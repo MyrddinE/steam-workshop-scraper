@@ -41,3 +41,6 @@ wheels/
 # OS specifics
 .DS_Store
 Thumbs.db
+
+# Documentation/Reference
+reference/
