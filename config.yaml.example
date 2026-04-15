@@ -1,0 +1,17 @@
+# Steam Workshop Scraper Configuration
+
+api:
+  key: "YOUR_API_KEY_HERE" # Can be overridden by STEAM_API_KEY env var
+
+database:
+  path: "workshop.db"
+
+daemon:
+  batch_size: 10
+  request_delay_seconds: 1.5
+  target_appids:
+    - 294100 # RimWorld example
+
+logging:
+  level: "INFO"
+  file: "scraper.log"

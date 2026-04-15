@@ -1,0 +1,43 @@
+# Project Specific
+task_checklist.md
+config.yaml
+*.db
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+
+# Testing & Coverage
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+.tox/
+.nosepy
+
+# Distribution / Build
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# OS specifics
+.DS_Store
+Thumbs.db

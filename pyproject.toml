@@ -1,0 +1,17 @@
+[project]
+name = "steam-workshop-scraper"
+version = "0.1.0"
+description = "A background daemon and TUI for scraping and querying Steam Workshop data."
+authors = [
+    {name = "Myrddin", email = "myrddin@example.com"},
+]
+dependencies = [
+    "requests",
+    "requests-html",
+    "pyyaml",
+    "textual"
+]
+
+[project.scripts]
+workshop-daemon = "src.daemon_runner:main"
+workshop-tui = "src.tui:main"

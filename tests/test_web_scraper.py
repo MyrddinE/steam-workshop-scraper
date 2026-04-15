@@ -1,0 +1,76 @@
+import pytest
+import responses
+import requests
+from src.web_scraper import scrape_extended_details
+
+STEAM_WORKSHOP_URL = "https://steamcommunity.com/sharedfiles/filedetails/"
+
+@responses.activate
+def test_scrape_extended_details_success():
+    """Test successfully scraping the extended description from HTML."""
+    html_content = '''
+    <html>
+        <body>
+            <div class="workshopItemDescription" id="highlightContent">
+                [b]This is an extended description.[/b]<br>It has multiple lines.
+            </div>
+            <div class="rightDetailsBlock">
+                 <div class="workshopTags">
+                     <a href="?searchtext=&childpublishedfileid=0&section=readytouseitems&requiredtags%5B%5D=1.4">1.4</a>
+                 </div>
+            </div>
+        </body>
+    </html>
+    '''
+    # We mock the GET request
+    responses.add(
+        responses.GET,
+        STEAM_WORKSHOP_URL,
+        body=html_content,
+        status=200,
+        content_type="text/html"
+    )
+
+    details = scrape_extended_details("https://steamcommunity.com/sharedfiles/filedetails/?id=2872938263")
+    assert details is not None
+    assert "This is an extended description" in details["description"]
+    assert "1.4" in details["tags"]
+
+@responses.activate
+def test_scrape_extended_details_not_found():
+    """Test scraping when the description div is missing."""
+    html_content = '<html><body>No description here!</body></html>'
+    responses.add(
+        responses.GET,
+        STEAM_WORKSHOP_URL,
+        body=html_content,
+        status=200,
+        content_type="text/html"
+    )
+
+    details = scrape_extended_details("https://steamcommunity.com/sharedfiles/filedetails/?id=2872938263")
+    assert details is not None
+    assert details["description"] is None
+
+@responses.activate
+def test_scrape_extended_details_http_error():
+    """Test scraping handles HTTP 404 appropriately."""
+    responses.add(
+        responses.GET,
+        STEAM_WORKSHOP_URL,
+        status=404
+    )
+
+    details = scrape_extended_details("https://steamcommunity.com/sharedfiles/filedetails/?id=123")
+    assert details is None
+
+@responses.activate
+def test_scrape_extended_details_timeout():
+    """Test handling of request timeouts."""
+    responses.add(
+        responses.GET,
+        STEAM_WORKSHOP_URL,
+        body=requests.exceptions.Timeout()
+    )
+    details = scrape_extended_details("https://steamcommunity.com/sharedfiles/filedetails/?id=123")
+    assert details is None
