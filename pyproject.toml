@@ -13,7 +13,8 @@ dependencies = [
     "requests",
     "requests-html",
     "pyyaml",
-    "textual"
+    "textual",
+    "lxml_html_clean"
 ]
 
 [project.scripts]
