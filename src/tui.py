@@ -211,9 +211,17 @@ class ScraperApp(App):
         jump_btn = self.query_one("#btn-jump-author", Button)
         
         tags = item_data.get("tags", "[]")
-        try:
-            tags_list = json.loads(tags)
-        except json.JSONDecodeError:
+        if not tags:
+            tags = "[]"
+            
+        if isinstance(tags, str):
+            try:
+                tags_list = json.loads(tags)
+            except json.JSONDecodeError:
+                tags_list = []
+        elif isinstance(tags, list):
+            tags_list = tags
+        else:
             tags_list = []
 
         details = [
