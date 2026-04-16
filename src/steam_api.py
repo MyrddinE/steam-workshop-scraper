@@ -35,3 +35,30 @@ def get_workshop_details_api(item_id: int, api_key: str) -> dict | None:
         
     except requests.exceptions.RequestException:
         return None
+
+def query_workshop_items(appid: int, api_key: str, count: int = 50) -> list[int]:
+    """
+    Queries the Steam API for a list of workshop items for a specific app.
+    Useful for seeding the database with IDs.
+    """
+    url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
+    params = {
+        "key": api_key,
+        "query_type": 0, # RankByVote (popular)
+        "page": 1,
+        "numperpage": count,
+        "creator_appid": appid,
+        "appid": appid,
+        "return_vote_data": 1
+    }
+    
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        json_data = response.json()
+        
+        id_list = json_data.get("response", {}).get("publishedfileidlist", [])
+        return [int(wid) for wid in id_list]
+        
+    except (requests.exceptions.RequestException, ValueError):
+        return []

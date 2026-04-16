@@ -4,7 +4,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from src.database import get_next_items_to_scrape, insert_or_update_item
-from src.steam_api import get_workshop_details_api
+from src.steam_api import get_workshop_details_api, query_workshop_items
 from src.web_scraper import scrape_extended_details
 
 class Daemon:
@@ -37,9 +37,13 @@ class Daemon:
         items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size)
         
         if not items_to_scrape:
-            # If no items are pending, sleep a bit longer before checking again
-            time.sleep(self.delay * 2)
-            return
+            logging.info("No items in database queue. Attempting to seed from Steam...")
+            self.seed_database()
+            # Try getting items again after seeding
+            items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size)
+            if not items_to_scrape:
+                time.sleep(self.delay * 5)
+                return
 
         for item_id in items_to_scrape:
             if not self.running:
@@ -111,3 +115,12 @@ class Daemon:
         while self.running:
             self.process_batch()
         logging.info("Daemon gracefully exited.")
+
+    def seed_database(self):
+        """Fetches a list of item IDs for target appids to populate the database."""
+        for appid in self.target_appids:
+            logging.info(f"Seeding items for AppID {appid}...")
+            new_ids = query_workshop_items(appid, self.api_key, count=100)
+            for wid in new_ids:
+                insert_or_update_item(self.db_path, {"workshop_id": wid})
+            logging.info(f"Seeded {len(new_ids)} items for AppID {appid}.")

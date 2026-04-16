@@ -1,9 +1,28 @@
 import pytest
 import responses
 import requests
-from src.steam_api import get_workshop_details_api
+from src.steam_api import get_workshop_details_api, query_workshop_items
 
 STEAM_API_URL = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
+QUERY_API_URL = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
+
+@responses.activate
+def test_query_workshop_items_success():
+    """Test successful 200 OK response from Steam Query API."""
+    mock_json = {
+        "response": {
+            "publishedfileidlist": ["1001", "1002"]
+        }
+    }
+    responses.add(
+        responses.GET,
+        QUERY_API_URL,
+        json=mock_json,
+        status=200
+    )
+
+    ids = query_workshop_items(appid=294100, api_key="TEST_KEY")
+    assert ids == [1001, 1002]
 
 @responses.activate
 def test_get_workshop_details_api_success():

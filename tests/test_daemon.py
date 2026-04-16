@@ -100,13 +100,36 @@ def test_daemon_run_loop(mock_process, mock_config):
     mock_process.assert_called_once()
 
 @patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.Daemon.seed_database')
 @patch('time.sleep')
-def test_daemon_process_batch_empty(mock_sleep, mock_get_items, mock_config):
-    """Test behavior when no items are returned from the queue."""
+def test_daemon_process_batch_empty(mock_sleep, mock_seed, mock_get_items, mock_config):
+    """Test behavior when no items are returned from the queue (triggers seeding)."""
+    # First call returns empty, second call (after seed) also returns empty
     mock_get_items.return_value = []
+    
     daemon = Daemon(mock_config)
     daemon.process_batch()
-    mock_sleep.assert_called_once_with(0.02) # Delay * 2
+    
+    # 1. It should have called seed_database
+    mock_seed.assert_called_once()
+    # 2. It should sleep for delay * 5 because it's still empty
+    mock_sleep.assert_called_once_with(0.05) 
+
+@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.query_workshop_items')
+@patch('src.daemon.insert_or_update_item')
+def test_daemon_seed_database(mock_insert, mock_query, mock_get_items, mock_config):
+    """Test the seeding logic correctly calls discovery and inserts into DB."""
+    mock_query.return_value = [11, 22]
+    
+    daemon = Daemon(mock_config)
+    daemon.seed_database()
+    
+    mock_query.assert_called_once_with(123, "TEST_KEY", count=100)
+    assert mock_insert.call_count == 2
+    # Verify the first call's data
+    args = mock_insert.call_args_list[0][0]
+    assert args[1]["workshop_id"] == 11
 
 @patch('src.daemon.get_next_items_to_scrape')
 @patch('src.daemon.get_workshop_details_api')

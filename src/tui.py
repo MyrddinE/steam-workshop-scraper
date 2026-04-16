@@ -99,34 +99,57 @@ class ScraperApp(App):
             author_options = []
         author_options.insert(0, ("Any Author", ""))
 
-        yield Vertical(
-            Horizontal(
-                Input(placeholder="Search Title (supports -exclusion)...", id="search-title", classes="search-input-w"),
-                Input(placeholder="Search Description...", id="search-desc", classes="search-input-w"),
-                Input(placeholder="Search Filename...", id="search-filename", classes="search-input-w"),
-                classes="search-row"
-            ),
-            Horizontal(
-                Input(placeholder="Search Tags...", id="search-tags", classes="search-input-w"),
-                Select(author_options, prompt="Select Author", id="search-author"),
-                classes="search-row"
-            ),
-            Horizontal(
-                Input(placeholder="File Size (e.g. < 1000)...", id="search-file-size", classes="search-input-w"),
-                Input(placeholder="Subscriptions (e.g. >= 50)...", id="search-subscriptions", classes="search-input-w"),
-                Input(placeholder="Favorited...", id="search-favorited", classes="search-input-w"),
-                Input(placeholder="Views...", id="search-views", classes="search-input-w"),
-                classes="search-row"
-            ),
+        # Create widgets with border titles
+        title_in = Input(placeholder="Search Title (supports -exclusion)...", id="search-title", classes="search-input-w")
+        title_in.border_title = "Title"
+        
+        desc_in = Input(placeholder="Search Description...", id="search-desc", classes="search-input-w")
+        desc_in.border_title = "Description"
+        
+        file_in = Input(placeholder="Search Filename...", id="search-filename", classes="search-input-w")
+        file_in.border_title = "Filename"
+        
+        tags_in = Input(placeholder="Search Tags...", id="search-tags", classes="search-input-w")
+        tags_in.border_title = "Tags"
+        
+        author_sel = Select(author_options, prompt="Select Author", id="search-author")
+        author_sel.border_title = "Author ID"
+
+        size_in = Input(placeholder="e.g. < 1000", id="search-file-size", classes="search-input-w")
+        size_in.border_title = "File Size"
+        
+        subs_in = Input(placeholder="e.g. >= 50", id="search-subscriptions", classes="search-input-w")
+        subs_in.border_title = "Subs"
+        
+        fav_in = Input(placeholder="Favorited...", id="search-favorited", classes="search-input-w")
+        fav_in.border_title = "Favs"
+        
+        view_in = Input(placeholder="Views...", id="search-views", classes="search-input-w")
+        view_in.border_title = "Views"
+
+        search_container = Vertical(
+            Horizontal(title_in, desc_in, file_in, classes="search-row"),
+            Horizontal(tags_in, author_sel, classes="search-row"),
+            Horizontal(size_in, subs_in, fav_in, view_in, classes="search-row"),
             id="search-container"
         )
+        search_container.border_title = "Filters"
+
+        results_list = ListView(id="results-list")
+        results_list.border_title = "Items"
+
+        details_view = Static("Select an item to see details", id="item-details")
+        details_container = Vertical(
+            details_view,
+            Button("Jump to Author", id="btn-jump-author", variant="primary"),
+            id="details-container"
+        )
+        details_container.border_title = "Details"
+
+        yield search_container
         yield Horizontal(
-            ListView(id="results-list"),
-            Vertical(
-                Static("Select an item to see details", id="item-details"),
-                Button("Jump to Author", id="btn-jump-author", variant="primary"),
-                id="details-container"
-            ),
+            results_list,
+            details_container,
             id="main-container"
         )
         yield Footer()
