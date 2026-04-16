@@ -80,9 +80,15 @@ async def test_tui_jump_to_author(mock_config, mock_results):
             app.set_focus(list_view)
             await pilot.press("enter")
             
-            # Click 'Jump to Author' button
+            # Wait for ListView.Selected event to process and layout to un-hide the button
+            await pilot.pause(0.1)
+            
+            # Click 'Jump to Author' button using official widget method
             jump_btn = app.query_one("#btn-jump-author", Button)
-            await pilot.click("#btn-jump-author")
+            jump_btn.press()
+            
+            # Wait for button press event to process and execute search
+            await pilot.pause(0.1)
             
             # Verify Author Select is updated and title is cleared
             author_select = app.query_one("#search-author", Select)

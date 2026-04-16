@@ -24,29 +24,52 @@ class ScraperApp(App):
     CSS = """
     Screen {
         layout: vertical;
+        background: $surface;
     }
     #search-container {
         height: auto;
         margin: 1;
+        padding: 1;
+        border: ascii $accent;
     }
     .search-row {
         height: 3;
+        margin-bottom: 1;
     }
     .search-input-w {
         width: 1fr;
+        background: black;
+        color: white;
+        border: ascii $primary;
+    }
+    .search-input-w:focus {
+        background: $boost;
+        border: ascii $secondary;
+    }
+    Select {
+        width: 1fr;
+        background: black;
+        color: white;
+        border: ascii $primary;
+    }
+    Select:focus {
+        background: $boost;
+        border: ascii $secondary;
     }
     #main-container {
         layout: horizontal;
     }
     #results-list {
         width: 40%;
-        border: solid green;
+        border: ascii green;
+        background: $panel;
     }
     #details-container {
         width: 60%;
-        border: solid blue;
+        border: ascii blue;
         padding: 1;
         layout: vertical;
+        background: $panel;
     }
     #item-details {
         height: 1fr;
