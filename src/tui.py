@@ -214,15 +214,24 @@ class ScraperApp(App):
         if not tags:
             tags = "[]"
             
+        tags_list = []
         if isinstance(tags, str):
             try:
-                tags_list = json.loads(tags)
+                parsed_tags = json.loads(tags)
+                if isinstance(parsed_tags, list):
+                    tags_list = parsed_tags
             except json.JSONDecodeError:
-                tags_list = []
+                pass
         elif isinstance(tags, list):
             tags_list = tags
-        else:
-            tags_list = []
+
+        # Flatten tags if they are dictionaries (e.g. [{"tag": "Mod"}])
+        flat_tags = []
+        for t in tags_list:
+            if isinstance(t, dict) and "tag" in t:
+                flat_tags.append(str(t["tag"]))
+            elif isinstance(t, str):
+                flat_tags.append(t)
 
         details = [
             f"[b][u]{item_data.get('title', 'N/A')}[/u][/b]",
@@ -230,7 +239,7 @@ class ScraperApp(App):
             f"Creator: {item_data.get('creator', 'N/A')}",
             f"AppID: {item_data.get('consumer_appid', 'N/A')}",
             f"Language ID: {item_data.get('language', 'N/A')}",
-            f"Tags: {', '.join(tags_list)}",
+            f"Tags: {', '.join(flat_tags)}",
             "",
             "[b]Description:[/b]",
             item_data.get("extended_description") or item_data.get("short_description") or "N/A"
