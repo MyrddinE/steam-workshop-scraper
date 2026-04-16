@@ -103,3 +103,46 @@ async def test_tui_jump_to_author(mock_config, mock_results):
             
             assert title_input.value == ""
             assert author_select.value == "Author A"
+
+@pytest.mark.asyncio
+async def test_tui_tag_data_types(mock_config):
+    """Tests TUI behavior with tags provided as string, list, or invalid types."""
+    mock_results = [
+        {
+            "workshop_id": 3,
+            "title": "List Mod",
+            "tags": ["Valid", "List"]
+        },
+        {
+            "workshop_id": 4,
+            "title": "Dict Mod",
+            "tags": {"invalid": "dict"}
+        }
+    ]
+
+    from unittest.mock import patch
+    with patch('src.tui.load_config', return_value=mock_config),          patch('src.tui.search_items', return_value=mock_results):
+        
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1) # Wait for mount
+            
+            # Verify List Mod
+            list_view = app.query_one(ListView)
+            list_view.index = 0
+            app.set_focus(list_view)
+            await pilot.press("enter")
+            
+            detail_pane = app.query_one("#item-details", Static)
+            content = str(detail_pane.render())
+            assert "List Mod" in content
+            assert "Valid, List" in content
+            
+            # Verify Dict Mod (should not crash, should just be empty tags)
+            list_view.index = 1
+            app.set_focus(list_view)
+            await pilot.press("enter")
+            
+            content2 = str(detail_pane.render())
+            assert "Dict Mod" in content2
+            assert "Tags: " in content2 # Fallback to empty list join
