@@ -80,7 +80,8 @@ class Daemon:
                 "creator", "creator_appid", "consumer_appid", "filename", "file_size", "preview_url",
                 "hcontent_file", "hcontent_preview", "short_description", "time_created",
                 "time_updated", "visibility", "banned", "ban_reason", "app_name", "file_type",
-                "subscriptions", "favorited", "views", "tags", "extended_description", "language"
+                "subscriptions", "favorited", "views", "tags", "extended_description", "language",
+                "lifetime_subscriptions", "lifetime_favorited"
             }
             
             clean_api_data = {}

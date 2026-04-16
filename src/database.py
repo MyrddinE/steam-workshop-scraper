@@ -48,15 +48,18 @@ def initialize_database(db_path: str):
         views INTEGER,
         tags TEXT,
         extended_description TEXT,
-        language INTEGER
+        language INTEGER,
+        lifetime_subscriptions INTEGER,
+        lifetime_favorited INTEGER
     )
     """)
 
-    # Safe migration for existing databases
-    try:
-        cursor.execute("ALTER TABLE workshop_items ADD COLUMN language INTEGER")
-    except sqlite3.OperationalError:
-        pass # Column already exists
+    # Safe migrations for existing databases
+    for col in ["language", "lifetime_subscriptions", "lifetime_favorited"]:
+        try:
+            cursor.execute(f"ALTER TABLE workshop_items ADD COLUMN {col} INTEGER")
+        except sqlite3.OperationalError:
+            pass # Column already exists
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
