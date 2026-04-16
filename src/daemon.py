@@ -67,6 +67,8 @@ class Daemon:
 
             # Merge API data
             # Map keys that differ from our schema
+            if "publishedfileid" in api_data:
+                api_data["workshop_id"] = int(api_data.pop("publishedfileid"))
             if "creator_app_id" in api_data:
                 api_data["creator_appid"] = api_data.pop("creator_app_id")
             if "consumer_app_id" in api_data:
@@ -82,7 +84,7 @@ class Daemon:
             }
             
             clean_api_data = {}
-            known_ignored_keys = {"publishedfileid", "result"}
+            known_ignored_keys = {"result"}
             
             for k, v in api_data.items():
                 if k in allowed_keys:
