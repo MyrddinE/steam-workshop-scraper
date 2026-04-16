@@ -32,6 +32,7 @@ A robust, background Python daemon and Terminal User Interface (TUI) for scrapin
     ```bash
     pip install -e .
     ```
+    *(Note: This creates the `workshop-daemon` and `workshop-tui` executables in `.venv/bin/`.)*
 
 ## Configuration
 
@@ -54,7 +55,7 @@ export STEAM_API_KEY="YOUR_API_KEY_HERE"
 
 ## Usage
 
-The project provides two command-line tools that are meant to be run simultaneously in separate terminal windows.
+Ensure your virtual environment is activated so the commands in `.venv/bin/` are in your path. The project provides two tools:
 
 ### 1. The Daemon
 
