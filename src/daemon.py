@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timezone
 from src.database import get_next_items_to_scrape, insert_or_update_item
 from src.steam_api import get_workshop_details_api, query_workshop_items
-from src.web_scraper import scrape_extended_details
+from src.web_scraper import scrape_extended_details, discover_ids_html
 
 class Daemon:
     def __init__(self, config: dict):
@@ -120,7 +120,16 @@ class Daemon:
         """Fetches a list of item IDs for target appids to populate the database."""
         for appid in self.target_appids:
             logging.info(f"Seeding items for AppID {appid}...")
+            
+            # Try official API first
             new_ids = query_workshop_items(appid, self.api_key, count=100)
+            
+            # Fallback to HTML scraping if API returned nothing
+            if not new_ids:
+                logging.info(f"API discovery failed for AppID {appid}. Falling back to HTML scraping...")
+                new_ids = discover_ids_html(appid)
+            
             for wid in new_ids:
                 insert_or_update_item(self.db_path, {"workshop_id": wid})
+                
             logging.info(f"Seeded {len(new_ids)} items for AppID {appid}.")

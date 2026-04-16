@@ -1,5 +1,6 @@
 from requests_html import HTMLSession
 import requests
+import re
 
 def scrape_extended_details(item_url: str) -> dict | None:
     """
@@ -28,3 +29,30 @@ def scrape_extended_details(item_url: str) -> dict | None:
         }
     except requests.exceptions.RequestException:
         return None
+
+def discover_ids_html(appid: int) -> list[int]:
+    """
+    Scrapes the Steam Workshop browse page to find item IDs.
+    Acts as a fallback when the Steam API is unavailable or no key is provided.
+    """
+    url = f"https://steamcommunity.com/workshop/browse/?appid={appid}&browsemethod=trend&section=readytouseitems"
+    session = HTMLSession()
+    try:
+        response = session.get(url, timeout=10)
+        response.raise_for_status()
+        
+        # Steam IDs are in 'id' parameters of links (e.g., sharedfiles/filedetails/?id=...)
+        # We look for all sharedfiles links
+        links = response.html.find('a[href*="sharedfiles/filedetails/?id="]')
+        ids = []
+        for link in links:
+            href = link.attrs.get('href', '')
+            # Extract digits after 'id='
+            match = re.search(r'id=(\d+)', href)
+            if match:
+                ids.append(int(match.group(1)))
+        
+        # Return unique IDs only
+        return list(set(ids))
+    except (requests.exceptions.RequestException, Exception):
+        return []

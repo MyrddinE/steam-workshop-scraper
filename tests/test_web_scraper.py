@@ -1,7 +1,7 @@
 import pytest
 import responses
 import requests
-from src.web_scraper import scrape_extended_details
+from src.web_scraper import scrape_extended_details, discover_ids_html
 
 STEAM_WORKSHOP_URL = "https://steamcommunity.com/sharedfiles/filedetails/"
 
@@ -74,3 +74,27 @@ def test_scrape_extended_details_timeout():
     )
     details = scrape_extended_details("https://steamcommunity.com/sharedfiles/filedetails/?id=123")
     assert details is None
+
+@responses.activate
+def test_discover_ids_html_success():
+    """Test successfully discovering IDs from Workshop browse HTML."""
+    html_content = '''
+    <html>
+        <body>
+            <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=5001&searchtext=">Mod 1</a>
+            <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=5002">Mod 2</a>
+        </body>
+    </html>
+    '''
+    responses.add(
+        responses.GET,
+        "https://steamcommunity.com/workshop/browse/",
+        body=html_content,
+        status=200,
+        content_type="text/html"
+    )
+
+    ids = discover_ids_html(appid=294100)
+    assert len(ids) == 2
+    assert 5001 in ids
+    assert 5002 in ids

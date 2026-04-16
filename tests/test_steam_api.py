@@ -8,10 +8,13 @@ QUERY_API_URL = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v
 
 @responses.activate
 def test_query_workshop_items_success():
-    """Test successful 200 OK response from Steam Query API."""
+    """Test successful 200 OK response from Steam Query API using real-world schema."""
     mock_json = {
         "response": {
-            "publishedfileidlist": ["1001", "1002"]
+            "publishedfiledetails": [
+                {"publishedfileid": "1001"},
+                {"publishedfileid": "1002"}
+            ]
         }
     }
     responses.add(

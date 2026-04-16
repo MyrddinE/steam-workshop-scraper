@@ -169,8 +169,9 @@ class ScraperApp(App):
         
         author_select = self.query_one("#search-author", Select)
         author_q = ""
-        if author_select.value and str(author_select.value) not in ["Select.BLANK", "Select.NULL"]:
-            author_q = str(author_select.value)
+        # Robustly handle Textual's Select.BLANK/NULL internal objects
+        if isinstance(author_select.value, str):
+            author_q = author_select.value
 
         numeric_filters = {
             "file_size": self.query_one("#search-file-size", Input).value,

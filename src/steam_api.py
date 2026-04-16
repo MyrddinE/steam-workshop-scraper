@@ -57,8 +57,8 @@ def query_workshop_items(appid: int, api_key: str, count: int = 50) -> list[int]
         response.raise_for_status()
         json_data = response.json()
         
-        id_list = json_data.get("response", {}).get("publishedfileidlist", [])
-        return [int(wid) for wid in id_list]
+        details = json_data.get("response", {}).get("publishedfiledetails", [])
+        return [int(item["publishedfileid"]) for item in details if "publishedfileid" in item]
         
-    except (requests.exceptions.RequestException, ValueError):
+    except (requests.exceptions.RequestException, ValueError, KeyError):
         return []
