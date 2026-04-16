@@ -9,8 +9,30 @@ def mock_config():
     return {
         "database": {"path": "test.db"},
         "api": {"key": "TEST_KEY"},
-        "daemon": {"batch_size": 2, "request_delay_seconds": 0.01}
+        "daemon": {"batch_size": 2, "request_delay_seconds": 0.01, "target_appids": [123]}
     }
+
+def test_daemon_init_defaults():
+    """Test that the Daemon correctly applies fallback defaults for missing config keys."""
+    # Provide minimal valid config (only target_appids is strictly required now)
+    minimal_config = {"daemon": {"target_appids": [456]}}
+    daemon = Daemon(minimal_config)
+    
+    assert daemon.db_path == "workshop.db"
+    assert daemon.api_key == ""
+    assert daemon.batch_size == 10
+    assert daemon.delay == 1.5
+    assert daemon.target_appids == [456]
+
+def test_daemon_init_missing_appids():
+    """Test that the Daemon raises a ValueError if target_appids is omitted."""
+    empty_config = {}
+    with pytest.raises(ValueError, match="must be provided as a list"):
+        Daemon(empty_config)
+        
+    invalid_config = {"daemon": {"target_appids": "not_a_list_just_a_string"}}
+    with pytest.raises(ValueError, match="must be provided as a list"):
+        Daemon(invalid_config)
 
 @patch('src.daemon.get_next_items_to_scrape')
 @patch('src.daemon.get_workshop_details_api')
@@ -76,8 +98,6 @@ def test_daemon_run_loop(mock_process, mock_config):
     mock_process.side_effect = fake_process_batch
     daemon.run()
     mock_process.assert_called_once()
-
-# --- New tests to cover missing branches ---
 
 @patch('src.daemon.get_next_items_to_scrape')
 @patch('time.sleep')

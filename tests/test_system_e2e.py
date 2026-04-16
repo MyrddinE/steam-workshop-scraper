@@ -20,7 +20,11 @@ def system_config(tmp_path):
     return {
         "database": {"path": db_path},
         "api": {"key": "E2E_KEY"},
-        "daemon": {"batch_size": 1, "request_delay_seconds": 0.05}
+        "daemon": {
+            "batch_size": 1, 
+            "request_delay_seconds": 0.05,
+            "target_appids": [8888]
+        }
     }
 
 @pytest.mark.asyncio

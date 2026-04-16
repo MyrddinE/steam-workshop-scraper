@@ -11,10 +11,17 @@ class Daemon:
     def __init__(self, config: dict):
         self.config = config
         self.running = True
-        self.db_path = config["database"]["path"]
-        self.api_key = config["api"]["key"]
+        
+        # Implement default fallbacks
+        self.db_path = config.get("database", {}).get("path", "workshop.db")
+        self.api_key = config.get("api", {}).get("key", "")
         self.batch_size = config.get("daemon", {}).get("batch_size", 10)
         self.delay = config.get("daemon", {}).get("request_delay_seconds", 1.5)
+        
+        # Enforce required target_appids
+        self.target_appids = config.get("daemon", {}).get("target_appids")
+        if not self.target_appids or not isinstance(self.target_appids, list):
+            raise ValueError("Configuration error: 'daemon.target_appids' must be provided as a list.")
         
         # Setup graceful shutdown
         signal.signal(signal.SIGINT, self.handle_shutdown)
