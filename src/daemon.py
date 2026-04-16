@@ -66,13 +66,24 @@ class Daemon:
                 continue
 
             # Merge API data
+            # Map keys that differ from our schema
+            if "creator_app_id" in api_data:
+                api_data["creator_appid"] = api_data.pop("creator_app_id")
+            if "consumer_app_id" in api_data:
+                api_data["consumer_appid"] = api_data.pop("consumer_app_id")
+
             # Remove keys that don't match our schema
-            if "publishedfileid" in api_data:
-                del api_data["publishedfileid"]
-            if "result" in api_data:
-                del api_data["result"]
+            allowed_keys = {
+                "workshop_id", "dt_found", "dt_updated", "dt_attempted", "status", "title",
+                "creator", "creator_appid", "consumer_appid", "filename", "file_size", "preview_url",
+                "hcontent_file", "hcontent_preview", "short_description", "time_created",
+                "time_updated", "visibility", "banned", "ban_reason", "app_name", "file_type",
+                "subscriptions", "favorited", "views", "tags", "extended_description"
+            }
+            
+            clean_api_data = {k: v for k, v in api_data.items() if k in allowed_keys}
                 
-            base_data.update(api_data)
+            base_data.update(clean_api_data)
             base_data["dt_updated"] = now_iso
 
             # Check if tags were provided as list, JSON stringify for SQLite
