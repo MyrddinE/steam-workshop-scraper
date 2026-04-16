@@ -3,7 +3,13 @@ import signal
 import json
 import logging
 from datetime import datetime, timezone
-from src.database import get_next_items_to_scrape, insert_or_update_item
+from src.database import (
+    get_next_items_to_scrape, 
+    insert_or_update_item, 
+    count_unscraped_items, 
+    get_app_page, 
+    update_app_page
+)
 from src.steam_api import get_workshop_details_api, query_workshop_items
 from src.web_scraper import scrape_extended_details, discover_ids_html
 
@@ -34,23 +40,23 @@ class Daemon:
 
     def process_batch(self):
         """Processes a single batch of workshop items."""
+        # Seeding check: If we have fewer than 100 unscraped items, fetch the next page
+        unscraped = count_unscraped_items(self.db_path)
+        if unscraped < 100:
+            logging.info(f"Low unscraped queue ({unscraped}). Expanding discovery...")
+            self.seed_database()
+
         items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size)
         
         if not items_to_scrape:
-            logging.info("No items in database queue. Attempting to seed from Steam...")
-            self.seed_database()
-            # Try getting items again after seeding
-            items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size)
-            if not items_to_scrape:
-                time.sleep(self.delay * 5)
-                return
+            # If still nothing, sleep
+            time.sleep(self.delay * 5)
+            return
 
         for item_id in items_to_scrape:
             if not self.running:
                 break # Exit early if shutting down
 
-            logging.info(f"Processing item {item_id}...")
-            
             now_iso = datetime.now(timezone.utc).isoformat()
             base_data = {
                 "workshop_id": item_id,
@@ -62,6 +68,7 @@ class Daemon:
             if not api_data:
                 base_data["status"] = 500
                 insert_or_update_item(self.db_path, base_data)
+                logging.warning(f"[{item_id}] Failed to fetch from Steam API.")
                 time.sleep(self.delay)
                 continue
 
@@ -73,6 +80,8 @@ class Daemon:
                 api_data["creator_appid"] = api_data.pop("creator_app_id")
             if "consumer_app_id" in api_data:
                 api_data["consumer_appid"] = api_data.pop("consumer_app_id")
+            if "description" in api_data:
+                api_data["short_description"] = api_data.pop("description")
 
             # Remove keys that don't match our schema
             allowed_keys = {
@@ -91,7 +100,8 @@ class Daemon:
                 if k in allowed_keys:
                     clean_api_data[k] = v
                 elif k not in known_ignored_keys:
-                    logging.warning(f"Discarding unknown API column: '{k}' with value '{v}' for item {item_id}")
+                    val_preview = str(v)[:20] + "..." if len(str(v)) > 20 else str(v)
+                    logging.warning(f"Discarding unknown API column: '{k}' with value '{val_preview}' for item {item_id}")
                 
             base_data.update(clean_api_data)
             base_data["dt_updated"] = now_iso
@@ -107,6 +117,7 @@ class Daemon:
             if not scrape_data:
                 base_data["status"] = 206 # Partial Content
                 insert_or_update_item(self.db_path, base_data)
+                logging.warning(f"[{item_id}] '{base_data.get('title', 'Unknown')}' | Scraper failed, partial data saved.")
                 time.sleep(self.delay)
                 continue
 
@@ -127,6 +138,9 @@ class Daemon:
             base_data["status"] = 200 # OK
             insert_or_update_item(self.db_path, base_data)
             
+            populated_fields = [k for k, v in base_data.items() if v is not None and v != ""]
+            logging.info(f"[{item_id}] \"{base_data.get('title', 'Unknown Title')}\" | Populated: {populated_fields}")
+            
             # Polite delay between items
             time.sleep(self.delay)
 
@@ -138,19 +152,23 @@ class Daemon:
         logging.info("Daemon gracefully exited.")
 
     def seed_database(self):
-        """Fetches a list of item IDs for target appids to populate the database."""
+        """Fetches the next page of item IDs for target appids to populate the database."""
         for appid in self.target_appids:
-            logging.info(f"Seeding items for AppID {appid}...")
+            page = get_app_page(self.db_path, appid)
+            logging.info(f"Discovering items for AppID {appid} (Page {page})...")
             
             # Try official API first
-            new_ids = query_workshop_items(appid, self.api_key, count=100)
+            new_ids = query_workshop_items(appid, self.api_key, count=100, page=page)
             
             # Fallback to HTML scraping if API returned nothing
             if not new_ids:
                 logging.info(f"API discovery failed for AppID {appid}. Falling back to HTML scraping...")
                 new_ids = discover_ids_html(appid)
             
-            for wid in new_ids:
-                insert_or_update_item(self.db_path, {"workshop_id": wid})
-                
-            logging.info(f"Seeded {len(new_ids)} items for AppID {appid}.")
+            if new_ids:
+                for wid in new_ids:
+                    insert_or_update_item(self.db_path, {"workshop_id": wid})
+                update_app_page(self.db_path, appid, page + 1)
+                logging.info(f"Queued {len(new_ids)} new items for AppID {appid}.")
+            else:
+                logging.warning(f"No new items found for AppID {appid} on page {page}.")
