@@ -78,10 +78,17 @@ class Daemon:
                 "creator", "creator_appid", "consumer_appid", "filename", "file_size", "preview_url",
                 "hcontent_file", "hcontent_preview", "short_description", "time_created",
                 "time_updated", "visibility", "banned", "ban_reason", "app_name", "file_type",
-                "subscriptions", "favorited", "views", "tags", "extended_description"
+                "subscriptions", "favorited", "views", "tags", "extended_description", "language"
             }
             
-            clean_api_data = {k: v for k, v in api_data.items() if k in allowed_keys}
+            clean_api_data = {}
+            known_ignored_keys = {"publishedfileid", "result"}
+            
+            for k, v in api_data.items():
+                if k in allowed_keys:
+                    clean_api_data[k] = v
+                elif k not in known_ignored_keys:
+                    logging.warning(f"Discarding unknown API column: '{k}' with value '{v}' for item {item_id}")
                 
             base_data.update(clean_api_data)
             base_data["dt_updated"] = now_iso

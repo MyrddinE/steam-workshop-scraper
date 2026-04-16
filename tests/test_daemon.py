@@ -173,3 +173,41 @@ def test_daemon_runner_initializes_db(mock_daemon, mock_load, mock_init):
         
     mock_init.assert_called_once_with("dummy.db")
     mock_daemon.return_value.run.assert_called_once()
+
+@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.get_workshop_details_api')
+@patch('src.daemon.scrape_extended_details')
+@patch('src.daemon.insert_or_update_item')
+@patch('time.sleep')
+@patch('logging.warning')
+def test_daemon_process_batch_sanitization(mock_warn, mock_sleep, mock_insert, mock_scrape, mock_api, mock_get_items, mock_config):
+    """Test that the daemon maps schema keys correctly and strips/warns on invalid keys."""
+    mock_get_items.return_value = [123]
+    mock_api.return_value = {
+        "title": "Test", 
+        "creator_app_id": 4000, 
+        "consumer_app_id": 4000,
+        "publishedfileid": "123",
+        "result": 1,
+        "future_steam_feature": "magic" # This should trigger a warning
+    }
+    mock_scrape.return_value = None
+
+    daemon = Daemon(mock_config)
+    daemon.process_batch()
+    
+    inserted_data = mock_insert.call_args[0][1]
+    
+    # 1. Verify expected mapping occurred
+    assert inserted_data["creator_appid"] == 4000
+    assert inserted_data["consumer_appid"] == 4000
+    
+    # 2. Verify old/invalid keys were removed
+    assert "creator_app_id" not in inserted_data
+    assert "consumer_app_id" not in inserted_data
+    assert "publishedfileid" not in inserted_data
+    assert "result" not in inserted_data
+    assert "future_steam_feature" not in inserted_data
+    
+    # 3. Verify that the unknown key triggered a warning
+    mock_warn.assert_called_once_with("Discarding unknown API column: 'future_steam_feature' with value 'magic' for item 123")

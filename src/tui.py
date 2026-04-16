@@ -221,6 +221,7 @@ class ScraperApp(App):
             f"ID: {item_data.get('workshop_id', 'N/A')}",
             f"Creator: {item_data.get('creator', 'N/A')}",
             f"AppID: {item_data.get('consumer_appid', 'N/A')}",
+            f"Language ID: {item_data.get('language', 'N/A')}",
             f"Tags: {', '.join(tags_list)}",
             "",
             "[b]Description:[/b]",

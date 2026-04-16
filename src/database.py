@@ -47,9 +47,16 @@ def initialize_database(db_path: str):
         favorited INTEGER,
         views INTEGER,
         tags TEXT,
-        extended_description TEXT
+        extended_description TEXT,
+        language INTEGER
     )
     """)
+
+    # Safe migration for existing databases
+    try:
+        cursor.execute("ALTER TABLE workshop_items ADD COLUMN language INTEGER")
+    except sqlite3.OperationalError:
+        pass # Column already exists
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
