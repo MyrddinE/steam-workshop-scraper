@@ -24,13 +24,12 @@ class ScraperApp(App):
     CSS = """
     Screen {
         layout: vertical;
-        background: $surface;
     }
     #search-container {
         height: auto;
         margin: 1;
         padding: 1;
-        border: ascii $accent;
+        border: solid $accent;
     }
     .search-row {
         height: 3;
@@ -38,38 +37,30 @@ class ScraperApp(App):
     }
     .search-input-w {
         width: 1fr;
-        background: black;
-        color: white;
-        border: ascii $primary;
+        border: solid $primary;
     }
     .search-input-w:focus {
-        background: $boost;
-        border: ascii $secondary;
+        border: solid $secondary;
     }
     Select {
         width: 1fr;
-        background: black;
-        color: white;
-        border: ascii $primary;
+        border: solid $primary;
     }
     Select:focus {
-        background: $boost;
-        border: ascii $secondary;
+        border: solid $secondary;
     }
     #main-container {
         layout: horizontal;
     }
     #results-list {
         width: 40%;
-        border: ascii green;
-        background: $panel;
+        border: solid green;
     }
     #details-container {
         width: 60%;
-        border: ascii blue;
+        border: solid blue;
         padding: 1;
         layout: vertical;
-        background: $panel;
     }
     #item-details {
         height: 1fr;
@@ -82,6 +73,9 @@ class ScraperApp(App):
 
     def __init__(self, config_path: str = "config.yaml"):
         super().__init__()
+        # Force a light theme to guarantee high contrast on terminal emulators like PuTTY
+        self.theme = "textual-light"
+        
         try:
             self.config = load_config(config_path)
         except FileNotFoundError:
@@ -89,6 +83,10 @@ class ScraperApp(App):
         self.db_path = self.config["database"]["path"]
         initialize_database(self.db_path)
         self.current_item_creator = None
+
+    def on_mount(self) -> None:
+        """Run an empty search on startup to populate the list."""
+        self.call_after_refresh(self.execute_search)
 
     def compose(self) -> ComposeResult:
         yield Header()

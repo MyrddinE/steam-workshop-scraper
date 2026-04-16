@@ -31,7 +31,14 @@ async def test_tui_advanced_search_flow(mock_config, mock_results):
         
         app = ScraperApp()
         async with app.run_test() as pilot:
-            # Verify separate inputs exist
+            # Wait for on_mount auto-search to complete
+            await pilot.pause(0.1)
+
+            # Verify results auto-populated
+            list_view = app.query_one(ListView)
+            assert len(list_view.children) == 1
+
+            # Verify new inputs exist
             title_input = app.query_one("#search-title", Input)
             desc_input = app.query_one("#search-desc", Input)
             author_select = app.query_one("#search-author", Select)
