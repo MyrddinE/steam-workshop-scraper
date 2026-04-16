@@ -136,3 +136,17 @@ def test_daemon_process_batch_json_decode_error(mock_sleep, mock_insert, mock_sc
     inserted_data = mock_insert.call_args[0][1]
     # It should fallback to empty list, then merge 'new_tag'
     assert inserted_data["tags"] == '["new_tag"]'
+
+@patch('src.daemon_runner.initialize_database')
+@patch('src.daemon_runner.load_config')
+@patch('src.daemon_runner.Daemon')
+def test_daemon_runner_initializes_db(mock_daemon, mock_load, mock_init):
+    """Verifies that the runner calls initialize_database before running."""
+    from src.daemon_runner import main
+    mock_load.return_value = {"database": {"path": "dummy.db"}, "daemon": {"target_appids": [1]}}
+    
+    with patch('sys.argv', ['workshop-daemon']):
+        main()
+        
+    mock_init.assert_called_once_with("dummy.db")
+    mock_daemon.return_value.run.assert_called_once()

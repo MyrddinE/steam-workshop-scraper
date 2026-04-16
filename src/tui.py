@@ -2,7 +2,7 @@ import json
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button
 from textual.containers import Horizontal, Vertical
-from src.database import search_items, get_all_authors
+from src.database import search_items, get_all_authors, initialize_database
 from src.config import load_config
 
 class WorkshopItem(ListItem):
@@ -64,6 +64,7 @@ class ScraperApp(App):
         except FileNotFoundError:
             self.config = {"database": {"path": "workshop.db"}}
         self.db_path = self.config["database"]["path"]
+        initialize_database(self.db_path)
         self.current_item_creator = None
 
     def compose(self) -> ComposeResult:

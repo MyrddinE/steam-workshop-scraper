@@ -1,6 +1,7 @@
 import logging
 from src.daemon import Daemon
 from src.config import load_config
+from src.database import initialize_database
 import sys
 
 def main():
@@ -16,6 +17,9 @@ def main():
         logging.error(f"Configuration file not found: {config_path}")
         sys.exit(1)
         
+    db_path = config.get("database", {}).get("path", "workshop.db")
+    initialize_database(db_path)
+    
     daemon = Daemon(config)
     daemon.run()
 
