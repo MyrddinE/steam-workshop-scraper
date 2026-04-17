@@ -19,7 +19,20 @@ def mock_results_with_bbcode():
             "creator": "Author [X]",
             "consumer_appid": 294100,
             "short_description": "Short [i]Italic[/i] description.",
-            "extended_description": "[url=https://example.com] [img]https://example.com/img.gif[/img] [/url]",
+            "extended_description": """
+[h1]Welcome[/h1]
+[list]
+[*] Item 1
+[*] Item 2
+[/list]
+[table]
+[tr][th]Col 1[/th][th]Col 2[/th][/tr]
+[tr][td]Val 1[/td][td]Val 2[/td][/tr]
+[/table]
+[quote=Someone]Hello world[/quote]
+[code]print('hi')[/code]
+[url=https://example.com] [img]https://example.com/img.gif[/img] [/url]
+""",
             "tags": '["[Tag]"]'
         }
     ]
@@ -48,15 +61,21 @@ async def test_tui_no_markup_error_on_bbcode(mock_config, mock_results_with_bbco
             await pilot.press("enter")
             
             # If we reached here without an exception, the fix worked.
-            # We specifically want to check the Static widget in DetailsPane
+            # We specifically want to check the Markdown widget in DetailsPane
             from src.tui import DetailsPane
+            from textual.widgets import Markdown
             detail_pane = app.query_one("#item-details", DetailsPane)
-            detail_content = detail_pane.query_one("#detail-content", Static)
+            detail_content = detail_pane.query_one("#detail-content", Markdown)
             
-            # Verify markup is disabled (internal attribute check)
-            assert detail_content._render_markup is False
+            # Wait for any async updates to the Markdown widget
+            await pilot.pause(0.1)
             
-            # Verify content is rendered as plain text
-            content = str(detail_content.render())
-            assert "[b]Bold Title[/b]" in content
-            assert "[url=https://example.com]" in content
+            # Verify content is converted to Markdown formatting
+            content = str(detail_content._markdown)
+            assert "**Bold Title**" in content
+            assert "# Welcome" in content
+            assert "* Item 1" in content
+            assert "Col 1" in content
+            assert "> **Someone said:**" in content
+            assert "```" in content
+            assert "https://example.com" in content

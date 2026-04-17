@@ -100,10 +100,11 @@ async def test_end_to_end_system_flow(system_config):
             await pilot.press("enter")
 
             from src.tui import DetailsPane
+            from textual.widgets import Markdown
             detail_pane = app.query_one("#item-details", DetailsPane)
-            detail_content = detail_pane.query_one("#detail-content", Static)
+            detail_content = detail_pane.query_one("#detail-content", Markdown)
 
-            content = str(detail_content.render())
+            content = str(detail_content._markdown)
             assert "The ultimate test" in content
             assert "E2E" in content # From tags
 

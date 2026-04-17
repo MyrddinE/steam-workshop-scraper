@@ -1,13 +1,71 @@
 import json
 import logging
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button
+from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button, Markdown
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from src.database import search_items, get_all_authors, initialize_database, flag_for_translation, get_item_details
 from src.config import load_config
 
-from rich.markup import escape
+import re
+
+def bbcode_to_markdown(text: str) -> str:
+    """Converts common Steam BBCode tags to Markdown."""
+    if not text:
+        return ""
+    
+    # 1. Headers
+    text = re.sub(r'\[h1\](.*?)\[/h1\]', r'# \1', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'\[h2\](.*?)\[/h2\]', r'## \1', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'\[h3\](.*?)\[/h3\]', r'### \1', text, flags=re.IGNORECASE | re.DOTALL)
+
+    # 2. Basic Formatting
+    text = re.sub(r'\[b\](.*?)\[/b\]', r'**\1**', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'\[i\](.*?)\[/i\]', r'*\1*', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'\[u\](.*?)\[/u\]', r'\1', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'\[s\](.*?)\[/s\]', r'~~\1~~', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'\[strike\](.*?)\[/strike\]', r'~~\1~~', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'\[spoiler\](.*?)\[/spoiler\]', r'[SPOILER: \1]', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'\[noparse\](.*?)\[/noparse\]', r'`\1`', text, flags=re.IGNORECASE | re.DOTALL)
+
+    # 3. Links, Images, Videos
+    text = re.sub(r'\[url=(.*?)\](.*?)\[/url\]', r'[\2](\1)', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'\[url\](.*?)\[/url\]', r'[\1](\1)', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'\[img\](.*?)\[/img\]', r'![image](\1)', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'\[video\](.*?)\[/video\]', r'[Video](\1)', text, flags=re.IGNORECASE | re.DOTALL)
+
+    # 4. Lists
+    # Bulleted lists
+    text = re.sub(r'\[list\]', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[/list\]', '\n', text, flags=re.IGNORECASE)
+    # Numbered lists (simplifying olist to numbered list)
+    text = re.sub(r'\[olist\]', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[/olist\]', '\n', text, flags=re.IGNORECASE)
+    # List items: handle [*] item -> * item
+    text = re.sub(r'\[\*\]\s*', '* ', text)
+
+    # 5. Tables (Simple conversion - Markdown tables are limited)
+    text = re.sub(r'\[table\]', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[/table\]', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[tr\]', '| ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[/tr\]', ' |\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[th\]', ' **', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[/th\]', '** |', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[td\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[/td\]', ' |', text, flags=re.IGNORECASE)
+
+    # 6. Quotes and Code
+    text = re.sub(r'\[quote=(.*?)\](.*?)\[/quote\]', r'> **\1 said:**\n> \2', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'\[quote\](.*?)\[/quote\]', r'> \1', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'\[code\](.*?)\[/code\]', r'```\n\1\n```', text, flags=re.IGNORECASE | re.DOTALL)
+
+    # 7. HR
+    text = re.sub(r'\[hr\]', '\n---\n', text, flags=re.IGNORECASE)
+    
+    # Cleanup: remove extra spaces resulting from some conversions
+    text = re.sub(r'\|  \|', '|', text)
+    
+    return text
 
 class DetailsPane(VerticalScroll):
     """A scrollable pane for viewing workshop item details."""
@@ -20,7 +78,7 @@ class DetailsPane(VerticalScroll):
             yield Label("[b]Item Details[/b]", id="details-header-label")
             yield Button("Show Original", id="btn-toggle-translation", classes="details-btn")
             yield Button("Translate", id="btn-request-translation", classes="details-btn")
-        yield Static(id="detail-content", markup=False)
+        yield Markdown(id="detail-content")
 
     def on_mount(self) -> None:
         """Setup background refresh to catch translation updates."""
@@ -48,7 +106,7 @@ class DetailsPane(VerticalScroll):
 
     def update_content(self) -> None:
         if not self.item_data:
-            self.query_one("#detail-content", Static).update("Select an item to see details.")
+            self.query_one("#detail-content", Markdown).update("Select an item to see details.")
             self.query_one("#btn-toggle-translation").display = False
             self.query_one("#btn-request-translation").display = False
             return
@@ -87,24 +145,25 @@ class DetailsPane(VerticalScroll):
             tags_list = [str(t.get("tag") if isinstance(t, dict) else t) for t in (parsed if isinstance(parsed, list) else [])]
         except: pass
 
-        content = [
-            f"{title}",
-            f"ID: {item.get('workshop_id', 'N/A')}",
-            f"Creator: {item.get('creator', 'N/A')}",
-            f"AppID: {item.get('consumer_appid', 'N/A')}",
-            f"Language ID: {item.get('language', 'N/A')}",
-            f"Tags: {', '.join(tags_list)}",
+        # Convert to Markdown
+        md_content = [
+            f"# {bbcode_to_markdown(title)}",
+            f"**ID:** {item.get('workshop_id', 'N/A')}  ",
+            f"**Creator:** {item.get('creator', 'N/A')}  ",
+            f"**AppID:** {item.get('consumer_appid', 'N/A')}  ",
+            f"**Language ID:** {item.get('language', 'N/A')}  ",
+            f"**Tags:** {', '.join(tags_list)}  ",
         ]
         
         if item.get("translation_priority", 0) > 0:
-            content.append("Queued for translation...")
+            md_content.append("\n*Queued for translation...*")
         
-        content.extend([
-            "",
-            "Description:",
-            desc
+        md_content.extend([
+            "\n---",
+            "### Description",
+            bbcode_to_markdown(desc)
         ])
-        self.query_one("#detail-content", Static).update("\n".join(content))
+        self.query_one("#detail-content", Markdown).update("\n".join(md_content))
 
 class WorkshopItem(ListItem):
     """A list item representing a workshop item."""

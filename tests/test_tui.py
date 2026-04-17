@@ -73,10 +73,11 @@ async def test_tui_advanced_search_flow(mock_config, mock_results):
             await pilot.press("enter")
             
             from src.tui import DetailsPane
+            from textual.widgets import Markdown
             detail_pane = app.query_one("#item-details", DetailsPane)
-            detail_content = detail_pane.query_one("#detail-content", Static)
+            detail_content = detail_pane.query_one("#detail-content", Markdown)
 
-            content = str(detail_content.render())
+            content = str(detail_content._markdown)
             assert "Amazing Mod" in content
 
 @pytest.mark.asyncio
@@ -156,10 +157,11 @@ async def test_tui_tag_data_types(mock_config):
             await pilot.press("enter")
 
             from src.tui import DetailsPane
+            from textual.widgets import Markdown
             detail_pane = app.query_one("#item-details", DetailsPane)
-            detail_content = detail_pane.query_one("#detail-content", Static)
+            detail_content = detail_pane.query_one("#detail-content", Markdown)
 
-            content = str(detail_content.render())
+            content = str(detail_content._markdown)
             assert "List Mod" in content
             assert "Valid, List" in content
 
@@ -168,7 +170,7 @@ async def test_tui_tag_data_types(mock_config):
             app.set_focus(list_view)
             await pilot.press("enter")
 
-            content2 = str(detail_content.render())
+            content2 = str(detail_content._markdown)
             assert "Dict Mod" in content2
 
             assert "Tags: \n" in content2 or "Tags: \n" not in content2 # It just shouldn't crash
@@ -178,7 +180,7 @@ async def test_tui_tag_data_types(mock_config):
             app.set_focus(list_view)
             await pilot.press("enter")
 
-            content3 = str(detail_content.render())
+            content3 = str(detail_content._markdown)
             assert "API Tags Mod" in content3
             assert "Mod, 1.0" in content3
 
