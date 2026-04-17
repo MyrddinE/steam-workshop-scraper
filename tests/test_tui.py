@@ -1,5 +1,6 @@
 import pytest
 from textual.widgets import Input, ListItem, Static, ListView, Select, Button
+from textual.containers import VerticalScroll
 from src.tui import ScraperApp
 from unittest.mock import patch, MagicMock
 
@@ -117,32 +118,47 @@ async def test_tui_tag_data_types(mock_config):
             "workshop_id": 4,
             "title": "Dict Mod",
             "tags": {"invalid": "dict"}
+        },
+        {
+            "workshop_id": 5,
+            "title": "API Tags Mod",
+            "tags": '[{"tag": "Mod"}, {"tag": "1.0"}]'
         }
     ]
 
     from unittest.mock import patch
-    with patch('src.tui.load_config', return_value=mock_config),          patch('src.tui.search_items', return_value=mock_results):
+    with patch('src.tui.load_config', return_value=mock_config), \
+         patch('src.tui.search_items', return_value=mock_results):
         
         app = ScraperApp()
         async with app.run_test() as pilot:
             await pilot.pause(0.1) # Wait for mount
-            
+
             # Verify List Mod
             list_view = app.query_one(ListView)
             list_view.index = 0
             app.set_focus(list_view)
             await pilot.press("enter")
-            
+
             detail_pane = app.query_one("#item-details", Static)
             content = str(detail_pane.render())
             assert "List Mod" in content
             assert "Valid, List" in content
-            
+
             # Verify Dict Mod (should not crash, should just be empty tags)
             list_view.index = 1
             app.set_focus(list_view)
             await pilot.press("enter")
-            
+
             content2 = str(detail_pane.render())
             assert "Dict Mod" in content2
-            assert "Tags: " in content2 # Fallback to empty list join
+            assert "Tags: \n" in content2 or "Tags: \n" not in content2 # It just shouldn't crash
+
+            # Verify API Tags Mod
+            list_view.index = 2
+            app.set_focus(list_view)
+            await pilot.press("enter")
+
+            content3 = str(detail_pane.render())
+            assert "API Tags Mod" in content3
+            assert "Tags: Mod, 1.0" in content3

@@ -1,7 +1,7 @@
 import json
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from src.database import search_items, get_all_authors, initialize_database
 from src.config import load_config
 
@@ -140,7 +140,7 @@ class ScraperApp(App):
 
         details_view = Static("Select an item to see details", id="item-details")
         details_container = Vertical(
-            details_view,
+            VerticalScroll(details_view, id="scroll-container"),
             Button("Jump to Author", id="btn-jump-author", variant="primary"),
             id="details-container"
         )

@@ -36,7 +36,7 @@ def get_workshop_details_api(item_id: int, api_key: str) -> dict | None:
     except requests.exceptions.RequestException:
         return None
 
-def query_workshop_items(appid: int, api_key: str, count: int = 50) -> list[int]:
+def query_workshop_items(appid: int, api_key: str, count: int = 50, page: int = 1) -> list[int]:
     """
     Queries the Steam API for a list of workshop items for a specific app.
     Useful for seeding the database with IDs.
@@ -45,7 +45,7 @@ def query_workshop_items(appid: int, api_key: str, count: int = 50) -> list[int]
     params = {
         "key": api_key,
         "query_type": 0, # RankByVote (popular)
-        "page": 1,
+        "page": page,
         "numperpage": count,
         "creator_appid": appid,
         "appid": appid,

@@ -8,7 +8,10 @@ from src.database import (
     insert_or_update_item,
     get_next_items_to_scrape,
     search_items,
-    get_connection
+    get_connection,
+    get_app_page,
+    update_app_page,
+    count_unscraped_items
 )
 
 @pytest.fixture
@@ -17,6 +20,27 @@ def db_path(tmp_path):
     path = str(tmp_path / "test_workshop.db")
     initialize_database(path)
     return path
+
+def test_app_state_pagination(db_path):
+    """Test getting and updating the current page for an appid."""
+    # Should default to 1
+    assert get_app_page(db_path, 294100) == 1
+    
+    update_app_page(db_path, 294100, 2)
+    assert get_app_page(db_path, 294100) == 2
+    
+    update_app_page(db_path, 294100, 5)
+    assert get_app_page(db_path, 294100) == 5
+
+def test_count_unscraped_items(db_path):
+    """Test counting items that have never been attempted."""
+    assert count_unscraped_items(db_path) == 0
+    
+    insert_or_update_item(db_path, {"workshop_id": 1}) # Unscraped
+    insert_or_update_item(db_path, {"workshop_id": 2}) # Unscraped
+    insert_or_update_item(db_path, {"workshop_id": 3, "dt_attempted": "2023-01-01"}) # Scraped
+    
+    assert count_unscraped_items(db_path) == 2
 
 def test_initialize_database(db_path):
     """Tests that the database and table are created correctly."""
