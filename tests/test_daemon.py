@@ -38,13 +38,16 @@ def test_daemon_init_missing_appids():
 @patch('src.daemon.get_next_items_to_scrape')
 @patch('src.daemon.get_workshop_details_api')
 @patch('src.daemon.scrape_extended_details')
+@patch('src.daemon.get_user')
+@patch('src.daemon.insert_or_update_user')
 @patch('src.daemon.insert_or_update_item')
 @patch('time.sleep')
-def test_daemon_process_batch_success(mock_sleep, mock_insert, mock_scrape, mock_api, mock_get_items, mock_count, mock_config):
+def test_daemon_process_batch_success(mock_sleep, mock_insert, mock_insert_user, mock_get_user, mock_scrape, mock_api, mock_get_items, mock_count, mock_config):
     mock_count.return_value = 1000 # Enough to skip seeding
     mock_get_items.return_value = [123]
     mock_api.return_value = {"title": "Test Mod", "creator": "111"}
     mock_scrape.return_value = {"description": "Cool mod", "tags": ["tag1"]}
+    mock_get_user.return_value = {"steamid": 111, "dt_updated": "2026-01-01T00:00:00"} # Recent enough
 
     daemon = Daemon(mock_config)
     daemon.process_batch()
@@ -266,3 +269,33 @@ def test_daemon_translation_flagging(mock_sleep, mock_insert, mock_scrape, mock_
     # It's called multiple times (API then Scraper), we want the final one
     final_call_data = mock_insert.call_args[0][1]
     assert final_call_data["translation_priority"] == 1
+
+@patch('src.daemon.count_unscraped_items')
+@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.get_workshop_details_api')
+@patch('src.daemon.scrape_extended_details')
+@patch('src.daemon.get_player_summaries')
+@patch('src.daemon.get_user')
+@patch('src.daemon.insert_or_update_user')
+@patch('src.daemon.insert_or_update_item')
+@patch('time.sleep')
+def test_daemon_user_fetching(mock_sleep, mock_insert_item, mock_insert_user, mock_get_user, mock_summaries, mock_scrape, mock_api, mock_get_items, mock_count, mock_config):
+    """Test that the daemon fetches user details and flags for translation."""
+    mock_count.return_value = 1000
+    mock_get_items.return_value = [300]
+    mock_api.return_value = {"title": "Mod", "creator": "777", "workshop_id": 300}
+    mock_scrape.return_value = {"description": "Desc", "tags": []}
+    mock_get_user.return_value = None # Force update
+    
+    # Mock Steam API for user
+    mock_summaries.return_value = {777: {"personaname": "안녕하세요"}}
+    
+    daemon = Daemon(mock_config)
+    daemon.process_batch()
+    
+    # Verify user was inserted with translation flag
+    mock_insert_user.assert_called_once()
+    user_data = mock_insert_user.call_args[0][1]
+    assert user_data["steamid"] == 777
+    assert user_data["personaname"] == "안녕하세요"
+    assert user_data["translation_priority"] == 1

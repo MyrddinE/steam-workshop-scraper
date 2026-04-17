@@ -62,3 +62,33 @@ def query_workshop_items(appid: int, api_key: str, count: int = 50, page: int = 
         
     except (requests.exceptions.RequestException, ValueError, KeyError):
         return []
+
+def get_player_summaries(steamids: list[int], api_key: str) -> dict[int, dict]:
+    """
+    Fetches persona names for a list of SteamIDs.
+    Returns a mapping of SteamID -> {personaname: str, ...}
+    """
+    if not steamids:
+        return {}
+        
+    url = "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/"
+    ids_str = ",".join(str(sid) for sid in steamids)
+    params = {
+        "key": api_key,
+        "steamids": ids_str
+    }
+    
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        json_data = response.json()
+        
+        players = json_data.get("response", {}).get("players", [])
+        result = {}
+        for p in players:
+            sid = int(p["steamid"])
+            result[sid] = p
+        return result
+        
+    except (requests.exceptions.RequestException, ValueError, KeyError):
+        return {}

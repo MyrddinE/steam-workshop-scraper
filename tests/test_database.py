@@ -118,29 +118,36 @@ def test_translation_columns_and_priority(db_path):
     
     # Flag it for translation (Priority 1 - Auto)
     from src.database import flag_for_translation, get_next_translation_item
-    flag_for_translation(db_path, 101, 1)
+    flag_for_translation(db_path, 101, 1, table="workshop_items")
     
-    # Insert another item and flag it with higher priority (Priority 10 - User)
-    insert_or_update_item(db_path, {"workshop_id": 102, "title": "Priority Title"})
-    flag_for_translation(db_path, 102, 10)
+    # Flag a user with higher priority (Priority 10 - User)
+    from src.database import insert_or_update_user
+    insert_or_update_user(db_path, {"steamid": 76561198000000000, "personaname": "안녕하세요"})
+    flag_for_translation(db_path, 76561198000000000, 10, table="users")
     
-    # get_next_translation_item should return 102 first because it has higher priority
-    assert get_next_translation_item(db_path) == 102
+    # get_next_translation_item should return the user first because of higher priority
+    next_item = get_next_translation_item(db_path)
+    assert next_item == ("user", 76561198000000000)
     
-    # Update 102 as translated
-    insert_or_update_item(db_path, {
-        "workshop_id": 102, 
-        "title_en": "Priority Title EN", 
-        "dt_translated": "2023-01-01T12:00:00",
-        "translation_priority": 0
-    })
+    # After translating user, should return the mod
+    flag_for_translation(db_path, 76561198000000000, 0, table="users")
+    next_item = get_next_translation_item(db_path)
+    assert next_item == ("workshop_item", 101)
+
+def test_user_table_operations(db_path):
+    """Tests basic CRUD for the users table."""
+    from src.database import insert_or_update_user, get_user
+    user_data = {"steamid": 12345, "personaname": "Test User"}
+    insert_or_update_user(db_path, user_data)
     
-    # Now it should return 101
-    assert get_next_translation_item(db_path) == 101
+    user = get_user(db_path, 12345)
+    assert user["personaname"] == "Test User"
     
-    # If all are 0 or NULL, it should return None
-    flag_for_translation(db_path, 101, 0)
-    assert get_next_translation_item(db_path) is None
+    # Update
+    user_data["personaname"] = "Updated Name"
+    insert_or_update_user(db_path, user_data)
+    user = get_user(db_path, 12345)
+    assert user["personaname"] == "Updated Name"
 
 def test_concurrent_read_write(db_path):
     """

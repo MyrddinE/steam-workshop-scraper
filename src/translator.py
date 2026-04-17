@@ -12,9 +12,9 @@ def is_ascii(s: str) -> bool:
         return True
     return all(ord(c) < 128 for c in s)
 
-def translate_item(db_path: str, workshop_id: int, config: dict):
+def translate_item(db_path: str, item_id: int, config: dict, item_type: str = "workshop_item"):
     """
-    Fetches the row for workshop_id, translates relevant fields via OpenAI,
+    Fetches the row for workshop_id or steamid, translates relevant fields via OpenAI,
     and updates the database with the results.
     """
     openai_config = config.get("openai", {})
@@ -23,18 +23,37 @@ def translate_item(db_path: str, workshop_id: int, config: dict):
         return
 
     conn = get_connection(db_path)
-    cursor = conn.execute(
-        "SELECT title, short_description, extended_description FROM workshop_items WHERE workshop_id = ?",
-        (workshop_id,)
-    )
-    row = cursor.fetchone()
-    if not row:
-        conn.close()
-        return
-
-    title = row["title"] or ""
-    short_desc = row["short_description"] or ""
-    extended_desc = row["extended_description"] or ""
+    
+    if item_type == "workshop_item":
+        cursor = conn.execute(
+            "SELECT title, short_description, extended_description FROM workshop_items WHERE workshop_id = ?",
+            (item_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return
+        fields_to_translate = {
+            "title_en": row["title"] or "",
+            "short_description_en": row["short_description"] or "",
+            "extended_description_en": row["extended_description"] or ""
+        }
+        id_col = "workshop_id"
+        table = "workshop_items"
+    else: # user
+        cursor = conn.execute(
+            "SELECT personaname FROM users WHERE steamid = ?",
+            (item_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return
+        fields_to_translate = {
+            "personaname_en": row["personaname"] or ""
+        }
+        id_col = "steamid"
+        table = "users"
 
     # Prepare OpenAI Client
     client = OpenAI(
@@ -43,14 +62,12 @@ def translate_item(db_path: str, workshop_id: int, config: dict):
     )
 
     prompt = f"""
-    Translate the following Steam Workshop item metadata into English. 
+    Translate the following Steam Workshop {'item metadata' if item_type == 'workshop_item' else 'user name'} into English. 
     Maintain the tone and any formatting (like [b] tags).
-    Return the result as a raw JSON object with these keys: "title_en", "short_description_en", "extended_description_en".
+    Return the result as a raw JSON object with these keys: {', '.join(f'"{k}"' for k in fields_to_translate.keys())}.
     If a field is already in English, return it unchanged.
 
-    Title: {title}
-    Short Description: {short_desc}
-    Extended Description: {extended_desc}
+    {json.dumps(fields_to_translate, ensure_ascii=False)}
     """
 
     try:
@@ -68,29 +85,23 @@ def translate_item(db_path: str, workshop_id: int, config: dict):
         
         now_iso = datetime.now(timezone.utc).isoformat()
         
-        conn.execute(
-            """
-            UPDATE workshop_items 
-            SET title_en = ?, short_description_en = ?, extended_description_en = ?, 
-                dt_translated = ?, translation_priority = 0
-            WHERE workshop_id = ?
-            """,
-            (
-                translated_data.get("title_en"),
-                translated_data.get("short_description_en"),
-                translated_data.get("extended_description_en"),
-                now_iso,
-                workshop_id
-            )
-        )
+        update_parts = [f"{k} = ?" for k in fields_to_translate.keys()]
+        update_parts.append("dt_translated = ?")
+        update_parts.append("translation_priority = 0")
+        
+        sql = f"UPDATE {table} SET {', '.join(update_parts)} WHERE {id_col} = ?"
+        
+        params = [translated_data.get(k) for k in fields_to_translate.keys()]
+        params.append(now_iso)
+        params.append(item_id)
+        
+        conn.execute(sql, params)
         conn.commit()
-        logging.info(f"[{workshop_id}] Successfully translated to English.")
+        logging.info(f"[{item_id}] ({item_type}) Successfully translated to English.")
         
     except Exception as e:
-        logging.error(f"[{workshop_id}] Translation failed: {e}")
-        # Reset priority to prevent infinite immediate retries, or maybe set to 1 if we want to retry later?
-        # User requested translation (10) should maybe be reset to 1 on failure.
-        conn.execute("UPDATE workshop_items SET translation_priority = 1 WHERE workshop_id = ?", (workshop_id,))
+        logging.error(f"[{item_id}] ({item_type}) Translation failed: {e}")
+        conn.execute(f"UPDATE {table} SET translation_priority = 1 WHERE {id_col} = ?", (item_id,))
         conn.commit()
     finally:
         conn.close()
@@ -113,9 +124,10 @@ class TranslatorThread(threading.Thread):
         
         while self.running:
             try:
-                workshop_id = get_next_translation_item(self.db_path)
-                if workshop_id:
-                    translate_item(self.db_path, workshop_id, self.config)
+                result = get_next_translation_item(self.db_path)
+                if result:
+                    item_type, item_id = result
+                    translate_item(self.db_path, item_id, self.config, item_type=item_type)
                     # Small breath between translations to be polite
                     time.sleep(1)
                 else:

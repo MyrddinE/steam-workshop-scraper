@@ -27,7 +27,7 @@ def initialize_database(db_path: str):
         dt_attempted TEXT,
         status INTEGER,
         title TEXT,
-        creator TEXT,
+        creator INTEGER,
         creator_appid INTEGER,
         consumer_appid INTEGER,
         filename TEXT,
@@ -54,6 +54,18 @@ def initialize_database(db_path: str):
         title_en TEXT,
         short_description_en TEXT,
         extended_description_en TEXT,
+        dt_translated TEXT,
+        translation_priority INTEGER DEFAULT 0
+    )
+    """)
+
+    # Create users table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        steamid INTEGER PRIMARY KEY,
+        personaname TEXT,
+        personaname_en TEXT,
+        dt_updated TEXT,
         dt_translated TEXT,
         translation_priority INTEGER DEFAULT 0
     )
@@ -175,28 +187,70 @@ def count_unscraped_items(db_path: str) -> int:
     conn.close()
     return row["count"] if row else 0
 
-def flag_for_translation(db_path: str, workshop_id: int, priority: int):
-    """Updates the translation priority for a specific item."""
+def insert_or_update_user(db_path: str, user_data: dict):
+    """Inserts or updates a user in the users table."""
     conn = get_connection(db_path)
+    columns = list(user_data.keys())
+    placeholders = ",".join(["?"] * len(columns))
+    updates = ",".join([f"{col}=excluded.{col}" for col in columns if col != "steamid"])
+    
+    sql = f"""
+        INSERT INTO users ({",".join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(steamid) DO UPDATE SET {updates}
+    """
+    conn.execute(sql, list(user_data.values()))
+    conn.commit()
+    conn.close()
+
+def get_user(db_path: str, steamid: int) -> dict | None:
+    """Fetches a user by steamid."""
+    conn = get_connection(db_path)
+    cursor = conn.execute("SELECT * FROM users WHERE steamid = ?", (steamid,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def flag_for_translation(db_path: str, item_id: int, priority: int, table: str = "workshop_items"):
+    """Updates the translation priority for a specific item or user."""
+    conn = get_connection(db_path)
+    id_col = "workshop_id" if table == "workshop_items" else "steamid"
     conn.execute(
-        "UPDATE workshop_items SET translation_priority = ? WHERE workshop_id = ?",
-        (priority, workshop_id)
+        f"UPDATE {table} SET translation_priority = ? WHERE {id_col} = ?",
+        (priority, item_id)
     )
     conn.commit()
     conn.close()
 
-def get_next_translation_item(db_path: str) -> int | None:
+def get_next_translation_item(db_path: str) -> tuple[str, int] | None:
     """
-    Returns the workshop_id of the next item needing translation,
-    ordered by priority descending.
+    Returns (type, id) of the next item needing translation,
+    checking both workshop_items and users, ordered by priority descending.
     """
     conn = get_connection(db_path)
+    # Check workshop_items
     cursor = conn.execute(
-        "SELECT workshop_id FROM workshop_items WHERE translation_priority > 0 ORDER BY translation_priority DESC LIMIT 1"
+        "SELECT workshop_id, translation_priority FROM workshop_items WHERE translation_priority > 0 ORDER BY translation_priority DESC LIMIT 1"
     )
-    row = cursor.fetchone()
+    mod_row = cursor.fetchone()
+    
+    # Check users
+    cursor = conn.execute(
+        "SELECT steamid, translation_priority FROM users WHERE translation_priority > 0 ORDER BY translation_priority DESC LIMIT 1"
+    )
+    user_row = cursor.fetchone()
     conn.close()
-    return row["workshop_id"] if row else None
+    
+    if not mod_row and not user_row:
+        return None
+        
+    mod_prio = mod_row["translation_priority"] if mod_row else 0
+    user_prio = user_row["translation_priority"] if user_row else 0
+    
+    if user_prio > mod_prio:
+        return ("user", user_row["steamid"])
+    else:
+        return ("workshop_item", mod_row["workshop_id"])
 
 def _parse_query(query: str) -> tuple[list[str], list[str]]:
     """

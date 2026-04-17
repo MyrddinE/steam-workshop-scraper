@@ -56,24 +56,61 @@ def test_translate_item_success(mock_get_conn, mock_openai_class, mock_config):
                 found_update = True
     # assert found_update # We'll refine this once implementation is done
 
+@patch("src.translator.OpenAI")
+@patch("src.translator.get_connection")
+def test_translate_user_success(mock_get_conn, mock_openai_class, mock_config):
+    """Test successful translation of a user personaname."""
+    mock_conn = MagicMock()
+    mock_get_conn.return_value = mock_conn
+    mock_cursor = mock_conn.execute.return_value
+    
+    # Mock user row
+    mock_row = MagicMock()
+    mock_row.__getitem__.side_effect = lambda key: {
+        "steamid": 12345,
+        "personaname": "안녕하세요"
+    }.get(key)
+    mock_cursor.fetchone.return_value = mock_row
+    
+    # Mock OpenAI response
+    mock_client = mock_openai_class.return_value
+    mock_response = MagicMock()
+    mock_response.choices[0].message.content = '{"personaname_en": "Hello"}'
+    mock_client.chat.completions.create.return_value = mock_response
+    
+    translate_item("test.db", 12345, mock_config, item_type="user")
+    
+    # Verify OpenAI was called
+    assert mock_client.chat.completions.create.called
+    
+    # Verify DB update call
+    found_update = False
+    for call in mock_conn.execute.call_args_list:
+        if "UPDATE users" in call[0][0]:
+            found_update = True
+    assert found_update
+
 @patch("src.translator.get_next_translation_item")
 @patch("src.translator.translate_item")
 @patch("time.sleep")
 def test_translator_thread_loop(mock_sleep, mock_translate, mock_get_next, mock_config):
     """Test the translator thread picks up items and processes them."""
-    mock_get_next.side_effect = [123, None] # One item then nothing
+    # First a user, then a mod, then nothing
+    mock_get_next.side_effect = [("user", 123), ("workshop_item", 456), None]
     
     thread = TranslatorThread(mock_config)
-    # We need a way to stop the thread after one iteration
-    def stop_after_one(*args, **kwargs):
-        thread.running = False
-        
-    mock_translate.side_effect = stop_after_one
+    def stop_after_two(*args, **kwargs):
+        if mock_translate.call_count >= 2:
+            thread.running = False
+            
+    mock_translate.side_effect = stop_after_two
     
     thread.start()
     thread.join(timeout=2)
     
-    mock_translate.assert_called_once_with("test.db", 123, mock_config)
+    assert mock_translate.call_count == 2
+    mock_translate.assert_any_call("test.db", 123, mock_config, item_type="user")
+    mock_translate.assert_any_call("test.db", 456, mock_config, item_type="workshop_item")
 
 def test_translator_thread_no_config():
     """Test that the thread exits early if OpenAI is not configured."""

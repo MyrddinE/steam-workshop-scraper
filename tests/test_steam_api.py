@@ -142,3 +142,22 @@ def test_get_workshop_details_api_invalid_item():
     )
     details = get_workshop_details_api(item_id=123, api_key="TEST_KEY")
     assert details is None
+
+@responses.activate
+def test_get_player_summaries_success():
+    url = "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/"
+    mock_data = {
+        "response": {
+            "players": [
+                {"steamid": "123", "personaname": "Player One"},
+                {"steamid": "456", "personaname": "Player Two"}
+            ]
+        }
+    }
+    responses.add(responses.GET, url, json=mock_data, status=200)
+    
+    from src.steam_api import get_player_summaries
+    summaries = get_player_summaries([123, 456], "FAKE_KEY")
+    assert len(summaries) == 2
+    assert summaries[123]["personaname"] == "Player One"
+    assert summaries[456]["personaname"] == "Player Two"

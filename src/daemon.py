@@ -8,9 +8,11 @@ from src.database import (
     insert_or_update_item, 
     count_unscraped_items, 
     get_app_page, 
-    update_app_page
+    update_app_page,
+    insert_or_update_user,
+    get_user
 )
-from src.steam_api import get_workshop_details_api, query_workshop_items
+from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries
 from src.web_scraper import scrape_extended_details, discover_ids_html
 from src.translator import TranslatorThread, is_ascii
 
@@ -152,6 +154,34 @@ class Daemon:
             base_data["status"] = 200 # OK
             insert_or_update_item(self.db_path, base_data)
             
+            # Step 3: Fetch User/Creator details
+            creator_id = base_data.get("creator")
+            if creator_id:
+                try:
+                    creator_id = int(creator_id)
+                    # Check if we need to update user (missing or older than 7 days)
+                    existing_user = get_user(self.db_path, creator_id)
+                    should_update_user = True
+                    if existing_user and existing_user.get("dt_updated"):
+                        last_upd = datetime.fromisoformat(existing_user["dt_updated"])
+                        if (datetime.now(timezone.utc) - last_upd).days < 7:
+                            should_update_user = False
+                    
+                    if should_update_user:
+                        user_summaries = get_player_summaries([creator_id], self.api_key)
+                        if creator_id in user_summaries:
+                            pdata = user_summaries[creator_id]
+                            user_record = {
+                                "steamid": creator_id,
+                                "personaname": pdata.get("personaname"),
+                                "dt_updated": datetime.now(timezone.utc).isoformat()
+                            }
+                            if not is_ascii(user_record["personaname"]):
+                                user_record["translation_priority"] = 1
+                            insert_or_update_user(self.db_path, user_record)
+                except (ValueError, TypeError):
+                    pass # Not a numeric SteamID
+
             populated_fields = [k for k, v in base_data.items() if v is not None and v != ""]
             logging.info(f"[{item_id}] \"{base_data.get('title', 'Unknown Title')}\" | Populated: {populated_fields}")
             
