@@ -9,7 +9,7 @@ def load_config(path: str) -> dict:
         raise FileNotFoundError(f"Config file not found: {path}")
 
     with open(path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+        config = yaml.safe_load(f) or {}
 
     # Environment variable overrides
     env_key = os.environ.get("STEAM_API_KEY")
