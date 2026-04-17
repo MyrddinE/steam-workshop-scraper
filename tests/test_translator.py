@@ -37,7 +37,7 @@ def test_translate_item_success(mock_get_conn, mock_openai_class, mock_config):
     mock_response.choices[0].message.content = '{"title_en": "Hello", "short_description_en": "Intro", "extended_description_en": "Long Description"}'
     mock_client.chat.completions.create.return_value = mock_response
     
-    translate_item("test.db", 123, mock_config)
+    translate_item("test.db", 123, mock_config, priority=1)
     
     # Verify OpenAI was called correctly
     assert mock_client.chat.completions.create.called
@@ -78,7 +78,7 @@ def test_translate_user_success(mock_get_conn, mock_openai_class, mock_config):
     mock_response.choices[0].message.content = '{"personaname_en": "Hello"}'
     mock_client.chat.completions.create.return_value = mock_response
     
-    translate_item("test.db", 12345, mock_config, item_type="user")
+    translate_item("test.db", 12345, mock_config, item_type="user", priority=10)
     
     # Verify OpenAI was called
     assert mock_client.chat.completions.create.called
@@ -96,7 +96,7 @@ def test_translate_user_success(mock_get_conn, mock_openai_class, mock_config):
 def test_translator_thread_loop(mock_sleep, mock_translate, mock_get_next, mock_config):
     """Test the translator thread picks up items and processes them."""
     # First a user, then a mod, then nothing
-    mock_get_next.side_effect = [("user", 123), ("workshop_item", 456), None]
+    mock_get_next.side_effect = [("user", 123, 10), ("workshop_item", 456, 1), None]
     
     thread = TranslatorThread(mock_config)
     def stop_after_two(*args, **kwargs):
@@ -109,8 +109,8 @@ def test_translator_thread_loop(mock_sleep, mock_translate, mock_get_next, mock_
     thread.join(timeout=2)
     
     assert mock_translate.call_count == 2
-    mock_translate.assert_any_call("test.db", 123, mock_config, item_type="user")
-    mock_translate.assert_any_call("test.db", 456, mock_config, item_type="workshop_item")
+    mock_translate.assert_any_call("test.db", 123, mock_config, item_type="user", priority=10)
+    mock_translate.assert_any_call("test.db", 456, mock_config, item_type="workshop_item", priority=1)
 
 def test_translator_thread_no_config():
     """Test that the thread exits early if OpenAI is not configured."""

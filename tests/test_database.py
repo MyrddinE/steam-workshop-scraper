@@ -127,12 +127,12 @@ def test_translation_columns_and_priority(db_path):
     
     # get_next_translation_item should return the user first because of higher priority
     next_item = get_next_translation_item(db_path)
-    assert next_item == ("user", 76561198000000000)
+    assert next_item == ("user", 76561198000000000, 10)
     
     # After translating user, should return the mod
     flag_for_translation(db_path, 76561198000000000, 0, table="users")
     next_item = get_next_translation_item(db_path)
-    assert next_item == ("workshop_item", 101)
+    assert next_item == ("workshop_item", 101, 1)
 
 def test_user_table_operations(db_path):
     """Tests basic CRUD for the users table."""

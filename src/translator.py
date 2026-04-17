@@ -6,13 +6,16 @@ from datetime import datetime, timezone
 from openai import OpenAI
 from src.database import get_connection, get_next_translation_item
 
+# Silence httpx logging which openai uses internally
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 def is_ascii(s: str) -> bool:
     """Returns True if the string is entirely ASCII."""
     if not s:
         return True
     return all(ord(c) < 128 for c in s)
 
-def translate_item(db_path: str, item_id: int, config: dict, item_type: str = "workshop_item"):
+def translate_item(db_path: str, item_id: int, config: dict, item_type: str = "workshop_item", priority: int = 0):
     """
     Fetches the row for workshop_id or steamid, translates relevant fields via OpenAI,
     and updates the database with the results.
@@ -97,7 +100,7 @@ def translate_item(db_path: str, item_id: int, config: dict, item_type: str = "w
         
         conn.execute(sql, params)
         conn.commit()
-        logging.info(f"[{item_id}] ({item_type}) Successfully translated to English.")
+        logging.info(f"[{item_id}] ({item_type}) Successfully translated to English (Priority: {priority}).")
         
     except Exception as e:
         logging.error(f"[{item_id}] ({item_type}) Translation failed: {e}")
@@ -126,8 +129,8 @@ class TranslatorThread(threading.Thread):
             try:
                 result = get_next_translation_item(self.db_path)
                 if result:
-                    item_type, item_id = result
-                    translate_item(self.db_path, item_id, self.config, item_type=item_type)
+                    item_type, item_id, priority = result
+                    translate_item(self.db_path, item_id, self.config, item_type=item_type, priority=priority)
                     # Small breath between translations to be polite
                     time.sleep(1)
                 else:

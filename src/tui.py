@@ -73,10 +73,16 @@ class DetailsPane(VerticalScroll):
             f"AppID: {item.get('consumer_appid', 'N/A')}",
             f"Language ID: {item.get('language', 'N/A')}",
             f"Tags: {', '.join(tags_list)}",
+        ]
+        
+        if item.get("translation_priority", 0) > 0:
+            content.append("[i]Queued for translation...[/i]")
+        
+        content.extend([
             "",
             "[b]Description:[/b]",
             desc
-        ]
+        ])
         self.query_one("#detail-content", Static).update("\n".join(content))
 
 class WorkshopItem(ListItem):
@@ -320,9 +326,34 @@ class ScraperApp(App):
         elif event.button.id == "btn-request-translation":
             detail_pane = self.query_one("#item-details", DetailsPane)
             if detail_pane.item_data:
-                wid = detail_pane.item_data.get("workshop_id")
+                item = detail_pane.item_data
+                wid = item.get("workshop_id")
+                
+                # Check if it already has a priority set
+                if item.get("translation_priority", 0) > 0:
+                    self.notify(f"Item {wid} is already in the translation queue.", severity="warning")
+                    return
+
                 flag_for_translation(self.db_path, wid, priority=10)
+                # Update local state immediately so UI can show 'queued'
+                item["translation_priority"] = 10
+                detail_pane.update_content()
+                
                 self.notify(f"Item {wid} flagged for high-priority translation.")
+                
+                # Simple refresh after 3 seconds to try and catch the finished translation
+                async def delayed_refresh():
+                    # Re-fetch the item from DB
+                    from src.database import get_connection
+                    conn = get_connection(self.db_path)
+                    cursor = conn.execute("SELECT * FROM workshop_items WHERE workshop_id = ?", (wid,))
+                    row = cursor.fetchone()
+                    conn.close()
+                    if row:
+                        detail_pane.item_data = dict(row)
+                        self.notify(f"Translation for {wid} updated.")
+                
+                self.set_timer(3.0, delayed_refresh)
 
 def main():
     app = ScraperApp()

@@ -222,9 +222,9 @@ def flag_for_translation(db_path: str, item_id: int, priority: int, table: str =
     conn.commit()
     conn.close()
 
-def get_next_translation_item(db_path: str) -> tuple[str, int] | None:
+def get_next_translation_item(db_path: str) -> tuple[str, int, int] | None:
     """
-    Returns (type, id) of the next item needing translation,
+    Returns (type, id, priority) of the next item needing translation,
     checking both workshop_items and users, ordered by priority descending.
     """
     conn = get_connection(db_path)
@@ -248,9 +248,9 @@ def get_next_translation_item(db_path: str) -> tuple[str, int] | None:
     user_prio = user_row["translation_priority"] if user_row else 0
     
     if user_prio > mod_prio:
-        return ("user", user_row["steamid"])
+        return ("user", user_row["steamid"], user_prio)
     else:
-        return ("workshop_item", mod_row["workshop_id"])
+        return ("workshop_item", mod_row["workshop_id"], mod_prio)
 
 def _parse_query(query: str) -> tuple[list[str], list[str]]:
     """
