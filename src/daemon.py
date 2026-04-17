@@ -108,7 +108,10 @@ class Daemon:
                     clean_api_data[k] = v
                 elif k not in known_ignored_keys:
                     val_preview = str(v)[:20] + "..." if len(str(v)) > 20 else str(v)
-                    logging.warning(f"Discarding unknown API column: '{k}' with value '{val_preview}' for item {item_id}")
+                    if v is not None and str(v).strip() != "":
+                        logging.info(f"Discarding unknown API column: '{k}' with value '{val_preview}' for item {item_id}")
+                    else:
+                        logging.debug(f"Discarding unknown API column: '{k}' with value '{val_preview}' for item {item_id}")
                 
             base_data.update(clean_api_data)
             base_data["dt_updated"] = now_iso
