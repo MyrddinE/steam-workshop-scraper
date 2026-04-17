@@ -7,6 +7,8 @@ from textual.reactive import reactive
 from src.database import search_items, get_all_authors, initialize_database, flag_for_translation, get_item_details
 from src.config import load_config
 
+from rich.markup import escape
+
 class DetailsPane(VerticalScroll):
     """A scrollable pane for viewing workshop item details."""
     workshop_id = reactive(None)
@@ -18,7 +20,7 @@ class DetailsPane(VerticalScroll):
             yield Label("[b]Item Details[/b]", id="details-header-label")
             yield Button("Show Original", id="btn-toggle-translation", classes="details-btn")
             yield Button("Translate", id="btn-request-translation", classes="details-btn")
-        yield Static(id="detail-content")
+        yield Static(id="detail-content", markup=False)
 
     def on_mount(self) -> None:
         """Setup background refresh to catch translation updates."""
@@ -86,7 +88,7 @@ class DetailsPane(VerticalScroll):
         except: pass
 
         content = [
-            f"[b][u]{title}[/u][/b]",
+            f"{title}",
             f"ID: {item.get('workshop_id', 'N/A')}",
             f"Creator: {item.get('creator', 'N/A')}",
             f"AppID: {item.get('consumer_appid', 'N/A')}",
@@ -95,11 +97,11 @@ class DetailsPane(VerticalScroll):
         ]
         
         if item.get("translation_priority", 0) > 0:
-            content.append("[i]Queued for translation...[/i]")
+            content.append("Queued for translation...")
         
         content.extend([
             "",
-            "[b]Description:[/b]",
+            "Description:",
             desc
         ])
         self.query_one("#detail-content", Static).update("\n".join(content))
