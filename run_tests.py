@@ -12,8 +12,6 @@ def run_tests():
 
     cmd = [
         sys.executable, "-m", "pytest",
-        "--cov=src",
-        "--cov-report=term-missing",
         "tests/"
     ]
     
