@@ -45,6 +45,22 @@ def test_load_config_env_override(tmp_path):
     finally:
         del os.environ["STEAM_API_KEY"]
 
+def test_load_config_openai_env_override(tmp_path):
+    """Tests that OPENAI_API_KEY environment variable overrides YAML settings."""
+    config_data = {
+        "openai": {"api_key": "original_openai_key"}
+    }
+    config_file = tmp_path / "config.yaml"
+    with open(config_file, "w") as f:
+        yaml.dump(config_data, f)
+
+    os.environ["OPENAI_API_KEY"] = "overridden_openai_key"
+    try:
+        config = load_config(str(config_file))
+        assert config["openai"]["api_key"] == "overridden_openai_key"
+    finally:
+        del os.environ["OPENAI_API_KEY"]
+
 def test_load_config_env_override_missing_section(tmp_path):
     """Tests that environment variables create the 'api' section if missing."""
     config_data = {

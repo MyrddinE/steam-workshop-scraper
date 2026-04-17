@@ -18,4 +18,10 @@ def load_config(path: str) -> dict:
             config["api"] = {}
         config["api"]["key"] = env_key
 
+    openai_env_key = os.environ.get("OPENAI_API_KEY")
+    if openai_env_key:
+        if "openai" not in config:
+            config["openai"] = {}
+        config["openai"]["api_key"] = openai_env_key
+
     return config

@@ -13,7 +13,7 @@ daemon:
     - 294100 # RimWorld
 
 openai:
-  api_key: "YOUR_OPENAI_API_KEY_HERE"
+  api_key: "YOUR_OPENAI_API_KEY_HERE" # Can be overridden by OPENAI_API_KEY env var
   endpoint: "https://api.openai.com/v1"
   model: "gpt-4o-mini"
  example
