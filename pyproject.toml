@@ -14,7 +14,8 @@ dependencies = [
     "requests-html",
     "pyyaml",
     "textual",
-    "lxml_html_clean"
+    "lxml_html_clean",
+    "openai"
 ]
 
 [project.scripts]

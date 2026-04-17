@@ -98,8 +98,12 @@ async def test_end_to_end_system_flow(system_config):
             list_view.index = 0
             app.set_focus(list_view)
             await pilot.press("enter")
-            
-            detail_pane = app.query_one("#item-details", Static)
-            content = str(detail_pane.render())
+
+            from src.tui import DetailsPane
+            detail_pane = app.query_one("#item-details", DetailsPane)
+            detail_content = detail_pane.query_one("#detail-content", Static)
+
+            content = str(detail_content.render())
             assert "The ultimate test" in content
             assert "E2E" in content # From tags
+

@@ -1,9 +1,83 @@
 import json
+import logging
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from src.database import search_items, get_all_authors, initialize_database
+from textual.reactive import reactive
+from src.database import search_items, get_all_authors, initialize_database, flag_for_translation
 from src.config import load_config
+
+class DetailsPane(VerticalScroll):
+    """A scrollable pane for viewing workshop item details."""
+    item_data = reactive(None)
+    show_translated = reactive(True)
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="details-header"):
+            yield Label("[b]Item Details[/b]", id="details-header-label")
+            yield Button("Show Original", id="btn-toggle-translation", classes="details-btn")
+            yield Button("Translate", id="btn-request-translation", classes="details-btn")
+        yield Static(id="detail-content")
+
+    def watch_item_data(self, item_data: dict) -> None:
+        self.update_content()
+
+    def watch_show_translated(self, show_translated: bool) -> None:
+        self.update_content()
+
+    def update_content(self) -> None:
+        if not self.item_data:
+            self.query_one("#detail-content", Static).update("Select an item to see details.")
+            self.query_one("#btn-toggle-translation").display = False
+            self.query_one("#btn-request-translation").display = False
+            return
+
+        item = self.item_data
+        
+        # Determine which fields to show based on toggle and existence
+        display_translated = self.show_translated and item.get("dt_translated")
+        
+        title = item.get("title_en") if display_translated and item.get("title_en") else item.get("title", "N/A")
+        
+        # Descriptions fallback chain
+        if display_translated:
+            desc = item.get("extended_description_en") or item.get("short_description_en")
+            if not desc:
+                desc = item.get("extended_description") or item.get("short_description") or "N/A"
+        else:
+            desc = item.get("extended_description") or item.get("short_description") or "N/A"
+
+        # Toggle Button visibility and label
+        toggle_btn = self.query_one("#btn-toggle-translation")
+        if item.get("dt_translated"):
+            toggle_btn.display = True
+            toggle_btn.label = "Show Original" if self.show_translated else "Show Translation"
+        else:
+            toggle_btn.display = False
+
+        # Request Translation Button visibility
+        req_btn = self.query_one("#btn-request-translation")
+        req_btn.display = True
+
+        tags = item.get("tags", "[]")
+        tags_list = []
+        try:
+            parsed = json.loads(tags) if isinstance(tags, str) else tags
+            tags_list = [str(t.get("tag") if isinstance(t, dict) else t) for t in (parsed if isinstance(parsed, list) else [])]
+        except: pass
+
+        content = [
+            f"[b][u]{title}[/u][/b]",
+            f"ID: {item.get('workshop_id', 'N/A')}",
+            f"Creator: {item.get('creator', 'N/A')}",
+            f"AppID: {item.get('consumer_appid', 'N/A')}",
+            f"Language ID: {item.get('language', 'N/A')}",
+            f"Tags: {', '.join(tags_list)}",
+            "",
+            "[b]Description:[/b]",
+            desc
+        ]
+        self.query_one("#detail-content", Static).update("\n".join(content))
 
 class WorkshopItem(ListItem):
     """A list item representing a workshop item."""
@@ -68,6 +142,19 @@ class ScraperApp(App):
     #btn-jump-author {
         margin-top: 1;
         display: none;
+    }
+    #details-header {
+        height: 3;
+        margin-bottom: 1;
+        border-bottom: solid $primary;
+    }
+    #details-header-label {
+        width: 1fr;
+        content-align: left middle;
+    }
+    .details-btn {
+        margin-left: 1;
+        min-width: 16;
     }
     """
 
@@ -138,9 +225,8 @@ class ScraperApp(App):
         results_list = ListView(id="results-list")
         results_list.border_title = "Items"
 
-        details_view = Static("Select an item to see details", id="item-details")
         details_container = Vertical(
-            VerticalScroll(details_view, id="scroll-container"),
+            DetailsPane(id="item-details"),
             Button("Jump to Author", id="btn-jump-author", variant="primary"),
             id="details-container"
         )
@@ -207,53 +293,17 @@ class ScraperApp(App):
         item_data = event.item.item_data
         self.current_item_creator = item_data.get('creator')
         
-        detail_pane = self.query_one("#item-details", Static)
+        detail_pane = self.query_one("#item-details", DetailsPane)
+        detail_pane.item_data = item_data
+        
         jump_btn = self.query_one("#btn-jump-author", Button)
-        
-        tags = item_data.get("tags", "[]")
-        if not tags:
-            tags = "[]"
-            
-        tags_list = []
-        if isinstance(tags, str):
-            try:
-                parsed_tags = json.loads(tags)
-                if isinstance(parsed_tags, list):
-                    tags_list = parsed_tags
-            except json.JSONDecodeError:
-                pass
-        elif isinstance(tags, list):
-            tags_list = tags
-
-        # Flatten tags if they are dictionaries (e.g. [{"tag": "Mod"}])
-        flat_tags = []
-        for t in tags_list:
-            if isinstance(t, dict) and "tag" in t:
-                flat_tags.append(str(t["tag"]))
-            elif isinstance(t, str):
-                flat_tags.append(t)
-
-        details = [
-            f"[b][u]{item_data.get('title', 'N/A')}[/u][/b]",
-            f"ID: {item_data.get('workshop_id', 'N/A')}",
-            f"Creator: {item_data.get('creator', 'N/A')}",
-            f"AppID: {item_data.get('consumer_appid', 'N/A')}",
-            f"Language ID: {item_data.get('language', 'N/A')}",
-            f"Tags: {', '.join(flat_tags)}",
-            "",
-            "[b]Description:[/b]",
-            item_data.get("extended_description") or item_data.get("short_description") or "N/A"
-        ]
-        
-        detail_pane.update("\n".join(details))
-        
         if self.current_item_creator:
             jump_btn.display = True
         else:
             jump_btn.display = False
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle button presses (e.g., Jump to Author)."""
+        """Handle button presses (e.g., Jump to Author, Translation)."""
         if event.button.id == "btn-jump-author" and self.current_item_creator:
             # Clear text inputs
             self.query_one("#search-title", Input).value = ""
@@ -262,6 +312,17 @@ class ScraperApp(App):
             # Set combo box to the author (this triggers on_select_changed which searches)
             author_select = self.query_one("#search-author", Select)
             author_select.value = self.current_item_creator
+        
+        elif event.button.id == "btn-toggle-translation":
+            detail_pane = self.query_one("#item-details", DetailsPane)
+            detail_pane.show_translated = not detail_pane.show_translated
+            
+        elif event.button.id == "btn-request-translation":
+            detail_pane = self.query_one("#item-details", DetailsPane)
+            if detail_pane.item_data:
+                wid = detail_pane.item_data.get("workshop_id")
+                flag_for_translation(self.db_path, wid, priority=10)
+                self.notify(f"Item {wid} flagged for high-priority translation.")
 
 def main():
     app = ScraperApp()

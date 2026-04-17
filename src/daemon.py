@@ -12,6 +12,7 @@ from src.database import (
 )
 from src.steam_api import get_workshop_details_api, query_workshop_items
 from src.web_scraper import scrape_extended_details, discover_ids_html
+from src.translator import TranslatorThread, is_ascii
 
 class Daemon:
     def __init__(self, config: dict):
@@ -23,6 +24,9 @@ class Daemon:
         self.api_key = config.get("api", {}).get("key", "")
         self.batch_size = config.get("daemon", {}).get("batch_size", 10)
         self.delay = config.get("daemon", {}).get("request_delay_seconds", 1.5)
+        
+        # Translator thread
+        self.translator = TranslatorThread(config)
         
         # Enforce required target_appids
         self.target_appids = config.get("daemon", {}).get("target_appids")
@@ -37,6 +41,7 @@ class Daemon:
         """Signals the loop to stop and finishes the current batch safely."""
         logging.info(f"Received signal {signum}, initiating graceful shutdown...")
         self.running = False
+        self.translator.running = False
 
     def process_batch(self):
         """Processes a single batch of workshop items."""
@@ -90,7 +95,7 @@ class Daemon:
                 "hcontent_file", "hcontent_preview", "short_description", "time_created",
                 "time_updated", "visibility", "banned", "ban_reason", "app_name", "file_type",
                 "subscriptions", "favorited", "views", "tags", "extended_description", "language",
-                "lifetime_subscriptions", "lifetime_favorited"
+                "lifetime_subscriptions", "lifetime_favorited", "translation_priority"
             }
             
             clean_api_data = {}
@@ -135,6 +140,15 @@ class Daemon:
                 merged_tags = list(set(existing_tags + scrape_data["tags"]))
                 base_data["tags"] = json.dumps(merged_tags, ensure_ascii=False)
 
+            # Check if translation is needed (contains non-ASCII)
+            needs_trans = (
+                not is_ascii(base_data.get("title", "")) or 
+                not is_ascii(base_data.get("short_description", "")) or 
+                not is_ascii(base_data.get("extended_description", ""))
+            )
+            if needs_trans:
+                base_data["translation_priority"] = 1
+
             base_data["status"] = 200 # OK
             insert_or_update_item(self.db_path, base_data)
             
@@ -147,6 +161,7 @@ class Daemon:
     def run(self):
         """Main loop that continuously queries and scrapes."""
         logging.info("Starting daemon loop...")
+        self.translator.start()
         while self.running:
             self.process_batch()
         logging.info("Daemon gracefully exited.")

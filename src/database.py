@@ -50,14 +50,29 @@ def initialize_database(db_path: str):
         extended_description TEXT,
         language INTEGER,
         lifetime_subscriptions INTEGER,
-        lifetime_favorited INTEGER
+        lifetime_favorited INTEGER,
+        title_en TEXT,
+        short_description_en TEXT,
+        extended_description_en TEXT,
+        dt_translated TEXT,
+        translation_priority INTEGER DEFAULT 0
     )
     """)
 
     # Safe migrations for existing databases
-    for col in ["language", "lifetime_subscriptions", "lifetime_favorited"]:
+    new_cols = [
+        ("language", "INTEGER"),
+        ("lifetime_subscriptions", "INTEGER"),
+        ("lifetime_favorited", "INTEGER"),
+        ("title_en", "TEXT"),
+        ("short_description_en", "TEXT"),
+        ("extended_description_en", "TEXT"),
+        ("dt_translated", "TEXT"),
+        ("translation_priority", "INTEGER DEFAULT 0")
+    ]
+    for col_name, col_type in new_cols:
         try:
-            cursor.execute(f"ALTER TABLE workshop_items ADD COLUMN {col} INTEGER")
+            cursor.execute(f"ALTER TABLE workshop_items ADD COLUMN {col_name} {col_type}")
         except sqlite3.OperationalError:
             pass # Column already exists
 
@@ -159,6 +174,29 @@ def count_unscraped_items(db_path: str) -> int:
     row = cursor.fetchone()
     conn.close()
     return row["count"] if row else 0
+
+def flag_for_translation(db_path: str, workshop_id: int, priority: int):
+    """Updates the translation priority for a specific item."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "UPDATE workshop_items SET translation_priority = ? WHERE workshop_id = ?",
+        (priority, workshop_id)
+    )
+    conn.commit()
+    conn.close()
+
+def get_next_translation_item(db_path: str) -> int | None:
+    """
+    Returns the workshop_id of the next item needing translation,
+    ordered by priority descending.
+    """
+    conn = get_connection(db_path)
+    cursor = conn.execute(
+        "SELECT workshop_id FROM workshop_items WHERE translation_priority > 0 ORDER BY translation_priority DESC LIMIT 1"
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row["workshop_id"] if row else None
 
 def _parse_query(query: str) -> tuple[list[str], list[str]]:
     """

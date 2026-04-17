@@ -244,3 +244,25 @@ def test_daemon_process_batch_sanitization(mock_warn, mock_sleep, mock_insert, m
     
     # 3. Verify that the unknown key triggered a warning
     mock_warn.assert_called_once_with("Discarding unknown API column: 'future_steam_feature' with value 'magic' for item 123")
+
+@patch('src.daemon.count_unscraped_items')
+@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.get_workshop_details_api')
+@patch('src.daemon.scrape_extended_details')
+@patch('src.daemon.insert_or_update_item')
+@patch('time.sleep')
+def test_daemon_translation_flagging(mock_sleep, mock_insert, mock_scrape, mock_api, mock_get_items, mock_count, mock_config):
+    """Test that items with non-ASCII titles are flagged for translation."""
+    mock_count.return_value = 1000
+    mock_get_items.return_value = [200]
+    # Korean title
+    mock_api.return_value = {"title": "안녕하세요", "workshop_id": 200}
+    mock_scrape.return_value = {"description": "ASCII desc", "tags": []}
+    
+    daemon = Daemon(mock_config)
+    daemon.process_batch()
+    
+    # Check the last call to insert_or_update_item
+    # It's called multiple times (API then Scraper), we want the final one
+    final_call_data = mock_insert.call_args[0][1]
+    assert final_call_data["translation_priority"] == 1

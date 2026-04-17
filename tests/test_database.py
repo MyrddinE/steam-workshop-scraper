@@ -111,6 +111,37 @@ def test_search_items(db_path):
     assert len(results_tags) == 1
     assert results_tags[0]["workshop_id"] == 4
 
+def test_translation_columns_and_priority(db_path):
+    """Test that translation-related columns and priority queries work correctly."""
+    # Insert an item
+    insert_or_update_item(db_path, {"workshop_id": 101, "title": "Test Title"})
+    
+    # Flag it for translation (Priority 1 - Auto)
+    from src.database import flag_for_translation, get_next_translation_item
+    flag_for_translation(db_path, 101, 1)
+    
+    # Insert another item and flag it with higher priority (Priority 10 - User)
+    insert_or_update_item(db_path, {"workshop_id": 102, "title": "Priority Title"})
+    flag_for_translation(db_path, 102, 10)
+    
+    # get_next_translation_item should return 102 first because it has higher priority
+    assert get_next_translation_item(db_path) == 102
+    
+    # Update 102 as translated
+    insert_or_update_item(db_path, {
+        "workshop_id": 102, 
+        "title_en": "Priority Title EN", 
+        "dt_translated": "2023-01-01T12:00:00",
+        "translation_priority": 0
+    })
+    
+    # Now it should return 101
+    assert get_next_translation_item(db_path) == 101
+    
+    # If all are 0 or NULL, it should return None
+    flag_for_translation(db_path, 101, 0)
+    assert get_next_translation_item(db_path) is None
+
 def test_concurrent_read_write(db_path):
     """
     Tests that WAL mode allows simultaneous read and write without locking the DB.

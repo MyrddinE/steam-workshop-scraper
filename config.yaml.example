@@ -10,7 +10,13 @@ daemon:
   batch_size: 10
   request_delay_seconds: 1.5
   target_appids:
-    - 294100 # RimWorld example
+    - 294100 # RimWorld
+
+openai:
+  api_key: "YOUR_OPENAI_API_KEY_HERE"
+  endpoint: "https://api.openai.com/v1"
+  model: "gpt-4o-mini"
+ example
 
 logging:
   level: "INFO"
