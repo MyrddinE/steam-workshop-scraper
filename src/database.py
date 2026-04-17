@@ -61,6 +61,14 @@ def initialize_database(db_path: str):
         except sqlite3.OperationalError:
             pass # Column already exists
 
+    # Create app_state table for pagination
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS app_state (
+        appid INTEGER PRIMARY KEY,
+        current_page INTEGER DEFAULT 1
+    )
+    """)
+
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON workshop_items (status)")
@@ -119,6 +127,32 @@ def get_next_items_to_scrape(db_path: str, limit: int = 10) -> list[int]:
     conn.close()
     return results
 
+
+def get_app_page(db_path: str, appid: int) -> int:
+    """Returns the last page scraped for a given appid (defaults to 1)."""
+    conn = get_connection(db_path)
+    cursor = conn.execute("SELECT current_page FROM app_state WHERE appid = ?", (appid,))
+    row = cursor.fetchone()
+    conn.close()
+    return row["current_page"] if row else 1
+
+def update_app_page(db_path: str, appid: int, page: int):
+    """Updates the last page scraped for a given appid."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT INTO app_state (appid, current_page) VALUES (?, ?) ON CONFLICT(appid) DO UPDATE SET current_page=excluded.current_page",
+        (appid, page)
+    )
+    conn.commit()
+    conn.close()
+
+def count_unscraped_items(db_path: str) -> int:
+    """Returns the number of items that have never been scraped (dt_attempted is NULL)."""
+    conn = get_connection(db_path)
+    cursor = conn.execute("SELECT COUNT(workshop_id) as count FROM workshop_items WHERE dt_attempted IS NULL")
+    row = cursor.fetchone()
+    conn.close()
+    return row["count"] if row else 0
 
 def _parse_query(query: str) -> tuple[list[str], list[str]]:
     """
