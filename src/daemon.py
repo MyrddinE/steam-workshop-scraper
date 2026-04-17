@@ -138,8 +138,17 @@ class Daemon:
                 except json.JSONDecodeError:
                     existing_tags = []
                 
-                # Simple merge of lists
-                merged_tags = list(set(existing_tags + scrape_data["tags"]))
+                # Normalize existing and new tags to strings for unique merging
+                def normalize_tags(tlist):
+                    norm = []
+                    for t in tlist:
+                        if isinstance(t, dict) and "tag" in t:
+                            norm.append(str(t["tag"]))
+                        elif isinstance(t, str):
+                            norm.append(t)
+                    return norm
+
+                merged_tags = list(set(normalize_tags(existing_tags) + normalize_tags(scrape_data["tags"])))
                 base_data["tags"] = json.dumps(merged_tags, ensure_ascii=False)
 
             # Check if translation is needed (contains non-ASCII)

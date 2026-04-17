@@ -299,3 +299,27 @@ def test_daemon_user_fetching(mock_sleep, mock_insert_item, mock_insert_user, mo
     assert user_data["steamid"] == 777
     assert user_data["personaname"] == "안녕하세요"
     assert user_data["translation_priority"] == 1
+
+@patch('src.daemon.count_unscraped_items')
+@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.get_workshop_details_api')
+@patch('src.daemon.scrape_extended_details')
+@patch('src.daemon.insert_or_update_item')
+@patch('src.daemon.get_user')
+@patch('time.sleep')
+def test_daemon_tag_normalization(mock_sleep, mock_get_user, mock_insert, mock_scrape, mock_api, mock_get_items, mock_count, mock_config):
+    """Test that dictionary tags from API are correctly normalized and merged."""
+    mock_count.return_value = 1000
+    mock_get_items.return_value = [101]
+    mock_get_user.return_value = {"dt_updated": "2026-01-01T00:00:00"}
+    # API returns list of dicts
+    mock_api.return_value = {"workshop_id": 101, "tags": [{"tag": "Mod"}, {"tag": "1.5"}]}
+    # Scraper returns list of strings
+    mock_scrape.return_value = {"tags": ["Mod", "NewTag"]}
+
+    daemon = Daemon(mock_config)
+    daemon.process_batch()
+    
+    inserted_data = mock_insert.call_args[0][1]
+    tags = json.loads(inserted_data["tags"])
+    assert sorted(tags) == sorted(["Mod", "1.5", "NewTag"])
