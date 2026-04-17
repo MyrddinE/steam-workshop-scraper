@@ -26,8 +26,14 @@ def mock_results():
 
 @pytest.mark.asyncio
 async def test_tui_advanced_search_flow(mock_config, mock_results):
+    def get_details_mock(db, wid):
+        for r in mock_results:
+            if r["workshop_id"] == wid: return r
+        return None
+
     with patch('src.tui.load_config', return_value=mock_config), \
          patch('src.tui.search_items', return_value=mock_results), \
+         patch('src.tui.get_item_details', side_effect=get_details_mock), \
          patch('src.tui.get_all_authors', return_value=["Author A", "Author B"]):
         
         app = ScraperApp()
@@ -130,8 +136,14 @@ async def test_tui_tag_data_types(mock_config):
     ]
 
     from unittest.mock import patch
+    def get_details_mock(db, wid):
+        for r in mock_results:
+            if r["workshop_id"] == wid: return r
+        return None
+
     with patch('src.tui.load_config', return_value=mock_config), \
-         patch('src.tui.search_items', return_value=mock_results):
+         patch('src.tui.search_items', return_value=mock_results), \
+         patch('src.tui.get_item_details', side_effect=get_details_mock):
         
         app = ScraperApp()
         async with app.run_test() as pilot:

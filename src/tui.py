@@ -4,12 +4,13 @@ from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
-from src.database import search_items, get_all_authors, initialize_database, flag_for_translation
+from src.database import search_items, get_all_authors, initialize_database, flag_for_translation, get_item_details
 from src.config import load_config
 
 class DetailsPane(VerticalScroll):
     """A scrollable pane for viewing workshop item details."""
-    item_data = reactive(None)
+    workshop_id = reactive(None)
+    item_data = reactive(None) # Detailed data fetched from DB
     show_translated = reactive(True)
 
     def compose(self) -> ComposeResult:
@@ -18,6 +19,24 @@ class DetailsPane(VerticalScroll):
             yield Button("Show Original", id="btn-toggle-translation", classes="details-btn")
             yield Button("Translate", id="btn-request-translation", classes="details-btn")
         yield Static(id="detail-content")
+
+    def on_mount(self) -> None:
+        """Setup background refresh to catch translation updates."""
+        self.set_interval(2.0, self.refresh_data)
+
+    async def refresh_data(self) -> None:
+        """Fetches fresh data from DB for the current workshop_id."""
+        if self.workshop_id:
+            # We access db_path via self.app (ScraperApp instance)
+            fresh_data = get_item_details(self.app.db_path, self.workshop_id)
+            if fresh_data:
+                self.item_data = fresh_data
+
+    async def watch_workshop_id(self, workshop_id: int) -> None:
+        """When ID changes, clear old data and fetch new."""
+        self.item_data = None
+        if workshop_id:
+            await self.refresh_data()
 
     def watch_item_data(self, item_data: dict) -> None:
         self.update_content()
@@ -92,12 +111,16 @@ class WorkshopItem(ListItem):
         self.item_data = item_data
 
     def compose(self) -> ComposeResult:
-        title = self.item_data.get("title", "Unknown Title")
-        wid = self.item_data.get("workshop_id", "Unknown ID")
+        wid = self.item_data.get("workshop_id", "N/A")
+
+        # Prefer translated title for the list view
+        title = self.item_data.get("title_en") or self.item_data.get("title", "Unknown Title")
+
         creator = self.item_data.get("creator", "Unknown Creator")
         appid = self.item_data.get("consumer_appid", "Unknown AppID")
         yield Label(f"[b]{title}[/b] ({wid})")
         yield Label(f"By: {creator} | AppID: {appid}")
+
 
 class ScraperApp(App):
     """A Terminal GUI for searching the Steam Workshop database."""
@@ -279,7 +302,8 @@ class ScraperApp(App):
             filename_query=file_q,
             tags_query=tags_q,
             creator=author_q,
-            numeric_filters=numeric_filters
+            numeric_filters=numeric_filters,
+            summary_only=True
         )
         
         list_view = self.query_one("#results-list", ListView)
@@ -300,7 +324,7 @@ class ScraperApp(App):
         self.current_item_creator = item_data.get('creator')
         
         detail_pane = self.query_one("#item-details", DetailsPane)
-        detail_pane.item_data = item_data
+        detail_pane.workshop_id = item_data.get("workshop_id")
         
         jump_btn = self.query_one("#btn-jump-author", Button)
         if self.current_item_creator:
@@ -335,25 +359,12 @@ class ScraperApp(App):
                     return
 
                 flag_for_translation(self.db_path, wid, priority=10)
+                
                 # Update local state immediately so UI can show 'queued'
                 item["translation_priority"] = 10
                 detail_pane.update_content()
                 
                 self.notify(f"Item {wid} flagged for high-priority translation.")
-                
-                # Simple refresh after 3 seconds to try and catch the finished translation
-                async def delayed_refresh():
-                    # Re-fetch the item from DB
-                    from src.database import get_connection
-                    conn = get_connection(self.db_path)
-                    cursor = conn.execute("SELECT * FROM workshop_items WHERE workshop_id = ?", (wid,))
-                    row = cursor.fetchone()
-                    conn.close()
-                    if row:
-                        detail_pane.item_data = dict(row)
-                        self.notify(f"Translation for {wid} updated.")
-                
-                self.set_timer(3.0, delayed_refresh)
 
 def main():
     app = ScraperApp()

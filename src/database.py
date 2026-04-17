@@ -286,16 +286,30 @@ def _apply_numeric_filter(sql: str, params: list, col: str, filter_str: str) -> 
         params.append(val)
     return sql, params
 
+def get_item_details(db_path: str, workshop_id: int) -> dict | None:
+    """Fetches all columns for a single workshop item."""
+    conn = get_connection(db_path)
+    cursor = conn.execute("SELECT * FROM workshop_items WHERE workshop_id = ?", (workshop_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
 def search_items(db_path: str, query: str = "", appid: int = None, 
                  title_query: str = "", desc_query: str = "", filename_query: str = "", tags_query: str = "",
-                 creator: str = "", numeric_filters: dict = None, tags: str = None) -> list[dict]:
+                 creator: str = "", numeric_filters: dict = None, tags: str = None,
+                 summary_only: bool = False) -> list[dict]:
     """
     Searches the database for items matching the criteria.
-    Now supports complex multi-field searching with negative terms and numeric inequalities.
+    If summary_only is True, returns only essential columns for list view display.
     """
     conn = get_connection(db_path)
     
-    sql = "SELECT * FROM workshop_items WHERE 1=1"
+    if summary_only:
+        cols = "workshop_id, title, title_en, creator, consumer_appid, dt_translated"
+    else:
+        cols = "*"
+        
+    sql = f"SELECT {cols} FROM workshop_items WHERE 1=1"
     params = []
 
     def apply_query_to_columns(q_str: str, cols: list[str]):
