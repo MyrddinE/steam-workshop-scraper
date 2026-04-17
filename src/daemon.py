@@ -151,24 +151,43 @@ class Daemon:
             self.process_batch()
         logging.info("Daemon gracefully exited.")
 
-    def seed_database(self):
-        """Fetches the next page of item IDs for target appids to populate the database."""
+    def seed_database(self, target_new: int = 100):
+        """
+        Fetches pages of item IDs for target appids until we have added target_new 
+        actually new items to the database, or we run out of results.
+        """
         for appid in self.target_appids:
-            page = get_app_page(self.db_path, appid)
-            logging.info(f"Discovering items for AppID {appid} (Page {page})...")
+            new_discovered_count = 0
+            consecutive_empty_pages = 0
             
-            # Try official API first
-            new_ids = query_workshop_items(appid, self.api_key, count=100, page=page)
+            while new_discovered_count < target_new and consecutive_empty_pages < 5:
+                page = get_app_page(self.db_path, appid)
+                logging.info(f"Discovering items for AppID {appid} (Page {page})...")
+                
+                # Try official API first
+                new_ids = query_workshop_items(appid, self.api_key, count=100, page=page)
+                
+                # Fallback to HTML scraping if API returned nothing
+                if not new_ids:
+                    logging.info(f"API discovery failed for AppID {appid}. Falling back to HTML scraping...")
+                    new_ids = discover_ids_html(appid, page=page)
+                
+                if new_ids:
+                    consecutive_empty_pages = 0
+                    page_new_count = 0
+                    for wid in new_ids:
+                        if insert_or_update_item(self.db_path, {"workshop_id": wid}):
+                            page_new_count += 1
+                    
+                    new_discovered_count += page_new_count
+                    update_app_page(self.db_path, appid, page + 1)
+                    logging.info(f"Page {page} for AppID {appid} provided {page_new_count} new items. (Total new this seed: {new_discovered_count})")
+                    
+                    if page_new_count == 0:
+                        # If a whole page of 100 items had nothing new, we're likely deep in already-scraped territory
+                        consecutive_empty_pages += 1
+                else:
+                    logging.warning(f"No items found for AppID {appid} on page {page}. Ending discovery for this app.")
+                    break
             
-            # Fallback to HTML scraping if API returned nothing
-            if not new_ids:
-                logging.info(f"API discovery failed for AppID {appid}. Falling back to HTML scraping...")
-                new_ids = discover_ids_html(appid)
-            
-            if new_ids:
-                for wid in new_ids:
-                    insert_or_update_item(self.db_path, {"workshop_id": wid})
-                update_app_page(self.db_path, appid, page + 1)
-                logging.info(f"Queued {len(new_ids)} new items for AppID {appid}.")
-            else:
-                logging.warning(f"No new items found for AppID {appid} on page {page}.")
+            logging.info(f"Finished discovery for AppID {appid}. Added {new_discovered_count} new items.")

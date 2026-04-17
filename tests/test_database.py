@@ -63,16 +63,17 @@ def test_insert_or_update_item(db_path):
         "title": "Test Item",
         "dt_attempted": "2023-10-01T12:00:00"
     }
-    insert_or_update_item(db_path, item)
+    # First insert should return True
+    assert insert_or_update_item(db_path, item) is True
     
     conn = get_connection(db_path)
     cursor = conn.cursor()
     cursor.execute("SELECT title FROM workshop_items WHERE workshop_id=123")
     assert cursor.fetchone()[0] == "Test Item"
     
-    # Update existing item
+    # Update existing item should return False
     item["title"] = "Updated Item"
-    insert_or_update_item(db_path, item)
+    assert insert_or_update_item(db_path, item) is False
     cursor.execute("SELECT title FROM workshop_items WHERE workshop_id=123")
     assert cursor.fetchone()[0] == "Updated Item"
     conn.close()

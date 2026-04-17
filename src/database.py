@@ -83,12 +83,17 @@ def initialize_database(db_path: str):
     conn.commit()
     conn.close()
 
-def insert_or_update_item(db_path: str, item_data: dict):
+def insert_or_update_item(db_path: str, item_data: dict) -> bool:
     """
     Inserts a new item or updates an existing item.
+    Returns True if a new item was discovered (inserted), False if it was updated.
     """
     conn = get_connection(db_path)
     
+    # Check if item exists to determine if this is a new discovery
+    cursor = conn.execute("SELECT 1 FROM workshop_items WHERE workshop_id = ?", (item_data["workshop_id"],))
+    is_new = cursor.fetchone() is None
+
     columns = list(item_data.keys())
     placeholders = ",".join(["?"] * len(columns))
     
@@ -112,6 +117,7 @@ def insert_or_update_item(db_path: str, item_data: dict):
     conn.execute(sql, list(item_data.values()))
     conn.commit()
     conn.close()
+    return is_new
 
 def get_next_items_to_scrape(db_path: str, limit: int = 10) -> list[int]:
     """

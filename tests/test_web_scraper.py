@@ -77,7 +77,7 @@ def test_scrape_extended_details_timeout():
 
 @responses.activate
 def test_discover_ids_html_success():
-    """Test successfully discovering IDs from Workshop browse HTML."""
+    """Test successfully discovering IDs from Workshop browse HTML with paging."""
     html_content = '''
     <html>
         <body>
@@ -86,15 +86,16 @@ def test_discover_ids_html_success():
         </body>
     </html>
     '''
+    # Verify the URL includes browsemethod=mostrecent and p=2
     responses.add(
         responses.GET,
-        "https://steamcommunity.com/workshop/browse/",
+        "https://steamcommunity.com/workshop/browse/?appid=294100&browsemethod=mostrecent&section=readytouseitems&p=2",
         body=html_content,
         status=200,
         content_type="text/html"
     )
 
-    ids = discover_ids_html(appid=294100)
+    ids = discover_ids_html(appid=294100, page=2)
     assert len(ids) == 2
     assert 5001 in ids
     assert 5002 in ids

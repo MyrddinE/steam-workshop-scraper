@@ -127,19 +127,33 @@ def test_daemon_process_batch_empty(mock_sleep, mock_seed, mock_get_items, mock_
 @patch('src.daemon.query_workshop_items')
 @patch('src.daemon.insert_or_update_item')
 def test_daemon_seed_database(mock_insert, mock_query, mock_get_items, mock_update_page, mock_get_page, mock_config):
-    """Test the seeding logic correctly calls discovery and inserts into DB."""
-    mock_get_page.return_value = 1
-    mock_query.return_value = [11, 22]
+    """Test the seeding logic correctly calls discovery and inserts into DB, looping until buffer is full."""
+    # Simulate the page incrementing
+    mock_get_page.side_effect = [1, 2, 3]
+    
+    # First page gives 60 items, second page gives 60 items (total 120, satisfying > 100)
+    mock_query.side_effect = [
+        [i for i in range(60)], # Page 1
+        [i for i in range(60, 120)] # Page 2
+    ]
+    # All are new
+    mock_insert.return_value = True
     
     daemon = Daemon(mock_config)
-    daemon.seed_database()
+    daemon.seed_database(target_new=100)
     
-    mock_query.assert_called_once_with(123, "TEST_KEY", count=100, page=1)
-    assert mock_insert.call_count == 2
-    mock_update_page.assert_called_once_with("test.db", 123, 2)
-    # Verify the first call's data
-    args = mock_insert.call_args_list[0][0]
-    assert args[1]["workshop_id"] == 11
+    # Should have called query twice (Page 1 and Page 2)
+    assert mock_query.call_count == 2
+    mock_query.assert_any_call(123, "TEST_KEY", count=100, page=1)
+    mock_query.assert_any_call(123, "TEST_KEY", count=100, page=2)
+    
+    # 120 inserts
+    assert mock_insert.call_count == 120
+    
+    # Should have updated the page in app_state twice
+    assert mock_update_page.call_count == 2
+    mock_update_page.assert_any_call("test.db", 123, 2) # After page 1
+    mock_update_page.assert_any_call("test.db", 123, 3) # After page 2
 
 @patch('src.daemon.count_unscraped_items')
 @patch('src.daemon.get_next_items_to_scrape')

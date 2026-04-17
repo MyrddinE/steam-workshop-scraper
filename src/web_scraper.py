@@ -30,12 +30,12 @@ def scrape_extended_details(item_url: str) -> dict | None:
     except requests.exceptions.RequestException:
         return None
 
-def discover_ids_html(appid: int) -> list[int]:
+def discover_ids_html(appid: int, page: int = 1) -> list[int]:
     """
     Scrapes the Steam Workshop browse page to find item IDs.
     Acts as a fallback when the Steam API is unavailable or no key is provided.
     """
-    url = f"https://steamcommunity.com/workshop/browse/?appid={appid}&browsemethod=trend&section=readytouseitems"
+    url = f"https://steamcommunity.com/workshop/browse/?appid={appid}&browsemethod=mostrecent&section=readytouseitems&p={page}"
     session = HTMLSession()
     try:
         response = session.get(url, timeout=10)
