@@ -1,6 +1,7 @@
 import json
 import logging
 from textual.app import App, ComposeResult
+from textual import on, events
 from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button, Markdown
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
@@ -360,6 +361,20 @@ class ScraperApp(App):
     def on_mount(self) -> None:
         """Run an empty search on startup to populate the list."""
         self.call_after_refresh(self.execute_search)
+        
+        # Watch the scroll_y property to trigger infinite loading
+        list_view = self.query_one("#results-list", ListView)
+        self.watch(list_view, "scroll_y", self._check_scroll_bottom)
+
+    def _check_scroll_bottom(self, scroll_y: float) -> None:
+        try:
+            list_view = self.query_one("#results-list", ListView)
+            if list_view.max_scroll_y == 0:
+                return
+            if scroll_y >= list_view.max_scroll_y - 5:
+                self.run_worker(self.load_more_items())
+        except Exception:
+            pass
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -481,19 +496,6 @@ class ScraperApp(App):
             # If we are within 10 items of the end, fetch more
             if list_view.index is not None and list_view.index >= len(list_view) - 10:
                 await self.load_more_items()
-
-    def on_scroll(self, event) -> None:
-        """Handle mouse scrolling for infinite loading."""
-        # Check if results-list is near bottom
-        try:
-            list_view = self.query_one("#results-list", ListView)
-            # scroll_y is the current scroll position
-            # max_scroll_y is the maximum possible scroll position
-            if list_view.scroll_y >= list_view.max_scroll_y - 5:
-                # We need to call an async method from a sync event handler
-                self.run_worker(self.load_more_items())
-        except Exception:
-            pass
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Handle selection of an item in the list."""
