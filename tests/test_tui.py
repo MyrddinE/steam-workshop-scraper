@@ -242,7 +242,7 @@ async def test_tui_jump_to_author_clears_multiple_rows(mock_config, mock_results
 
 @pytest.mark.asyncio
 async def test_tui_infinite_scroll(mock_config):
-    from unittest.mock import patch, MagicMock, PropertyMock
+    from unittest.mock import patch, PropertyMock
     from src.tui import ScraperApp
     from textual.widgets import ListView
 
@@ -262,16 +262,9 @@ async def test_tui_infinite_scroll(mock_config):
             list_view = app.query_one(ListView)
             assert len(list_view.children) == 50
 
-            # Simulate scroll event by mocking max_scroll_y and scrolling to the bottom
-            class FakeScrollEvent:
-                pass
-
-            # Force max scroll y manually by mocking the property
-            with patch.object(type(list_view), 'max_scroll_y', new_callable=PropertyMock) as mock_max:
-                mock_max.return_value = 105
-                list_view.scroll_y = 100
-                app.on_scroll(FakeScrollEvent())
-
+            # Real scroll simulation using Textual's scroll API
+            list_view.scroll_y = list_view.max_scroll_y
+            
             import asyncio
             for _ in range(10):
                 if len(list_view.children) >= 100:
