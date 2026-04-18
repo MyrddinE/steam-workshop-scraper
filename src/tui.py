@@ -570,7 +570,38 @@ class ScraperApp(App):
                 self.notify(f"Item {wid} flagged for high-priority translation.")
 
 def main():
-    app = ScraperApp()
+    config_path = "config.yaml"
+    import sys
+    if len(sys.argv) > 1:
+        config_path = sys.argv[1]
+        
+    try:
+        config = load_config(config_path)
+    except FileNotFoundError:
+        config = {}
+        
+    log_config = config.get("logging", {})
+    level_str = log_config.get("level", "INFO").upper()
+    log_level = getattr(logging, level_str, logging.INFO)
+    log_file = log_config.get("file")
+    
+    # For TUI, prefer file logging only so it doesn't mess up the screen
+    handlers = []
+    if log_file:
+        handlers.append(logging.FileHandler(log_file))
+        
+    if handlers:
+        logging.basicConfig(
+            level=log_level,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=handlers,
+            force=True
+        )
+    else:
+        # Disable logging if no file, as stdout corrupts TUI
+        logging.getLogger().addHandler(logging.NullHandler())
+
+    app = ScraperApp(config_path)
     app.run()
 
 if __name__ == "__main__":

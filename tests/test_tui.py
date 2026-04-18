@@ -350,7 +350,9 @@ async def test_tui_remove_search_row(mock_config):
 
 def test_tui_main_execution():
     from unittest.mock import patch
-    with patch('src.tui.ScraperApp') as mock_app:
+    with patch('src.tui.ScraperApp') as mock_app, \
+         patch('sys.argv', ['tui.py']), \
+         patch('src.tui.load_config', return_value={"database": {"path": "test.db"}}):
         import src.tui
         src.tui.main()
         mock_app.return_value.run.assert_called_once()
@@ -401,3 +403,58 @@ async def test_tui_on_input_submitted(mock_config):
         app.execute_search = AsyncMock()
         await app.on_input_submitted(Input.Submitted(Input(), "test"))
         app.execute_search.assert_called_once()
+
+def test_tui_main_logging_configured(tmp_path):
+    import sys
+    import logging
+    from unittest.mock import patch, MagicMock
+    import src.tui
+    
+    config_file = tmp_path / "config.yaml"
+    log_file = tmp_path / "tui.log"
+    config_file.write_text(f"logging:\n  level: 'WARNING'\n  file: '{log_file}'\n")
+    
+    with patch('sys.argv', ['tui.py', str(config_file)]), \
+         patch('src.tui.ScraperApp') as mock_app, \
+         patch('logging.basicConfig') as mock_basic_config, \
+         patch('logging.FileHandler') as mock_file_handler:
+         
+        mock_fh_instance = MagicMock()
+        mock_file_handler.return_value = mock_fh_instance
+        
+        src.tui.main()
+        
+        # Check that we parsed sys.argv and requested the correct log file
+        mock_file_handler.assert_called_once_with(str(log_file))
+        
+        # Check basicConfig arguments are passed down
+        kwargs = mock_basic_config.call_args.kwargs
+        assert kwargs["level"] == logging.WARNING
+        assert mock_fh_instance in kwargs["handlers"]
+        
+        # Ensure the app was started using our config path
+        mock_app.assert_called_once_with(str(config_file))
+
+def test_tui_main_no_logging(tmp_path):
+    import sys
+    import logging
+    from unittest.mock import patch, MagicMock
+    import src.tui
+    
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("database:\n  path: 'test.db'\n")
+    
+    with patch('sys.argv', ['tui.py', str(config_file)]), \
+         patch('src.tui.ScraperApp') as mock_app, \
+         patch('logging.basicConfig') as mock_basic_config, \
+         patch('logging.getLogger') as mock_get_logger:
+         
+        src.tui.main()
+        
+        # We shouldn't call basicConfig if there's no log file, as we don't want StreamHandler messing up the TUI
+        mock_basic_config.assert_not_called()
+        
+        # We should add a NullHandler to suppress logging
+        mock_get_logger.return_value.addHandler.assert_called_once()
+        added_handler = mock_get_logger.return_value.addHandler.call_args[0][0]
+        assert isinstance(added_handler, logging.NullHandler)
