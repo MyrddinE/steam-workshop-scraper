@@ -79,3 +79,8 @@ async def test_tui_no_markup_error_on_bbcode(mock_config, mock_results_with_bbco
             assert "> **Someone said:**" in content
             assert "```" in content
             assert "https://example.com" in content
+
+def test_bbcode_to_markdown_empty():
+    from src.tui import bbcode_to_markdown
+    assert bbcode_to_markdown(None) == ""
+    assert bbcode_to_markdown("") == ""

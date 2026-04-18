@@ -118,3 +118,54 @@ def test_translator_thread_no_config():
     # It should not even start the loop or should exit immediately
     thread.run() 
     # If it reached here without hanging, it successfully handled missing config
+
+def test_translate_item_no_api_key(tmp_path):
+    from src.translator import translate_item
+    db_path = str(tmp_path / "test.db")
+    # No openai key in config
+    translate_item(db_path, 123, {"database": {"path": db_path}}, "workshop_item")
+
+def test_translate_item_not_found(tmp_path):
+    from src.translator import translate_item
+    from src.database import initialize_database
+    db_path = str(tmp_path / "test.db")
+    initialize_database(db_path)
+    # API key provided, but item not in DB
+    config = {"openai": {"api_key": "test_key"}}
+    translate_item(db_path, 999, config, "workshop_item")
+    translate_item(db_path, 999, config, "user")
+
+def test_translate_item_json_decode_error(tmp_path):
+    from src.translator import translate_item
+    from src.database import initialize_database, insert_or_update_item
+    import json
+    
+    db_path = str(tmp_path / "test.db")
+    initialize_database(db_path)
+    
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Test Title"})
+    config = {"openai": {"api_key": "test_key"}}
+    
+    with patch('src.translator.OpenAI') as mock_openai:
+        mock_client = MagicMock()
+        mock_openai.return_value = mock_client
+        
+        mock_response = MagicMock()
+        mock_response.choices[0].message.content = "INVALID JSON DATA"
+        mock_client.chat.completions.create.return_value = mock_response
+        
+        # Should catch JSONDecodeError and not crash
+        translate_item(db_path, 1, config, "workshop_item")
+
+def test_translator_daemon_exception():
+    from src.translator import TranslatorThread
+    daemon = TranslatorThread({"database": {"path": "dummy"}, "openai": {"api_key": "dummy"}})
+    daemon.running = True
+    
+    with patch('src.translator.get_next_translation_item', side_effect=Exception("Test Error")):
+        def sleep_mock(*args):
+            daemon.running = False
+            
+        with patch('time.sleep', side_effect=sleep_mock):
+            daemon.run()
+            assert not daemon.running

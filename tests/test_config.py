@@ -82,3 +82,14 @@ def test_load_config_missing_file():
     """Tests behavior when the config file is missing (should probably use defaults or fail gracefully)."""
     with pytest.raises(FileNotFoundError):
         load_config("non_existent_file.yaml")
+
+def test_load_config_openai_env_key_no_block(tmp_path):
+    # Test when OPENAI_API_KEY is in env, but config has no "openai" block
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("database:\n  path: 'test.db'\n")
+    import os
+    from src.config import load_config
+    from unittest.mock import patch
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "env_key_only"}):
+        config = load_config(str(config_file))
+        assert config["openai"]["api_key"] == "env_key_only"

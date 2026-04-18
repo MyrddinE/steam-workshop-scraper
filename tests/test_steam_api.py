@@ -161,3 +161,15 @@ def test_get_player_summaries_success():
     assert len(summaries) == 2
     assert summaries[123]["personaname"] == "Player One"
     assert summaries[456]["personaname"] == "Player Two"
+
+def test_get_player_summaries_empty():
+    from src.steam_api import get_player_summaries
+    assert get_player_summaries([], "test_key") == {}
+
+@responses.activate
+def test_get_player_summaries_exception():
+    from src.steam_api import get_player_summaries
+    url = "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/"
+    responses.add(responses.GET, url, body=requests.exceptions.ConnectionError("Connection timeout"))
+    result = get_player_summaries([123], "test_key")
+    assert result == {}

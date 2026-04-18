@@ -273,3 +273,131 @@ async def test_tui_infinite_scroll(mock_config):
 
             # 50 more should be loaded
             assert len(list_view.children) == 100
+
+@pytest.mark.asyncio
+async def test_tui_details_pane_translation_fallback_and_priority(mock_config):
+    from unittest.mock import patch
+    from src.tui import ScraperApp
+    from textual.widgets import ListView
+
+    mock_results = [{
+        "workshop_id": 1, 
+        "title": "Title", 
+        "dt_translated": "2023-01-01", 
+        "translation_priority": 0,
+        "tags": "{invalid_json",
+        "extended_description": "Original Desc"
+        # No translated desc, so it will fall back
+    }]
+    
+    with patch('src.tui.load_config', return_value=mock_config), \
+         patch('src.tui.search_items', return_value=mock_results), \
+         patch('src.tui.get_item_details', return_value=mock_results[0]):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            list_view = app.query_one(ListView)
+            list_view.index = 0
+            app.set_focus(list_view)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            
+            # Since priority is 0, it shouldn't say queued
+            detail_content = app.query_one("#detail-content")
+            assert "Queued for translation..." not in str(detail_content._markdown)
+            
+            # Toggle translation to trigger the fallback logic and button label logic
+            toggle_btn = app.query_one("#btn-toggle-translation")
+            assert toggle_btn.display is True
+            toggle_btn.press()
+            await pilot.pause(0.1)
+            
+            assert "Original Desc" in str(detail_content._markdown) # Fallback worked
+            
+            # Click Request Translation
+            req_btn = app.query_one("#btn-request-translation")
+            with patch('src.tui.flag_for_translation') as mock_flag:
+                req_btn.press()
+                await pilot.pause(0.1)
+                mock_flag.assert_called_once_with(mock_config["database"]["path"], 1, priority=10)
+
+@pytest.mark.asyncio
+async def test_tui_remove_search_row(mock_config):
+    from unittest.mock import patch
+    from src.tui import ScraperApp
+    from textual.widgets import Button
+
+    with patch('src.tui.load_config', return_value=mock_config):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            
+            # Call add_row correctly
+            builder = app.query_one("#search-builder")
+            builder.add_row("AND")
+            await pilot.pause(0.2)
+            
+            rows = list(builder.query("SearchRow"))
+            assert len(rows) == 2
+            
+            # Click remove on the second row
+            remove_btn = rows[1].query_one("#btn-remove", Button)
+            remove_btn.press()
+            await pilot.pause(0.1)
+            
+            rows = list(builder.query("SearchRow"))
+            assert len(rows) == 1
+
+def test_tui_main_execution():
+    from unittest.mock import patch
+    with patch('src.tui.ScraperApp') as mock_app:
+        import src.tui
+        src.tui.main()
+        mock_app.return_value.run.assert_called_once()
+
+def test_scraperapp_config_not_found():
+    from src.tui import ScraperApp
+    from unittest.mock import patch
+    with patch('src.tui.load_config', side_effect=FileNotFoundError), \
+         patch('src.tui.initialize_database') as mock_init:
+        app = ScraperApp("nonexistent.yaml")
+        assert app.config == {"database": {"path": "workshop.db"}}
+        mock_init.assert_called_once_with("workshop.db")
+
+def test_tui_check_scroll_bottom_exception(mock_config):
+    from src.tui import ScraperApp
+    from unittest.mock import patch
+    with patch('src.tui.load_config', return_value=mock_config):
+        app = ScraperApp()
+        # Should not crash, just returns silently
+        app._check_scroll_bottom(100)
+
+@pytest.mark.asyncio
+async def test_tui_execute_search_not_mounted(mock_config):
+    from src.tui import ScraperApp
+    from unittest.mock import patch
+    with patch('src.tui.load_config', return_value=mock_config):
+        app = ScraperApp()
+        # Not mounted, should return
+        await app.execute_search()
+        
+@pytest.mark.asyncio
+async def test_tui_execute_search_no_list_view(mock_config):
+    from src.tui import ScraperApp
+    from unittest.mock import patch
+    with patch('src.tui.load_config', return_value=mock_config):
+        app = ScraperApp()
+        app.is_mounted = True # fake it
+        # Try to query, fails, returns
+        await app.execute_search()
+
+@pytest.mark.asyncio
+async def test_tui_on_input_submitted(mock_config):
+    from src.tui import ScraperApp
+    from textual.widgets import Input
+    from unittest.mock import patch, AsyncMock
+    with patch('src.tui.load_config', return_value=mock_config):
+        app = ScraperApp()
+        app.execute_search = AsyncMock()
+        await app.on_input_submitted(Input.Submitted(Input(), "test"))
+        app.execute_search.assert_called_once()
