@@ -118,6 +118,11 @@ class DetailsPane(VerticalScroll):
         
         title = item.get("title_en") if display_translated and item.get("title_en") else item.get("title", "N/A")
         
+        # User name prioritization
+        creator_name = item.get("personaname_en") if display_translated and item.get("personaname_en") else item.get("personaname")
+        if not creator_name:
+            creator_name = str(item.get("creator", "N/A"))
+
         # Descriptions fallback chain
         if display_translated:
             desc = item.get("extended_description_en") or item.get("short_description_en")
@@ -149,7 +154,7 @@ class DetailsPane(VerticalScroll):
         md_content = [
             f"# {bbcode_to_markdown(title)}",
             f"**ID:** {item.get('workshop_id', 'N/A')}  ",
-            f"**Creator:** {item.get('creator', 'N/A')}  ",
+            f"**Creator:** {creator_name}  ",
             f"**AppID:** {item.get('consumer_appid', 'N/A')}  ",
             f"**Language ID:** {item.get('language', 'N/A')}  ",
             f"**Tags:** {', '.join(tags_list)}  ",
@@ -177,11 +182,81 @@ class WorkshopItem(ListItem):
         # Prefer translated title for the list view
         title = self.item_data.get("title_en") or self.item_data.get("title", "Unknown Title")
 
-        creator = self.item_data.get("creator", "Unknown Creator")
+        # Prefer translated persona name
+        creator = self.item_data.get("personaname_en") or self.item_data.get("personaname") or self.item_data.get("creator", "Unknown Creator")
+
         appid = self.item_data.get("consumer_appid", "Unknown AppID")
         yield Label(f"[b]{title}[/b] ({wid})")
         yield Label(f"By: {creator} | AppID: {appid}")
 
+
+class SearchRow(Horizontal):
+    """A single row in the search builder."""
+    def __init__(self, fields: list[str], operators: dict[str, list[str]], is_first: bool = False):
+        super().__init__(classes="search-row")
+        self.fields = fields
+        self.operators_map = operators
+        self.is_first = is_first
+
+    def compose(self) -> ComposeResult:
+        field_options = [(f, f) for f in self.fields]
+        yield Select(field_options, prompt="Field", id="field-select", classes="row-field")
+        yield Select([], prompt="Op", id="op-select", classes="row-op")
+        yield Input(placeholder="Value", id="value-input", classes="row-input")
+        yield Button("AND", id="btn-and", variant="default", classes="row-btn")
+        yield Button("OR", id="btn-or", variant="default", classes="row-btn")
+        if not self.is_first:
+            yield Button("X", id="btn-remove", variant="error", classes="row-btn-remove")
+        else:
+            # Placeholder to keep alignment
+            yield Static("", classes="row-btn-remove")
+
+    def on_mount(self) -> None:
+        self.query_one("#field-select", Select).value = self.fields[0]
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "field-select":
+            field = str(event.value)
+            # Determine field type to show relevant operators
+            is_numeric = field in ["File Size", "Subs", "Favs", "Views", "Workshop ID", "AppID", "Language ID"]
+            ops = self.operators_map["numeric" if is_numeric else "text"]
+            op_select = self.query_one("#op-select", Select)
+            op_select.set_options([(o.replace("_", " "), o) for o in ops])
+            op_select.value = ops[0]
+
+class SearchBuilder(VerticalScroll):
+    """A container for multiple SearchRows."""
+    def compose(self) -> ComposeResult:
+        self.fields = [
+            "Title", "Description", "Filename", "Tags", "Author ID",
+            "File Size", "Subs", "Favs", "Views", "Workshop ID", "AppID", "Language ID"
+        ]
+        self.operators = {
+            "text": ["contains", "is", "is_not", "is_empty", "is_not_empty"],
+            "numeric": ["is", "is_not", "gt", "lt", "gte", "lte", "is_empty", "is_not_empty"]
+        }
+        yield SearchRow(self.fields, self.operators, is_first=True)
+
+    def add_row(self, logic: str) -> None:
+        # Get the last row to set its logical operator display if needed? 
+        # Actually the buttons in the row that was clicked should probably be used.
+        new_row = SearchRow(self.fields, self.operators)
+        self.mount(new_row)
+        new_row.logic = logic # Custom attribute to store logic from previous row
+
+    def get_filters(self) -> list[dict]:
+        filters = []
+        rows = self.query(SearchRow)
+        for i, row in enumerate(rows):
+            f = {
+                "field": row.query_one("#field-select", Select).value,
+                "op": row.query_one("#op-select", Select).value,
+                "value": row.query_one("#value-input", Input).value,
+            }
+            if i > 0:
+                f["logic"] = getattr(row, "logic", "AND")
+            filters.append(f)
+        return filters
 
 class ScraperApp(App):
     """A Terminal GUI for searching the Steam Workshop database."""
@@ -191,35 +266,41 @@ class ScraperApp(App):
     }
     #search-container {
         height: auto;
+        max-height: 18; /* Roughly 4-5 rows */
         margin: 1;
         padding: 1;
         border: solid $accent;
     }
     .search-row {
         height: 3;
-        margin-bottom: 1;
+        margin-bottom: 0;
     }
-    .search-input-w {
-        width: 1fr;
-        border: solid $primary;
-    }
-    .search-input-w:focus {
-        border: solid $secondary;
-    }
-    Select {
-        width: 1fr;
-        border: solid $primary;
-    }
-    Select:focus {
-        border: solid $secondary;
-    }
+    .row-field { width: 20%; }
+    .row-op { width: 20%; }
+    .row-input { width: 35%; }
+    .row-btn { width: 8%; min-width: 0; margin-left: 1; }
+    .row-btn-remove { width: 5%; min-width: 0; margin-left: 1; }
+
     #main-container {
         layout: horizontal;
     }
-    #results-list {
+    #results-column {
         width: 40%;
+        layout: vertical;
+    }
+    #results-list {
+        height: 1fr;
         border: solid green;
     }
+    #sort-container {
+        height: 3;
+        layout: horizontal;
+        border: solid $primary;
+        margin-bottom: 1;
+    }
+    .sort-select { width: 60%; }
+    .sort-order { width: 40%; }
+
     #details-container {
         width: 60%;
         border: solid blue;
@@ -268,49 +349,30 @@ class ScraperApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         
-        # Build Author choices from DB
-        try:
-            authors = get_all_authors(self.db_path)
-            author_options = [(a, a) for a in authors if a]
-        except Exception:
-            author_options = []
-        author_options.insert(0, ("Any Author", ""))
-
-        # Create widgets with border titles
-        title_in = Input(placeholder="Search Title (supports -exclusion)...", id="search-title", classes="search-input-w")
-        title_in.border_title = "Title"
-        
-        desc_in = Input(placeholder="Search Description...", id="search-desc", classes="search-input-w")
-        desc_in.border_title = "Description"
-        
-        file_in = Input(placeholder="Search Filename...", id="search-filename", classes="search-input-w")
-        file_in.border_title = "Filename"
-        
-        tags_in = Input(placeholder="Search Tags...", id="search-tags", classes="search-input-w")
-        tags_in.border_title = "Tags"
-        
-        author_sel = Select(author_options, prompt="Select Author", id="search-author")
-        author_sel.border_title = "Author ID"
-
-        size_in = Input(placeholder="e.g. < 1000", id="search-file-size", classes="search-input-w")
-        size_in.border_title = "File Size"
-        
-        subs_in = Input(placeholder="e.g. >= 50", id="search-subscriptions", classes="search-input-w")
-        subs_in.border_title = "Subs"
-        
-        fav_in = Input(placeholder="Favorited...", id="search-favorited", classes="search-input-w")
-        fav_in.border_title = "Favs"
-        
-        view_in = Input(placeholder="Views...", id="search-views", classes="search-input-w")
-        view_in.border_title = "Views"
-
+        search_builder = SearchBuilder(id="search-builder")
         search_container = Vertical(
-            Horizontal(title_in, desc_in, file_in, classes="search-row"),
-            Horizontal(tags_in, author_sel, classes="search-row"),
-            Horizontal(size_in, subs_in, fav_in, view_in, classes="search-row"),
+            search_builder,
             id="search-container"
         )
         search_container.border_title = "Filters"
+
+        sort_options = [
+            ("Title", "title"),
+            ("File Size", "file_size"),
+            ("Subscriptions", "subscriptions"),
+            ("Favorited", "favorited"),
+            ("Views", "views"),
+            ("Workshop ID", "workshop_id"),
+            ("Created Time", "time_created"),
+            ("Updated Time", "time_updated"),
+        ]
+        
+        sort_container = Horizontal(
+            Select(sort_options, value="title", id="sort-by", classes="sort-select"),
+            Select([("ASC", "ASC"), ("DESC", "DESC")], value="ASC", id="sort-order", classes="sort-order"),
+            id="sort-container"
+        )
+        sort_container.border_title = "Sort"
 
         results_list = ListView(id="results-list")
         results_list.border_title = "Items"
@@ -324,7 +386,11 @@ class ScraperApp(App):
 
         yield search_container
         yield Horizontal(
-            results_list,
+            Vertical(
+                sort_container,
+                results_list,
+                id="results-column"
+            ),
             details_container,
             id="main-container"
         )
@@ -334,44 +400,32 @@ class ScraperApp(App):
         await self.execute_search()
 
     async def on_select_changed(self, event: Select.Changed) -> None:
-        await self.execute_search()
+        # Avoid triggering search while initializing Selects
+        if event.value is not None:
+            await self.execute_search()
 
     async def execute_search(self) -> None:
         """Executes a search using all active filters."""
-        title_q = self.query_one("#search-title", Input).value
-        desc_q = self.query_one("#search-desc", Input).value
-        file_q = self.query_one("#search-filename", Input).value
-        tags_q = self.query_one("#search-tags", Input).value
+        search_builder = self.query_one("#search-builder", SearchBuilder)
+        filters = search_builder.get_filters()
         
-        author_select = self.query_one("#search-author", Select)
-        author_q = ""
-        # Robustly handle Textual's Select.BLANK/NULL internal objects
-        if isinstance(author_select.value, str):
-            author_q = author_select.value
+        sort_by = self.query_one("#sort-by", Select).value
+        sort_order = self.query_one("#sort-order", Select).value
 
-        numeric_filters = {
-            "file_size": self.query_one("#search-file-size", Input).value,
-            "subscriptions": self.query_one("#search-subscriptions", Input).value,
-            "favorited": self.query_one("#search-favorited", Input).value,
-            "views": self.query_one("#search-views", Input).value
-        }
+        # Handle potential Select.BLANK
+        if not isinstance(sort_by, str): sort_by = "title"
+        if not isinstance(sort_order, str): sort_order = "ASC"
 
         results = search_items(
             self.db_path, 
-            title_query=title_q, 
-            desc_query=desc_q, 
-            filename_query=file_q,
-            tags_query=tags_q,
-            creator=author_q,
-            numeric_filters=numeric_filters,
+            filters=filters,
+            sort_by=sort_by,
+            sort_order=sort_order,
             summary_only=True
         )
         
         list_view = self.query_one("#results-list", ListView)
         await list_view.clear()
-        
-        import sys
-        print(f"SEARCH PARAMS: title={title_q}, author={author_q}, results={len(results)}", file=sys.stderr)
         
         for item in results:
             await list_view.append(WorkshopItem(item))
@@ -394,15 +448,37 @@ class ScraperApp(App):
             jump_btn.display = False
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle button presses (e.g., Jump to Author, Translation)."""
-        if event.button.id == "btn-jump-author" and self.current_item_creator:
-            # Clear text inputs
-            self.query_one("#search-title", Input).value = ""
-            self.query_one("#search-desc", Input).value = ""
+        """Handle button presses (e.g., Jump to Author, Translation, Search Builder buttons)."""
+        if event.button.id in ("btn-and", "btn-or"):
+            logic = "AND" if event.button.id == "btn-and" else "OR"
+            self.query_one("#search-builder", SearchBuilder).add_row(logic)
+            await self.execute_search()
+        
+        elif event.button.id == "btn-remove":
+            # SearchRow is the parent's parent? No, Button is child of SearchRow.
+            row = event.button.parent
+            if isinstance(row, SearchRow):
+                row.remove()
+                # Use call_after_refresh to ensure the row is gone before searching?
+                # Actually remove() is usually immediate enough or we can just wait.
+                self.call_after_refresh(self.execute_search)
+
+        elif event.button.id == "btn-jump-author" and self.current_item_creator:
+            # Jump to author with the new search builder: 
+            # Clear all but first row, set first row to Author ID = creator
+            builder = self.query_one("#search-builder", SearchBuilder)
+            rows = builder.query(SearchRow)
+            for row in rows[1:]:
+                row.remove()
             
-            # Set combo box to the author (this triggers on_select_changed which searches)
-            author_select = self.query_one("#search-author", Select)
-            author_select.value = self.current_item_creator
+            first_row = rows[0]
+            first_row.query_one("#field-select", Select).value = "Author ID"
+            # Wait for op-select to update? It might need a refresh.
+            # We can force it or just set it if we know it's numeric.
+            first_row.query_one("#op-select", Select).value = "is"
+            first_row.query_one("#value-input", Input).value = str(self.current_item_creator)
+            
+            await self.execute_search()
         
         elif event.button.id == "btn-toggle-translation":
             detail_pane = self.query_one("#item-details", DetailsPane)

@@ -149,6 +149,35 @@ def test_user_table_operations(db_path):
     user = get_user(db_path, 12345)
     assert user["personaname"] == "Updated Name"
 
+def test_user_join_in_queries(db_path):
+    """Verifies that queries return joined user information."""
+    from src.database import insert_or_update_user, insert_or_update_item, search_items, get_item_details
+    
+    steamid = 76561198000000000
+    insert_or_update_user(db_path, {
+        "steamid": steamid, 
+        "personaname": "ModderOne",
+        "personaname_en": "TranslatedModder"
+    })
+    
+    insert_or_update_item(db_path, {
+        "workshop_id": 999,
+        "title": "Awesome Mod",
+        "creator": steamid,
+        "status": 200
+    })
+    
+    # Test search_items join
+    results = search_items(db_path, query="Awesome")
+    assert len(results) == 1
+    assert results[0]["personaname"] == "ModderOne"
+    assert results[0]["personaname_en"] == "TranslatedModder"
+    
+    # Test get_item_details join
+    details = get_item_details(db_path, 999)
+    assert details["personaname"] == "ModderOne"
+    assert details["personaname_en"] == "TranslatedModder"
+
 def test_concurrent_read_write(db_path):
     """
     Tests that WAL mode allows simultaneous read and write without locking the DB.
@@ -174,3 +203,76 @@ def test_concurrent_read_write(db_path):
     
     # If no 'sqlite3.OperationalError: database is locked' exception was thrown, WAL is working
     assert True
+
+def test_get_next_translation_item_none(db_path):
+    from src.database import get_next_translation_item
+    # No items flagged
+    assert get_next_translation_item(db_path) is None
+
+def test_search_items_advanced_queries(db_path):
+    from src.database import insert_or_update_item, search_items
+    
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, 
+        "title": "Apple Banana", 
+        "short_description": "Fruit mod", 
+        "filename": "apple.zip", 
+        "tags": "['fruit']",
+        "creator": 123,
+        "file_size": 1000
+    })
+    
+    insert_or_update_item(db_path, {
+        "workshop_id": 2, 
+        "title": "Orange Mod", 
+        "short_description": "Fruit mod too", 
+        "filename": "orange.zip", 
+        "tags": "['fruit', 'citrus']",
+        "creator": 456,
+        "file_size": 2000
+    })
+
+    # Test negative token
+    results = search_items(db_path, query="Fruit -Banana")
+    assert len(results) == 1
+    assert results[0]["workshop_id"] == 2
+
+    # Test mismatched quotes (fallback to split)
+    results = search_items(db_path, query='Fruit "Mod')
+    # Because shlex fails, it splits to ['Fruit', '"Mod']. Neither item has '"Mod' with a literal quote.
+    assert len(results) == 0
+
+    # Test matched quotes
+    results = search_items(db_path, query='Fruit "Mod"')
+    # shlex splits to ['Fruit', 'Mod']. Both items have 'mod' in short_description.
+    assert len(results) == 2
+
+    # Test summary_only
+    results = search_items(db_path, query="Fruit", summary_only=True)
+    assert len(results) == 2
+    assert "short_description" not in results[0]  # Only essential columns returned
+
+    # Test specific fields
+    results = search_items(db_path, title_query="Apple", desc_query="Fruit", filename_query="apple", tags_query="fruit", creator=123)
+    assert len(results) == 1
+    assert results[0]["workshop_id"] == 1
+
+    # Test numeric_filters
+    results = search_items(db_path, numeric_filters={"file_size": "> 1500"})
+    assert len(results) == 1
+    assert results[0]["workshop_id"] == 2
+
+def test_get_all_authors(db_path):
+    from src.database import insert_or_update_item, get_all_authors
+    insert_or_update_item(db_path, {"workshop_id": 1, "creator": 999})
+    insert_or_update_item(db_path, {"workshop_id": 2, "creator": 888})
+    
+    authors = get_all_authors(db_path)
+    assert 999 in authors
+    assert 888 in authors
+    assert len(authors) >= 2
+
+def test_parse_query_empty():
+    from src.database import _parse_query
+    assert _parse_query("") == ([], [])
+    assert _parse_query(None) == ([], [])

@@ -287,9 +287,15 @@ def _apply_numeric_filter(sql: str, params: list, col: str, filter_str: str) -> 
     return sql, params
 
 def get_item_details(db_path: str, workshop_id: int) -> dict | None:
-    """Fetches all columns for a single workshop item."""
+    """Fetches all columns for a single workshop item, joined with user info."""
     conn = get_connection(db_path)
-    cursor = conn.execute("SELECT * FROM workshop_items WHERE workshop_id = ?", (workshop_id,))
+    sql = """
+        SELECT w.*, u.personaname, u.personaname_en, u.dt_translated as user_dt_translated
+        FROM workshop_items w
+        LEFT JOIN users u ON w.creator = u.steamid
+        WHERE w.workshop_id = ?
+    """
+    cursor = conn.execute(sql, (workshop_id,))
     row = cursor.fetchone()
     conn.close()
     return dict(row) if row else None
@@ -297,19 +303,21 @@ def get_item_details(db_path: str, workshop_id: int) -> dict | None:
 def search_items(db_path: str, query: str = "", appid: int = None, 
                  title_query: str = "", desc_query: str = "", filename_query: str = "", tags_query: str = "",
                  creator: str = "", numeric_filters: dict = None, tags: str = None,
-                 summary_only: bool = False) -> list[dict]:
+                 summary_only: bool = False, filters: list[dict] = None,
+                 sort_by: str = None, sort_order: str = "ASC") -> list[dict]:
     """
     Searches the database for items matching the criteria.
+    Joins with users table to provide names.
     If summary_only is True, returns only essential columns for list view display.
     """
     conn = get_connection(db_path)
     
     if summary_only:
-        cols = "workshop_id, title, title_en, creator, consumer_appid, dt_translated"
+        cols = "w.workshop_id, w.title, w.title_en, w.creator, w.consumer_appid, w.dt_translated, u.personaname, u.personaname_en"
     else:
-        cols = "*"
+        cols = "w.*, u.personaname, u.personaname_en"
         
-    sql = f"SELECT {cols} FROM workshop_items WHERE 1=1"
+    sql = f"SELECT {cols} FROM workshop_items w LEFT JOIN users u ON w.creator = u.steamid WHERE 1=1"
     params = []
 
     def apply_query_to_columns(q_str: str, cols: list[str]):
@@ -354,6 +362,83 @@ def search_items(db_path: str, query: str = "", appid: int = None,
         for col, f_str in numeric_filters.items():
             if col in valid_cols and f_str:
                 sql, params = _apply_numeric_filter(sql, params, col, f_str)
+
+    if filters:
+        filter_clauses = []
+        for i, f in enumerate(filters):
+            logic = f.get("logic", "AND").upper()
+            field = f.get("field")
+            op = f.get("op")
+            val = f.get("value")
+
+            if not field or not op:
+                continue
+            
+            # Map common names to DB columns
+            field_map = {
+                "Title": "title",
+                "Description": "short_description",
+                "Filename": "filename",
+                "Tags": "tags",
+                "Author ID": "creator",
+                "File Size": "file_size",
+                "Subs": "subscriptions",
+                "Favs": "favorited",
+                "Views": "views",
+                "Workshop ID": "workshop_id",
+                "AppID": "consumer_appid",
+                "Language ID": "language"
+            }
+            db_col = field_map.get(field, field)
+            
+            clause = ""
+            if op == "contains":
+                clause = f"{db_col} LIKE ?"
+                params.append(f"%{val}%")
+            elif op == "is":
+                clause = f"{db_col} = ?"
+                params.append(val)
+            elif op == "is_not":
+                clause = f"{db_col} != ?"
+                params.append(val)
+            elif op == "gt":
+                clause = f"{db_col} > ?"
+                params.append(val)
+            elif op == "lt":
+                clause = f"{db_col} < ?"
+                params.append(val)
+            elif op == "gte":
+                clause = f"{db_col} >= ?"
+                params.append(val)
+            elif op == "lte":
+                clause = f"{db_col} <= ?"
+                params.append(val)
+            elif op == "is_empty":
+                clause = f"({db_col} IS NULL OR {db_col} = '')"
+            elif op == "is_not_empty":
+                clause = f"({db_col} IS NOT NULL AND {db_col} != '')"
+            
+            if clause:
+                filter_clauses.append((logic, clause))
+                
+        if filter_clauses:
+            sql += " AND ("
+            for idx, (logic, clause) in enumerate(filter_clauses):
+                if idx == 0:
+                    sql += clause
+                else:
+                    sql += f" {logic} {clause}"
+            sql += ")"
+
+    if sort_by:
+        # Simple whitelist for safety
+        valid_sort_cols = {
+            "title", "file_size", "subscriptions", "favorited", "views", 
+            "workshop_id", "time_created", "time_updated"
+        }
+        if sort_by in valid_sort_cols:
+            order = "DESC" if sort_order.upper() == "DESC" else "ASC"
+            sql += f" ORDER BY {sort_by} {order}"
         
     cursor = conn.execute(sql, params)
     results = [dict(row) for row in cursor.fetchall()]
