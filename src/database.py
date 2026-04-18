@@ -304,7 +304,8 @@ def search_items(db_path: str, query: str = "", appid: int = None,
                  title_query: str = "", desc_query: str = "", filename_query: str = "", tags_query: str = "",
                  creator: str = "", numeric_filters: dict = None, tags: str = None,
                  summary_only: bool = False, filters: list[dict] = None,
-                 sort_by: str = None, sort_order: str = "ASC") -> list[dict]:
+                 sort_by: str = None, sort_order: str = "ASC",
+                 limit: int = None, offset: int = None) -> list[dict]:
     """
     Searches the database for items matching the criteria.
     Joins with users table to provide names.
@@ -439,6 +440,13 @@ def search_items(db_path: str, query: str = "", appid: int = None,
         if sort_by in valid_sort_cols:
             order = "DESC" if sort_order.upper() == "DESC" else "ASC"
             sql += f" ORDER BY {sort_by} {order}"
+            
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+        if offset is not None:
+            sql += " OFFSET ?"
+            params.append(offset)
         
     cursor = conn.execute(sql, params)
     results = [dict(row) for row in cursor.fetchall()]

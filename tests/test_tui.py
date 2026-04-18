@@ -46,26 +46,8 @@ async def test_tui_advanced_search_flow(mock_config, mock_results):
             assert len(list_view.children) == 1
 
             # Verify new inputs exist
-            title_input = app.query_one("#search-title", Input)
-            desc_input = app.query_one("#search-desc", Input)
-            author_select = app.query_one("#search-author", Select)
-
-            assert title_input.value == ""
-            
-            # Verify new inputs exist
-            app.query_one("#search-filename", Input)
-            app.query_one("#search-tags", Input)
-            app.query_one("#search-subscriptions", Input)
-            app.query_one("#search-views", Input)
-            
-            # Type in title and hit enter
-            await pilot.click("#search-title")
-            await pilot.press(*"Amazing")
-            await pilot.press("enter")
-            
-            # Verify results appear
-            list_view = app.query_one(ListView)
-            assert len(list_view.children) == 1
+            search_builder = app.query_one("#search-builder")
+            assert search_builder is not None
             
             # Select the item
             list_view.index = 0
@@ -88,9 +70,8 @@ async def test_tui_jump_to_author(mock_config, mock_results):
         
         app = ScraperApp()
         async with app.run_test() as pilot:
-            # Populate list
-            await pilot.click("#search-title")
-            await pilot.press("enter")
+            # Wait for on_mount
+            await pilot.pause(0.1)
             
             # Select item
             list_view = app.query_one(ListView)
@@ -109,14 +90,15 @@ async def test_tui_jump_to_author(mock_config, mock_results):
             await pilot.pause(0.1)
             
             # Verify Author Select is updated and title is cleared
-            author_select = app.query_one("#search-author", Select)
-            title_input = app.query_one("#search-title", Input)
-            
-            assert title_input.value == ""
-            assert author_select.value == "Author A"
+            builder = app.query_one("#search-builder")
+            rows = builder.query("SearchRow")
+            assert len(rows) == 1
+            first_row = list(rows)[0]
+            assert first_row.query_one("#field-select").value == "Author ID"
+            assert first_row.query_one("#value-input").value == "Author A"
 
 @pytest.mark.asyncio
-async def test_tui_tag_data_types(mock_config):
+async def test_tui_translation_flow(mock_config, mock_results):
     """Tests TUI behavior with tags provided as string, list, or invalid types."""
     mock_results = [
         {

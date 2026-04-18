@@ -81,9 +81,17 @@ async def test_end_to_end_system_flow(system_config):
         app = ScraperApp()
         async with app.run_test() as pilot:
             
-            # Type "E2E" into the title search
-            title_input = app.query_one("#search-title", Input)
-            title_input.value = "E2E"
+            # Setup the first SearchRow
+            builder = app.query_one("#search-builder")
+            rows = builder.query("SearchRow")
+            first_row = list(rows)[0]
+            
+            first_row.query_one("#field-select").value = "Title"
+            first_row.query_one("#op-select").value = "contains"
+            
+            # Type "E2E" into the value search
+            value_input = first_row.query_one("#value-input")
+            value_input.value = "E2E"
             
             # Explicitly execute search
             await app.execute_search()

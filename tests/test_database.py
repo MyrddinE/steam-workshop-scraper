@@ -276,3 +276,17 @@ def test_parse_query_empty():
     from src.database import _parse_query
     assert _parse_query("") == ([], [])
     assert _parse_query(None) == ([], [])
+
+def test_search_items_pagination(db_path):
+    from src.database import insert_or_update_item, search_items
+    
+    for i in range(1, 11):
+        insert_or_update_item(db_path, {"workshop_id": 100 + i, "title": f"Page Item {i}"})
+        
+    results = search_items(db_path, query="Page Item", limit=5, sort_by="workshop_id", sort_order="ASC")
+    assert len(results) == 5
+    assert results[0]["workshop_id"] == 101
+    
+    results = search_items(db_path, query="Page Item", limit=5, offset=5, sort_by="workshop_id", sort_order="ASC")
+    assert len(results) == 5
+    assert results[0]["workshop_id"] == 106

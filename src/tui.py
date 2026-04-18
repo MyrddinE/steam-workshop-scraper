@@ -341,6 +341,11 @@ class ScraperApp(App):
         self.db_path = self.config["database"]["path"]
         initialize_database(self.db_path)
         self.current_item_creator = None
+        
+        # Pagination state
+        self.current_offset = 0
+        self.has_more_results = True
+        self.is_loading = False
 
     def on_mount(self) -> None:
         """Run an empty search on startup to populate the list."""
@@ -405,7 +410,28 @@ class ScraperApp(App):
             await self.execute_search()
 
     async def execute_search(self) -> None:
-        """Executes a search using all active filters."""
+        """Executes a new search, resetting pagination."""
+        if not self.is_mounted:
+            return
+            
+        self.current_offset = 0
+        self.has_more_results = True
+        
+        try:
+            list_view = self.query_one("#results-list", ListView)
+        except Exception:
+            return
+        await list_view.clear()
+        
+        await self.load_more_items()
+
+    async def load_more_items(self) -> None:
+        """Fetches the next chunk of items from the database."""
+        if self.is_loading or not self.has_more_results:
+            return
+            
+        self.is_loading = True
+        
         search_builder = self.query_one("#search-builder", SearchBuilder)
         filters = search_builder.get_filters()
         
@@ -421,14 +447,30 @@ class ScraperApp(App):
             filters=filters,
             sort_by=sort_by,
             sort_order=sort_order,
-            summary_only=True
+            summary_only=True,
+            limit=50,
+            offset=self.current_offset
         )
         
         list_view = self.query_one("#results-list", ListView)
-        await list_view.clear()
         
         for item in results:
             await list_view.append(WorkshopItem(item))
+            
+        self.current_offset += len(results)
+        
+        if len(results) < 50:
+            self.has_more_results = False
+            
+        self.is_loading = False
+
+    async def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        """Load more items when scrolling near the bottom of the list."""
+        list_view = event.list_view
+        if list_view.id == "results-list":
+            # If we are within 10 items of the end, fetch more
+            if list_view.index is not None and list_view.index >= len(list_view) - 10:
+                await self.load_more_items()
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Handle selection of an item in the list."""
