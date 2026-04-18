@@ -218,8 +218,14 @@ class SearchRow(Horizontal):
         if event.select.id == "field-select":
             field = str(event.value)
             # Determine field type to show relevant operators
-            is_numeric = field in ["File Size", "Subs", "Favs", "Views", "Workshop ID", "AppID", "Language ID"]
-            ops = self.operators_map["numeric" if is_numeric else "text"]
+            if field == "Author ID" or field == "Workshop ID" or field == "AppID":
+                op_type = "id"
+            elif field in ["File Size", "Subs", "Favs", "Views", "Language ID"]:
+                op_type = "numeric"
+            else:
+                op_type = "text"
+                
+            ops = self.operators_map[op_type]
             op_select = self.query_one("#op-select", Select)
             op_select.set_options([(o.replace("_", " "), o) for o in ops])
             op_select.value = ops[0]
@@ -232,8 +238,9 @@ class SearchBuilder(VerticalScroll):
             "File Size", "Subs", "Favs", "Views", "Workshop ID", "AppID", "Language ID"
         ]
         self.operators = {
-            "text": ["contains", "is", "is_not", "is_empty", "is_not_empty"],
-            "numeric": ["is", "is_not", "gt", "lt", "gte", "lte", "is_empty", "is_not_empty"]
+            "text": ["contains", "does_not_contain", "is", "is_not", "is_empty", "is_not_empty"],
+            "numeric": ["is", "is_not", "gt", "lt", "gte", "lte", "is_empty", "is_not_empty"],
+            "id": ["is", "is_not"]
         }
         yield SearchRow(self.fields, self.operators, is_first=True)
 
@@ -266,10 +273,13 @@ class ScraperApp(App):
     }
     #search-container {
         height: auto;
-        max-height: 18; /* Roughly 4-5 rows */
         margin: 1;
         padding: 1;
         border: solid $accent;
+    }
+    #search-builder {
+        height: auto;
+        max-height: 12; /* Roughly 4 rows */
     }
     .search-row {
         height: 3;
@@ -472,6 +482,19 @@ class ScraperApp(App):
             if list_view.index is not None and list_view.index >= len(list_view) - 10:
                 await self.load_more_items()
 
+    def on_scroll(self, event) -> None:
+        """Handle mouse scrolling for infinite loading."""
+        # Check if results-list is near bottom
+        try:
+            list_view = self.query_one("#results-list", ListView)
+            # scroll_y is the current scroll position
+            # max_scroll_y is the maximum possible scroll position
+            if list_view.scroll_y >= list_view.max_scroll_y - 5:
+                # We need to call an async method from a sync event handler
+                self.run_worker(self.load_more_items())
+        except Exception:
+            pass
+
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Handle selection of an item in the list."""
         if not event.item:
@@ -497,30 +520,29 @@ class ScraperApp(App):
             await self.execute_search()
         
         elif event.button.id == "btn-remove":
-            # SearchRow is the parent's parent? No, Button is child of SearchRow.
             row = event.button.parent
             if isinstance(row, SearchRow):
                 row.remove()
-                # Use call_after_refresh to ensure the row is gone before searching?
-                # Actually remove() is usually immediate enough or we can just wait.
                 self.call_after_refresh(self.execute_search)
 
         elif event.button.id == "btn-jump-author" and self.current_item_creator:
-            # Jump to author with the new search builder: 
-            # Clear all but first row, set first row to Author ID = creator
             builder = self.query_one("#search-builder", SearchBuilder)
-            rows = builder.query(SearchRow)
-            for row in rows[1:]:
-                row.remove()
             
-            first_row = rows[0]
-            first_row.query_one("#field-select", Select).value = "Author ID"
-            # Wait for op-select to update? It might need a refresh.
-            # We can force it or just set it if we know it's numeric.
-            first_row.query_one("#op-select", Select).value = "is"
-            first_row.query_one("#value-input", Input).value = str(self.current_item_creator)
+            # Clear all current rows
+            await builder.query(SearchRow).remove()
             
-            await self.execute_search()
+            # Add a fresh first row
+            new_row = SearchRow(builder.fields, builder.operators, is_first=True)
+            await builder.mount(new_row)
+            
+            # Use call_after_refresh to ensure selects are populated
+            def setup_author_filter():
+                new_row.query_one("#field-select", Select).value = "Author ID"
+                new_row.query_one("#op-select", Select).value = "is"
+                new_row.query_one("#value-input", Input).value = str(self.current_item_creator)
+                self.run_worker(self.execute_search())
+            
+            self.call_after_refresh(setup_author_filter)
         
         elif event.button.id == "btn-toggle-translation":
             detail_pane = self.query_one("#item-details", DetailsPane)

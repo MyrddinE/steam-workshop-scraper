@@ -396,6 +396,9 @@ def search_items(db_path: str, query: str = "", appid: int = None,
             if op == "contains":
                 clause = f"{db_col} LIKE ?"
                 params.append(f"%{val}%")
+            elif op == "does_not_contain":
+                clause = f"({db_col} IS NULL OR {db_col} NOT LIKE ?)"
+                params.append(f"%{val}%")
             elif op == "is":
                 clause = f"{db_col} = ?"
                 params.append(val)

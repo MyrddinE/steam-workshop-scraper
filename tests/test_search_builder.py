@@ -119,3 +119,10 @@ def test_search_sorting(db_path):
     results = search_items(db_path, sort_by="title", sort_order="ASC")
     # In SQLite, NULL is smallest.
     assert results[0]["workshop_id"] in (4, 5)
+
+def test_search_does_not_contain(db_path):
+    filters = [{"field": "title", "op": "does_not_contain", "value": "Alpha"}]
+    results = search_items(db_path, filters=filters)
+    # Alpha Item is 1, so 2, 3, 4, 5 should remain (4 is None, 5 is "")
+    assert len(results) == 4
+    assert 1 not in {r["workshop_id"] for r in results}
