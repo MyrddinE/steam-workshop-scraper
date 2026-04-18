@@ -325,3 +325,62 @@ def test_daemon_tag_normalization(mock_sleep, mock_get_user, mock_insert, mock_s
     inserted_data = mock_insert.call_args[0][1]
     tags = json.loads(inserted_data["tags"])
     assert sorted(tags) == sorted(["Mod", "1.5", "NewTag"])
+
+def test_expand_user_discovery():
+    from src.daemon import Daemon
+    from src.database import get_connection, insert_or_update_item, initialize_database
+    import tempfile
+    import os
+    
+    with tempfile.NamedTemporaryFile(delete=False) as tf:
+        db_path = tf.name
+        
+    try:
+        initialize_database(db_path)
+        
+        # Add a workshop item with a creator that is not in the users table
+        insert_or_update_item(db_path, {"workshop_id": 999, "creator": "123456789"})
+        
+        config = {
+            "database": {"path": db_path},
+            "api": {"key": "test_key"},
+            "daemon": {"target_appids": [4000], "batch_size": 5}
+        }
+        
+        daemon = Daemon(config)
+        
+        # Mock get_player_summaries to simulate API response
+        with patch('src.daemon.get_player_summaries') as mock_summaries:
+            mock_summaries.return_value = {123456789: {"personaname": "TestUser"}}
+            
+            daemon.expand_user_discovery()
+            
+            # Verify the API was called with the missing ID
+            mock_summaries.assert_called_once_with([123456789], "test_key")
+            
+            # Verify the user was added to the users table
+            conn = get_connection(db_path)
+            cursor = conn.execute("SELECT personaname FROM users WHERE steamid = 123456789")
+            user = cursor.fetchone()
+            conn.close()
+            
+            assert user is not None
+            assert user["personaname"] == "TestUser"
+            
+        # Test placeholder for missing user
+        insert_or_update_item(db_path, {"workshop_id": 888, "creator": "987654321"})
+        with patch('src.daemon.get_player_summaries') as mock_summaries:
+            mock_summaries.return_value = {} # Return empty (user not found)
+            
+            daemon.expand_user_discovery()
+            
+            conn = get_connection(db_path)
+            cursor = conn.execute("SELECT personaname FROM users WHERE steamid = 987654321")
+            user = cursor.fetchone()
+            conn.close()
+            
+            assert user is not None
+            assert user["personaname"] == "SteamID:987654321"
+
+    finally:
+        os.remove(db_path)

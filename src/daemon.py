@@ -10,7 +10,8 @@ from src.database import (
     get_app_page, 
     update_app_page,
     insert_or_update_user,
-    get_user
+    get_user,
+    get_connection
 )
 from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries
 from src.web_scraper import scrape_extended_details, discover_ids_html
@@ -41,12 +42,58 @@ class Daemon:
 
     def handle_shutdown(self, signum, frame):
         """Signals the loop to stop and finishes the current batch safely."""
-        logging.info(f"Received signal {signum}, initiating graceful shutdown...")
+        logging.info(f"Received signal {signum}, initiating shutdown...")
         self.running = False
         self.translator.running = False
 
+    def expand_user_discovery(self):
+        """
+        Scans workshop_items for creators who are not in the users table 
+        and fetches their summaries.
+        """
+        conn = get_connection(self.db_path)
+        # Find creators in workshop_items that aren't in users table
+        sql = """
+            SELECT DISTINCT creator FROM workshop_items 
+            WHERE creator IS NOT NULL 
+            AND creator NOT IN (SELECT steamid FROM users)
+            LIMIT 100
+        """
+        cursor = conn.execute(sql)
+        missing_ids = [int(row["creator"]) for row in cursor.fetchall() if row["creator"]]
+        conn.close()
+
+        if missing_ids:
+            logging.info(f"Proactively fetching {len(missing_ids)} missing user profiles...")
+            summaries = get_player_summaries(missing_ids, self.api_key)
+            for sid in missing_ids:
+                if sid in summaries:
+                    pdata = summaries[sid]
+                    user_record = {
+                        "steamid": sid,
+                        "personaname": pdata.get("personaname"),
+                        "dt_updated": datetime.now(timezone.utc).isoformat()
+                    }
+                    if not is_ascii(user_record["personaname"]):
+                        user_record["translation_priority"] = 1
+                        logging.info(f"User {sid} ('{user_record['personaname']}') flagged for translation.")
+                    
+                    insert_or_update_user(self.db_path, user_record)
+                    logging.info(f"Updated profile for user {sid}: '{user_record['personaname']}'")
+                else:
+                    # Insert a placeholder so we don't keep trying every batch
+                    insert_or_update_user(self.db_path, {
+                        "steamid": sid, 
+                        "personaname": f"SteamID:{sid}",
+                        "dt_updated": datetime.now(timezone.utc).isoformat()
+                    })
+                    logging.info(f"User {sid} not found in API, inserted placeholder.")
+
     def process_batch(self):
         """Processes a single batch of workshop items."""
+        # Proactive user discovery check
+        self.expand_user_discovery()
+        
         # Seeding check: If we have fewer than 100 unscraped items, fetch the next page
         unscraped = count_unscraped_items(self.db_path)
         if unscraped < 100:
@@ -111,7 +158,7 @@ class Daemon:
                     if v is not None and str(v).strip() != "":
                         logging.info(f"Discarding unknown API column: '{k}' with value '{val_preview}' for item {item_id}")
                     else:
-                        logging.debug(f"Discarding unknown API column: '{k}' with value '{val_preview}' for item {item_id}")
+                        logging.debug(f"Discarding unknown (empty) API column: '{k}' for item {item_id}")
                 
             base_data.update(clean_api_data)
             base_data["dt_updated"] = now_iso
