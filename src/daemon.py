@@ -174,7 +174,16 @@ class Daemon:
             if not scrape_data:
                 base_data["status"] = 206 # Partial Content
                 insert_or_update_item(self.db_path, base_data)
-                logging.warning(f"[{item_id}] '{base_data.get('title', 'Unknown')}' | Scraper failed, partial data saved.")
+                
+                # Assemble detailed log message
+                successful_fields = [k for k, v in base_data.items() if v is not None]
+                failed_fields = ["extended_description", "tags"] # Known scrape targets
+                logging.warning(
+                    f"[{item_id}] '{base_data.get('title', 'Unknown')}' | Scraper failed, partial data saved. "
+                    f"Successfully pulled from API: {successful_fields}. "
+                    f"Failed to scrape from web: {failed_fields}."
+                )
+                
                 time.sleep(self.delay)
                 continue
 

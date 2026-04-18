@@ -384,3 +384,41 @@ def test_expand_user_discovery():
 
     finally:
         os.remove(db_path)
+
+def test_process_batch_scraper_failure(tmp_path):
+    from src.daemon import Daemon
+    from src.database import get_connection, initialize_database
+    
+    db_path = tmp_path / "test.db"
+    initialize_database(str(db_path))
+    
+    config = {
+        "database": {"path": str(db_path)},
+        "api": {"key": "test_key"},
+        "daemon": {"target_appids": [4000], "batch_size": 5, "request_delay_seconds": 0}
+    }
+    
+    daemon = Daemon(config)
+    
+    # Mock API to return one item, but Web Scraper to fail
+    with patch('src.daemon.get_workshop_details_api') as mock_api, \
+         patch('src.daemon.scrape_extended_details', return_value=None):
+
+        mock_api.return_value = {"title": "Test Scraper Fail", "time_created": 1609459200, "time_updated": 1609459200}
+
+        # Add the item to the database manually
+        from src.database import insert_or_update_item
+        insert_or_update_item(str(db_path), {"workshop_id": 123, "status": 0})
+
+        # This should attempt to scrape and fail
+        daemon.process_batch()
+        
+        conn = get_connection(str(db_path))
+        cursor = conn.execute("SELECT status, title, extended_description FROM workshop_items WHERE workshop_id = 123")
+        item = cursor.fetchone()
+        conn.close()
+        
+        assert item is not None
+        assert item["status"] == 206 # Partial Content
+        assert item["title"] == "Test Scraper Fail"
+        assert item["extended_description"] is None # Scraper failed
