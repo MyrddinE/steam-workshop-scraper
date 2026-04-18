@@ -166,3 +166,117 @@ async def test_tui_translation_flow(mock_config, mock_results):
             assert "API Tags Mod" in content3
             assert "Mod, 1.0" in content3
 
+
+@pytest.mark.asyncio
+async def test_tui_operator_selection_by_field_type(mock_config, mock_results):
+    from unittest.mock import patch
+    from src.tui import ScraperApp
+    from textual.widgets import Select
+
+    with patch('src.tui.load_config', return_value=mock_config), \
+         patch('src.tui.search_items', return_value=mock_results):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            
+            builder = app.query_one("#search-builder")
+            first_row = list(builder.query("SearchRow"))[0]
+            field_select = first_row.query_one("#field-select", Select)
+            op_select = first_row.query_one("#op-select", Select)
+            
+            # Switch to numeric field
+            field_select.value = "File Size"
+            await pilot.pause(0.1)
+            assert "gt" in [val for label, val in op_select._options]
+            assert "does_not_contain" not in [val for label, val in op_select._options]
+            
+            # Switch to ID field
+            field_select.value = "Author ID"
+            await pilot.pause(0.1)
+            assert "is" in [val for label, val in op_select._options]
+            assert "gt" not in [val for label, val in op_select._options]
+            
+            # Switch to Text field
+            field_select.value = "Title"
+            await pilot.pause(0.1)
+            assert "does_not_contain" in [val for label, val in op_select._options]
+
+@pytest.mark.asyncio
+async def test_tui_jump_to_author_clears_multiple_rows(mock_config, mock_results):
+    from unittest.mock import patch
+    from src.tui import ScraperApp
+    from textual.widgets import ListView, Button
+
+    with patch('src.tui.load_config', return_value=mock_config), \
+         patch('src.tui.search_items', return_value=mock_results), \
+         patch('src.tui.get_all_authors', return_value=["Author A"]):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            
+            # Add some extra rows
+            await pilot.click("#btn-and")
+            await pilot.click("#btn-or")
+            await pilot.pause(0.1)
+            
+            builder = app.query_one("#search-builder")
+            assert len(builder.query("SearchRow")) == 3
+            
+            # Select an item to show the jump button
+            list_view = app.query_one(ListView)
+            list_view.index = 0
+            app.set_focus(list_view)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            
+            # Click jump button
+            jump_btn = app.query_one("#btn-jump-author", Button)
+            jump_btn.press()
+            await pilot.pause(0.2)
+            
+            # Verify rows cleared and set to Author ID
+            rows = list(builder.query("SearchRow"))
+            assert len(rows) == 1
+            assert rows[0].query_one("#field-select").value == "Author ID"
+            assert rows[0].query_one("#value-input").value == "Author A"
+
+@pytest.mark.asyncio
+async def test_tui_infinite_scroll(mock_config):
+    from unittest.mock import patch, MagicMock, PropertyMock
+    from src.tui import ScraperApp
+    from textual.widgets import ListView
+
+    mock_results = [{"workshop_id": i, "title": f"Item {i}", "creator": "A"} for i in range(100)]
+
+    # We want to mock search_items to paginate
+    def mock_search_items(db, *args, **kwargs):
+        offset = kwargs.get("offset", 0)
+        limit = kwargs.get("limit", 50)
+        return mock_results[offset:offset+limit]
+
+    with patch('src.tui.load_config', return_value=mock_config), \
+         patch('src.tui.search_items', side_effect=mock_search_items):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            list_view = app.query_one(ListView)
+            assert len(list_view.children) == 50
+
+            # Simulate scroll event by mocking max_scroll_y and scrolling to the bottom
+            class FakeScrollEvent:
+                pass
+
+            # Force max scroll y manually by mocking the property
+            with patch.object(type(list_view), 'max_scroll_y', new_callable=PropertyMock) as mock_max:
+                mock_max.return_value = 105
+                list_view.scroll_y = 100
+                app.on_scroll(FakeScrollEvent())
+
+            import asyncio
+            for _ in range(10):
+                if len(list_view.children) >= 100:
+                    break
+                await asyncio.sleep(0.1)
+
+            # 50 more should be loaded
+            assert len(list_view.children) == 100
