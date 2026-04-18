@@ -7,6 +7,26 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from src.database import search_items, get_all_authors, initialize_database, flag_for_translation, get_item_details
 from src.config import load_config
+import os
+import yaml
+
+def load_tui_state(path: str) -> dict:
+    """Loads the TUI state from a YAML file."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+
+def save_tui_state(path: str, state: dict) -> None:
+    """Saves the TUI state to a YAML file."""
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            yaml.dump(state, f, default_flow_style=False)
+    except Exception:
+        pass
 
 import re
 
@@ -252,6 +272,38 @@ class SearchBuilder(VerticalScroll):
         self.mount(new_row)
         new_row.logic = logic # Custom attribute to store logic from previous row
 
+    def set_filters(self, filters: list[dict]) -> None:
+        """Populates the builder with a given list of filters."""
+        for row in list(self.query(SearchRow)):
+            row.remove()
+            
+        if not filters:
+            self.mount(SearchRow(self.fields, self.operators, is_first=True))
+            return
+
+        for i, f in enumerate(filters):
+            is_first = (i == 0)
+            row = SearchRow(self.fields, self.operators, is_first=is_first)
+            if not is_first:
+                row.logic = f.get("logic", "AND")
+            self.mount(row)
+
+            # Use closure to capture loop variables correctly
+            def apply_values(r=row, field=f.get("field"), op=f.get("op"), val=f.get("value")):
+                try:
+                    field_select = r.query_one("#field-select", Select)
+                    field_select.value = field
+                    
+                    op_select = r.query_one("#op-select", Select)
+                    op_select.value = op
+                    
+                    value_input = r.query_one("#value-input", Input)
+                    value_input.value = val
+                except Exception:
+                    pass
+                    
+            self.app.call_after_refresh(apply_values)
+
     def get_filters(self) -> list[dict]:
         filters = []
         rows = self.query(SearchRow)
@@ -357,9 +409,58 @@ class ScraperApp(App):
         self.current_offset = 0
         self.has_more_results = True
         self.is_loading = False
+        
+        # UI State recovery
+        self.state_file = "tui_state.yaml"
+        self._initial_state = load_tui_state(self.state_file)
+        self._restored_scroll_y = self._initial_state.get("scroll_y", 0)
+        self._restored_selected_id = self._initial_state.get("selected_workshop_id", None)
+        self._has_restored_state = False
+
+    def save_state(self) -> None:
+        """Saves current UI state to disk."""
+        if not self.is_mounted or not self._has_restored_state:
+            return
+            
+        try:
+            builder = self.query_one("#search-builder", SearchBuilder)
+            filters = builder.get_filters()
+            sort_by = self.query_one("#sort-by", Select).value
+            sort_order = self.query_one("#sort-order", Select).value
+            list_view = self.query_one("#results-list", ListView)
+            
+            selected_id = None
+            if list_view.index is not None and list_view.index < len(list_view.children):
+                item = list_view.children[list_view.index]
+                if hasattr(item, 'item_data'):
+                    selected_id = item.item_data.get("workshop_id")
+            
+            state = {
+                "filters": filters,
+                "sort_by": sort_by,
+                "sort_order": sort_order,
+                "scroll_y": list_view.scroll_y,
+                "selected_workshop_id": selected_id
+            }
+            save_tui_state(self.state_file, state)
+        except Exception:
+            pass
 
     def on_mount(self) -> None:
-        """Run an empty search on startup to populate the list."""
+        """Initialize the UI and recover state."""
+        # Recover sorting and filters
+        if self._initial_state:
+            try:
+                if "sort_by" in self._initial_state:
+                    self.query_one("#sort-by", Select).value = self._initial_state["sort_by"]
+                if "sort_order" in self._initial_state:
+                    self.query_one("#sort-order", Select).value = self._initial_state["sort_order"]
+                if "filters" in self._initial_state:
+                    builder = self.query_one("#search-builder", SearchBuilder)
+                    builder.set_filters(self._initial_state["filters"])
+            except Exception:
+                pass
+                
         self.call_after_refresh(self.execute_search)
         
         # Watch the scroll_y property to trigger infinite loading
@@ -367,6 +468,7 @@ class ScraperApp(App):
         self.watch(list_view, "scroll_y", self._check_scroll_bottom)
 
     def _check_scroll_bottom(self, scroll_y: float) -> None:
+        self.save_state()
         try:
             list_view = self.query_one("#results-list", ListView)
             if list_view.max_scroll_y == 0:
@@ -432,6 +534,8 @@ class ScraperApp(App):
     async def on_select_changed(self, event: Select.Changed) -> None:
         # Avoid triggering search while initializing Selects
         if event.value is not None:
+            if self._has_restored_state:
+                self.save_state()
             await self.execute_search()
 
     async def execute_search(self) -> None:
@@ -489,6 +593,26 @@ class ScraperApp(App):
             
         self.is_loading = False
 
+        if not self._has_restored_state:
+            self._has_restored_state = True
+            
+            def restore_state():
+                try:
+                    if self._restored_selected_id:
+                        for i, item in enumerate(list_view.children):
+                            if getattr(item, 'item_data', {}).get("workshop_id") == self._restored_selected_id:
+                                list_view.index = i
+                                break
+                                
+                    if self._restored_scroll_y > 0:
+                        list_view.scroll_y = self._restored_scroll_y
+                except Exception:
+                    pass
+
+            self.call_after_refresh(restore_state)
+        else:
+            self.save_state()
+
     async def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         """Load more items when scrolling near the bottom of the list."""
         list_view = event.list_view
@@ -499,6 +623,7 @@ class ScraperApp(App):
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Handle selection of an item in the list."""
+        self.save_state()
         if not event.item:
             return
             
