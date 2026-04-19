@@ -124,40 +124,6 @@ def test_daemon_process_batch_empty(mock_sleep, mock_seed, mock_get_items, mock_
     # It should sleep for delay * 5 because it's still empty
     mock_sleep.assert_called_once_with(0.05) 
 
-@patch('src.daemon.get_app_page')
-@patch('src.daemon.update_app_page')
-@patch('src.daemon.get_next_items_to_scrape')
-@patch('src.daemon.query_workshop_items')
-@patch('src.daemon.insert_or_update_item')
-def test_daemon_seed_database(mock_insert, mock_query, mock_get_items, mock_update_page, mock_get_page, mock_config):
-    """Test the seeding logic correctly calls discovery and inserts into DB, looping until buffer is full."""
-    # Simulate the page incrementing
-    mock_get_page.side_effect = [1, 2, 3]
-    
-    # First page gives 60 items, second page gives 60 items (total 120, satisfying > 100)
-    mock_query.side_effect = [
-        [i for i in range(60)], # Page 1
-        [i for i in range(60, 120)] # Page 2
-    ]
-    # All are new
-    mock_insert.return_value = True
-    
-    daemon = Daemon(mock_config)
-    daemon.seed_database(target_new=100)
-    
-    # Should have called query twice (Page 1 and Page 2)
-    assert mock_query.call_count == 2
-    mock_query.assert_any_call(123, "TEST_KEY", count=100, page=1)
-    mock_query.assert_any_call(123, "TEST_KEY", count=100, page=2)
-    
-    # 120 inserts
-    assert mock_insert.call_count == 120
-    
-    # Should have updated the page in app_state twice
-    assert mock_update_page.call_count == 2
-    mock_update_page.assert_any_call("test.db", 123, 2) # After page 1
-    mock_update_page.assert_any_call("test.db", 123, 3) # After page 2
-
 @patch('src.daemon.count_unscraped_items')
 @patch('src.daemon.get_next_items_to_scrape')
 @patch('src.daemon.get_workshop_details_api')
@@ -422,3 +388,76 @@ def test_process_batch_scraper_failure(tmp_path):
         assert item["status"] == 206 # Partial Content
         assert item["title"] == "Test Scraper Fail"
         assert item["extended_description"] is None # Scraper failed
+
+def test_daemon_historical_forward_strategy(tmp_path):
+    from src.daemon import Daemon
+    from src.database import initialize_database, update_app_tracking, get_app_tracking
+    import time
+
+    db_path = tmp_path / "test.db"
+    initialize_database(str(db_path))
+
+    config = {
+        "database": {"path": str(db_path)},
+        "api": {"key": "test_key"},
+        "daemon": {"target_appids": [4000], "batch_size": 5, "request_delay_seconds": 0}
+    }
+
+    daemon = Daemon(config)
+
+    now = 1700000000
+
+    with patch('src.daemon.query_files_by_date') as mock_query, \
+         patch('time.time', return_value=now):
+
+        # Simulate API returning some items on page 1, and 0 on page 2
+        def mock_query_files(appid, start, end, key, page=1):
+            if page == 1:
+                return {"total": 50, "items": [{"publishedfileid": "1"}, {"publishedfileid": "2"}]}
+            return {"total": 50, "items": []}
+
+        mock_query.side_effect = mock_query_files
+
+        # Test historical scraping starting from beginning
+        daemon.seed_database()
+
+        # Verify app tracking was updated to `now` because it loops until start_time >= now
+        last_scanned = get_app_tracking(str(db_path), 4000)
+        assert last_scanned == now
+
+        # Mock API returning too many pages (> 450)
+        def mock_query_too_many(appid, start, end, key, page=1):
+            return {"total": 50000, "items": [{"publishedfileid": "3"}]}
+
+        mock_query.side_effect = mock_query_too_many
+
+        # Reset tracking to 10 days ago, and move 'now' forward so we can see the window adjustment
+        update_app_tracking(str(db_path), 4000, now - (10 * 86400))
+        with patch('time.time', return_value=now):
+            # To prevent infinite loop with the too_many mock, we'll only let it run one iteration
+            # by throwing an exception on the second call.
+            mock_query.side_effect = [
+                {"total": 50000, "items": [{"publishedfileid": "3"}]}, # First check, fails threshold
+                {"total": 100, "items": [{"publishedfileid": "4"}]},  # Second check with smaller window, passes
+                {"total": 100, "items": []} # Third check, empty, breaks loop
+            ] * 10 # Repeat in case loop tries more
+
+            daemon.seed_database(target_new=1) # Just find 1 new item
+
+        # The tracked date should advance, but by a smaller increment than the initial 30 days
+        next_scanned = get_app_tracking(str(db_path), 4000)
+        assert next_scanned > now - (10 * 86400)
+        assert next_scanned <= now # It shouldn't go past now
+
+        # Mock 'catching up' to present day
+        update_app_tracking(str(db_path), 4000, now - 3600) # 1 hour ago
+        daemon.seed_database()
+
+        # Should not update because 24h haven't passed
+        assert get_app_tracking(str(db_path), 4000) == now - 3600
+
+        # Mock > 24h passing
+        with patch('time.time', return_value=now + 86400 + 3600): # 25 hours later
+            mock_query.side_effect = mock_query_files # Reset to normal behavior so it finishes
+            daemon.seed_database()
+            assert get_app_tracking(str(db_path), 4000) == now + 86400 + 3600
