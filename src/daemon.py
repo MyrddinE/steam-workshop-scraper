@@ -11,9 +11,11 @@ from src.database import (
     update_app_page,
     insert_or_update_user,
     get_user,
-    get_connection
+    get_connection,
+    get_app_tracking,
+    update_app_tracking
 )
-from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries
+from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries, query_files_by_date
 from src.web_scraper import scrape_extended_details, discover_ids_html
 from src.translator import TranslatorThread, is_ascii
 
@@ -42,7 +44,7 @@ class Daemon:
 
     def handle_shutdown(self, signum, frame):
         """Signals the loop to stop and finishes the current batch safely."""
-        logging.info(f"Received signal {signum}, initiating shutdown...")
+        logging.warning(f"Received signal {signum}, initiating shutdown...")
         self.running = False
         self.translator.running = False
 
@@ -264,43 +266,124 @@ class Daemon:
             self.process_batch()
         logging.info("Daemon gracefully exited.")
 
+    def _find_initial_start_date(self, appid: int) -> int:
+        """
+        Performs a binary search to find the Unix timestamp of the oldest 
+        date range containing workshop items for the appid.
+        Returns a timestamp just before the first items appear.
+        """
+        logging.info(f"AppID {appid} has no tracking history. Performing binary search to find the very first mod release...")
+        
+        low = 1063324800 # ~September 12, 2003 (Steam Launch)
+        now = int(time.time())
+        high = now
+        
+        best_found_start = now - (10 * 365 * 24 * 3600) # Default fallback
+        
+        while high - low > 86400: # 1-day resolution
+            mid = low + (high - low) // 2
+            logging.info(f"Binary search checking range up to {mid} ({datetime.fromtimestamp(mid, timezone.utc).date()})...")
+            
+            result = query_files_by_date(appid, low, mid, self.api_key, page=1)
+            
+            if result.get("total", 0) > 0:
+                # Items found in this left half. The first item is somewhere in here.
+                # So we move our upper bound down to mid.
+                high = mid
+                best_found_start = mid # Keep track in case we abort early
+            else:
+                # No items found in the left half. The first item must be after mid.
+                # So we move our lower bound up to mid.
+                low = mid
+                
+            time.sleep(1) # Be polite to API during search
+            
+        # Move back exactly one window size just to be safe, but no earlier than Steam Launch
+        final_start = max(1063324800, low - 86400)
+        logging.info(f"Binary search complete. First items appeared around {datetime.fromtimestamp(final_start, timezone.utc).date()}.")
+        return final_start
+
     def seed_database(self, target_new: int = 100):
         """
-        Fetches pages of item IDs for target appids until we have added target_new 
-        actually new items to the database, or we run out of results.
+        Historical forward scraping strategy. Uses IPublishedFileService/QueryFiles
+        to find items within dynamic date ranges.
         """
+        now = int(time.time())
+        
         for appid in self.target_appids:
+            last_scanned = get_app_tracking(self.db_path, appid)
+            
+            if last_scanned:
+                start_time = last_scanned
+            else:
+                start_time = self._find_initial_start_date(appid)
+            
+            # If we are within 24h of present, do nothing (wait for daily refresh)
+            if now - start_time < 86400:
+                logging.info(f"AppID {appid} is up to date (last scanned within 24h). Skipping discovery.")
+                continue
+                
+            logging.info(f"Discovering items for AppID {appid} starting from timestamp {start_time}...")
+            
+            # Start with a wide window, e.g., 30 days
+            window_size = 30 * 24 * 3600 
+            
             new_discovered_count = 0
-            consecutive_empty_pages = 0
             
-            while new_discovered_count < target_new and consecutive_empty_pages < 5:
-                page = get_app_page(self.db_path, appid)
-                logging.info(f"Discovering items for AppID {appid} (Page {page})...")
+            while new_discovered_count < target_new and start_time < now:
+                end_time = min(start_time + window_size, now)
                 
-                # Try official API first
-                new_ids = query_workshop_items(appid, self.api_key, count=100, page=page)
+                logging.info(f"Querying window: {start_time} to {end_time} ({round((end_time-start_time)/86400, 1)} days)")
                 
-                # Fallback to HTML scraping if API returned nothing
-                if not new_ids:
-                    logging.info(f"API discovery failed for AppID {appid}. Falling back to HTML scraping...")
-                    new_ids = discover_ids_html(appid, page=page)
+                # Fetch page 1 to check total results
+                result = query_files_by_date(appid, start_time, end_time, self.api_key, page=1)
+                total_items = result["total"]
                 
-                if new_ids:
-                    consecutive_empty_pages = 0
-                    page_new_count = 0
-                    for wid in new_ids:
-                        if insert_or_update_item(self.db_path, {"workshop_id": wid}):
-                            page_new_count += 1
-                    
-                    new_discovered_count += page_new_count
-                    update_app_page(self.db_path, appid, page + 1)
-                    logging.info(f"Page {page} for AppID {appid} provided {page_new_count} new items. (Total new this seed: {new_discovered_count})")
-                    
-                    if page_new_count == 0:
-                        # If a whole page of 100 items had nothing new, we're likely deep in already-scraped territory
-                        consecutive_empty_pages += 1
+                if total_items > 0:
+                    pages_needed = (total_items + 99) // 100
                 else:
-                    logging.warning(f"No items found for AppID {appid} on page {page}. Ending discovery for this app.")
-                    break
+                    pages_needed = 0
+                
+                # Max page threshold check (aim for < 450 pages to be safe from 500 limit)
+                # If we exceed, abort this window and narrow it.
+                if pages_needed > 450:
+                    logging.warning(f"Window returned {pages_needed} pages (exceeds 450 limit). Narrowing window.")
+                    # Halve the window size and retry this exact same start_time
+                    window_size = max(window_size // 2, 3600) # Don't go smaller than 1 hour
+                    continue
+                
+                # Process the pages
+                page_new_count = 0
+                if total_items > 0:
+                    for page in range(1, pages_needed + 1):
+                        if page > 1:
+                            # We already have page 1 from the threshold check
+                            result = query_files_by_date(appid, start_time, end_time, self.api_key, page=page)
+                            
+                        for item in result["items"]:
+                            wid = int(item["publishedfileid"])
+                            if insert_or_update_item(self.db_path, {"workshop_id": wid}):
+                                page_new_count += 1
+                                
+                        time.sleep(0.5) # Polite delay between pages
+                
+                new_discovered_count += page_new_count
+                logging.info(f"Window provided {page_new_count} new items. (Total new this seed: {new_discovered_count})")
+                
+                # Crucial: Full date range successfully scanned, update tracking
+                update_app_tracking(self.db_path, appid, end_time)
+                
+                # Move window forward
+                start_time = end_time
+                
+                # Dynamic adjustment of next window size based on density
+                # Target: ~10 pages (1000 items) per window.
+                if pages_needed == 0:
+                    # Nothing found, aggressively widen window (max 1 year)
+                    window_size = min(window_size * 4, 365 * 24 * 3600)
+                elif pages_needed < 5:
+                    window_size = min(window_size * 2, 365 * 24 * 3600)
+                elif pages_needed > 20:
+                    window_size = max(window_size // 2, 3600)
             
-            logging.info(f"Finished discovery for AppID {appid}. Added {new_discovered_count} new items.")
+            logging.info(f"Finished discovery cycle for AppID {appid}. Added {new_discovered_count} new items.")

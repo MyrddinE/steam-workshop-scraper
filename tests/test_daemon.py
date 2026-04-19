@@ -461,3 +461,39 @@ def test_daemon_historical_forward_strategy(tmp_path):
             mock_query.side_effect = mock_query_files # Reset to normal behavior so it finishes
             daemon.seed_database()
             assert get_app_tracking(str(db_path), 4000) == now + 86400 + 3600
+
+def test_daemon_find_initial_start_date(tmp_path):
+    from src.daemon import Daemon
+    from src.database import initialize_database
+    from unittest.mock import patch
+    import time
+    
+    db_path = tmp_path / "test.db"
+    initialize_database(str(db_path))
+    
+    config = {
+        "database": {"path": str(db_path)},
+        "api": {"key": "test_key"},
+        "daemon": {"target_appids": [4000]}
+    }
+    daemon = Daemon(config)
+    
+    now = int(time.time())
+    
+    with patch('src.daemon.query_files_by_date') as mock_query, \
+         patch('time.time', return_value=now):
+         
+        # Let's say the first item was created at now - 100 days
+        target_date = now - (100 * 86400)
+        
+        def mock_query_files(appid, start, end, key, page=1):
+            if end < target_date:
+                return {"total": 0, "items": []}
+            return {"total": 1, "items": [{"publishedfileid": "1"}]}
+            
+        mock_query.side_effect = mock_query_files
+        
+        found_start = daemon._find_initial_start_date(4000)
+        
+        # It should be within a couple days of the target date
+        assert abs(found_start - target_date) <= 86400 * 2
