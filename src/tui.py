@@ -422,7 +422,8 @@ class ScraperApp(App):
         self.is_loading = False
         
         # UI State recovery
-        self.state_file = "tui_state.yaml"
+        # We use a hidden file to avoid cluttering the working directory
+        self.state_file = ".tui_state.yaml"
         self._initial_state = load_tui_state(self.state_file)
         self._restored_scroll_y = self._initial_state.get("scroll_y", 0)
         self._restored_selected_id = self._initial_state.get("selected_workshop_id", None)

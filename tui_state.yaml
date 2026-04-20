@@ -1,8 +1,0 @@
-filters:
-- field: Title
-  op: contains
-  value: Author A
-scroll_y: 0.0
-selected_workshop_id: 12345
-sort_by: title
-sort_order: ASC
