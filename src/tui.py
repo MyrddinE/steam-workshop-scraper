@@ -294,13 +294,24 @@ class SearchBuilder(VerticalScroll):
                     field_select = r.query_one("#field-select", Select)
                     field_select.value = field
                     
+                    # Manually update options so they are synchronously available
+                    if field == "Author ID" or field == "Workshop ID" or field == "AppID":
+                        op_type = "id"
+                    elif field in ["File Size", "Subs", "Favs", "Views", "Language ID"]:
+                        op_type = "numeric"
+                    else:
+                        op_type = "text"
+                    ops = self.operators[op_type]
                     op_select = r.query_one("#op-select", Select)
+                    op_select.set_options([(o.replace("_", " "), o) for o in ops])
+                    
                     op_select.value = op
                     
                     value_input = r.query_one("#value-input", Input)
                     value_input.value = val
-                except Exception:
-                    pass
+                except Exception as e:
+                    import logging
+                    logging.error(f"apply_values failed: {e}", exc_info=True)
                     
             self.app.call_after_refresh(apply_values)
 

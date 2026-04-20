@@ -7,8 +7,6 @@ from src.database import (
     get_next_items_to_scrape, 
     insert_or_update_item, 
     count_unscraped_items, 
-    get_app_page, 
-    update_app_page,
     insert_or_update_user,
     get_user,
     get_connection,
@@ -274,11 +272,9 @@ class Daemon:
         """
         logging.info(f"AppID {appid} has no tracking history. Performing binary search to find the very first mod release...")
         
-        low = 1063324800 # ~September 12, 2003 (Steam Launch)
+        low = 1317484800 # October 1st, 2011 (Workshop Release)
         now = int(time.time())
         high = now
-        
-        best_found_start = now - (10 * 365 * 24 * 3600) # Default fallback
         
         while high - low > 86400: # 1-day resolution
             mid = low + (high - low) // 2
@@ -290,7 +286,6 @@ class Daemon:
                 # Items found in this left half. The first item is somewhere in here.
                 # So we move our upper bound down to mid.
                 high = mid
-                best_found_start = mid # Keep track in case we abort early
             else:
                 # No items found in the left half. The first item must be after mid.
                 # So we move our lower bound up to mid.
@@ -298,8 +293,8 @@ class Daemon:
                 
             time.sleep(1) # Be polite to API during search
             
-        # Move back exactly one window size just to be safe, but no earlier than Steam Launch
-        final_start = max(1063324800, low - 86400)
+        # Move back exactly one window size just to be safe, but no earlier than Workshop release
+        final_start = max(1317484800, low - 86400)
         logging.info(f"Binary search complete. First items appeared around {datetime.fromtimestamp(final_start, timezone.utc).date()}.")
         return final_start
 

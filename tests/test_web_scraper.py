@@ -99,3 +99,15 @@ def test_discover_ids_html_success():
     assert len(ids) == 2
     assert 5001 in ids
     assert 5002 in ids
+
+@responses.activate
+def test_discover_ids_html_exception():
+    """Test handling of exceptions during discovery."""
+    from unittest.mock import patch
+    import requests
+    with patch('src.web_scraper.HTMLSession') as mock_session:
+        mock_instance = mock_session.return_value
+        mock_instance.get.side_effect = requests.exceptions.RequestException("Timeout")
+        
+        result = discover_ids_html(4000)
+        assert result == []

@@ -88,13 +88,27 @@ def initialize_database(db_path: str):
         except sqlite3.OperationalError:
             pass # Column already exists
 
-    # Create app_state table for pagination
+    # Create app_tracking table for historical scraping
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS app_state (
+    CREATE TABLE IF NOT EXISTS app_tracking (
         appid INTEGER PRIMARY KEY,
-        current_page INTEGER DEFAULT 1
+        last_historical_date_scanned INTEGER
     )
     """)
+
+    # Data Migration: Populate app_tracking from existing workshop_items if empty, 
+    # and drop the obsolete app_state table.
+    cursor.execute("SELECT COUNT(*) FROM app_tracking")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("""
+            INSERT INTO app_tracking (appid, last_historical_date_scanned)
+            SELECT consumer_appid, MAX(time_updated)
+            FROM workshop_items
+            WHERE consumer_appid IS NOT NULL AND time_updated IS NOT NULL
+            GROUP BY consumer_appid
+        """)
+    
+    cursor.execute("DROP TABLE IF EXISTS app_state")
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
@@ -148,36 +162,27 @@ def insert_or_update_item(db_path: str, item_data: dict) -> bool:
 
 def get_next_items_to_scrape(db_path: str, limit: int = 10) -> list[int]:
     """
-    Returns a list of workshop_ids that need to be scraped, prioritizing
-    items that have never been attempted (NULL) or have the oldest attempt time.
+    Returns a list of workshop_ids that need to be scraped, prioritizing in exact order:
+    1. Unscraped new items (status IS NULL).
+    2. Partially failed items (status != 200).
+    3. Successfully scraped items (status = 200), ordered by dt_attempted ASC (stalest first).
     """
     conn = get_connection(db_path)
-    cursor = conn.execute(
-        "SELECT workshop_id FROM workshop_items ORDER BY dt_attempted ASC LIMIT ?", 
-        (limit,)
-    )
+    sql = """
+        SELECT workshop_id FROM workshop_items
+        ORDER BY
+            CASE
+                WHEN status IS NULL THEN 1
+                WHEN status != 200 THEN 2
+                ELSE 3
+            END ASC,
+            dt_attempted ASC
+        LIMIT ?
+    """
+    cursor = conn.execute(sql, (limit,))
     results = [row["workshop_id"] for row in cursor.fetchall()]
     conn.close()
     return results
-
-
-def get_app_page(db_path: str, appid: int) -> int:
-    """Returns the last page scraped for a given appid (defaults to 1)."""
-    conn = get_connection(db_path)
-    cursor = conn.execute("SELECT current_page FROM app_state WHERE appid = ?", (appid,))
-    row = cursor.fetchone()
-    conn.close()
-    return row["current_page"] if row else 1
-
-def update_app_page(db_path: str, appid: int, page: int):
-    """Updates the last page scraped for a given appid."""
-    conn = get_connection(db_path)
-    conn.execute(
-        "INSERT INTO app_state (appid, current_page) VALUES (?, ?) ON CONFLICT(appid) DO UPDATE SET current_page=excluded.current_page",
-        (appid, page)
-    )
-    conn.commit()
-    conn.close()
 
 def count_unscraped_items(db_path: str) -> int:
     """Returns the number of items that have never been scraped (dt_attempted is NULL)."""
@@ -463,3 +468,22 @@ def get_all_authors(db_path: str) -> list[str]:
     results = [row["creator"] for row in cursor.fetchall()]
     conn.close()
     return results
+
+def get_app_tracking(db_path: str, appid: int) -> int | None:
+    """Returns the last_historical_date_scanned for a given appid."""
+    conn = get_connection(db_path)
+    cursor = conn.execute("SELECT last_historical_date_scanned FROM app_tracking WHERE appid = ?", (appid,))
+    row = cursor.fetchone()
+    conn.close()
+    return row["last_historical_date_scanned"] if row else None
+
+def update_app_tracking(db_path: str, appid: int, last_date: int) -> None:
+    """Updates the last_historical_date_scanned for a given appid."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT INTO app_tracking (appid, last_historical_date_scanned) VALUES (?, ?) "
+        "ON CONFLICT(appid) DO UPDATE SET last_historical_date_scanned = excluded.last_historical_date_scanned",
+        (appid, last_date)
+    )
+    conn.commit()
+    conn.close()

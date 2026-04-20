@@ -497,3 +497,35 @@ def test_daemon_find_initial_start_date(tmp_path):
         
         # It should be within a couple days of the target date
         assert abs(found_start - target_date) <= 86400 * 2
+
+def test_daemon_find_initial_start_date_no_items(tmp_path):
+    """Test binary search when no items exist for the appid."""
+    from src.daemon import Daemon
+    from src.database import initialize_database
+    from unittest.mock import patch
+    import time
+    
+    db_path = tmp_path / "test.db"
+    initialize_database(str(db_path))
+    
+    config = {
+        "database": {"path": str(db_path)},
+        "api": {"key": "test_key"},
+        "daemon": {"target_appids": [4000]}
+    }
+    daemon = Daemon(config)
+    
+    now = int(time.time())
+    
+    with patch('src.daemon.query_files_by_date') as mock_query, \
+         patch('time.time', return_value=now):
+         
+        # Mock API returning zero items for every single query
+        mock_query.return_value = {"total": 0, "items": []}
+        
+        found_start = daemon._find_initial_start_date(4000)
+        
+        # If no items ever existed, 'low' should have converged to 'now'
+        # and final_start should be approximately now - 1 day.
+        assert abs(found_start - (now - 86400)) <= 86400
+        assert found_start >= 1317484800

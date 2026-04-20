@@ -173,3 +173,43 @@ def test_get_player_summaries_exception():
     responses.add(responses.GET, url, body=requests.exceptions.ConnectionError("Connection timeout"))
     result = get_player_summaries([123], "test_key")
     assert result == {}
+
+@responses.activate
+def test_query_files_by_date_success():
+    from src.steam_api import query_files_by_date
+    url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
+    
+    mock_data = {
+        "response": {
+            "total": 2,
+            "publishedfiledetails": [
+                {"publishedfileid": "111", "time_updated": 1000},
+                {"publishedfileid": "222", "time_updated": 2000}
+            ]
+        }
+    }
+    
+    responses.add(responses.GET, url, json=mock_data, status=200)
+    
+    result = query_files_by_date(4000, 100, 2000, "TEST_KEY", page=1)
+    assert result["total"] == 2
+    assert len(result["items"]) == 2
+    assert result["items"][0]["publishedfileid"] == "111"
+
+@responses.activate
+def test_query_files_by_date_empty():
+    from src.steam_api import query_files_by_date
+    url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
+    responses.add(responses.GET, url, json={"response": {}}, status=200)
+    result = query_files_by_date(4000, 100, 2000, "TEST_KEY", page=1)
+    assert result["total"] == 0
+    assert len(result["items"]) == 0
+
+@responses.activate
+def test_query_files_by_date_error():
+    from src.steam_api import query_files_by_date
+    url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
+    responses.add(responses.GET, url, status=500)
+    result = query_files_by_date(4000, 100, 2000, "TEST_KEY", page=1)
+    assert result["total"] == 0
+    assert len(result["items"]) == 0

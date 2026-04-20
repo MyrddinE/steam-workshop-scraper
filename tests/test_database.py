@@ -9,8 +9,6 @@ from src.database import (
     get_next_items_to_scrape,
     search_items,
     get_connection,
-    get_app_page,
-    update_app_page,
     count_unscraped_items
 )
 
@@ -20,17 +18,6 @@ def db_path(tmp_path):
     path = str(tmp_path / "test_workshop.db")
     initialize_database(path)
     return path
-
-def test_app_state_pagination(db_path):
-    """Test getting and updating the current page for an appid."""
-    # Should default to 1
-    assert get_app_page(db_path, 294100) == 1
-    
-    update_app_page(db_path, 294100, 2)
-    assert get_app_page(db_path, 294100) == 2
-    
-    update_app_page(db_path, 294100, 5)
-    assert get_app_page(db_path, 294100) == 5
 
 def test_count_unscraped_items(db_path):
     """Test counting items that have never been attempted."""
@@ -290,3 +277,43 @@ def test_search_items_pagination(db_path):
     results = search_items(db_path, query="Page Item", limit=5, offset=5, sort_by="workshop_id", sort_order="ASC")
     assert len(results) == 5
     assert results[0]["workshop_id"] == 106
+
+def test_app_tracking(db_path):
+    from src.database import get_app_tracking, update_app_tracking
+    
+    # Initially should be None
+    assert get_app_tracking(db_path, 4000) is None
+    
+    # Update and read
+    update_app_tracking(db_path, 4000, 1600000000)
+    assert get_app_tracking(db_path, 4000) == 1600000000
+    
+    # Update again
+    update_app_tracking(db_path, 4000, 1700000000)
+    assert get_app_tracking(db_path, 4000) == 1700000000
+
+def test_get_next_items_to_scrape_priority(db_path):
+    from src.database import get_next_items_to_scrape, insert_or_update_item
+    
+    # 1. Successfully scraped items, stalest first (status = 200)
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "dt_attempted": "2023-01-01"})
+    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "dt_attempted": "2024-01-01"})
+    
+    # 2. Partially failed items (status != 200)
+    insert_or_update_item(db_path, {"workshop_id": 3, "status": 206, "dt_attempted": "2025-01-01"})
+    insert_or_update_item(db_path, {"workshop_id": 4, "status": 500, "dt_attempted": "2025-02-01"})
+    
+    # 3. Unscraped new items (status IS NULL)
+    insert_or_update_item(db_path, {"workshop_id": 5})
+    insert_or_update_item(db_path, {"workshop_id": 6})
+    
+    items = get_next_items_to_scrape(db_path, limit=6)
+    
+    # Priority should be:
+    # Group 1: NULL status -> 5, 6 (order doesn't strictly matter between 5/6, but typically by rowid or dt)
+    # Group 2: != 200 status -> 3, 4 (ordered by dt_attempted ASC)
+    # Group 3: 200 status -> 1, 2 (ordered by dt_attempted ASC)
+    
+    assert set(items[0:2]) == {5, 6}
+    assert items[2:4] == [3, 4]
+    assert items[4:6] == [1, 2]
