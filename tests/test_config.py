@@ -1,8 +1,10 @@
 import os
 import yaml
 import pytest
+from unittest.mock import patch
 from src.config import load_config
 
+@patch.dict(os.environ, {}, clear=True)
 def test_load_config_yaml(tmp_path):
     """Tests that config correctly loads from a YAML file."""
     config_data = {

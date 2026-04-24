@@ -1,6 +1,7 @@
 from requests_html import HTMLSession
 import requests
 import re
+import requests.utils
 
 def scrape_extended_details(item_url: str) -> dict | None:
     """
@@ -30,29 +31,72 @@ def scrape_extended_details(item_url: str) -> dict | None:
     except requests.exceptions.RequestException:
         return None
 
-def discover_ids_html(appid: int, page: int = 1) -> list[int]:
+def discover_items_by_date_html(appid: int, start_date: int, end_date: int, page: int = 1, search_text: str = "", required_tags: list[str] = None, excluded_tags: list[str] = None, appids_required_for_use: list[int] = None) -> list[int]:
     """
-    Scrapes the Steam Workshop browse page to find item IDs.
-    Acts as a fallback when the Steam API is unavailable or no key is provided.
+    Scrapes the Steam Workshop browse page using date filters.
     """
-    url = f"https://steamcommunity.com/workshop/browse/?appid={appid}&browsemethod=mostrecent&section=readytouseitems&p={page}"
+    # workshop_preferences_v2 cookie value is: {"bOptedIn":true}
+    cookies = {
+        'workshop_preferences_v2': '%7B%22bOptedIn%22%3Atrue%7D'
+    }
+    
+    # Use 'mostrecent' to get chronological results, then apply date range
+    # Use updated_date_range_filter, as requested by user.
+    url_params = [
+        f"appid={appid}",
+        f"browsesort=mostrecent",
+        f"section=readytouseitems",
+        f"p={page}",
+        f"updated_date_range_filter_start={start_date}",
+        f"updated_date_range_filter_end={end_date}"
+    ]
+
+    if search_text:
+        url_params.append(f"searchtext={requests.utils.quote(search_text)}")
+
+    if required_tags:
+        for tag in required_tags:
+            url_params.append(f"requiredtags[]={requests.utils.quote(tag)}")
+
+    if excluded_tags:
+        for tag in excluded_tags:
+            url_params.append(f"excludedtags[]={requests.utils.quote(tag)}")
+
+    if appids_required_for_use:
+        for required_appid in appids_required_for_use:
+            url_params.append(f"appids_required_for_use[]={required_appid}")
+
+    url = f"https://steamcommunity.com/workshop/browse?" + "&".join(url_params)
+    
     session = HTMLSession()
     try:
-        response = session.get(url, timeout=10)
+        response = session.get(url, cookies=cookies, timeout=15)
         response.raise_for_status()
         
-        # Steam IDs are in 'id' parameters of links (e.g., sharedfiles/filedetails/?id=...)
-        # We look for all sharedfiles links
-        links = response.html.find('a[href*="sharedfiles/filedetails/?id="]')
         ids = []
-        for link in links:
-            href = link.attrs.get('href', '')
-            # Extract digits after 'id='
-            match = re.search(r'id=(\d+)', href)
-            if match:
-                ids.append(int(match.group(1)))
+        # Extract data from the SSR JSON blob (only publishedfileid for now)
+        # Look for a pattern like: "publishedfileid":"123"
+        item_id_pattern = re.compile(r'\\\"publishedfileid\\\":\\\"(\d+)\\\"')
+        matches = item_id_pattern.findall(response.text)
         
-        # Return unique IDs only
+        if not matches:
+            # Try a less escaped version
+            item_id_pattern = re.compile(r'"publishedfileid":"(\d+)"'
+            )
+            matches = item_id_pattern.findall(response.text)
+
+        for item_id in matches:
+            ids.append(int(item_id))
+            
+        # Fallback to standard hrefs if JSON extraction fails
+        if not ids:
+            links = response.html.find('a[href*="sharedfiles/filedetails/?id="]')
+            for link in links:
+                href = link.attrs.get('href', '')
+                match = re.search(r'id=(\d+)', href)
+                if match:
+                    ids.append(int(match.group(1)))
+
         return list(set(ids))
     except (requests.exceptions.RequestException, Exception):
         return []

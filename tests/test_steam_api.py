@@ -79,8 +79,7 @@ def test_get_workshop_details_api_404():
         status=404
     )
     details = get_workshop_details_api(item_id=123, api_key="TEST_KEY")
-    assert details is None
-
+    assert details["status"] == 500
 @responses.activate
 def test_get_workshop_details_api_429():
     """Test handling of 429 Too Many Requests."""
@@ -90,8 +89,7 @@ def test_get_workshop_details_api_429():
         status=429
     )
     details = get_workshop_details_api(item_id=123, api_key="TEST_KEY")
-    assert details is None
-
+    assert details["status"] == 500
 @responses.activate
 def test_get_workshop_details_api_timeout():
     """Test handling of request timeouts."""
@@ -101,8 +99,7 @@ def test_get_workshop_details_api_timeout():
         body=requests.exceptions.Timeout()
     )
     details = get_workshop_details_api(item_id=123, api_key="TEST_KEY")
-    assert details is None
-
+    assert details["status"] == 500
 @responses.activate
 def test_get_workshop_details_api_empty_details():
     """Test when Steam API returns an empty publishedfiledetails array."""
@@ -120,8 +117,7 @@ def test_get_workshop_details_api_empty_details():
         status=200
     )
     details = get_workshop_details_api(item_id=123, api_key="TEST_KEY")
-    assert details is None
-
+    assert details["status"] == 404
 @responses.activate
 def test_get_workshop_details_api_invalid_item():
     """Test when Steam API returns 200 but item doesn't exist (result != 1)."""
@@ -141,8 +137,7 @@ def test_get_workshop_details_api_invalid_item():
         status=200
     )
     details = get_workshop_details_api(item_id=123, api_key="TEST_KEY")
-    assert details is None
-
+    assert details["status"] == 404
 @responses.activate
 def test_get_player_summaries_success():
     url = "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/"

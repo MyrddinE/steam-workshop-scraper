@@ -5,7 +5,7 @@ from textual import on, events
 from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button, Markdown
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
-from src.database import search_items, get_all_authors, initialize_database, flag_for_translation, get_item_details
+from src.database import search_items, get_all_authors, initialize_database, flag_for_translation, get_item_details, save_app_filter
 from src.config import load_config
 import os
 import yaml
@@ -349,6 +349,14 @@ class ScraperApp(App):
         height: 3;
         margin-bottom: 0;
     }
+    .search-buttons {
+        height: 3;
+        padding-top: 1;
+    }
+    .search-buttons Button {
+        width: auto; # Let buttons size naturally
+        margin-left: 1;
+    }
     .row-field { width: 20%; }
     .row-op { width: 20%; }
     .row-input { width: 35%; }
@@ -496,6 +504,11 @@ class ScraperApp(App):
         search_builder = SearchBuilder(id="search-builder")
         search_container = Vertical(
             search_builder,
+            Horizontal(
+                Button("Execute Search", id="btn-execute-search", variant="primary"),
+                Button("Save Filter for Scraper", id="btn-save-filter", variant="default"),
+                classes="search-buttons"
+            ),
             id="search-container"
         )
         search_container.border_title = "Filters"
@@ -653,7 +666,11 @@ class ScraperApp(App):
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses (e.g., Jump to Author, Translation, Search Builder buttons)."""
-        if event.button.id in ("btn-and", "btn-or"):
+        if event.button.id == "btn-execute-search":
+            await self.execute_search()
+        elif event.button.id == "btn-save-filter":
+            await self.action_save_filter_for_scraper()
+        elif event.button.id in ("btn-and", "btn-or"):
             logic = "AND" if event.button.id == "btn-and" else "OR"
             self.query_one("#search-builder", SearchBuilder).add_row(logic)
             await self.execute_search()
@@ -705,6 +722,46 @@ class ScraperApp(App):
                 detail_pane.update_content()
                 
                 self.notify(f"Item {wid} flagged for high-priority translation.")
+
+    async def action_save_filter_for_scraper(self) -> None:
+        """
+        Extracts current filters from the TUI and saves them to the database
+        for use by the background scraper.
+        """
+        builder = self.query_one("#search-builder", SearchBuilder)
+        filters = builder.get_filters()
+        
+        filter_text = ""
+        required_tags = []
+        excluded_tags = []
+
+        for f in filters:
+            field = f.get("field")
+            op = f.get("op")
+            value = f.get("value", "")
+            
+            if field == "Title" and op == "contains":
+                filter_text = value
+            elif field == "Tags" and op == "contains":
+                # Split tags by comma or space for simplicity, then add
+                for tag in re.split(r'[\s,]+', value):
+                    if tag:
+                        required_tags.append(tag)
+            elif field == "Tags" and op == "does_not_contain":
+                for tag in re.split(r'[\s,]+', value):
+                    if tag:
+                        excluded_tags.append(tag)
+            # Numeric filters are ignored as per requirements
+
+        # Get currently active appid from config or default
+        current_appid = self.config.get("daemon", {}).get("target_appids", [None])[0] # Get first appid for simplicity
+
+        if current_appid is None:
+            self.notify("No target AppID configured for saving filter.", severity="error")
+            return
+            
+        save_app_filter(self.db_path, current_appid, filter_text, required_tags, excluded_tags)
+        self.notify(f"Filter saved for AppID {current_appid}. Scraper will use this filter.")
 
 def main():
     config_path = "config.yaml"

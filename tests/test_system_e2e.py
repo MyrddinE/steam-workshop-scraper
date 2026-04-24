@@ -15,64 +15,43 @@ def system_config(tmp_path):
     initialize_database(db_path)
     
     # We must seed an initial item for the daemon to pick up
-    insert_or_update_item(db_path, {"workshop_id": 8888})
+    # Using a real RimWorld item ID for live verification
+    real_rimworld_id = 2838181007
+    insert_or_update_item(db_path, {"workshop_id": real_rimworld_id})
+    
+    # Add dummy items to suppress automatic seeding/discovery expansion during test
+    for i in range(101):
+        insert_or_update_item(db_path, {"workshop_id": 99000 + i, "dt_attempted": "2026-01-01", "status": 200})
     
     return {
         "database": {"path": db_path},
-        "api": {"key": "E2E_KEY"},
+        "api": {"key": os.environ.get("STEAM_API_KEY")},
         "daemon": {
             "batch_size": 1, 
-            "request_delay_seconds": 0.05,
-            "target_appids": [8888]
+            "request_delay_seconds": 0.5,
+            "target_appids": [294100]
         }
     }
 
 @pytest.mark.asyncio
-@responses.activate
 async def test_end_to_end_system_flow(system_config):
     """
-    Simulates the entire system:
-    1. The Daemon fetching from 'Steam'.
-    2. The Database storing it.
-    3. The TUI searching and displaying it.
+    Simulates the entire system using the LIVE Steam site.
     """
-    
-    # 1. Mock the Steam API and Website
-    api_url = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
-    api_mock_data = {
-        "response": {
-            "result": 1,
-            "resultcount": 1,
-            "publishedfiledetails": [
-                {
-                    "publishedfileid": "8888",
-                    "result": 1,
-                    "title": "E2E Final Boss Mod",
-                    "creator": "System Tester",
-                    "subscriptions": 9999
-                }
-            ]
-        }
-    }
-    responses.add(responses.POST, api_url, json=api_mock_data, status=200)
-
-    web_url = "https://steamcommunity.com/sharedfiles/filedetails/?id=8888"
-    web_mock_html = '''
-    <html><body>
-        <div class="workshopItemDescription" id="highlightContent">The ultimate test.</div>
-        <div class="workshopTags"><a href="#">E2E</a></div>
-    </body></html>
-    '''
-    responses.add(responses.GET, web_url, body=web_mock_html, status=200, content_type="text/html")
+    if not system_config["api"]["key"]:
+        pytest.skip("STEAM_API_KEY not set")
 
     # 2. Run the Daemon (synchronously for exactly one batch)
     daemon = Daemon(system_config)
     daemon.process_batch()
     
     # Verify DB state directly first
-    db_results = search_items(system_config["database"]["path"], title_query="E2E")
-    assert len(db_results) == 1
-    assert db_results[0]["status"] == 200
+    # Search for an item we know exists or was just scraped
+    from src.database import get_item_details
+    item = get_item_details(system_config["database"]["path"], 2838181007)
+    assert item is not None
+    assert item["status"] == 200
+    assert item["title"] is not None
 
     # 3. Spin up the TUI and search for what the Daemon just downloaded
     # We have to patch load_config so the TUI uses our temporary system_config

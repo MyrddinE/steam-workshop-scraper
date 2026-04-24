@@ -25,16 +25,22 @@ def get_workshop_details_api(item_id: int, api_key: str) -> dict | None:
         
         details = json_data.get("response", {}).get("publishedfiledetails", [])
         if not details:
-            return None
+            # If no details, it means the item was not found or is invalid.
+            return {"status": 404, "publishedfileid": item_id}
             
         item = details[0]
         if item.get("result") != 1:
-            return None
+            return {"status": 404, "publishedfileid": item_id}
             
+        # Ensure the item always has a status, default to 200 if not provided by API
+        if "status" not in item:
+            item["status"] = 200
+
         return item
         
     except requests.exceptions.RequestException:
-        return None
+        # Return a 500 status on API request failure
+        return {"status": 500, "publishedfileid": item_id}
 
 def query_workshop_items(appid: int, api_key: str, count: int = 50, page: int = 1) -> list[int]:
     """

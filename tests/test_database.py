@@ -3,6 +3,7 @@ import os
 import threading
 import time
 import pytest
+import json
 from src.database import (
     initialize_database,
     insert_or_update_item,
@@ -279,18 +280,41 @@ def test_search_items_pagination(db_path):
     assert results[0]["workshop_id"] == 106
 
 def test_app_tracking(db_path):
-    from src.database import get_app_tracking, update_app_tracking
+    from src.database import get_app_tracking, update_app_tracking, save_app_filter
     
     # Initially should be None
     assert get_app_tracking(db_path, 4000) is None
     
-    # Update and read
+    # Test update_app_tracking (last_historical_date_scanned)
     update_app_tracking(db_path, 4000, 1600000000)
-    assert get_app_tracking(db_path, 4000) == 1600000000
+    tracking = get_app_tracking(db_path, 4000)
+    assert tracking["last_historical_date_scanned"] == 1600000000
+    assert tracking["filter_text"] == ''
+    assert tracking["required_tags"] == '[]'
+    assert tracking["excluded_tags"] == '[]'
     
     # Update again
     update_app_tracking(db_path, 4000, 1700000000)
-    assert get_app_tracking(db_path, 4000) == 1700000000
+    tracking = get_app_tracking(db_path, 4000)
+    assert tracking["last_historical_date_scanned"] == 1700000000
+
+    # Test save_app_filter
+    save_app_filter(db_path, 4000, "test search", ["tag1", "tag2"], ["excl1"])
+    tracking = get_app_tracking(db_path, 4000)
+    assert tracking["filter_text"] == "test search"
+    assert tracking["required_tags"] == json.dumps(["tag1", "tag2"])
+    assert tracking["excluded_tags"] == json.dumps(["excl1"])
+    
+    # Ensure last_historical_date_scanned is NOT updated by save_app_filter
+    assert tracking["last_historical_date_scanned"] == 1700000000
+
+    # Test saving only some filters
+    save_app_filter(db_path, 4000, required_tags=["new_tag"])
+    tracking = get_app_tracking(db_path, 4000)
+    assert tracking["filter_text"] == "" # Should revert to default if not provided
+    assert tracking["required_tags"] == json.dumps(["new_tag"])
+    assert tracking["excluded_tags"] == '[]'
+
 
 def test_get_next_items_to_scrape_priority(db_path):
     from src.database import get_next_items_to_scrape, insert_or_update_item

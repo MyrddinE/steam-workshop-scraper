@@ -7,20 +7,25 @@ from src.database import (
     get_next_items_to_scrape, 
     insert_or_update_item, 
     count_unscraped_items, 
-    insert_or_update_user,
-    get_user,
-    get_connection,
+    insert_or_update_user, 
+    get_user, 
+    flag_for_translation,
     get_app_tracking,
-    update_app_tracking
+    update_app_tracking,
+    save_app_filter,
+    get_connection # Added
 )
 from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries, query_files_by_date
-from src.web_scraper import scrape_extended_details, discover_ids_html
+from src.web_scraper import scrape_extended_details, discover_items_by_date_html
 from src.translator import TranslatorThread, is_ascii
+import json # For handling JSON-serialized tags
+
 
 class Daemon:
     def __init__(self, config: dict):
         self.config = config
         self.running = True
+        self.last_filters = {}
         
         # Implement default fallbacks
         self.db_path = config.get("database", {}).get("path", "workshop.db")
@@ -119,23 +124,37 @@ class Daemon:
 
             # Step 1: Query API
             api_data = get_workshop_details_api(item_id, self.api_key)
-            if not api_data:
-                base_data["status"] = 500
-                insert_or_update_item(self.db_path, base_data)
-                logging.warning(f"[{item_id}] Failed to fetch from Steam API.")
-                time.sleep(self.delay)
-                continue
 
-            # Merge API data
-            # Map keys that differ from our schema
-            if "publishedfileid" in api_data:
-                api_data["workshop_id"] = int(api_data.pop("publishedfileid"))
-            if "creator_app_id" in api_data:
-                api_data["creator_appid"] = api_data.pop("creator_app_id")
-            if "consumer_app_id" in api_data:
-                api_data["consumer_appid"] = api_data.pop("consumer_app_id")
-            if "description" in api_data:
-                api_data["short_description"] = api_data.pop("description")
+            # Initialize base_data with item_id, attempt timestamp, and API-provided status
+            base_data = {
+                "workshop_id": item_id,
+                "dt_attempted": now_iso,
+                "status": api_data.get("status", 0) # Default to 0 if API doesn't provide one
+            }
+            
+            if base_data["status"] == 404:
+                logging.warning(f"[{item_id}] Item not found (404) via API. Marking as such.")
+                insert_or_update_item(self.db_path, base_data)
+                continue # Skip to next item
+            elif base_data["status"] == 500:
+                logging.error(f"[{item_id}] API request failed (500). Retrying later.")
+                insert_or_update_item(self.db_path, base_data) # Store 500 status
+                continue # Skip to next item
+
+            # If API call was successful, proceed with processing its data
+            # Merge API data (it will contain actual item details if status != 404/500)
+            # Ensure the API data does not override workshop_id, dt_attempted, status which are already set in base_data
+            api_data.pop("publishedfileid", None) # Remove it if present, as it's mapped to workshop_id
+            api_data.pop("status", None) # Remove status as we explicitly set it in base_data
+            base_data.update(api_data)
+
+            # Map keys that differ from our schema (these keys were already removed in steam_api.py, but for safety.)
+            if "creator_app_id" in base_data:
+                base_data["creator_appid"] = base_data.pop("creator_app_id")
+            if "consumer_app_id" in base_data:
+                base_data["consumer_appid"] = base_data.pop("consumer_app_id")
+            if "description" in base_data:
+                base_data["short_description"] = base_data.pop("description")
 
             # Remove keys that don't match our schema
             allowed_keys = {
@@ -148,9 +167,9 @@ class Daemon:
             }
             
             clean_api_data = {}
-            known_ignored_keys = {"result"}
+            known_ignored_keys = {"result"} # 'result' is handled by steam_api.py, should not appear here
             
-            for k, v in api_data.items():
+            for k, v in base_data.items():
                 if k in allowed_keys:
                     clean_api_data[k] = v
                 elif k not in known_ignored_keys:
@@ -160,7 +179,7 @@ class Daemon:
                     else:
                         logging.debug(f"Discarding unknown (empty) API column: '{k}' for item {item_id}")
                 
-            base_data.update(clean_api_data)
+            base_data = clean_api_data # Overwrite base_data with only allowed keys
             base_data["dt_updated"] = now_iso
 
             # Check if tags were provided as list, JSON stringify for SQLite
@@ -173,10 +192,12 @@ class Daemon:
             
             if not scrape_data:
                 base_data["status"] = 206 # Partial Content
+                logging.debug(f"DEBUG: Calling insert_or_update_item with base_data: {base_data}") # Debug print
                 insert_or_update_item(self.db_path, base_data)
-                
+
                 # Assemble detailed log message
                 successful_fields = [k for k, v in base_data.items() if v is not None]
+
                 failed_fields = ["extended_description", "tags"] # Known scrape targets
                 logging.warning(
                     f"[{item_id}] '{base_data.get('title', 'Unknown')}' | Scraper failed, partial data saved. "
@@ -264,10 +285,10 @@ class Daemon:
             self.process_batch()
         logging.info("Daemon gracefully exited.")
 
-    def _find_initial_start_date(self, appid: int) -> int:
+    def _find_initial_start_date(self, appid: int, search_text: str = "", required_tags: list[str] = None, excluded_tags: list[str] = None) -> int:
         """
         Performs a binary search to find the Unix timestamp of the oldest 
-        date range containing workshop items for the appid.
+        date range containing workshop items for the appid, given filter criteria.
         Returns a timestamp just before the first items appear.
         """
         logging.info(f"AppID {appid} has no tracking history. Performing binary search to find the very first mod release...")
@@ -277,12 +298,16 @@ class Daemon:
         high = now
         
         while high - low > 86400: # 1-day resolution
+            if not self.running:
+                logging.info("Binary search interrupted by shutdown signal.")
+                break
             mid = low + (high - low) // 2
             logging.info(f"Binary search checking range up to {mid} ({datetime.fromtimestamp(mid, timezone.utc).date()})...")
             
-            result = query_files_by_date(appid, low, mid, self.api_key, page=1)
+            # Use web scraper since API doesn't support date filtering
+            found_items = discover_items_by_date_html(appid, low, mid, page=1, search_text=search_text, required_tags=required_tags, excluded_tags=excluded_tags)
             
-            if result.get("total", 0) > 0:
+            if len(found_items) > 0:
                 # Items found in this left half. The first item is somewhere in here.
                 # So we move our upper bound down to mid.
                 high = mid
@@ -304,81 +329,107 @@ class Daemon:
         to find items within dynamic date ranges.
         """
         now = int(time.time())
-        
-        for appid in self.target_appids:
-            last_scanned = get_app_tracking(self.db_path, appid)
-            
-            if last_scanned:
-                start_time = last_scanned
+
+        # AppID-specific discovery loop for initial seeding
+        for appid in self.config["daemon"]["target_appids"]:
+            app_tracking = get_app_tracking(self.db_path, appid)
+            last_scanned_date = app_tracking["last_historical_date_scanned"] if app_tracking else 0
+            saved_filter_text = app_tracking["filter_text"] if app_tracking else ""
+            saved_required_tags = json.loads(app_tracking["required_tags"]) if app_tracking and app_tracking["required_tags"] else []
+            saved_excluded_tags = json.loads(app_tracking["excluded_tags"]) if app_tracking and app_tracking["excluded_tags"] else []
+
+            # Compare current filter with last used filter (stored in daemon instance)
+            current_filter = {
+                "text": saved_filter_text,
+                "req_tags": sorted(saved_required_tags),
+                "excl_tags": sorted(saved_excluded_tags)
+            }
+            current_filter_hash = json.dumps(current_filter, sort_keys=True)
+
+            if appid not in self.last_filters:
+                self.last_filters[appid] = {"hash": None, "start_time": None}
+
+            filter_changed = (self.last_filters[appid]["hash"] != current_filter_hash)
+
+            if filter_changed:
+                logging.info(f"Filter changed for AppID {appid}. Resetting historical scan.")
+                # If filter changed, reset the scan to the very beginning.
+                # The binary search will find the first item under the new filter.
+                start_time = self._find_initial_start_date(appid, saved_filter_text, saved_required_tags, saved_excluded_tags)
+                last_scanned_date = start_time # Update tracking to new starting point
+                self.last_filters[appid]["hash"] = current_filter_hash
+                self.last_filters[appid]["start_time"] = start_time
+                update_app_tracking(self.db_path, appid, start_time) # Also update DB to reflect new start
             else:
-                start_time = self._find_initial_start_date(appid)
-            
-            # If we are within 24h of present, do nothing (wait for daily refresh)
-            if now - start_time < 86400:
+                start_time = last_scanned_date
+                self.last_filters[appid]["hash"] = current_filter_hash
+                self.last_filters[appid]["start_time"] = start_time
+
+            # If the app was scanned recently, skip for now.
+            if (now - last_scanned_date) < (24 * 3600) and not filter_changed:
                 logging.info(f"AppID {appid} is up to date (last scanned within 24h). Skipping discovery.")
                 continue
-                
+
             logging.info(f"Discovering items for AppID {appid} starting from timestamp {start_time}...")
-            
-            # Start with a wide window, e.g., 30 days
-            window_size = 30 * 24 * 3600 
-            
             new_discovered_count = 0
-            
-            while new_discovered_count < target_new and start_time < now:
+            window_size = 30 * 24 * 3600 # Start with a 30-day window
+
+            # Continue looping while we're finding new items or haven't reached current time
+            # And we haven't been explicitly told to stop
+            while start_time < now and self.running:
                 end_time = min(start_time + window_size, now)
-                
+                if end_time == start_time: # Avoid infinite loop if start_time catches up to now exactly
+                    break
+
                 logging.info(f"Querying window: {start_time} to {end_time} ({round((end_time-start_time)/86400, 1)} days)")
-                
-                # Fetch page 1 to check total results
-                result = query_files_by_date(appid, start_time, end_time, self.api_key, page=1)
-                total_items = result["total"]
-                
-                if total_items > 0:
-                    pages_needed = (total_items + 99) // 100
-                else:
-                    pages_needed = 0
-                
-                # Max page threshold check (aim for < 450 pages to be safe from 500 limit)
-                # If we exceed, abort this window and narrow it.
-                if pages_needed > 450:
-                    logging.warning(f"Window returned {pages_needed} pages (exceeds 450 limit). Narrowing window.")
-                    # Halve the window size and retry this exact same start_time
-                    window_size = max(window_size // 2, 3600) # Don't go smaller than 1 hour
-                    continue
-                
-                # Process the pages
-                page_new_count = 0
-                if total_items > 0:
-                    for page in range(1, pages_needed + 1):
-                        if page > 1:
-                            # We already have page 1 from the threshold check
-                            result = query_files_by_date(appid, start_time, end_time, self.api_key, page=page)
-                            
-                        for item in result["items"]:
-                            wid = int(item["publishedfileid"])
-                            if insert_or_update_item(self.db_path, {"workshop_id": wid}):
-                                page_new_count += 1
-                                
-                        time.sleep(0.5) # Polite delay between pages
-                
-                new_discovered_count += page_new_count
-                logging.info(f"Window provided {page_new_count} new items. (Total new this seed: {new_discovered_count})")
-                
+
+                window_new_count = 0
+                page = 1
+                while self.running:
+                    found_items = discover_items_by_date_html(appid, start_time, end_time, page=page, search_text=saved_filter_text, required_tags=saved_required_tags, excluded_tags=saved_excluded_tags)
+
+                    if not found_items:
+                        break
+
+                    page_new_count = 0
+                    for item_id in found_items:
+                        # discover_items_by_date_html now returns a list of IDs
+                        if insert_or_update_item(self.db_path, {"workshop_id": item_id}):
+                            page_new_count += 1
+
+                    window_new_count += page_new_count
+                    logging.info(f"Page {page} provided {page_new_count} new items.")
+
+                    # If we got fewer than 30 items, it's likely the last page
+                    if len(found_items) < 30:
+                        break
+
+                    # Safety limit for paging
+                    if page >= 100: # 3000 items per window max
+                        logging.warning("Hit safety limit of 100 pages for a single date window.")
+                        break
+
+                    page += 1
+                    time.sleep(self.delay) # Be polite
+
+                new_discovered_count += window_new_count
+                logging.info(f"Window provided {window_new_count} new items. (Total new this seed: {new_discovered_count})")
+
                 # Crucial: Full date range successfully scanned, update tracking
+                # This means we've processed up to end_time for the current filter.
+                # Only update last_historical_date_scanned here, filter is tracked separately.
                 update_app_tracking(self.db_path, appid, end_time)
-                
+
                 # Move window forward
                 start_time = end_time
-                
+
                 # Dynamic adjustment of next window size based on density
-                # Target: ~10 pages (1000 items) per window.
-                if pages_needed == 0:
+                if window_new_count == 0:
                     # Nothing found, aggressively widen window (max 1 year)
                     window_size = min(window_size * 4, 365 * 24 * 3600)
-                elif pages_needed < 5:
+                elif window_new_count < 100:
                     window_size = min(window_size * 2, 365 * 24 * 3600)
-                elif pages_needed > 20:
+                elif window_new_count > 500:
                     window_size = max(window_size // 2, 3600)
-            
+
             logging.info(f"Finished discovery cycle for AppID {appid}. Added {new_discovered_count} new items.")

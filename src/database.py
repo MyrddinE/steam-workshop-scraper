@@ -1,6 +1,7 @@
 import sqlite3
 import shlex
 import re
+import json
 
 def get_connection(db_path: str):
     """
@@ -88,13 +89,28 @@ def initialize_database(db_path: str):
         except sqlite3.OperationalError:
             pass # Column already exists
 
-    # Create app_tracking table for historical scraping
+    # Create app_tracking table for historical scraping and filter storage
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS app_tracking (
         appid INTEGER PRIMARY KEY,
-        last_historical_date_scanned INTEGER
+        last_historical_date_scanned INTEGER,
+        filter_text TEXT DEFAULT '',
+        required_tags TEXT DEFAULT '[]',
+        excluded_tags TEXT DEFAULT '[]'
     )
     """)
+
+    # Safe migrations for existing databases to add new filter columns
+    app_tracking_new_cols = [
+        ("filter_text", "TEXT DEFAULT ''"),
+        ("required_tags", "TEXT DEFAULT '[]'"),
+        ("excluded_tags", "TEXT DEFAULT '[]'")
+    ]
+    for col_name, col_type in app_tracking_new_cols:
+        try:
+            cursor.execute(f"ALTER TABLE app_tracking ADD COLUMN {col_name} {col_type}")
+        except sqlite3.OperationalError:
+            pass # Column already exists
 
     # Data Migration: Populate app_tracking from existing workshop_items if empty, 
     # and drop the obsolete app_state table.
@@ -469,13 +485,41 @@ def get_all_authors(db_path: str) -> list[str]:
     conn.close()
     return results
 
-def get_app_tracking(db_path: str, appid: int) -> int | None:
-    """Returns the last_historical_date_scanned for a given appid."""
+def get_app_tracking(db_path: str, appid: int) -> dict | None:
+    """
+    Returns the app tracking data for a given appid, including scan date and filters.
+    Returns a dictionary of all columns if found, otherwise None.
+    """
     conn = get_connection(db_path)
-    cursor = conn.execute("SELECT last_historical_date_scanned FROM app_tracking WHERE appid = ?", (appid,))
+    cursor = conn.execute("SELECT * FROM app_tracking WHERE appid = ?", (appid,))
     row = cursor.fetchone()
     conn.close()
-    return row["last_historical_date_scanned"] if row else None
+    return dict(row) if row else None
+
+
+def save_app_filter(db_path: str, appid: int, filter_text: str = "", required_tags: list[str] = None, excluded_tags: list[str] = None) -> None:
+    """
+    Saves the filter settings for a given appid in the app_tracking table.
+    Tags lists are JSON-serialized.
+    """
+    conn = get_connection(db_path)
+    
+    # Ensure tags are JSON serialized
+    json_required_tags = json.dumps(required_tags) if required_tags is not None else '[]'
+    json_excluded_tags = json.dumps(excluded_tags) if excluded_tags is not None else '[]'
+
+    # Update only the filter-related columns. 
+    # last_historical_date_scanned is NOT updated here; it's handled by daemon.
+    conn.execute(
+        "INSERT INTO app_tracking (appid, filter_text, required_tags, excluded_tags) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(appid) DO UPDATE SET "
+        "filter_text = excluded.filter_text, "
+        "required_tags = excluded.required_tags, "
+        "excluded_tags = excluded.excluded_tags",
+        (appid, filter_text, json_required_tags, json_excluded_tags)
+    )
+    conn.commit()
+    conn.close()
 
 def update_app_tracking(db_path: str, appid: int, last_date: int) -> None:
     """Updates the last_historical_date_scanned for a given appid."""

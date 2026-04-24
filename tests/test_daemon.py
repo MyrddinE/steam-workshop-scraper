@@ -1,8 +1,9 @@
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, ANY
 import signal
 import json
 from src.daemon import Daemon
+from src.database import get_app_tracking, update_app_tracking
 
 @pytest.fixture
 def mock_config():
@@ -68,9 +69,10 @@ def test_daemon_process_batch_success(mock_sleep, mock_insert, mock_insert_user,
 def test_daemon_process_batch_api_failure(mock_sleep, mock_insert, mock_api, mock_get_items, mock_count, mock_config):
     mock_count.return_value = 1000
     mock_get_items.return_value = [456]
-    mock_api.return_value = None
+    mock_api.return_value = {"status": 500, "publishedfileid": 456} # Mock API failure with status
 
     daemon = Daemon(mock_config)
+
     daemon.process_batch()
     
     inserted_data = mock_insert.call_args[0][1]
@@ -310,7 +312,7 @@ def test_expand_user_discovery():
         config = {
             "database": {"path": db_path},
             "api": {"key": "test_key"},
-            "daemon": {"target_appids": [4000], "batch_size": 5}
+            "daemon": {"target_appids": [1062090], "batch_size": 5}
         }
         
         daemon = Daemon(config)
@@ -353,7 +355,7 @@ def test_expand_user_discovery():
 
 def test_process_batch_scraper_failure(tmp_path):
     from src.daemon import Daemon
-    from src.database import get_connection, initialize_database
+    from src.database import get_connection, initialize_database, insert_or_update_item, update_app_tracking
     
     db_path = tmp_path / "test.db"
     initialize_database(str(db_path))
@@ -361,37 +363,41 @@ def test_process_batch_scraper_failure(tmp_path):
     config = {
         "database": {"path": str(db_path)},
         "api": {"key": "test_key"},
-        "daemon": {"target_appids": [4000], "batch_size": 5, "request_delay_seconds": 0}
+        "daemon": {"target_appids": [999999], "batch_size": 1, "request_delay_seconds": 0}
     }
     
     daemon = Daemon(config)
     
     # Mock API to return one item, but Web Scraper to fail
     with patch('src.daemon.get_workshop_details_api') as mock_api, \
-         patch('src.daemon.scrape_extended_details', return_value=None):
+         patch('src.daemon.scrape_extended_details', return_value=None), \
+         patch('src.daemon.discover_items_by_date_html', return_value=[]), \
+         patch('src.daemon.get_next_items_to_scrape', return_value=[123]) as mock_get_next, \
+         patch('src.daemon.count_unscraped_items', return_value=1000): # High count to prevent expansion
 
-        mock_api.return_value = {"title": "Test Scraper Fail", "time_created": 1609459200, "time_updated": 1609459200}
-
+        mock_api.return_value = {"title": "Test Scraper Fail", "status": 200, "time_created": 1609459200, "time_updated": 1609459200}
+        
         # Add the item to the database manually
-        from src.database import insert_or_update_item
-        insert_or_update_item(str(db_path), {"workshop_id": 123, "status": 0})
+        insert_or_update_item(str(db_path), {"workshop_id": 123, "status": 0, "consumer_appid": 999999})
 
         # This should attempt to scrape and fail
         daemon.process_batch()
         
-        conn = get_connection(str(db_path))
-        cursor = conn.execute("SELECT status, title, extended_description FROM workshop_items WHERE workshop_id = 123")
-        item = cursor.fetchone()
-        conn.close()
+        # Retrieve the item directly from the database to check its final status
+        from src.database import get_item_details
+        item = get_item_details(str(db_path), 123)
+        assert item["status"] == 206 # Expecting Partial Content
         
         assert item is not None
         assert item["status"] == 206 # Partial Content
         assert item["title"] == "Test Scraper Fail"
         assert item["extended_description"] is None # Scraper failed
 
-def test_daemon_historical_forward_strategy(tmp_path):
+@patch('src.daemon.discover_items_by_date_html')
+@patch('time.time')
+def test_daemon_historical_forward_strategy(mock_time, mock_discover, tmp_path):
     from src.daemon import Daemon
-    from src.database import initialize_database, update_app_tracking, get_app_tracking
+    from src.database import initialize_database, get_app_tracking, update_app_tracking
     import time
 
     db_path = tmp_path / "test.db"
@@ -400,67 +406,72 @@ def test_daemon_historical_forward_strategy(tmp_path):
     config = {
         "database": {"path": str(db_path)},
         "api": {"key": "test_key"},
-        "daemon": {"target_appids": [4000], "batch_size": 5, "request_delay_seconds": 0}
+        "daemon": {"target_appids": [1062090], "batch_size": 5, "request_delay_seconds": 0}
     }
 
     daemon = Daemon(config)
 
     now = 1700000000
+    mock_time.return_value = now
+    daemon.last_filters = {1062090: {"hash": None, "start_time": None}}
 
-    with patch('src.daemon.query_files_by_date') as mock_query, \
-         patch('time.time', return_value=now):
+    # Scenario 1: Initial run, no prior tracking, no filter
+    with patch('src.daemon.Daemon._find_initial_start_date', return_value=1000000) as mock_find_initial:
+        mock_discover.return_value = [1, 2, 3] # Simulate some items found
+        daemon.seed_database(target_new=1)
+        
+        mock_find_initial.assert_called_once_with(1062090, "", [], [])
+        # Tracking should be updated in DB
+        tracking = get_app_tracking(str(db_path), 1062090)
+        assert tracking["last_historical_date_scanned"] >= 1000000
 
-        # Simulate API returning some items on page 1, and 0 on page 2
-        def mock_query_files(appid, start, end, key, page=1):
-            if page == 1:
-                return {"total": 50, "items": [{"publishedfileid": "1"}, {"publishedfileid": "2"}]}
-            return {"total": 50, "items": []}
+    # Reset mocks for next scenario
+    mock_discover.reset_mock()
 
-        mock_query.side_effect = mock_query_files
+    # Scenario 2: Filter change detected. Should reset scan date via _find_initial_start_date
+    # Set an old filter in the DB manually
+    from src.database import save_app_filter
+    save_app_filter(str(db_path), 1062090, filter_text="old", required_tags=["old_tag"])
+    # Seed daemon instance with a matching hash so it *doesn't* think it changed yet
+    old_hash = json.dumps({"text": "old", "req_tags": ["old_tag"], "excl_tags": []}, sort_keys=True)
+    daemon.last_filters[1062090]["hash"] = old_hash
+    
+    # Now update the DB filter to something "new"
+    save_app_filter(str(db_path), 1062090, filter_text="new filter", required_tags=["TagA"], excluded_tags=["TagB"])
 
-        # Test historical scraping starting from beginning
-        daemon.seed_database()
+    with patch('src.daemon.Daemon._find_initial_start_date', return_value=now - (100 * 86400)) as mock_find_initial:
+        mock_discover.return_value = [4, 5, 6]
+        daemon.seed_database(target_new=1) # Target 1 new item
+        
+        mock_find_initial.assert_called_once_with(1062090, "new filter", ["TagA"], ["TagB"])
+        # After filter change, last_historical_date_scanned should be updated to the new start_time
+        updated_tracking = get_app_tracking(str(db_path), 1062090)
+        assert updated_tracking["last_historical_date_scanned"] >= now - (100 * 86400)
+        # Also verify discover_items_by_date_html was called with the new filter
+        mock_discover.assert_called_with(1062090, ANY, ANY, page=1, search_text="new filter", required_tags=["TagA"], excluded_tags=["TagB"])
 
-        # Verify app tracking was updated to `now` because it loops until start_time >= now
-        last_scanned = get_app_tracking(str(db_path), 4000)
-        assert last_scanned == now
+    # Reset mocks for next scenario
+    mock_discover.reset_mock()
 
-        # Mock API returning too many pages (> 450)
-        def mock_query_too_many(appid, start, end, key, page=1):
-            return {"total": 50000, "items": [{"publishedfileid": "3"}]}
+    # Scenario 3: No filter change, app recently scanned. Should skip discovery.
+    # Update tracking to 12 hours ago
+    update_app_tracking(str(db_path), 1062090, now - (12 * 3600))
+    # Ensure daemon's internal hash matches DB so no change is detected
+    new_tracking = get_app_tracking(str(db_path), 1062090)
+    current_filter = {"text": new_tracking["filter_text"], "req_tags": sorted(json.loads(new_tracking["required_tags"])), "excl_tags": sorted(json.loads(new_tracking["excluded_tags"]))}
+    daemon.last_filters[1062090]["hash"] = json.dumps(current_filter, sort_keys=True)
+    
+    daemon.seed_database()
+    mock_discover.assert_not_called()
 
-        mock_query.side_effect = mock_query_too_many
-
-        # Reset tracking to 10 days ago, and move 'now' forward so we can see the window adjustment
-        update_app_tracking(str(db_path), 4000, now - (10 * 86400))
-        with patch('time.time', return_value=now):
-            # To prevent infinite loop with the too_many mock, we'll only let it run one iteration
-            # by throwing an exception on the second call.
-            mock_query.side_effect = [
-                {"total": 50000, "items": [{"publishedfileid": "3"}]}, # First check, fails threshold
-                {"total": 100, "items": [{"publishedfileid": "4"}]},  # Second check with smaller window, passes
-                {"total": 100, "items": []} # Third check, empty, breaks loop
-            ] * 10 # Repeat in case loop tries more
-
-            daemon.seed_database(target_new=1) # Just find 1 new item
-
-        # The tracked date should advance, but by a smaller increment than the initial 30 days
-        next_scanned = get_app_tracking(str(db_path), 4000)
-        assert next_scanned > now - (10 * 86400)
-        assert next_scanned <= now # It shouldn't go past now
-
-        # Mock 'catching up' to present day
-        update_app_tracking(str(db_path), 4000, now - 3600) # 1 hour ago
-        daemon.seed_database()
-
-        # Should not update because 24h haven't passed
-        assert get_app_tracking(str(db_path), 4000) == now - 3600
-
-        # Mock > 24h passing
-        with patch('time.time', return_value=now + 86400 + 3600): # 25 hours later
-            mock_query.side_effect = mock_query_files # Reset to normal behavior so it finishes
-            daemon.seed_database()
-            assert get_app_tracking(str(db_path), 4000) == now + 86400 + 3600
+    # Scenario 4: No filter change, app not recently scanned. Should perform discovery.
+    update_app_tracking(str(db_path), 1062090, now - (30 * 86400)) # 30 days ago
+    mock_discover.return_value = [7, 8, 9] # Simulate items found
+    daemon.seed_database(target_new=1)
+    
+    # Check that it called discover with the current filter (which is still "new filter" from Scenario 2)
+    mock_discover.assert_called_with(1062090, ANY, ANY, page=1, search_text="new filter", required_tags=["TagA"], excluded_tags=["TagB"])
+    assert get_app_tracking(str(db_path), 1062090)["last_historical_date_scanned"] > now - (30 * 86400)
 
 def test_daemon_find_initial_start_date(tmp_path):
     from src.daemon import Daemon
@@ -474,26 +485,26 @@ def test_daemon_find_initial_start_date(tmp_path):
     config = {
         "database": {"path": str(db_path)},
         "api": {"key": "test_key"},
-        "daemon": {"target_appids": [4000]}
+        "daemon": {"target_appids": [1062090]}
     }
     daemon = Daemon(config)
     
     now = int(time.time())
     
-    with patch('src.daemon.query_files_by_date') as mock_query, \
+    with patch('src.daemon.discover_items_by_date_html') as mock_query, \
          patch('time.time', return_value=now):
          
         # Let's say the first item was created at now - 100 days
         target_date = now - (100 * 86400)
         
-        def mock_query_files(appid, start, end, key, page=1):
+        def mock_query_files(appid, start, end, page=1, search_text="", required_tags=None, excluded_tags=None):
             if end < target_date:
-                return {"total": 0, "items": []}
-            return {"total": 1, "items": [{"publishedfileid": "1"}]}
+                return []
+            return [1]
             
         mock_query.side_effect = mock_query_files
         
-        found_start = daemon._find_initial_start_date(4000)
+        found_start = daemon._find_initial_start_date(4000, search_text="test", required_tags=["tag"]) # Pass dummy filters
         
         # It should be within a couple days of the target date
         assert abs(found_start - target_date) <= 86400 * 2
@@ -511,19 +522,21 @@ def test_daemon_find_initial_start_date_no_items(tmp_path):
     config = {
         "database": {"path": str(db_path)},
         "api": {"key": "test_key"},
-        "daemon": {"target_appids": [4000]}
+        "daemon": {"target_appids": [1062090]}
     }
     daemon = Daemon(config)
     
     now = int(time.time())
     
-    with patch('src.daemon.query_files_by_date') as mock_query, \
+    with patch('src.daemon.discover_items_by_date_html') as mock_query, \
          patch('time.time', return_value=now):
          
-        # Mock API returning zero items for every single query
-        mock_query.return_value = {"total": 0, "items": []}
+        # Mock scraper returning zero items for every single query
+        def mock_query_files_no_items(appid, start, end, page=1, search_text="", required_tags=None, excluded_tags=None):
+            return []
+        mock_query.side_effect = mock_query_files_no_items
         
-        found_start = daemon._find_initial_start_date(4000)
+        found_start = daemon._find_initial_start_date(4000, search_text="no_items_test") # Pass dummy filter
         
         # If no items ever existed, 'low' should have converged to 'now'
         # and final_start should be approximately now - 1 day.
