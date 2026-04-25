@@ -293,8 +293,8 @@ class Daemon:
                 except (ValueError, TypeError):
                     pass # Not a numeric SteamID
 
-            populated_fields = [k for k, v in base_data.items() if v is not None and v != ""]
-            logging.info(f"[{item_id}] \"{base_data.get('title', 'Unknown Title')}\" | Populated: {populated_fields}")
+            # populated_fields = [k for k, v in base_data.items() if v is not None and v != ""]
+            logging.info(f"[{item_id}] \"{base_data.get('title', 'Unknown Title')}\"") # | Populated: {populated_fields}")
             
             # Record Success and Adjust Delay
             self.consecutive_successes += 1
