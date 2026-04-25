@@ -3,7 +3,7 @@ from unittest.mock import patch, MagicMock, ANY
 import json
 import time
 from src.daemon import Daemon
-from src.database import initialize_database, insert_or_update_item, count_unscraped_items, update_app_tracking
+from src.database import initialize_database, insert_or_update_item, count_unscraped_items, update_app_tracking, get_app_tracking
 
 @pytest.mark.asyncio
 @patch('src.daemon.time.time')
@@ -54,3 +54,54 @@ async def test_seed_database_queue_limit(mock_sleep, mock_discover, mock_time, t
         # Queue already has ~120 items from previous step
         daemon.seed_database(target_new=100)
         mock_discover.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch('src.daemon.time.time')
+@patch('src.daemon.discover_items_by_date_html')
+@patch('src.daemon.time.sleep')
+async def test_seed_database_no_tracking_update_on_early_exit(mock_sleep, mock_discover, mock_time, tmp_path):
+    """
+    Test that last_historical_date_scanned is NOT updated if seed_database exits early
+    due to the queue filling up in the middle of a date window.
+    """
+    db_path = str(tmp_path / "early_exit_test.db")
+    initialize_database(db_path)
+    
+    config = {
+        "database": {"path": db_path},
+        "api": {"key": "test_key"},
+        "daemon": {"target_appids": [1062090], "batch_size": 10, "request_delay_seconds": 0}
+    }
+    daemon = Daemon(config)
+    
+    now = 1700000000
+    mock_time.return_value = now
+    
+    initial_last_scanned = now - (100 * 86400) # 100 days ago
+    update_app_tracking(db_path, 1062090, initial_last_scanned)
+    daemon.last_filters[1062090] = {"hash": json.dumps({"text": "", "req_tags": [], "excl_tags": []}), "start_time": initial_last_scanned}
+    
+    # Mock _find_initial_start_date to just return a fixed value
+    with patch.object(Daemon, '_find_initial_start_date', return_value=initial_last_scanned):
+        # Simulate a window where the queue fills up quickly
+        # First call: 10 items. Queue is 10. Target 20.
+        # Second call (next page in same window): 15 items. Queue is 25. Target 20. --> Should exit here.
+        mock_discover.side_effect = [
+            [i for i in range(1, 11)],   # Page 1: 10 items
+            [i for i in range(11, 26)],  # Page 2: 15 items. Total 25.
+            [] # If it continues, this would be hit
+        ]
+        
+        # Call seed_database with a target_new that will be hit mid-window
+        daemon.seed_database(target_new=20)
+        
+        # Verify discover was called twice (for 2 pages)
+        assert mock_discover.call_count == 2
+        
+        # Assert that last_historical_date_scanned was NOT updated
+        current_tracking = get_app_tracking(db_path, 1062090)
+        assert current_tracking["last_historical_date_scanned"] == initial_last_scanned
+        
+        # Verify the queue has items as expected
+        assert count_unscraped_items(db_path) >= 20

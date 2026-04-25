@@ -378,8 +378,14 @@ class Daemon:
 
         # AppID-specific discovery loop for initial seeding
         for appid in self.config["daemon"]["target_appids"]:
+            # Check if queue is already appropriately filled before starting discovery for this appid
+            if count_unscraped_items(self.db_path) >= target_new:
+                logging.info(f"Queue appropriately filled (>= {target_new}) for AppID {appid}. Skipping discovery.")
+                continue # Skip to next appid
+
             app_tracking = get_app_tracking(self.db_path, appid)
             last_scanned_date = app_tracking["last_historical_date_scanned"] if app_tracking else 0
+            initial_start_time = last_scanned_date # Store this for the log message on early exit
             saved_filter_text = app_tracking["filter_text"] if app_tracking else ""
             saved_required_tags = json.loads(app_tracking["required_tags"]) if app_tracking and app_tracking["required_tags"] else []
             saved_excluded_tags = json.loads(app_tracking["excluded_tags"]) if app_tracking and app_tracking["excluded_tags"] else []
@@ -419,15 +425,12 @@ class Daemon:
             logging.info(f"Discovering items for AppID {appid} starting from timestamp {start_time}...")
             new_discovered_count = 0
             window_size = 30 * 24 * 3600 # Start with a 30-day window
+            last_successful_window_end_time = start_time # Track the furthest point successfully scanned
 
             # Continue looping while we're finding new items or haven't reached current time
             # And we haven't been explicitly told to stop
+            discovery_interrupted_early = False
             while start_time < now and self.running:
-                # Check if queue is already appropriately filled
-                if count_unscraped_items(self.db_path) >= target_new:
-                    logging.info(f"Queue appropriately filled (>= {target_new}). Returning to scraping.")
-                    return
-
                 end_time = min(start_time + window_size, now)
                 if end_time == start_time: # Avoid infinite loop if start_time catches up to now exactly
                     break
@@ -436,6 +439,9 @@ class Daemon:
 
                 window_new_count = 0
                 page = 1
+                # Flag to check if this specific window's pages were fully processed
+                pages_completed_for_window = True
+
                 while self.running:
                     found_items = discover_items_by_date_html(appid, start_time, end_time, page=page, search_text=saved_filter_text, required_tags=saved_required_tags, excluded_tags=saved_excluded_tags)
 
@@ -453,10 +459,10 @@ class Daemon:
                     
                     # Check if queue reached capacity after this page
                     if count_unscraped_items(self.db_path) >= target_new:
-                        logging.info(f"Queue appropriately filled (>= {target_new}) after page {page}. Returning to scraping.")
-                        # Still update tracking for the progress made so far
-                        update_app_tracking(self.db_path, appid, end_time)
-                        return
+                        logging.info(f"Queue appropriately filled (>= {target_new}) after page {page}. Interrupting discovery.")
+                        pages_completed_for_window = False # This window was not fully completed
+                        discovery_interrupted_early = True # Overall discovery for appid interrupted
+                        break # Break from inner page loop
 
                     # If we got fewer than 30 items, it's likely the last page
                     if len(found_items) < 30:
@@ -473,10 +479,10 @@ class Daemon:
                 new_discovered_count += window_new_count
                 logging.info(f"Window provided {window_new_count} new items. (Total new this seed: {new_discovered_count})")
 
-                # Crucial: Full date range successfully scanned, update tracking
-                # This means we've processed up to end_time for the current filter.
-                # Only update last_historical_date_scanned here, filter is tracked separately.
-                update_app_tracking(self.db_path, appid, end_time)
+                # Only advance last_successful_window_end_time if all pages within this window were processed
+                # This variable is now solely for logging/final update if no early exit
+                if pages_completed_for_window:
+                    last_successful_window_end_time = end_time
 
                 # Move window forward
                 start_time = end_time
@@ -490,4 +496,13 @@ class Daemon:
                 elif window_new_count > 500:
                     window_size = max(window_size // 2, 3600)
 
-            logging.info(f"Finished discovery cycle for AppID {appid}. Added {new_discovered_count} new items.")
+                if discovery_interrupted_early:
+                    break # Break from outer loop for this appid
+
+            # After the discovery loop for this appid, update tracking to the furthest successful point
+            # ONLY if discovery was NOT interrupted early for this appid
+            if not discovery_interrupted_early and last_successful_window_end_time > last_scanned_date:
+                logging.info(f"Updating last scanned date for AppID {appid} to {datetime.fromtimestamp(last_successful_window_end_time, timezone.utc).date()}.")
+                update_app_tracking(self.db_path, appid, last_successful_window_end_time)
+            else:
+                logging.info(f"Discovery for AppID {appid} interrupted or no full windows scanned. Last scanned date remains {datetime.fromtimestamp(last_scanned_date, timezone.utc).date()}.")
