@@ -68,6 +68,20 @@ async def test_command_palette_contrast(mock_config):
         from textual.command import CommandPalette
         assert isinstance(top_screen, CommandPalette)
         
+        # Type something to get hits
+        await pilot.press("c", "l", "e", "a", "r")
+        await pilot.pause(0.2)
+        
+        # Verify there are hits in the CommandList
+        from textual.command import CommandList
+        command_list = top_screen.query_one(CommandList)
+        assert command_list.option_count > 0
+        
+        # Check readability of the first hit
+        # OptionList rendering is complex, but we can try to find the internal widgets if any,
+        # or just check the style of the list itself.
+        assert is_readable(command_list)
+        
         cp_input = top_screen.query_one("CommandInput")
         assert is_readable(cp_input)
 

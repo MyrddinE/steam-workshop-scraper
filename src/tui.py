@@ -426,7 +426,7 @@ class ScraperApp(App):
     ]
 
     CSS = """
-    Screen {
+    #_default {
         layout: vertical;
     }
     #search-container {
@@ -484,11 +484,11 @@ class ScraperApp(App):
     .search-row Button.-error {
         background: $error;
     }
-    .row-field { width: 20%; }
-    .row-op { width: 20%; }
-    .row-input { width: 35%; }
-    .row-btn { width: 8%; min-width: 0; margin-left: 1; }
-    .row-btn-remove { width: 5%; min-width: 0; margin-left: 1; }
+    .search-row .row-field { width: 20%; }
+    .search-row .row-op { width: 20%; }
+    .search-row .row-input { width: 35%; }
+    .search-row .row-btn { width: 8%; min-width: 0; margin-left: 1; }
+    .search-row .row-btn-remove { width: 5%; min-width: 0; margin-left: 1; }
 
     #main-container {
         layout: horizontal;
