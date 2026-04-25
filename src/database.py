@@ -323,6 +323,7 @@ def get_item_details(db_path: str, workshop_id: int) -> dict | None:
 
 def search_items(db_path: str, query: str = "", appid: int = None, 
                  title_query: str = "", desc_query: str = "", filename_query: str = "",
+                 tags_query: str = "", tags: str = "", filters: list[dict] = None,
                  creator: str = "", numeric_filters: dict = None, 
                  required_tags: list[str] = None, excluded_tags: list[str] = None,
                  summary_only: bool = False, 
