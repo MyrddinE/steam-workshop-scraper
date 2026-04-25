@@ -100,7 +100,7 @@ def translate_item(db_path: str, item_id: int, config: dict, item_type: str = "w
         
         conn.execute(sql, params)
         conn.commit()
-        logging.info(f"[{item_id}] ({item_type}) Successfully translated to English (Priority: {priority}).")
+        logging.info(f"[{item_id}] ({item_type}) Translated \"{fields_to_translate['title']}\" to \"{translated_data['title']}\" @ p{priority}.")
         
     except Exception as e:
         logging.error(f"[{item_id}] ({item_type}) Translation failed: {e}")
