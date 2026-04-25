@@ -423,6 +423,11 @@ class Daemon:
             # Continue looping while we're finding new items or haven't reached current time
             # And we haven't been explicitly told to stop
             while start_time < now and self.running:
+                # Check if queue is already appropriately filled
+                if count_unscraped_items(self.db_path) >= target_new:
+                    logging.info(f"Queue appropriately filled (>= {target_new}). Returning to scraping.")
+                    return
+
                 end_time = min(start_time + window_size, now)
                 if end_time == start_time: # Avoid infinite loop if start_time catches up to now exactly
                     break
@@ -445,6 +450,13 @@ class Daemon:
 
                     window_new_count += page_new_count
                     logging.info(f"Page {page} provided {page_new_count} new items.")
+                    
+                    # Check if queue reached capacity after this page
+                    if count_unscraped_items(self.db_path) >= target_new:
+                        logging.info(f"Queue appropriately filled (>= {target_new}) after page {page}. Returning to scraping.")
+                        # Still update tracking for the progress made so far
+                        update_app_tracking(self.db_path, appid, end_time)
+                        return
 
                     # If we got fewer than 30 items, it's likely the last page
                     if len(found_items) < 30:
@@ -477,10 +489,5 @@ class Daemon:
                     window_size = min(window_size * 2, 365 * 24 * 3600)
                 elif window_new_count > 500:
                     window_size = max(window_size // 2, 3600)
-
-            # Interrupt if we've found enough new items
-            if new_discovered_count >= target_new:
-                logging.info(f"Target ({target_new}) of new items reached for AppID {appid}. Interrupting discovery.")
-                break # Break out of the appid discovery loop
 
             logging.info(f"Finished discovery cycle for AppID {appid}. Added {new_discovered_count} new items.")

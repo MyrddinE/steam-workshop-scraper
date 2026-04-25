@@ -421,7 +421,7 @@ def test_daemon_historical_forward_strategy(mock_time, mock_discover, tmp_path):
     # Scenario 1: Initial run, no prior tracking, no filter
     with patch('src.daemon.Daemon._find_initial_start_date', return_value=1000000) as mock_find_initial:
         mock_discover.return_value = [1, 2, 3] # Simulate some items found
-        daemon.seed_database(target_new=1)
+        daemon.seed_database(target_new=10) # Target 10, queue is empty, should run
         
         mock_find_initial.assert_called_once_with(1062090, "", [], [])
         # Tracking should be updated in DB
@@ -444,7 +444,7 @@ def test_daemon_historical_forward_strategy(mock_time, mock_discover, tmp_path):
 
     with patch('src.daemon.Daemon._find_initial_start_date', return_value=now - (100 * 86400)) as mock_find_initial:
         mock_discover.return_value = [4, 5, 6]
-        daemon.seed_database(target_new=1) # Target 1 new item
+        daemon.seed_database(target_new=20) # Target 20, queue has 3, should run
         
         mock_find_initial.assert_called_once_with(1062090, "new filter", ["TagA"], ["TagB"])
         # After filter change, last_historical_date_scanned should be updated to the new start_time
@@ -464,13 +464,13 @@ def test_daemon_historical_forward_strategy(mock_time, mock_discover, tmp_path):
     current_filter = {"text": new_tracking["filter_text"], "req_tags": sorted(json.loads(new_tracking["required_tags"])), "excl_tags": sorted(json.loads(new_tracking["excluded_tags"]))}
     daemon.last_filters[1062090]["hash"] = json.dumps(current_filter, sort_keys=True)
     
-    daemon.seed_database()
+    daemon.seed_database(target_new=30)
     mock_discover.assert_not_called()
 
     # Scenario 4: No filter change, app not recently scanned. Should perform discovery.
     update_app_tracking(str(db_path), 1062090, now - (30 * 86400)) # 30 days ago
     mock_discover.return_value = [7, 8, 9] # Simulate items found
-    daemon.seed_database(target_new=1)
+    daemon.seed_database(target_new=40)
     
     # Check that it called discover with the current filter (which is still "new filter" from Scenario 2)
     mock_discover.assert_called_with(1062090, ANY, ANY, page=1, search_text="new filter", required_tags=["TagA"], excluded_tags=["TagB"])

@@ -84,20 +84,19 @@ async def test_tui_jump_to_author(mock_config, mock_results):
             # Wait for ListView.Selected event to process and layout to un-hide the button
             await pilot.pause(0.1)
             
-            # Click 'Jump to Author' button using official widget method
-            jump_btn = app.query_one("#btn-jump-author", Button)
-            jump_btn.press()
+            # Click 'Jump to Author' button
+            await pilot.click("#btn-jump-author")
             
-            # Wait for button press event to process and execute search
-            await pilot.pause(0.1)
+            # Wait for button press event and call_after_refresh to process
+            await pilot.pause(0.2)
             
             # Verify Author Select is updated and title is cleared
             builder = app.query_one("#search-builder")
             rows = builder.query("SearchRow")
             assert len(rows) == 1
             first_row = list(rows)[0]
-            assert first_row.query_one("#field-select").value == "Author ID"
-            assert first_row.query_one("#value-input").value == "Author A"
+            assert str(first_row.query_one("#field-select").value) == "Author ID"
+            assert str(first_row.query_one("#value-input").value) == "Author A"
 
 @pytest.mark.asyncio
 async def test_tui_translation_flow(mock_config, mock_results):
