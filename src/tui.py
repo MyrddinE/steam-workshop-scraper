@@ -244,17 +244,38 @@ class WorkshopItem(ListItem):
 
 class SearchRow(Horizontal):
     """A single row in the search builder."""
-    def __init__(self, fields: list[str], operators: dict[str, list[str]], is_first: bool = False):
+    def __init__(self, fields: list[str], operators: dict[str, list[str]], is_first: bool = False, initial_filter: dict = None):
         super().__init__(classes="search-row")
         self.fields = fields
         self.operators_map = operators
         self.is_first = is_first
+        self.initial_filter = initial_filter or {}
 
     def compose(self) -> ComposeResult:
+        field = self.initial_filter.get("field", self.fields[0])
         field_options = [(f, f) for f in self.fields]
-        yield Select(field_options, prompt="Field", id="field-select", classes="row-field")
-        yield Select([], prompt="Op", id="op-select", classes="row-op")
-        yield Input(placeholder="Value", id="value-input", classes="row-input")
+        yield Select(field_options, prompt="Field", id="field-select", classes="row-field", value=field)
+
+        # Determine ops based on field
+        if field in ["Author ID", "Workshop ID", "AppID"]:
+            op_type = "id"
+        elif field in ["File Size", "Subs", "Favs", "Views", "Language ID"]:
+            op_type = "numeric"
+        else:
+            op_type = "text"
+            
+        ops = self.operators_map[op_type]
+        op_options = [(o.replace("_", " "), o) for o in ops]
+        
+        op = self.initial_filter.get("op", ops[0])
+        if op not in ops:
+            op = ops[0]
+            
+        yield Select(op_options, prompt="Op", id="op-select", classes="row-op", value=op)
+        
+        val = self.initial_filter.get("value", "")
+        yield Input(placeholder="Value", id="value-input", classes="row-input", value=val)
+        
         yield Button("AND", id="btn-and", variant="default", classes="row-btn")
         yield Button("OR", id="btn-or", variant="default", classes="row-btn")
         if not self.is_first:
@@ -262,9 +283,6 @@ class SearchRow(Horizontal):
         else:
             # Placeholder to keep alignment
             yield Static("", classes="row-btn-remove")
-
-    def on_mount(self) -> None:
-        self.query_one("#field-select", Select).value = self.fields[0]
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "field-select":
@@ -278,9 +296,22 @@ class SearchRow(Horizontal):
                 op_type = "text"
                 
             ops = self.operators_map[op_type]
-            op_select = self.query_one("#op-select", Select)
-            op_select.set_options([(o.replace("_", " "), o) for o in ops])
-            op_select.value = ops[0]
+            try:
+                op_select = self.query_one("#op-select", Select)
+                current_val = op_select.value
+                
+                # If we have an initial filter and op_select is uninitialized or blank, use it
+                if current_val == Select.BLANK and self.initial_filter:
+                    current_val = self.initial_filter.get("op", ops[0])
+                    
+                op_select.set_options([(o.replace("_", " "), o) for o in ops])
+                
+                if current_val in ops:
+                    op_select.value = current_val
+                else:
+                    op_select.value = ops[0]
+            except Exception:
+                pass # Overlay might not be ready during initial mount
 
 class SearchBuilder(VerticalScroll):
     """A container for multiple SearchRows."""
@@ -297,11 +328,9 @@ class SearchBuilder(VerticalScroll):
         yield SearchRow(self.fields, self.operators, is_first=True)
 
     def add_row(self, logic: str) -> None:
-        # Get the last row to set its logical operator display if needed? 
-        # Actually the buttons in the row that was clicked should probably be used.
         new_row = SearchRow(self.fields, self.operators)
         self.mount(new_row)
-        new_row.logic = logic # Custom attribute to store logic from previous row
+        new_row.logic = logic
 
     def set_filters(self, filters: list[dict]) -> None:
         """Populates the builder with a given list of filters."""
@@ -314,37 +343,10 @@ class SearchBuilder(VerticalScroll):
 
         for i, f in enumerate(filters):
             is_first = (i == 0)
-            row = SearchRow(self.fields, self.operators, is_first=is_first)
+            row = SearchRow(self.fields, self.operators, is_first=is_first, initial_filter=f)
             if not is_first:
                 row.logic = f.get("logic", "AND")
             self.mount(row)
-
-            # Use closure to capture loop variables correctly
-            def apply_values(r=row, field=f.get("field"), op=f.get("op"), val=f.get("value")):
-                try:
-                    field_select = r.query_one("#field-select", Select)
-                    field_select.value = field
-                    
-                    # Manually update options so they are synchronously available
-                    if field == "Author ID" or field == "Workshop ID" or field == "AppID":
-                        op_type = "id"
-                    elif field in ["File Size", "Subs", "Favs", "Views", "Language ID"]:
-                        op_type = "numeric"
-                    else:
-                        op_type = "text"
-                    ops = self.operators[op_type]
-                    op_select = r.query_one("#op-select", Select)
-                    op_select.set_options([(o.replace("_", " "), o) for o in ops])
-                    
-                    op_select.value = op
-                    
-                    value_input = r.query_one("#value-input", Input)
-                    value_input.value = val
-                except Exception as e:
-                    import logging
-                    logging.error(f"apply_values failed: {e}", exc_info=True)
-                    
-            self.app.call_after_refresh(apply_values)
 
     def get_filters(self) -> list[dict]:
         filters = []
