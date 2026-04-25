@@ -470,3 +470,38 @@ def test_tui_main_no_logging(tmp_path):
         mock_get_logger.return_value.addHandler.assert_called_once()
         added_handler = mock_get_logger.return_value.addHandler.call_args[0][0]
         assert isinstance(added_handler, logging.NullHandler)
+
+@pytest.mark.asyncio
+async def test_tui_clear_pending_command(tmp_path):
+    from src.tui import ScraperApp
+    from src.database import initialize_database, insert_or_update_item, get_connection
+    from unittest.mock import patch
+    
+    db_path = str(tmp_path / "tui_clear.db")
+    initialize_database(db_path)
+    
+    # 1. Pending (should be removed)
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": None, "dt_updated": None})
+    # 2. Not Pending (should remain)
+    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "dt_updated": "2023-01-01"})
+    
+    mock_config = {
+        "database": {"path": db_path},
+        "logging": {"level": "INFO"}
+    }
+    
+    with patch('src.tui.load_config', return_value=mock_config):
+        app = ScraperApp()
+        
+        async with app.run_test() as pilot:
+            # Trigger the action
+            app.action_clear_pending()
+            await pilot.pause()
+            
+            # Verify DB state
+            conn = get_connection(db_path)
+            ids = [row["workshop_id"] for row in conn.execute("SELECT workshop_id FROM workshop_items")]
+            conn.close()
+            
+            assert ids == [2]
+            assert 1 not in ids

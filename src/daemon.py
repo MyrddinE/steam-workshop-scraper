@@ -76,42 +76,49 @@ class Daemon:
 
         if missing_ids:
             logging.info(f"Proactively fetching {len(missing_ids)} missing user profiles...")
-            summaries = get_player_summaries(missing_ids, self.api_key)
-            for sid in missing_ids:
-                if sid in summaries:
-                    pdata = summaries[sid]
-                    user_record = {
-                        "steamid": sid,
-                        "personaname": pdata.get("personaname"),
-                        "dt_updated": datetime.now(timezone.utc).isoformat()
-                    }
-                    if not is_ascii(user_record["personaname"]):
-                        user_record["translation_priority"] = 1
-                        logging.info(f"User {sid} ('{user_record['personaname']}') flagged for translation.")
-                    
-                    insert_or_update_user(self.db_path, user_record)
-                    logging.info(f"Updated profile for user {sid}: '{user_record['personaname']}'")
-                else:
-                    # Insert a placeholder so we don't keep trying every batch
-                    insert_or_update_user(self.db_path, {
-                        "steamid": sid, 
-                        "personaname": f"SteamID:{sid}",
-                        "dt_updated": datetime.now(timezone.utc).isoformat()
-                    })
-                    logging.info(f"User {sid} not found in API, inserted placeholder.")
+            try:
+                summaries = get_player_summaries(missing_ids, self.api_key)
+                for sid in missing_ids:
+                    if sid in summaries:
+                        pdata = summaries[sid]
+                        user_record = {
+                            "steamid": sid,
+                            "personaname": pdata.get("personaname"),
+                            "dt_updated": datetime.now(timezone.utc).isoformat()
+                        }
+                        if not is_ascii(user_record["personaname"]):
+                            user_record["translation_priority"] = 1
+                            logging.info(f"User {sid} ('{user_record['personaname']}') flagged for translation.")
+                        
+                        insert_or_update_user(self.db_path, user_record)
+                        logging.info(f"Updated profile for user {sid}: '{user_record['personaname']}'")
+                    else:
+                        # Insert a placeholder so we don't keep trying every batch
+                        insert_or_update_user(self.db_path, {
+                            "steamid": sid, 
+                            "personaname": f"SteamID:{sid}",
+                            "dt_updated": datetime.now(timezone.utc).isoformat()
+                        })
+            except Exception as e:
+                logging.error(f"Error expanding user discovery: {e}")
 
     def process_batch(self):
         """Processes a single batch of workshop items."""
         # Proactive user discovery check
-        self.expand_user_discovery()
-        
-        # Seeding check: If we have fewer than 100 unscraped items, fetch the next page
-        unscraped = count_unscraped_items(self.db_path)
-        if unscraped < 100:
-            logging.info(f"Low unscraped queue ({unscraped}). Expanding discovery...")
-            self.seed_database()
+        try:
+            self.expand_user_discovery()
+            
+            # Seeding check: If we have fewer than 100 unscraped items, fetch the next page
+            unscraped = count_unscraped_items(self.db_path)
+            if unscraped < 100:
+                logging.info(f"Low unscraped queue ({unscraped}). Expanding discovery...")
+                self.seed_database()
 
-        items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size)
+            items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size)
+        except Exception as e:
+            logging.error(f"Database error in process_batch: {e}")
+            time.sleep(5)
+            return
         
         if not items_to_scrape:
             # If still nothing, sleep

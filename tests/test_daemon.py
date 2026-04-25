@@ -22,7 +22,7 @@ def test_daemon_init_defaults():
     assert daemon.db_path == "workshop.db"
     assert daemon.api_key == ""
     assert daemon.batch_size == 10
-    assert daemon.delay == 1.5
+    assert daemon.delay == 5
     assert daemon.target_appids == [456]
 
 def test_daemon_init_missing_appids():

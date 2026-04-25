@@ -60,19 +60,21 @@ async def test_tui_no_markup_error_on_bbcode(mock_config, mock_results_with_bbco
             app.set_focus(list_view)
             await pilot.press("enter")
             
-            # If we reached here without an exception, the fix worked.
-            # We specifically want to check the Markdown widget in DetailsPane
+            # Specifically check the title label and markdown content separately
             from src.tui import DetailsPane
-            from textual.widgets import Markdown
+            from textual.widgets import Markdown, Label
             detail_pane = app.query_one("#item-details", DetailsPane)
+            title_label = detail_pane.query_one("#item-title", Label)
             detail_content = detail_pane.query_one("#detail-content", Markdown)
             
-            # Wait for any async updates to the Markdown widget
+            # Wait for any async updates
             await pilot.pause(0.1)
             
-            # Verify content is converted to Markdown formatting
+            # Verify title is converted to bold in Label (using render() to get the text with styles)
+            assert "Bold Title" in str(title_label.render())
+            
+            # Verify description content is converted to Markdown formatting
             content = str(detail_content._markdown)
-            assert "**Bold Title**" in content
             assert "# Welcome" in content
             assert "* Item 1" in content
             assert "Col 1" in content
