@@ -364,6 +364,17 @@ class SearchBuilder(VerticalScroll):
 
 class ScraperApp(App):
     """A Terminal GUI for searching the Steam Workshop database."""
+    
+    BINDINGS = [
+        ("ctrl+q", "quit", "Quit"),
+        ("ctrl+s", "save_filter_for_scraper", "Save Filter"),
+        ("ctrl+t", "request_translation", "Translate"),
+        ("ctrl+w", "toggle_translation", "Toggle Translation"),
+        ("ctrl+a", "add_and_row", "AND"),
+        ("ctrl+o", "add_or_row", "OR"),
+        ("ctrl+x", "delete_bottom_row", "Delete Row"),
+    ]
+
     CSS = """
     Screen {
         layout: vertical;
@@ -725,30 +736,32 @@ class ScraperApp(App):
             self.save_state()
 
     async def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
-        """Load more items when scrolling near the bottom of the list."""
+        """Load more items when scrolling near the bottom of the list, and update details pane."""
         list_view = event.list_view
         if list_view.id == "results-list":
             # If we are within 10 items of the end, fetch more
             if list_view.index is not None and list_view.index >= len(list_view) - 10:
                 await self.load_more_items()
+                
+            if event.item and hasattr(event.item, 'item_data'):
+                item_data = event.item.item_data
+                self.current_item_creator = item_data.get('creator')
+                
+                detail_pane = self.query_one("#item-details", DetailsPane)
+                detail_pane.workshop_id = item_data.get("workshop_id")
+                
+                jump_btn = self.query_one("#btn-jump-author", Button)
+                if self.current_item_creator:
+                    jump_btn.display = True
+                else:
+                    jump_btn.display = False
+                    
+                self.save_state()
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Handle selection of an item in the list."""
+        # Selection logic moved to highlighted event for immediate viewing
         self.save_state()
-        if not event.item:
-            return
-            
-        item_data = event.item.item_data
-        self.current_item_creator = item_data.get('creator')
-        
-        detail_pane = self.query_one("#item-details", DetailsPane)
-        detail_pane.workshop_id = item_data.get("workshop_id")
-        
-        jump_btn = self.query_one("#btn-jump-author", Button)
-        if self.current_item_creator:
-            jump_btn.display = True
-        else:
-            jump_btn.display = False
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses (e.g., Jump to Author, Translation, Search Builder buttons)."""
@@ -848,6 +861,41 @@ class ScraperApp(App):
             
         save_app_filter(self.db_path, current_appid, filter_text, required_tags, excluded_tags)
         self.notify(f"Filter saved for AppID {current_appid}. Scraper will use this filter.")
+
+    def action_toggle_translation(self) -> None:
+        detail_pane = self.query_one("#item-details", DetailsPane)
+        detail_pane.show_translated = not detail_pane.show_translated
+
+    def action_request_translation(self) -> None:
+        detail_pane = self.query_one("#item-details", DetailsPane)
+        if detail_pane.item_data:
+            item = detail_pane.item_data
+            wid = item.get("workshop_id")
+            
+            if item.get("translation_priority", 0) > 0:
+                self.notify(f"Item {wid} is already in the translation queue.", severity="warning")
+                return
+
+            flag_for_translation(self.db_path, wid, priority=10)
+            item["translation_priority"] = 10
+            detail_pane.update_content()
+            self.notify(f"Item {wid} flagged for high-priority translation.")
+
+    async def action_add_and_row(self) -> None:
+        self.query_one("#search-builder", SearchBuilder).add_row("AND")
+        await self.execute_search()
+
+    async def action_add_or_row(self) -> None:
+        self.query_one("#search-builder", SearchBuilder).add_row("OR")
+        await self.execute_search()
+
+    async def action_delete_bottom_row(self) -> None:
+        builder = self.query_one("#search-builder", SearchBuilder)
+        rows = list(builder.query(SearchRow))
+        if len(rows) > 1:
+            row_to_delete = rows[-1]
+            row_to_delete.remove()
+            self.call_after_refresh(self.execute_search)
 
 def main():
     config_path = "config.yaml"
