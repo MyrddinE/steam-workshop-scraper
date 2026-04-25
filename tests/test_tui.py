@@ -240,39 +240,54 @@ async def test_tui_jump_to_author_clears_multiple_rows(mock_config, mock_results
             assert rows[0].query_one("#field-select").value == "Author ID"
             assert rows[0].query_one("#value-input").value == "Author A"
 
-@pytest.mark.asyncio
-async def test_tui_infinite_scroll(mock_config):
-    from unittest.mock import patch, PropertyMock
-    from src.tui import ScraperApp
-    from textual.widgets import ListView
+    @pytest.mark.asyncio
+    async def test_tui_infinite_scroll(mock_config):
+        from unittest.mock import patch, call, MagicMock
+        from src.tui import ScraperApp
+        from textual.widgets import ListView
+        from textual.scroll_view import ScrollView
 
-    mock_results = [{"workshop_id": i, "title": f"Item {i}", "creator": "A"} for i in range(100)]
+        mock_results = [{"workshop_id": i, "title": f"Item {i}", "creator": "A"} for i in range(100)]
+        mock_total_count = 100
 
-    # We want to mock search_items to paginate
-    def mock_search_items(db, *args, **kwargs):
-        offset = kwargs.get("offset", 0)
-        limit = kwargs.get("limit", 50)
-        return mock_results[offset:offset+limit]
+        # Mock search_items to paginate
+        def mock_search_items(db_path, *args, **kwargs):
+            if kwargs.get("count_only"):
+                return mock_total_count
+            offset = kwargs.get("offset", 0)
+            limit = kwargs.get("limit", 50)
+            return mock_results[offset:offset+limit]
 
-    with patch('src.tui.load_config', return_value=mock_config), \
-         patch('src.tui.search_items', side_effect=mock_search_items):
-        app = ScraperApp()
-        async with app.run_test() as pilot:
-            await pilot.pause(0.1)
-            list_view = app.query_one(ListView)
-            assert len(list_view.children) == 50
+        with patch('src.tui.load_config', return_value=mock_config), \
+             patch('src.tui.search_items', side_effect=mock_search_items) as mock_db_search:
+            app = ScraperApp()
+            async with app.run_test() as pilot:
+                # Wait for on_mount and initial execute_search (which calls load_more_items) to complete
+                await pilot.pause()
 
-            # Real scroll simulation using Textual's scroll API
-            list_view.scroll_y = list_view.max_scroll_y
-            
-            import asyncio
-            for _ in range(10):
-                if len(list_view.children) >= 100:
-                    break
-                await asyncio.sleep(0.1)
+                # Verify initial load state
+                assert app.items_loaded == 50
+                assert app.current_offset == 50
+                list_view = app.query_one(ListView)
+                assert len(list_view.children) == 50 # Now this should be reliable if items are appended
 
-            # 50 more should be loaded
-            assert len(list_view.children) == 100
+                # Simulate scrolling to trigger load_more_items
+                list_view.scroll_y = list_view.max_scroll_y # Scroll to bottom
+                await pilot.pause() # Wait for load_more_items to be called and processed
+
+                # Verify load_more_items call and state update
+                # The search_items call should reflect the next offset
+                expected_query_params = {
+                    "title_query": "", "tags": [], "excluded_tags": [], "creator_id": None,
+                    "min_size": None, "max_size": None, "min_subs": None, "max_subs": None,
+                    "min_favs": None, "max_favs": None, "min_views": None, "max_views": None,
+                    "workshop_id": None, "appid": None, "language_id": None,
+                    "sort_by": "title", "sort_order": "ASC"
+                }
+                mock_db_search.assert_called_with(ANY, limit=50, offset=50, **expected_query_params)
+                assert app.items_loaded == 100
+                assert app.current_offset == 100
+                assert len(list_view.children) == 100 # All items should now be rendered
 
 @pytest.mark.asyncio
 async def test_tui_details_pane_translation_fallback_and_priority(mock_config):

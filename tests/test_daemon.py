@@ -415,6 +415,9 @@ def test_daemon_historical_forward_strategy(mock_time, mock_discover, tmp_path):
     mock_time.return_value = now
     daemon.last_filters = {1062090: {"hash": None, "start_time": None}}
 
+    # Initialize app_tracking for AppID 1062090 to prevent TypeError on initial get_app_tracking calls
+    update_app_tracking(str(db_path), 1062090, 0)
+
     # Scenario 1: Initial run, no prior tracking, no filter
     with patch('src.daemon.Daemon._find_initial_start_date', return_value=1000000) as mock_find_initial:
         mock_discover.return_value = [1, 2, 3] # Simulate some items found

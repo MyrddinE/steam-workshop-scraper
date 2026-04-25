@@ -322,9 +322,10 @@ def get_item_details(db_path: str, workshop_id: int) -> dict | None:
     return dict(row) if row else None
 
 def search_items(db_path: str, query: str = "", appid: int = None, 
-                 title_query: str = "", desc_query: str = "", filename_query: str = "", tags_query: str = "",
-                 creator: str = "", numeric_filters: dict = None, tags: str = None,
-                 summary_only: bool = False, filters: list[dict] = None,
+                 title_query: str = "", desc_query: str = "", filename_query: str = "",
+                 creator: str = "", numeric_filters: dict = None, 
+                 required_tags: list[str] = None, excluded_tags: list[str] = None,
+                 summary_only: bool = False, 
                  sort_by: str = None, sort_order: str = "ASC",
                  limit: int = None, offset: int = None) -> list[dict]:
     """

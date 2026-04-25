@@ -432,4 +432,9 @@ class Daemon:
                 elif window_new_count > 500:
                     window_size = max(window_size // 2, 3600)
 
+            # Interrupt if we've found enough new items
+            if new_discovered_count >= target_new:
+                logging.info(f"Target ({target_new}) of new items reached for AppID {appid}. Interrupting discovery.")
+                break # Break out of the appid discovery loop
+
             logging.info(f"Finished discovery cycle for AppID {appid}. Added {new_discovered_count} new items.")
