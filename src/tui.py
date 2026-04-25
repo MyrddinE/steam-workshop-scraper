@@ -370,24 +370,34 @@ class ScraperApp(App):
     }
     #search-container {
         height: auto;
-        margin: 1;
-        padding: 1;
+        margin: 0;
+        padding: 0 1;
         border: solid $accent;
     }
     #search-builder {
         height: auto;
-        max-height: 12; /* Roughly 4 rows */
+        max-height: 12;
     }
     .search-row {
-        height: 3;
+        height: 2;
         margin-bottom: 0;
+        align: left middle;
+    }
+    .search-row Select, .search-row Input, .search-row Button {
+        height: 1;
+        border: none;
+        background: $boost;
     }
     .search-buttons {
-        height: 3;
+        height: auto;
         padding-top: 1;
+        margin-bottom: 1;
     }
     .search-buttons Button {
-        width: auto; # Let buttons size naturally
+        height: 1;
+        border: none;
+        background: $boost;
+        width: auto;
         margin-left: 1;
     }
     Button {
@@ -395,6 +405,10 @@ class ScraperApp(App):
     }
     Button.-primary, Button.-error, Button.-success, Button.-warning {
         color: auto 100%;
+        background: $primary;
+    }
+    .search-row Button.-error {
+        background: $error;
     }
     .row-field { width: 20%; }
     .row-op { width: 20%; }
@@ -412,11 +426,20 @@ class ScraperApp(App):
     #results-list {
         height: 1fr;
         border: solid $success;
+        margin: 0;
     }
     #sort-container {
-        height: 3;
+        height: auto;
         layout: horizontal;
         border: solid $primary;
+        margin-bottom: 0;
+        padding: 0 1;
+    }
+    #sort-container Select {
+        height: 1;
+        border: none;
+        background: $boost;
+        margin-top: 1;
         margin-bottom: 1;
     }
     .sort-select { width: 60%; }
@@ -425,7 +448,8 @@ class ScraperApp(App):
     #details-container {
         width: 60%;
         border: solid $secondary;
-        padding: 1;
+        padding: 0 1;
+        margin: 0;
         layout: vertical;
     }
     #item-details {
