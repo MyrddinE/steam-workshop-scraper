@@ -97,11 +97,11 @@ class DetailsPane(VerticalScroll):
     show_translated = reactive(True)
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="top-left-overlay"):
-            yield Button("Translate", id="btn-request-translation")
-            yield Button("Show Original", id="btn-toggle-translation")
-        
-        yield Button("jump", id="btn-jump-author", variant="primary", classes="top-right-btn")
+        with Horizontal(id="details-buttons-row"):
+            with Horizontal(id="top-left-buttons"):
+                yield Button("Translate", id="btn-request-translation")
+                yield Button("Show Original", id="btn-toggle-translation")
+            yield Button("jump", id="btn-jump-author", variant="primary")
 
         with Horizontal(id="title-creator-row"):
             yield Label("", id="item-title")
@@ -162,7 +162,7 @@ class DetailsPane(VerticalScroll):
             self.query_one("#btn-jump-author").display = False
             
             for stat in ["id", "created", "updated", "tags", "size", "views", "subs", "favs"]:
-                self.query_one(f"#stat-{stat}", Label).update(f"[b]{stat.capitalize()}:[/b] N/A")
+                self.query_one(f"#stat-{stat}", Label).display = False
             return
 
         item = self.item_data
@@ -226,12 +226,21 @@ class DetailsPane(VerticalScroll):
                 return f"[yellow]{gb:.1f} GB[/yellow]"
             except: return "N/A"
 
+        for stat in ["id", "created", "updated", "tags", "size", "views", "subs", "favs"]:
+            self.query_one(f"#stat-{stat}", Label).display = True
+
         self.query_one("#stat-id", Label).update(f"[b]ID:[/b] {item.get('workshop_id', 'N/A')}")
         self.query_one("#stat-created", Label).update(f"[b]Created:[/b] {format_ts(item.get('time_created'))}")
         
         updated_ts = item.get('time_updated')
         updated_str = format_ts(updated_ts) if updated_ts and updated_ts != item.get('time_created') else "N/A"
-        self.query_one("#stat-updated", Label).update(f"[b]Updated:[/b] {updated_str}")
+        
+        updated_label = self.query_one("#stat-updated", Label)
+        if updated_str == "N/A":
+            updated_label.display = False
+        else:
+            updated_label.display = True
+            updated_label.update(f"[b]Updated:[/b] {updated_str}")
         
         self.query_one("#stat-tags", Label).update(f"[b]Tags:[/b] {', '.join(tags_list) if tags_list else 'None'}")
 
@@ -526,31 +535,34 @@ class ScraperApp(App):
     #item-details {
         height: 1fr;
     }
-    #top-left-overlay {
-        position: absolute;
-        offset: 0 -1;
+    #details-buttons-row {
         height: 1;
-        width: auto;
+        margin-bottom: 0;
     }
-    #top-left-overlay Button {
+    #top-left-buttons {
+        width: 1fr;
+    }
+    #top-left-buttons Button {
         height: 1;
         border: none;
         padding: 0 1;
         min-width: 0;
         margin-right: 1;
+        background: $boost;
+        color: $accent;
     }
-    .top-right-btn {
-        position: absolute;
-        offset: 100% -1;
-        margin-left: -10;
+    #btn-jump-author {
         height: 1;
         border: none;
         padding: 0 1;
         min-width: 0;
+        background: $primary;
+        color: auto;
         display: none;
     }
     #title-creator-row {
         height: auto;
+        margin-top: 0;
     }
     #item-title {
         width: 1fr;
@@ -718,6 +730,7 @@ class ScraperApp(App):
             DetailsPane(id="item-details"),
             id="details-container"
         )
+        details_container.border_title = "Details"
 
         yield search_container
         yield Horizontal(
