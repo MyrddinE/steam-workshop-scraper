@@ -1,9 +1,11 @@
 import json
 import logging
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SystemCommand
 from textual import on, events
-from textual.command import Provider, Hit
+from textual.command import Provider, Hit, DiscoveryHit
 from textual.system_commands import SystemCommandsProvider
+from typing import Iterable
+from textual.screen import Screen
 from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button, Markdown
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
@@ -397,7 +399,17 @@ class SearchBuilder(VerticalScroll):
 
 class DatabaseCommands(Provider):
     """A command provider for database operations."""
-    async def search(self, query: str) -> ComposeResult:
+    
+    async def discover(self) -> Iterable[DiscoveryHit]:
+        """Yield commands that should be discoverable when the palette opens."""
+        yield DiscoveryHit(
+            "Clear Pending Database",
+            self.app.action_clear_pending,
+            help="Remove all unscraped/pending items from the database",
+        )
+
+    async def search(self, query: str) -> Iterable[Hit]:
+        """Search for database commands matching the query."""
         matcher = self.matcher(query)
         label = "Clear Pending Database"
         score = matcher.match(label)
@@ -406,13 +418,11 @@ class DatabaseCommands(Provider):
                 score,
                 matcher.highlight(label),
                 self.app.action_clear_pending,
-                text=label,
                 help="Remove all unscraped/pending items from the database",
             )
-
 class ScraperApp(App):
     """A Terminal GUI for searching the Steam Workshop database."""
-    
+
     COMMANDS = {SystemCommandsProvider, DatabaseCommands}
 
     BINDINGS = [
