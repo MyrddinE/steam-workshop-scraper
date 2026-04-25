@@ -533,3 +533,18 @@ def update_app_tracking(db_path: str, appid: int, last_date: int) -> None:
     )
     conn.commit()
     conn.close()
+
+def clear_pending_items(db_path: str) -> int:
+    """
+    Removes all workshop items that are 'pending' (never successfully scraped).
+    Criteria: (status IS NULL OR status = 404) AND dt_updated IS NULL.
+    Returns the number of rows deleted.
+    """
+    conn = get_connection(db_path)
+    cursor = conn.execute(
+        "DELETE FROM workshop_items WHERE (status IS NULL OR status = 404) AND dt_updated IS NULL"
+    )
+    count = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return count

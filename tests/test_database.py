@@ -10,7 +10,8 @@ from src.database import (
     get_next_items_to_scrape,
     search_items,
     get_connection,
-    count_unscraped_items
+    count_unscraped_items,
+    clear_pending_items
 )
 
 @pytest.fixture
@@ -98,6 +99,29 @@ def test_search_items(db_path):
     results_tags = search_items(db_path, tags="fruit")
     assert len(results_tags) == 1
     assert results_tags[0]["workshop_id"] == 4
+
+def test_clear_pending_items(db_path):
+    """Test clearing pending items (status NULL or 404 AND dt_updated NULL)."""
+    # 1. Pending (status NULL, dt_updated NULL) - Should be removed
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": None, "dt_updated": None})
+    # 2. Pending (status 404, dt_updated NULL) - Should be removed
+    insert_or_update_item(db_path, {"workshop_id": 2, "status": 404, "dt_updated": None})
+    # 3. Not Pending (status 200) - Should NOT be removed
+    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "dt_updated": None})
+    # 4. Not Pending (has dt_updated) - Should NOT be removed
+    insert_or_update_item(db_path, {"workshop_id": 4, "status": None, "dt_updated": "2023-01-01"})
+    # 5. Not Pending (both) - Should NOT be removed
+    insert_or_update_item(db_path, {"workshop_id": 5, "status": 200, "dt_updated": "2023-01-01"})
+
+    deleted_count = clear_pending_items(db_path)
+    assert deleted_count == 2
+    
+    conn = get_connection(db_path)
+    cursor = conn.execute("SELECT workshop_id FROM workshop_items ORDER BY workshop_id")
+    ids = [row["workshop_id"] for row in cursor.fetchall()]
+    conn.close()
+    
+    assert ids == [3, 4, 5]
 
 def test_translation_columns_and_priority(db_path):
     """Test that translation-related columns and priority queries work correctly."""

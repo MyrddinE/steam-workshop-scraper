@@ -2,10 +2,12 @@ import json
 import logging
 from textual.app import App, ComposeResult
 from textual import on, events
+from textual.command import Provider, Hit
+from textual.system_commands import SystemCommandsProvider
 from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button, Markdown
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
-from src.database import search_items, get_all_authors, initialize_database, flag_for_translation, get_item_details, save_app_filter
+from src.database import search_items, get_all_authors, initialize_database, flag_for_translation, get_item_details, save_app_filter, clear_pending_items
 from src.config import load_config
 import os
 import yaml
@@ -384,9 +386,25 @@ class SearchBuilder(VerticalScroll):
             filters.append(f)
         return filters
 
+class DatabaseCommands(Provider):
+    """A command provider for database operations."""
+    async def search(self, query: str) -> ComposeResult:
+        matcher = self.matcher(query)
+        label = "Clear Pending Database"
+        score = matcher.match(label)
+        if score > 0:
+            yield Hit(
+                score,
+                matcher.highlight(label),
+                self.app.action_clear_pending,
+                help="Remove all unscraped/pending items from the database",
+            )
+
 class ScraperApp(App):
     """A Terminal GUI for searching the Steam Workshop database."""
     
+    COMMANDS = {SystemCommandsProvider, DatabaseCommands}
+
     BINDINGS = [
         ("ctrl+q", "quit", "Quit"),
         ("ctrl+s", "save_filter_for_scraper", "Save Filter"),
@@ -555,6 +573,13 @@ class ScraperApp(App):
         height: auto;
     }
     """
+
+    def get_system_commands(self, screen):
+        """Filter out Screenshot and Theme commands from the system commands."""
+        for command in super().get_system_commands(screen):
+            if "screenshot" in command.name.lower() or "theme" in command.name.lower():
+                continue
+            yield command
 
     def __init__(self, config_path: str = "config.yaml"):
         super().__init__()
@@ -965,6 +990,12 @@ class ScraperApp(App):
             row_to_delete = rows[-1]
             row_to_delete.remove()
             self.call_after_refresh(self.execute_search)
+
+    def action_clear_pending(self) -> None:
+        """Removes all unscraped/pending items from the database."""
+        count = clear_pending_items(self.db_path)
+        self.notify(f"Database cleared: {count} pending items removed.")
+        self.run_worker(self.execute_search())
 
 def main():
     config_path = "config.yaml"
