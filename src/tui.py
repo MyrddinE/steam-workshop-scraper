@@ -388,6 +388,12 @@ class ScraperApp(App):
         border: none;
         background: $boost;
     }
+    .search-row Select > SelectCurrent {
+        border: none;
+        height: 1;
+        padding: 0 1;
+        background: $boost;
+    }
     .search-buttons {
         height: auto;
         padding-top: 1;
@@ -441,6 +447,12 @@ class ScraperApp(App):
         background: $boost;
         margin-top: 1;
         margin-bottom: 1;
+    }
+    #sort-container Select > SelectCurrent {
+        border: none;
+        height: 1;
+        padding: 0 1;
+        background: $boost;
     }
     .sort-select { width: 60%; }
     .sort-order { width: 40%; }
