@@ -388,6 +388,12 @@ class ScraperApp(App):
         width: auto; # Let buttons size naturally
         margin-left: 1;
     }
+    Button {
+        color: $accent;
+    }
+    Button.-primary, Button.-error, Button.-success, Button.-warning {
+        color: auto 100%;
+    }
     .row-field { width: 20%; }
     .row-op { width: 20%; }
     .row-input { width: 35%; }
@@ -403,7 +409,7 @@ class ScraperApp(App):
     }
     #results-list {
         height: 1fr;
-        border: solid green;
+        border: solid $success;
     }
     #sort-container {
         height: 3;
@@ -416,7 +422,7 @@ class ScraperApp(App):
 
     #details-container {
         width: 60%;
-        border: solid blue;
+        border: solid $secondary;
         padding: 1;
         layout: vertical;
     }
@@ -457,8 +463,7 @@ class ScraperApp(App):
 
     def __init__(self, config_path: str = "config.yaml"):
         super().__init__()
-        # Force a light theme to guarantee high contrast on terminal emulators like PuTTY
-        self.theme = "textual-light"
+        self.theme = "textual-dark"
         
         try:
             self.config = load_config(config_path)
