@@ -99,6 +99,11 @@ class DetailsPane(VerticalScroll):
             yield Label("[b]Item Details[/b]", id="details-header-label")
             yield Button("Show Original", id="btn-toggle-translation", classes="details-btn")
             yield Button("Translate", id="btn-request-translation", classes="details-btn")
+            
+        with Horizontal(id="creator-box"):
+            yield Label("[b]Creator:[/b] N/A", id="creator-label")
+            yield Button("jump", id="btn-jump-author", variant="primary")
+            
         yield Markdown(id="detail-content")
 
     def on_mount(self) -> None:
@@ -128,8 +133,10 @@ class DetailsPane(VerticalScroll):
     def update_content(self) -> None:
         if not self.item_data:
             self.query_one("#detail-content", Markdown).update("Select an item to see details.")
+            self.query_one("#creator-label", Label).update("[b]Creator:[/b] N/A")
             self.query_one("#btn-toggle-translation").display = False
             self.query_one("#btn-request-translation").display = False
+            self.query_one("#btn-jump-author").display = False
             return
 
         item = self.item_data
@@ -143,6 +150,14 @@ class DetailsPane(VerticalScroll):
         creator_name = item.get("personaname_en") if display_translated and item.get("personaname_en") else item.get("personaname")
         if not creator_name:
             creator_name = str(item.get("creator", "N/A"))
+            
+        self.query_one("#creator-label", Label).update(f"[b]Creator:[/b] {creator_name}")
+        
+        jump_btn = self.query_one("#btn-jump-author", Button)
+        if item.get("creator"):
+            jump_btn.display = True
+        else:
+            jump_btn.display = False
 
         # Descriptions fallback chain
         if display_translated:
@@ -170,14 +185,30 @@ class DetailsPane(VerticalScroll):
             parsed = json.loads(tags) if isinstance(tags, str) else tags
             tags_list = [str(t.get("tag") if isinstance(t, dict) else t) for t in (parsed if isinstance(parsed, list) else [])]
         except: pass
+        
+        def format_ts(ts):
+            if not ts: return "N/A"
+            try:
+                import datetime
+                return datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+            except:
+                return "N/A"
+
+        created_str = format_ts(item.get('time_created'))
+        updated_str = format_ts(item.get('time_updated'))
+        
+        date_str = f"**Created:** {created_str}"
+        if updated_str != "N/A" and updated_str != created_str:
+            date_str += f" | **Updated:** {updated_str}"
 
         # Convert to Markdown
         md_content = [
             f"# {bbcode_to_markdown(title)}",
             f"**ID:** {item.get('workshop_id', 'N/A')}  ",
-            f"**Creator:** {creator_name}  ",
             f"**AppID:** {item.get('consumer_appid', 'N/A')}  ",
             f"**Language ID:** {item.get('language', 'N/A')}  ",
+            date_str + "  ",
+            f"**Views:** {item.get('views', 0):,} | **Subscribers:** {item.get('subscriptions', 0):,} | **Favorites:** {item.get('favorited', 0):,}  ",
             f"**Tags:** {', '.join(tags_list)}  ",
         ]
         
@@ -392,9 +423,22 @@ class ScraperApp(App):
     #item-details {
         height: 1fr;
     }
+    #creator-box {
+        height: auto;
+        layout: horizontal;
+        align: left middle;
+        margin-bottom: 1;
+    }
+    #creator-label {
+        content-align: left middle;
+        margin-right: 1;
+    }
     #btn-jump-author {
-        margin-top: 1;
         display: none;
+        height: 1;
+        min-width: 8;
+        padding: 0 1;
+        border: none;
     }
     #details-header {
         height: 3;
@@ -536,7 +580,6 @@ class ScraperApp(App):
 
         details_container = Vertical(
             DetailsPane(id="item-details"),
-            Button("Jump to Author", id="btn-jump-author", variant="primary"),
             id="details-container"
         )
         details_container.border_title = "Details"
