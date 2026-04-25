@@ -32,7 +32,7 @@ class Daemon:
         self.db_path = config.get("database", {}).get("path", "workshop.db")
         self.api_key = config.get("api", {}).get("key", "")
         self.batch_size = config.get("daemon", {}).get("batch_size", 10)
-        self.delay = config.get("daemon", {}).get("request_delay_seconds", 1.5)
+        self.delay = config.get("daemon", {}).get("request_delay_seconds", 5)
         
         # Translator thread
         self.translator = TranslatorThread(config)
@@ -304,7 +304,7 @@ class Daemon:
             
             if self.consecutive_successes >= 100:
                 old_delay = self.delay
-                self.delay = max(1.0, self.delay - 1.0)
+                self.delay = max(1.0, self.delay - 0.1)
                 if old_delay != self.delay:
                     logging.info(f"100 consecutive successes! Decreasing delay from {old_delay} to {self.delay} seconds.")
                     if "daemon" not in self.config:
