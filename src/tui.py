@@ -397,6 +397,7 @@ class DatabaseCommands(Provider):
                 score,
                 matcher.highlight(label),
                 self.app.action_clear_pending,
+                text=label,
                 help="Remove all unscraped/pending items from the database",
             )
 
@@ -456,8 +457,15 @@ class ScraperApp(App):
         background: $boost;
         width: auto;
         margin-left: 1;
+        color: $accent;
     }
-    Button {
+    .search-row Button {
+        height: 1;
+        border: none;
+        background: $boost;
+        color: $accent;
+    }
+    #top-left-overlay Button, .top-right-btn {
         color: $accent;
     }
     Button.-primary, Button.-error, Button.-success, Button.-warning {
@@ -577,7 +585,7 @@ class ScraperApp(App):
     def get_system_commands(self, screen):
         """Filter out Screenshot and Theme commands from the system commands."""
         for command in super().get_system_commands(screen):
-            if "screenshot" in command.name.lower() or "theme" in command.name.lower():
+            if "screenshot" in command.title.lower() or "theme" in command.title.lower():
                 continue
             yield command
 
