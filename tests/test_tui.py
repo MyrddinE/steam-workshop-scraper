@@ -55,12 +55,14 @@ async def test_tui_advanced_search_flow(mock_config, mock_results):
             await pilot.press("enter")
             
             from src.tui import DetailsPane
-            from textual.widgets import Markdown
+            from textual.widgets import Markdown, Label
             detail_pane = app.query_one("#item-details", DetailsPane)
+            title_label = detail_pane.query_one("#item-title", Label)
             detail_content = detail_pane.query_one("#detail-content", Markdown)
 
+            assert "Amazing Mod" in str(title_label.render())
             content = str(detail_content._markdown)
-            assert "Amazing Mod" in content
+            assert "amazing" in content.lower()
 
 @pytest.mark.asyncio
 async def test_tui_jump_to_author(mock_config, mock_results):
@@ -136,35 +138,30 @@ async def test_tui_translation_flow(mock_config, mock_results):
             list_view = app.query_one(ListView)
             list_view.index = 0
             app.set_focus(list_view)
-            await pilot.press("enter")
+            await pilot.pause(0.1)
 
             from src.tui import DetailsPane
-            from textual.widgets import Markdown
+            from textual.widgets import Markdown, Label
             detail_pane = app.query_one("#item-details", DetailsPane)
-            detail_content = detail_pane.query_one("#detail-content", Markdown)
+            title_label = detail_pane.query_one("#item-title", Label)
+            tags_label = detail_pane.query_one("#stat-tags", Label)
 
-            content = str(detail_content._markdown)
-            assert "List Mod" in content
-            assert "Valid, List" in content
+            assert "List Mod" in str(title_label.render())
+            assert "Valid, List" in str(tags_label.render())
 
             # Verify Dict Mod (should not crash, should just be empty tags)
             list_view.index = 1
-            app.set_focus(list_view)
-            await pilot.press("enter")
+            await pilot.pause(0.1)
 
-            content2 = str(detail_content._markdown)
-            assert "Dict Mod" in content2
-
-            assert "Tags: \n" in content2 or "Tags: \n" not in content2 # It just shouldn't crash
+            assert "Dict Mod" in str(title_label.render())
+            assert "None" in str(tags_label.render())
 
             # Verify API Tags Mod
             list_view.index = 2
-            app.set_focus(list_view)
-            await pilot.press("enter")
+            await pilot.pause(0.1)
 
-            content3 = str(detail_content._markdown)
-            assert "API Tags Mod" in content3
-            assert "Mod, 1.0" in content3
+            assert "API Tags Mod" in str(title_label.render())
+            assert "Mod, 1.0" in str(tags_label.render())
 
 
 @pytest.mark.asyncio

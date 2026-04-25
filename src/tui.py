@@ -95,16 +95,36 @@ class DetailsPane(VerticalScroll):
     show_translated = reactive(True)
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="details-header"):
-            yield Label("[b]Item Details[/b]", id="details-header-label")
-            yield Button("Show Original", id="btn-toggle-translation", classes="details-btn")
-            yield Button("Translate", id="btn-request-translation", classes="details-btn")
+        with Horizontal(id="top-left-overlay"):
+            yield Button("Translate", id="btn-request-translation")
+            yield Button("Show Original", id="btn-toggle-translation")
+        
+        yield Button("jump", id="btn-jump-author", variant="primary", classes="top-right-btn")
+
+        with Horizontal(id="title-creator-row"):
+            yield Label("", id="item-title")
+            yield Label("", id="item-creator")
             
-        with Horizontal(id="creator-box"):
-            yield Label("[b]Creator:[/b] N/A", id="creator-label")
-            yield Button("jump", id="btn-jump-author", variant="primary")
+        yield Static(id="spacer-1", classes="blank-line")
             
-        yield Markdown(id="detail-content")
+        with Horizontal(id="stats-row"):
+            with Vertical(classes="stats-col"):
+                yield Label("ID: N/A", id="stat-id")
+                yield Label("Created: N/A", id="stat-created")
+                yield Label("Updated: N/A", id="stat-updated")
+                yield Label("Tags: N/A", id="stat-tags")
+            with Vertical(classes="stats-col"):
+                yield Label("Size: N/A", id="stat-size")
+                yield Label("Views: N/A", id="stat-views")
+                yield Label("Subs: N/A", id="stat-subs")
+                yield Label("Favs: N/A", id="stat-favs")
+
+        desc_container = Vertical(
+            Markdown(id="detail-content"),
+            id="desc-container"
+        )
+        desc_container.border_title = "Description"
+        yield desc_container
 
     def on_mount(self) -> None:
         """Setup background refresh to catch translation updates."""
@@ -133,25 +153,27 @@ class DetailsPane(VerticalScroll):
     def update_content(self) -> None:
         if not self.item_data:
             self.query_one("#detail-content", Markdown).update("Select an item to see details.")
-            self.query_one("#creator-label", Label).update("[b]Creator:[/b] N/A")
+            self.query_one("#item-title", Label).update("")
+            self.query_one("#item-creator", Label).update("")
             self.query_one("#btn-toggle-translation").display = False
             self.query_one("#btn-request-translation").display = False
             self.query_one("#btn-jump-author").display = False
+            
+            for stat in ["id", "created", "updated", "tags", "size", "views", "subs", "favs"]:
+                self.query_one(f"#stat-{stat}", Label).update(f"[b]{stat.capitalize()}:[/b] N/A")
             return
 
         item = self.item_data
         
-        # Determine which fields to show based on toggle and existence
         display_translated = self.show_translated and item.get("dt_translated")
-        
         title = item.get("title_en") if display_translated and item.get("title_en") else item.get("title", "N/A")
         
-        # User name prioritization
         creator_name = item.get("personaname_en") if display_translated and item.get("personaname_en") else item.get("personaname")
         if not creator_name:
             creator_name = str(item.get("creator", "N/A"))
             
-        self.query_one("#creator-label", Label).update(f"[b]Creator:[/b] {creator_name}")
+        self.query_one("#item-title", Label).update(f"[b]{title}[/b]")
+        self.query_one("#item-creator", Label).update(creator_name)
         
         jump_btn = self.query_one("#btn-jump-author", Button)
         if item.get("creator"):
@@ -159,7 +181,6 @@ class DetailsPane(VerticalScroll):
         else:
             jump_btn.display = False
 
-        # Descriptions fallback chain
         if display_translated:
             desc = item.get("extended_description_en") or item.get("short_description_en")
             if not desc:
@@ -167,7 +188,6 @@ class DetailsPane(VerticalScroll):
         else:
             desc = item.get("extended_description") or item.get("short_description") or "N/A"
 
-        # Toggle Button visibility and label
         toggle_btn = self.query_one("#btn-toggle-translation")
         if item.get("dt_translated"):
             toggle_btn.display = True
@@ -175,7 +195,6 @@ class DetailsPane(VerticalScroll):
         else:
             toggle_btn.display = False
 
-        # Request Translation Button visibility
         req_btn = self.query_one("#btn-request-translation")
         req_btn.display = True
 
@@ -190,37 +209,40 @@ class DetailsPane(VerticalScroll):
             if not ts: return "N/A"
             try:
                 import datetime
-                return datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+                return datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d')
             except:
                 return "N/A"
+                
+        def format_size(size_bytes):
+            if not size_bytes: return "N/A"
+            try:
+                kb = float(size_bytes) / 1024
+                if kb < 1024: return f"[gray]{kb:.1f} KB[/gray]"
+                mb = kb / 1024
+                if mb < 1024: return f"[white]{mb:.1f} MB[/white]"
+                gb = mb / 1024
+                return f"[yellow]{gb:.1f} GB[/yellow]"
+            except: return "N/A"
 
-        created_str = format_ts(item.get('time_created'))
-        updated_str = format_ts(item.get('time_updated'))
+        self.query_one("#stat-id", Label).update(f"[b]ID:[/b] {item.get('workshop_id', 'N/A')}")
+        self.query_one("#stat-created", Label).update(f"[b]Created:[/b] {format_ts(item.get('time_created'))}")
         
-        date_str = f"**Created:** {created_str}"
-        if updated_str != "N/A" and updated_str != created_str:
-            date_str += f" | **Updated:** {updated_str}"
+        updated_ts = item.get('time_updated')
+        updated_str = format_ts(updated_ts) if updated_ts and updated_ts != item.get('time_created') else "N/A"
+        self.query_one("#stat-updated", Label).update(f"[b]Updated:[/b] {updated_str}")
+        
+        self.query_one("#stat-tags", Label).update(f"[b]Tags:[/b] {', '.join(tags_list) if tags_list else 'None'}")
 
-        # Convert to Markdown
-        md_content = [
-            f"# {bbcode_to_markdown(title)}",
-            f"**ID:** {item.get('workshop_id', 'N/A')}  ",
-            f"**AppID:** {item.get('consumer_appid', 'N/A')}  ",
-            f"**Language ID:** {item.get('language', 'N/A')}  ",
-            date_str + "  ",
-            f"**Views:** {item.get('views', 0):,} | **Subscribers:** {item.get('subscriptions', 0):,} | **Favorites:** {item.get('favorited', 0):,}  ",
-            f"**Tags:** {', '.join(tags_list)}  ",
-        ]
-        
-        if item.get("translation_priority", 0) > 0:
-            md_content.append("\n*Queued for translation...*")
-        
-        md_content.extend([
-            "\n---",
-            "### Description",
-            bbcode_to_markdown(desc)
-        ])
-        self.query_one("#detail-content", Markdown).update("\n".join(md_content))
+        self.query_one("#stat-size", Label).update(f"[b]Size:[/b] {format_size(item.get('file_size'))}")
+        self.query_one("#stat-views", Label).update(f"[b]Views:[/b] {item.get('views', 0):,}")
+        self.query_one("#stat-subs", Label).update(f"[b]Subscribers:[/b] {item.get('subscriptions', 0):,}")
+        self.query_one("#stat-favs", Label).update(f"[b]Favorites:[/b] {item.get('favorited', 0):,}")
+
+        md_content = bbcode_to_markdown(desc)
+        if item.get("translation_priority", 0) > 0 and not item.get("dt_translated"):
+             md_content = f"> *[yellow]Translation requested, currently in queue...[/yellow]*\n\n{md_content}"
+             
+        self.query_one("#detail-content", Markdown).update(md_content)
 
 class WorkshopItem(ListItem):
     """A list item representing a workshop item."""
@@ -478,35 +500,59 @@ class ScraperApp(App):
     #item-details {
         height: 1fr;
     }
-    #creator-box {
-        height: auto;
-        layout: horizontal;
-        align: left middle;
-        margin-bottom: 1;
+    #top-left-overlay {
+        position: absolute;
+        offset: 0 -1;
+        height: 1;
+        width: auto;
     }
-    #creator-label {
-        content-align: left middle;
+    #top-left-overlay Button {
+        height: 1;
+        border: none;
+        padding: 0 1;
+        min-width: 0;
         margin-right: 1;
     }
-    #btn-jump-author {
-        display: none;
+    .top-right-btn {
+        position: absolute;
+        offset: 100% -1;
+        margin-left: -10;
         height: 1;
-        min-width: 8;
-        padding: 0 1;
         border: none;
+        padding: 0 1;
+        min-width: 0;
+        display: none;
     }
-    #details-header {
-        height: 3;
-        margin-bottom: 1;
-        border-bottom: solid $primary;
+    #title-creator-row {
+        height: auto;
     }
-    #details-header-label {
+    #item-title {
         width: 1fr;
         content-align: left middle;
     }
-    .details-btn {
-        margin-left: 1;
-        min-width: 16;
+    #item-creator {
+        width: auto;
+        max-width: 50%;
+        content-align: right middle;
+    }
+    .blank-line {
+        height: 1;
+    }
+    #stats-row {
+        height: auto;
+    }
+    .stats-col {
+        width: 50%;
+        height: auto;
+    }
+    #desc-container {
+        border-top: solid $primary;
+        border-right: none;
+        border-bottom: none;
+        border-left: none;
+        margin: 0;
+        padding: 0;
+        height: auto;
     }
     """
 
@@ -639,7 +685,6 @@ class ScraperApp(App):
             DetailsPane(id="item-details"),
             id="details-container"
         )
-        details_container.border_title = "Details"
 
         yield search_container
         yield Horizontal(
