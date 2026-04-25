@@ -526,6 +526,7 @@ class ScraperApp(App):
         self.current_offset = 0
         self.has_more_results = True
         self.is_loading = False
+        self.is_single_creator_mode = False
         
         # UI State recovery
         # We use a hidden file to avoid cluttering the working directory
@@ -537,7 +538,7 @@ class ScraperApp(App):
 
     def save_state(self) -> None:
         """Saves current UI state to disk."""
-        if not self.is_mounted or not self._has_restored_state:
+        if not self.is_mounted or not self._has_restored_state or self.is_single_creator_mode:
             return
             
         try:
@@ -566,6 +567,7 @@ class ScraperApp(App):
 
     def on_mount(self) -> None:
         """Initialize the UI and recover state."""
+        self.query_one("#btn-return", Button).display = False
         # Recover sorting and filters
         if self._initial_state:
             try:
@@ -605,6 +607,7 @@ class ScraperApp(App):
             Horizontal(
                 Button("Execute Search", id="btn-execute-search", variant="primary"),
                 Button("Save Filter for Scraper", id="btn-save-filter", variant="default"),
+                Button("Return", id="btn-return", variant="warning"),
                 classes="search-buttons"
             ),
             id="search-container"
@@ -781,24 +784,45 @@ class ScraperApp(App):
                 self.call_after_refresh(self.execute_search)
 
         elif event.button.id == "btn-jump-author" and self.current_item_creator:
+            # Save state before switching to single creator mode
+            if not self.is_single_creator_mode:
+                self.save_state()
+
+            self.is_single_creator_mode = True
+            self.query_one("#btn-save-filter", Button).display = False
+            self.query_one("#btn-return", Button).display = True
+
             builder = self.query_one("#search-builder", SearchBuilder)
-            
+
             # Clear all current rows
             await builder.query(SearchRow).remove()
-            
+
             # Add a fresh first row
             new_row = SearchRow(builder.fields, builder.operators, is_first=True)
             await builder.mount(new_row)
-            
+
             # Use call_after_refresh to ensure selects are populated
             def setup_author_filter():
                 new_row.query_one("#field-select", Select).value = "Author ID"
                 new_row.query_one("#op-select", Select).value = "is"
                 new_row.query_one("#value-input", Input).value = str(self.current_item_creator)
                 self.run_worker(self.execute_search())
-            
+
             self.call_after_refresh(setup_author_filter)
-        
+
+        elif event.button.id == "btn-return":
+            self.is_single_creator_mode = False
+            self.query_one("#btn-save-filter", Button).display = True
+            self.query_one("#btn-return", Button).display = False
+
+            # Reload saved state
+            state = load_tui_state(self.state_file)
+            if state and "filters" in state:
+                builder = self.query_one("#search-builder", SearchBuilder)
+                builder.set_filters(state["filters"])
+
+            self.call_after_refresh(self.execute_search)
+
         elif event.button.id == "btn-toggle-translation":
             detail_pane = self.query_one("#item-details", DetailsPane)
             detail_pane.show_translated = not detail_pane.show_translated
