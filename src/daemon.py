@@ -18,12 +18,13 @@ from src.database import (
 from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries, query_files_by_date
 from src.web_scraper import scrape_extended_details, discover_items_by_date_html
 from src.translator import TranslatorThread, is_ascii
-import json # For handling JSON-serialized tags
+from src.config import save_config
 
 
 class Daemon:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, config_path: str = "config.yaml"):
         self.config = config
+        self.config_path = config_path
         self.running = True
         self.last_filters = {}
         
@@ -36,6 +37,11 @@ class Daemon:
         # Translator thread
         self.translator = TranslatorThread(config)
         
+        # State variables for dynamic delay adjustment
+        self.consecutive_successes = 0
+        self.consecutive_failures = 0
+        self.had_recent_success_streak = False
+
         # Enforce required target_appids
         self.target_appids = config.get("daemon", {}).get("target_appids")
         if not self.target_appids or not isinstance(self.target_appids, list):
@@ -205,6 +211,22 @@ class Daemon:
                     f"Failed to scrape from web: {failed_fields}."
                 )
                 
+                # Record Failure and Adjust Delay
+                self.consecutive_failures += 1
+                self.consecutive_successes = 0
+                
+                if self.consecutive_failures >= 2 and self.had_recent_success_streak:
+                    old_delay = self.delay
+                    increase = max(1.0, round(self.delay * 0.10))
+                    self.delay += increase
+                    logging.info(f"Multiple consecutive failures after a success streak! Increasing delay from {old_delay} to {self.delay} seconds.")
+                    if "daemon" not in self.config:
+                        self.config["daemon"] = {}
+                    self.config["daemon"]["request_delay_seconds"] = self.delay
+                    save_config(self.config_path, self.config)
+                    
+                    self.had_recent_success_streak = False # Reset so we don't spam increases
+                
                 time.sleep(self.delay)
                 continue
 
@@ -273,6 +295,23 @@ class Daemon:
 
             populated_fields = [k for k, v in base_data.items() if v is not None and v != ""]
             logging.info(f"[{item_id}] \"{base_data.get('title', 'Unknown Title')}\" | Populated: {populated_fields}")
+            
+            # Record Success and Adjust Delay
+            self.consecutive_successes += 1
+            self.consecutive_failures = 0
+            if self.consecutive_successes >= 5:
+                self.had_recent_success_streak = True
+            
+            if self.consecutive_successes >= 100:
+                old_delay = self.delay
+                self.delay = max(1.0, self.delay - 1.0)
+                if old_delay != self.delay:
+                    logging.info(f"100 consecutive successes! Decreasing delay from {old_delay} to {self.delay} seconds.")
+                    if "daemon" not in self.config:
+                        self.config["daemon"] = {}
+                    self.config["daemon"]["request_delay_seconds"] = self.delay
+                    save_config(self.config_path, self.config)
+                self.consecutive_successes = 0
             
             # Polite delay between items
             time.sleep(self.delay)

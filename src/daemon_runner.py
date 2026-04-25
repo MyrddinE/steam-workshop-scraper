@@ -38,7 +38,7 @@ def main():
     db_path = config.get("database", {}).get("path", "workshop.db")
     initialize_database(db_path)
     
-    daemon = Daemon(config)
+    daemon = Daemon(config, config_path)
     daemon.run()
 
 if __name__ == "__main__":
