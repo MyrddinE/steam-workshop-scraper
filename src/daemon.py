@@ -501,8 +501,11 @@ class Daemon:
 
             # After the discovery loop for this appid, update tracking to the furthest successful point
             # ONLY if discovery was NOT interrupted early for this appid
-            if not discovery_interrupted_early and last_successful_window_end_time > last_scanned_date:
-                logging.info(f"Updating last scanned date for AppID {appid} to {datetime.fromtimestamp(last_successful_window_end_time, timezone.utc).date()}.")
-                update_app_tracking(self.db_path, appid, last_successful_window_end_time)
+            if not discovery_interrupted_early:
+                if last_successful_window_end_time > last_scanned_date: # Only update if we made progress
+                    logging.info(f"Updating last scanned date for AppID {appid} to {datetime.fromtimestamp(last_successful_window_end_time, timezone.utc).date()}.")
+                    update_app_tracking(self.db_path, appid, last_successful_window_end_time)
+                else:
+                    logging.info(f"Discovery for AppID {appid} completed naturally, but no new full windows scanned. Last scanned date remains {datetime.fromtimestamp(last_scanned_date, timezone.utc).date()}.")
             else:
-                logging.info(f"Discovery for AppID {appid} interrupted or no full windows scanned. Last scanned date remains {datetime.fromtimestamp(last_scanned_date, timezone.utc).date()}.")
+                logging.info(f"Discovery for AppID {appid} interrupted. Last scanned date remains {datetime.fromtimestamp(last_scanned_date, timezone.utc).date()}.")
