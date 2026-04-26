@@ -14,7 +14,8 @@ from src.database import (
     get_app_tracking,
     update_app_tracking,
     save_app_filter,
-    get_connection # Added
+    get_connection,
+    get_item_details
 )
 from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries, query_files_by_date
 from src.web_scraper import scrape_extended_details, discover_items_by_date_html
@@ -149,64 +150,65 @@ class Daemon:
             time.sleep(self.delay * 5)
             return
 
-        for item_id in items_to_scrape:
+        for existing_data in items_to_scrape:
             if not self.running:
                 break # Exit early if shutting down
 
             now_iso = datetime.now(timezone.utc).isoformat()
-            base_data = {
-                "workshop_id": item_id,
-                "dt_attempted": now_iso
-            }
+            item_id = existing_data['workshop_id']
+            if existing_data.get('title') is None or existing_data.get('creator') is None:
+                log_action = 'Add'
+            elif existing_data.get('extended_description') is None:
+                log_action = 'Complete'
+            else:
+                log_action = 'Update'
 
             # Step 1: Query API
             api_data = get_workshop_details_api(item_id, self.api_key)
+            api_status = api_data.get("status", 0)
 
-            # Initialize base_data with item_id, attempt timestamp, and API-provided status
-            base_data = {
-                "workshop_id": item_id,
-                "dt_attempted": now_iso,
-                "status": api_data.get("status", 0) # Default to 0 if API doesn't provide one
-            }
+            merged_data = existing_data.copy()
+            merged_data["dt_attempted"] = now_iso
+            merged_data["status"] = api_status
             
-            if base_data["status"] == 404:
-                logging.warning(f"[{item_id}] Item not found (404) via API. Marking as such.")
-                insert_or_update_item(self.db_path, base_data)
+            if api_status == 404:
+                logging.warning(f"[{item_id}] Item not found (404) via API, it may have been deleted.")
+                insert_or_update_item(self.db_path, merged_data)
                 continue # Skip to next item
-            elif base_data["status"] == 500:
+            elif api_status == 500:
                 logging.error(f"[{item_id}] API request failed (500). Retrying later.")
-                insert_or_update_item(self.db_path, base_data) # Store 500 status
+                insert_or_update_item(self.db_path, merged_data)
                 continue # Skip to next item
 
             # If API call was successful, proceed with processing its data
             # Merge API data (it will contain actual item details if status != 404/500)
-            # Ensure the API data does not override workshop_id, dt_attempted, status which are already set in base_data
+            # Ensure the API data does not override workshop_id, dt_attempted, status which are already set in merged_data
             api_data.pop("publishedfileid", None) # Remove it if present, as it's mapped to workshop_id
-            api_data.pop("status", None) # Remove status as we explicitly set it in base_data
-            base_data.update(api_data)
+            api_data.pop("status", None) # Remove status as we already set it
+            merged_data.update(api_data)
 
             # Map keys that differ from our schema (these keys were already removed in steam_api.py, but for safety.)
-            if "creator_app_id" in base_data:
-                base_data["creator_appid"] = base_data.pop("creator_app_id")
-            if "consumer_app_id" in base_data:
-                base_data["consumer_appid"] = base_data.pop("consumer_app_id")
-            if "description" in base_data:
-                base_data["short_description"] = base_data.pop("description")
+            if "creator_app_id" in merged_data:
+                merged_data["creator_appid"] = merged_data.pop("creator_app_id")
+            if "consumer_app_id" in merged_data:
+                merged_data["consumer_appid"] = merged_data.pop("consumer_app_id")
+            if "description" in merged_data:
+                merged_data["short_description"] = merged_data.pop("description")
 
             # Remove keys that don't match our schema
             allowed_keys = {
-                "workshop_id", "dt_found", "dt_updated", "dt_attempted", "status", "title",
+                "workshop_id", "dt_found", "dt_updated", "dt_attempted", "dt_translated", "status", "title", "title_en",
                 "creator", "creator_appid", "consumer_appid", "filename", "file_size", "preview_url",
-                "hcontent_file", "hcontent_preview", "short_description", "time_created",
+                "hcontent_file", "hcontent_preview", "short_description", "short_description_en", "time_created",
                 "time_updated", "visibility", "banned", "ban_reason", "app_name", "file_type",
-                "subscriptions", "favorited", "views", "tags", "extended_description", "language",
+                "subscriptions", "favorited", "views", "tags", "extended_description", "extended_description_en", "language",
                 "lifetime_subscriptions", "lifetime_favorited", "translation_priority"
             }
             
             clean_api_data = {}
             known_ignored_keys = {"result"} # 'result' is handled by steam_api.py, should not appear here
             
-            for k, v in base_data.items():
+            for k, v in merged_data.items():
                 if k in allowed_keys:
                     clean_api_data[k] = v
                 elif k not in known_ignored_keys:
@@ -216,28 +218,51 @@ class Daemon:
                     else:
                         logging.debug(f"Discarding unknown (empty) API column: '{k}' for item {item_id}")
                 
-            base_data = clean_api_data # Overwrite base_data with only allowed keys
-            base_data["dt_updated"] = now_iso
+            merged_data = clean_api_data # Overwrite merged_data with only allowed keys
+            merged_data["dt_updated"] = now_iso
 
             # Check if tags were provided as list, JSON stringify for SQLite
-            if "tags" in base_data and isinstance(base_data["tags"], list):
-                base_data["tags"] = json.dumps(base_data["tags"], ensure_ascii=False)
+            if "tags" in merged_data:
+                api_tags = merged_data.get("tags")
+                normalized_api_tags = []
+                if isinstance(api_tags, list):
+                    for t in api_tags:
+                        if isinstance(t, dict) and "tag" in t:
+                            normalized_api_tags.append(t["tag"])
+                        elif isinstance(t, str):
+                            normalized_api_tags.append(t)
+                elif isinstance(api_tags, str):
+                    try:
+                        t_list = json.loads(api_tags)
+                        if isinstance(t_list, list):
+                            for t in t_list:
+                                if isinstance(t, dict) and "tag" in t:
+                                    normalized_api_tags.append(t["tag"])
+                                elif isinstance(t, str):
+                                    normalized_api_tags.append(t)
+                        else:
+                             normalized_api_tags = [api_tags]
+                    except json.JSONDecodeError:
+                        normalized_api_tags = [api_tags]
+                
+                merged_data["tags"] = json.dumps(sorted(list(set(normalized_api_tags))), ensure_ascii=False)
 
             # Step 2: Scrape Extended Details
             url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={item_id}"
             scrape_data = scrape_extended_details(url)
+            display_title = merged_data.get('title_en') or merged_data.get('title', 'Unknown Title')
             
             if not scrape_data:
-                base_data["status"] = 206 # Partial Content
-                logging.debug(f"DEBUG: Calling insert_or_update_item with base_data: {base_data}") # Debug print
-                insert_or_update_item(self.db_path, base_data)
+                merged_data["status"] = 206 # Partial Content
+                logging.debug(f"DEBUG: Calling insert_or_update_item with merged_data: {merged_data}")
+                insert_or_update_item(self.db_path, merged_data)
 
                 # Assemble detailed log message
-                successful_fields = [k for k, v in base_data.items() if v is not None]
+                successful_fields = [k for k, v in merged_data.items() if v is not None]
 
                 failed_fields = ["extended_description", "tags"] # Known scrape targets
                 logging.warning(
-                    f"[{item_id}] '{base_data.get('title', 'Unknown')}' | Scraper failed, partial data saved. "
+                    f"[{item_id}] '{display_title}' | Scraper failed, partial data saved. "
                     f"Successfully pulled from API: {successful_fields}. "
                     f"Failed to scrape from web: {failed_fields}."
                 )
@@ -262,42 +287,30 @@ class Daemon:
                 continue
 
             # Merge Scrape Data
-            base_data["extended_description"] = scrape_data.get("description")
+            merged_data["extended_description"] = scrape_data.get("description")
             
-            # Combine tags from scrape if not present from API
-            if scrape_data.get("tags"):
-                try:
-                    existing_tags = json.loads(base_data.get("tags", "[]"))
-                except json.JSONDecodeError:
-                    existing_tags = []
-                
-                # Normalize existing and new tags to strings for unique merging
-                def normalize_tags(tlist):
-                    norm = []
-                    for t in tlist:
-                        if isinstance(t, dict) and "tag" in t:
-                            norm.append(str(t["tag"]))
-                        elif isinstance(t, str):
-                            norm.append(t)
-                    return norm
-
-                merged_tags = list(set(normalize_tags(existing_tags) + normalize_tags(scrape_data["tags"])))
-                base_data["tags"] = json.dumps(merged_tags, ensure_ascii=False)
-
             # Check if translation is needed (contains non-ASCII)
-            needs_trans = (
-                not is_ascii(base_data.get("title", "")) or 
-                not is_ascii(base_data.get("short_description", "")) or 
-                not is_ascii(base_data.get("extended_description", ""))
+            is_unicode = (
+                not is_ascii(merged_data.get("title", "")) or 
+                not is_ascii(merged_data.get("short_description", "")) or 
+                not is_ascii(merged_data.get("extended_description", ""))
             )
-            if needs_trans:
-                base_data["translation_priority"] = 1
+            is_translated = merged_data.get('dt_translated') is not None
+            is_changed = (
+                merged_data.get('title') != existing_data.get('title') or
+                merged_data.get('short_description') != existing_data.get('short_description') or
+                merged_data.get('extended_description') != existing_data.get('extended_description')
+            )
+            needs_trans = is_unicode and (not is_translated or is_changed)
 
-            base_data["status"] = 200 # OK
-            insert_or_update_item(self.db_path, base_data)
+            if needs_trans:
+                merged_data["translation_priority"] = 1
+
+            merged_data["status"] = 200 # OK
+            insert_or_update_item(self.db_path, merged_data)
             
             # Step 3: Fetch User/Creator details
-            creator_id = base_data.get("creator")
+            creator_id = merged_data.get("creator")
             if creator_id:
                 try:
                     creator_id = int(creator_id)
@@ -324,8 +337,7 @@ class Daemon:
                 except (ValueError, TypeError):
                     pass # Not a numeric SteamID
 
-            # populated_fields = [k for k, v in base_data.items() if v is not None and v != ""]
-            display_title = base_data.get('title_en') or base_data.get('title', 'Unknown Title')
+            # populated_fields = [k for k, v in merged_data.items() if v is not None and v != ""]
             logging.info(f"[{item_id}] \"{display_title}\"") # | Populated: {populated_fields}")
             
             # Record Success and Adjust Delay

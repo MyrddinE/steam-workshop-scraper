@@ -202,29 +202,44 @@ def insert_or_update_item(db_path: str, item_data: dict) -> bool:
     conn.close()
     return is_new
 
-def get_next_items_to_scrape(db_path: str, limit: int = 10) -> list[int]:
+def get_next_items_to_scrape(db_path: str, limit: int = 10) -> list[dict]:
     """
-    Returns a list of workshop_ids that need to be scraped, prioritizing in exact order:
-    1. Unscraped new items (status IS NULL).
-    2. Partially failed items (status != 200).
-    3. Successfully scraped items (status = 200), ordered by dt_attempted ASC (stalest first).
+    Retrieves the next batch of workshop items to be scraped.
+    Prioritizes items that have never been scraped, then those with partial
+    content (status 206) sorted by subscriber count (DESC), and finally
+    the oldest successfully scraped items.
+    Returns a list of full item data dictionaries.
     """
     conn = get_connection(db_path)
+    cursor = conn.cursor()
+
     sql = """
-        SELECT workshop_id FROM workshop_items
+        SELECT * FROM workshop_items
+        WHERE
+            status IS NULL OR
+            status = 206 OR
+            (status = 200 AND dt_updated < date('now', '-7 days'))
         ORDER BY
             CASE
-                WHEN status IS NULL THEN 1
-                WHEN status != 200 THEN 2
-                ELSE 3
+                WHEN status IS NULL THEN 0
+                WHEN status = 206 THEN 1
+                WHEN status = 200 AND dt_updated < date('now', '-7 days') THEN 2
+                ELSE 3 -- Fallback for other statuses, e.g., 404, 500, or very new 200s
             END ASC,
-            dt_attempted ASC
+            CASE
+                WHEN status = 206 THEN subscriptions
+                ELSE NULL
+            END DESC, -- Prioritize higher subscriptions for 206 status
+            dt_updated ASC -- General secondary sort, also for status=200 old items
         LIMIT ?
     """
-    cursor = conn.execute(sql, (limit,))
-    results = [row["workshop_id"] for row in cursor.fetchall()]
+    cursor.execute(sql, (limit,))
+    
+    # Return full dictionaries
+    items = [dict(row) for row in cursor.fetchall()]
+    
     conn.close()
-    return results
+    return items
 
 def count_unscraped_items(db_path: str) -> int:
     """Returns the number of items that have never been scraped (dt_attempted is NULL)."""

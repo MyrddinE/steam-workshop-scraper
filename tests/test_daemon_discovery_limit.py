@@ -80,21 +80,22 @@ async def test_seed_database_no_tracking_update_on_early_exit(mock_sleep, mock_d
     
     initial_last_scanned = now - (100 * 86400) # 100 days ago
     update_app_tracking(db_path, 1062090, initial_last_scanned, 3600*24*30)
-    daemon.last_filters[1062090] = {"hash": json.dumps({"text": "", "req_tags": [], "excl_tags": []}), "start_time": initial_last_scanned}
     
-    # Mock _find_initial_start_date to just return a fixed value
+    # Correctly initialize the daemon's internal state to match the database
+    daemon._load_initial_filter_state()
+    
+        # Mock _find_initial_start_date to just return a fixed value
     with patch.object(Daemon, '_find_initial_start_date', return_value=initial_last_scanned):
-        # Simulate a window where the queue fills up quickly
-        # First call: 10 items. Queue is 10. Target 20.
-        # Second call (next page in same window): 15 items. Queue is 25. Target 20. --> Should exit here.
+        # Simulate an exit during the FIRST window.
+        # To stay in the same window, Page 1 must return 30 items.
         mock_discover.side_effect = [
-            [i for i in range(1, 11)],   # Page 1: 10 items
-            [i for i in range(11, 26)],  # Page 2: 15 items. Total 25.
-            [] # If it continues, this would be hit
+            [i for i in range(1, 31)],   # Page 1: 30 items
+            [i for i in range(31, 46)],  # Page 2: 15 items. Total 45.
+            [] # Should not be hit
         ]
         
         # Call seed_database with a target_new that will be hit mid-window
-        daemon.seed_database(target_new=20)
+        daemon.seed_database(target_new=40)
         
         # Verify discover was called twice (for 2 pages)
         assert mock_discover.call_count == 2
@@ -104,7 +105,54 @@ async def test_seed_database_no_tracking_update_on_early_exit(mock_sleep, mock_d
         assert current_tracking["last_historical_date_scanned"] == initial_last_scanned
         
         # Verify the queue has items as expected
-        assert count_unscraped_items(db_path) >= 20
+        assert count_unscraped_items(db_path) >= 40
+
+@pytest.mark.asyncio
+@patch('src.daemon.time.time')
+@patch('src.daemon.discover_items_by_date_html')
+@patch('src.daemon.time.sleep')
+async def test_seed_database_tracking_updates_on_second_window_exit(mock_sleep, mock_discover, mock_time, tmp_path):
+    """
+    Test that last_historical_date_scanned IS updated to the end of Window 1 
+    if discovery is interrupted during Window 2.
+    """
+    db_path = str(tmp_path / "second_window_exit_test.db")
+    initialize_database(db_path)
+    
+    config = {
+        "database": {"path": db_path},
+        "api": {"key": "test_key"},
+        "daemon": {"target_appids": [1062090], "batch_size": 10, "request_delay_seconds": 0}
+    }
+    daemon = Daemon(config)
+    
+    now = 1700000000
+    mock_time.return_value = now
+    
+    initial_last_scanned = now - (100 * 86400) # 100 days ago
+    update_app_tracking(db_path, 1062090, initial_last_scanned, 3600*24*30)
+    
+    # Correctly initialize the daemon's internal state to match the database
+    daemon._load_initial_filter_state()
+    
+    # Mock _find_initial_start_date to just return a fixed value
+    with patch.object(Daemon, '_find_initial_start_date', return_value=initial_last_scanned):
+        # Simulate Window 1 completing, and Window 2 exiting early.
+        # Window 1, Page 1: < 30 items -> Window 1 finishes.
+        # Window 2, Page 1: < 30 items, but reaches target -> Window 2 finishes early.
+        mock_discover.side_effect = [
+            [i for i in range(1, 11)],   # Window 1, Page 1: 10 items. Finishes window.
+            [i for i in range(11, 26)],  # Window 2, Page 1: 15 items. Total 25. Reaches target 20.
+            [] # Should not be hit
+        ]
+        
+        # Call seed_database with a target_new that will be hit mid-window
+        daemon.seed_database(target_new=20)
+        
+        # Assert that last_historical_date_scanned WAS updated, but only to end of Window 1
+        current_tracking = get_app_tracking(db_path, 1062090)
+        expected_new_date = initial_last_scanned + (3600 * 24 * 30) # End of first window (initial + 30 days)
+        assert current_tracking["last_historical_date_scanned"] == expected_new_date
 
 @pytest.mark.asyncio
 @patch('src.daemon.time.time')

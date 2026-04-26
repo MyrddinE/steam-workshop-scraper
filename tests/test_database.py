@@ -4,6 +4,7 @@ import threading
 import time
 import pytest
 import json
+from datetime import datetime, timezone, timedelta
 from src.database import (
     initialize_database,
     insert_or_update_item,
@@ -69,14 +70,19 @@ def test_insert_or_update_item(db_path):
 
 def test_get_next_items_to_scrape(db_path):
     """Tests that items are fetched in order of oldest dt_attempted (NULLs first)."""
-    insert_or_update_item(db_path, {"workshop_id": 1, "dt_attempted": "2023-10-02"})
-    insert_or_update_item(db_path, {"workshop_id": 2}) # NULL dt_attempted, should come first
-    insert_or_update_item(db_path, {"workshop_id": 3, "dt_attempted": "2023-10-01"})
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "dt_updated": "2023-10-02"})
+    insert_or_update_item(db_path, {"workshop_id": 2, "status": None}) # NULL status, should come first
+    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "dt_updated": "2023-10-01"})
     
-    items = get_next_items_to_scrape(db_path, limit=2)
-    assert len(items) == 2
-    assert items[0] == 2  # NULL comes first
-    assert items[1] == 3  # Older date comes second
+    items = get_next_items_to_scrape(db_path, limit=3)
+    assert len(items) == 3
+    assert isinstance(items[0], dict)
+    
+    # Extract IDs to check order
+    item_ids = [item['workshop_id'] for item in items]
+    assert item_ids[0] == 2 # NULL comes first
+    assert item_ids[1] == 3 # Older date comes second
+    assert item_ids[2] == 1 # Newest date comes last
 
 def test_search_items(db_path):
     """Tests search capabilities over title and description, and filtering by appid."""
@@ -346,24 +352,33 @@ def test_get_next_items_to_scrape_priority(db_path):
     from src.database import get_next_items_to_scrape, insert_or_update_item
     
     # 1. Successfully scraped items, stalest first (status = 200)
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "dt_attempted": "2023-01-01"})
-    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "dt_attempted": "2024-01-01"})
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "dt_updated": "2023-01-01"})
+    # Item 2 is recent, so it should be excluded from re-scraping
+    recent_date = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "dt_updated": recent_date})
     
-    # 2. Partially failed items (status != 200)
-    insert_or_update_item(db_path, {"workshop_id": 3, "status": 206, "dt_attempted": "2025-01-01"})
-    insert_or_update_item(db_path, {"workshop_id": 4, "status": 500, "dt_attempted": "2025-02-01"})
+    # 2. Partially failed items (status = 206) - with different subscription counts
+    insert_or_update_item(db_path, {"workshop_id": 3, "status": 206, "dt_updated": "2025-01-01", "subscriptions": 100})
+    insert_or_update_item(db_path, {"workshop_id": 4, "status": 206, "dt_updated": "2025-02-01", "subscriptions": 500})
     
     # 3. Unscraped new items (status IS NULL)
     insert_or_update_item(db_path, {"workshop_id": 5})
     insert_or_update_item(db_path, {"workshop_id": 6})
     
-    items = get_next_items_to_scrape(db_path, limit=6)
+    # 4. Old items (older than 7 days)
+    # This item is older than #2, but should be lower priority than the NULL and 206 statuses
+    insert_or_update_item(db_path, {"workshop_id": 7, "status": 200, "dt_updated": "2022-01-01"})
+
+    items = get_next_items_to_scrape(db_path, limit=7)
+    item_ids = [item['workshop_id'] for item in items]
     
     # Priority should be:
-    # Group 1: NULL status -> 5, 6 (order doesn't strictly matter between 5/6, but typically by rowid or dt)
-    # Group 2: != 200 status -> 3, 4 (ordered by dt_attempted ASC)
-    # Group 3: 200 status -> 1, 2 (ordered by dt_attempted ASC)
+    # Group 1: NULL status -> 5, 6 (order doesn't strictly matter)
+    # Group 2: 206 status, ordered by subscriptions DESC -> 4, 3
+    # Group 3: Old 200 status, ordered by dt_updated ASC -> 7, 1
+    # Item 2 is not older than 7 days, so it should not be in the list.
     
-    assert set(items[0:2]) == {5, 6}
-    assert items[2:4] == [3, 4]
-    assert items[4:6] == [1, 2]
+    assert len(item_ids) == 6
+    assert set(item_ids[0:2]) == {5, 6}
+    assert item_ids[2:4] == [4, 3]
+    assert item_ids[4:6] == [7, 1]

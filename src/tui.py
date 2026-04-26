@@ -218,7 +218,7 @@ class DetailsPane(VerticalScroll):
 
         item = self.item_data
         
-        is_queued = item.get("is_queued_for_subscription", 0)
+        is_queued = bool(item.get("is_queued_for_subscription", 0))
         self.query_one("#btn-queue-sub").display = not is_queued
         self.query_one("#btn-unqueue-sub").display = is_queued
         
