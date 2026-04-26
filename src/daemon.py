@@ -206,7 +206,7 @@ class Daemon:
             }
             
             clean_api_data = {}
-            known_ignored_keys = {"result"} # 'result' is handled by steam_api.py, should not appear here
+            known_ignored_keys = {"result", "is_queued_for_subscription"} # 'result' is handled by steam_api.py, should not appear here
             
             for k, v in merged_data.items():
                 if k in allowed_keys:
