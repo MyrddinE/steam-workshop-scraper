@@ -333,6 +333,10 @@ class WorkshopItem(ListItem):
         yield Label(f"{prefix}[b]{title}[/b] ({wid})")
         yield Label(f"  By: {creator} | AppID: {appid}")
 
+    def refresh_item(self) -> None:
+        """Re-compose the item to reflect any changes in item_data."""
+        self.recompose()
+
 
 class SearchRow(Horizontal):
     """A single row in the search builder."""
@@ -1096,18 +1100,15 @@ class ScraperApp(App):
         
         # Update UI state in place
         item.item_data["is_queued_for_subscription"] = not item.item_data.get("is_queued_for_subscription", 0)
-        
-        # Re-compose the ListItem to show the change
-        is_queued = item.item_data["is_queued_for_subscription"]
-        prefix = "[green]*[/green] " if is_queued else "  "
-        item.query_one(".sub-indicator", Static).update(prefix)
+
+        # Refresh the ListItem to show the change
+        item.refresh_item()
 
         # Update details pane if it's showing the same item
         detail_pane = self.query_one("#item-details", DetailsPane)
         if detail_pane.workshop_id == workshop_id:
-            detail_pane.item_data["is_queued_for_subscription"] = is_queued
+            detail_pane.item_data["is_queued_for_subscription"] = item.item_data["is_queued_for_subscription"]
             detail_pane.update_content()
-        
         # Move to next item
         if list_view.index < len(list_view) - 1:
             list_view.index += 1
