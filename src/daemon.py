@@ -49,9 +49,31 @@ class Daemon:
         if not self.target_appids or not isinstance(self.target_appids, list):
             raise ValueError("Configuration error: 'daemon.target_appids' must be provided as a list.")
         
+        # Pre-load initial filter state to avoid false positives on startup
+        self._load_initial_filter_state()
+        
         # Setup graceful shutdown
         signal.signal(signal.SIGINT, self.handle_shutdown)
         signal.signal(signal.SIGTERM, self.handle_shutdown)
+
+    def _load_initial_filter_state(self):
+        """Pre-loads the last known filter state from the DB on startup."""
+        logging.info("Loading initial filter state from database...")
+        for appid in self.target_appids:
+            app_tracking = get_app_tracking(self.db_path, appid)
+            if app_tracking:
+                saved_filter_text = app_tracking.get("filter_text", "")
+                saved_required_tags = json.loads(app_tracking.get("required_tags", "[]"))
+                saved_excluded_tags = json.loads(app_tracking.get("excluded_tags", "[]"))
+
+                current_filter = {
+                    "text": saved_filter_text,
+                    "req_tags": sorted(saved_required_tags),
+                    "excl_tags": sorted(saved_excluded_tags)
+                }
+                current_filter_hash = json.dumps(current_filter, sort_keys=True)
+                
+                self.last_filters[appid] = {"hash": current_filter_hash, "start_time": app_tracking.get("last_historical_date_scanned")}
 
     def handle_shutdown(self, signum, frame):
         """Signals the loop to stop and finishes the current batch safely."""
