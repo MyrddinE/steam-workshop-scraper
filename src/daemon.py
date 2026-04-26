@@ -2,6 +2,7 @@ import time
 import signal
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from src.database import (
     get_next_items_to_scrape, 
@@ -33,6 +34,7 @@ class Daemon:
         self.api_key = config.get("api", {}).get("key", "")
         self.batch_size = config.get("daemon", {}).get("batch_size", 10)
         self.delay = config.get("daemon", {}).get("request_delay_seconds", 5)
+        self.pause_lock_file = ".pauselock"
         
         # Translator thread
         self.translator = TranslatorThread(config)
@@ -328,6 +330,10 @@ class Daemon:
         logging.info("Starting daemon loop...")
         self.translator.start()
         while self.running:
+            while os.path.exists(self.pause_lock_file):
+                logging.info("Scraping paused by TUI...")
+                time.sleep(5)
+            
             self.process_batch()
         logging.info("Daemon gracefully exited.")
 

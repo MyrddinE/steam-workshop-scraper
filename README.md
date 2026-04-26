@@ -5,12 +5,15 @@ A robust, background Python daemon and Terminal User Interface (TUI) for scrapin
 ## Features
 
 *   **Persistent Background Daemon**: Continuously polls the Steam Web API and scrapes Steam Workshop HTML to build a comprehensive local database of mods, maps, and workshop items.
+*   **Automatic Translation**: Can be configured with an OpenAI API key to automatically translate non-English titles and descriptions, which are then viewable in the TUI.
 *   **Write-Ahead Logging (WAL)**: The SQLite database is configured with WAL mode, allowing the background daemon to write data at the exact same time you are querying it in the TUI without database locking errors.
-*   **Advanced TUI Search**: A modern terminal interface powered by `Textual`.
-    *   **Multi-Field Searching**: Search across Title, Description, Filename, and Tags simultaneously.
-    *   **Complex Queries**: Supports exact phrases (`"mickey mouse"`) and negative terms (`-script`) to filter out noise.
-    *   **Numeric Inequalities**: Filter numeric fields (File Size, Subscriptions, Views) using operators like `>`, `<`, `>=`, and `<=`.
-    *   **Author Filtering**: A dynamic combo box populates with known Author IDs, and a "Jump to Author" button allows you to instantly pivot from an item to a list of all items by that specific creator.
+*   **Advanced TUI**: A modern terminal interface powered by `Textual` with many advanced features:
+    *   **State Persistence**: Remembers your filters, sorting, and last selected item between sessions.
+    *   **Infinite Scrolling**: The item list automatically loads more results as you scroll down.
+    *   **Command Palette**: Press `Ctrl+B` to access a command palette for quick actions.
+    *   **Complex Search Builder**: Build complex queries with AND/OR logic, exact phrases (`"mickey mouse"`), negative terms (`-script`), and numeric inequalities (`>1000`).
+    *   **BBCode Rendering**: Automatically converts Steam's BBCode formatting (like `[b]` and `[h1]`) into readable Markdown in the details pane.
+    *   **Author Filtering**: Instantly pivot from an item to a list of all workshop items by that same creator.
 *   **Unicode Safe**: Built to handle the massive variety of languages, emojis, and symbols found on the Steam Workshop without crashing or corrupting data.
 
 ## Installation
@@ -52,6 +55,13 @@ Edit `config.yaml` to set your desired `batch_size`, `request_delay_seconds` (to
 export STEAM_API_KEY="YOUR_API_KEY_HERE"
 ```
 *(Note: Public workshop items often do not require an API key, but having one is recommended for stability).*
+
+**Translation (Optional):** To enable automatic translation of non-English text, you must provide an OpenAI API key. It is highly recommended to provide this as an environment variable:
+```bash
+export OPENAI_API_KEY="YOUR_OPENAI_API_KEY_HERE"
+```
+
+You can also configure the OpenAI endpoint and model in `config.yaml` if you wish to use a custom or self-hosted model.
 
 ## Usage
 

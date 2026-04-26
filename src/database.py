@@ -81,7 +81,8 @@ def initialize_database(db_path: str):
         ("short_description_en", "TEXT"),
         ("extended_description_en", "TEXT"),
         ("dt_translated", "TEXT"),
-        ("translation_priority", "INTEGER DEFAULT 0")
+        ("translation_priority", "INTEGER DEFAULT 0"),
+        ("is_queued_for_subscription", "INTEGER DEFAULT 0")
     ]
     for col_name, col_type in new_cols:
         try:
@@ -141,6 +142,29 @@ def initialize_database(db_path: str):
 
     conn.commit()
     conn.close()
+
+def toggle_subscription_queue_status(db_path: str, workshop_id: int):
+    """Toggles the subscription queue status for a workshop item."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    # Use NOT to flip the boolean value (0 to 1, 1 to 0)
+    cursor.execute(
+        "UPDATE workshop_items SET is_queued_for_subscription = NOT is_queued_for_subscription WHERE workshop_id = ?",
+        (workshop_id,)
+    )
+    conn.commit()
+    conn.close()
+
+def get_queued_items(db_path: str) -> list[dict]:
+    """Retrieves all items currently queued for subscription."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT workshop_id, title FROM workshop_items WHERE is_queued_for_subscription = 1 ORDER BY title"
+    )
+    items = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return items
 
 def insert_or_update_item(db_path: str, item_data: dict) -> bool:
     """
@@ -339,7 +363,7 @@ def search_items(db_path: str, query: str = "", appid: int = None,
     conn = get_connection(db_path)
     
     if summary_only:
-        cols = "w.workshop_id, w.title, w.title_en, w.creator, w.consumer_appid, w.dt_translated, u.personaname, u.personaname_en"
+        cols = "w.workshop_id, w.title, w.title_en, w.creator, w.consumer_appid, w.dt_translated, w.is_queued_for_subscription, u.personaname, u.personaname_en"
     else:
         cols = "w.*, u.personaname, u.personaname_en"
         

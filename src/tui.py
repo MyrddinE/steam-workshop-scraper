@@ -5,14 +5,59 @@ from textual import on, events
 from textual.command import Provider, Hit, DiscoveryHit
 from textual.system_commands import SystemCommandsProvider
 from typing import Iterable
-from textual.screen import Screen
+from textual.screen import Screen, ModalScreen
 from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button, Markdown
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll, Center
 from textual.reactive import reactive
-from src.database import search_items, get_all_authors, initialize_database, flag_for_translation, get_item_details, save_app_filter, clear_pending_items
+from src.database import search_items, get_all_authors, initialize_database, flag_for_translation, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items
 from src.config import load_config
 import os
 import yaml
+
+class SubscriptionQueueScreen(ModalScreen):
+    """A modal screen that displays the subscription queue with clickable links."""
+
+    def __init__(self, db_path: str, pause_lock_file: str):
+        super().__init__()
+        self.db_path = db_path
+        self.pause_lock_file = pause_lock_file
+
+    def on_mount(self) -> None:
+        """Create the pause lock file when the screen is mounted."""
+        try:
+            with open(self.pause_lock_file, "w") as f:
+                pass # Create the file
+        except Exception as e:
+            logging.error(f"Failed to create pause lock file: {e}")
+
+    def on_unmount(self) -> None:
+        """Remove the pause lock file when the screen is unmounted."""
+        try:
+            if os.path.exists(self.pause_lock_file):
+                os.remove(self.pause_lock_file)
+        except Exception as e:
+            logging.error(f"Failed to remove pause lock file: {e}")
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="sub-queue-container"):
+            yield Label("Subscription Queue", id="sub-queue-title")
+            
+            items = get_queued_items(self.db_path)
+            if not items:
+                yield Label("Queue is empty. Press 's' on an item to add it.")
+            else:
+                for item in items:
+                    wid = item['workshop_id']
+                    title = item['title']
+                    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}"
+                    # Use Textual's @click handler for hyperlinks
+                    yield Label(f"[@click=app.open_link('{url}')]{title}[/]")
+            
+            yield Button("Close", id="btn-close-sub-queue")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-close-sub-queue":
+            self.app.pop_screen()
 
 def load_tui_state(path: str) -> dict:
     """Loads the TUI state from a YAML file."""
@@ -101,8 +146,10 @@ class DetailsPane(VerticalScroll):
     def compose(self) -> ComposeResult:
         with Horizontal(id="details-buttons-row"):
             with Horizontal(id="top-left-buttons"):
-                yield Button("Translate", id="btn-request-translation")
-                yield Button("Show Original", id="btn-toggle-translation")
+                yield Button("Queue", id="btn-queue-sub", classes="details-button")
+                yield Button("Unqueue", id="btn-unqueue-sub", classes="details-button")
+                yield Button("Translate", id="btn-request-translation", classes="details-button")
+                yield Button("Show Original", id="btn-toggle-translation", classes="details-button")
             yield Button("jump", id="btn-jump-author", variant="primary")
 
         with Horizontal(id="title-creator-row"):
@@ -162,12 +209,18 @@ class DetailsPane(VerticalScroll):
             self.query_one("#btn-toggle-translation").display = False
             self.query_one("#btn-request-translation").display = False
             self.query_one("#btn-jump-author").display = False
+            self.query_one("#btn-queue-sub").display = False
+            self.query_one("#btn-unqueue-sub").display = False
             
             for stat in ["id", "created", "updated", "tags", "size", "views", "subs", "favs"]:
                 self.query_one(f"#stat-{stat}", Label).display = False
             return
 
         item = self.item_data
+        
+        is_queued = item.get("is_queued_for_subscription", 0)
+        self.query_one("#btn-queue-sub").display = not is_queued
+        self.query_one("#btn-unqueue-sub").display = is_queued
         
         display_translated = self.show_translated and item.get("dt_translated")
         title = item.get("title_en") if display_translated and item.get("title_en") else item.get("title", "N/A")
@@ -273,8 +326,15 @@ class WorkshopItem(ListItem):
         creator = self.item_data.get("personaname_en") or self.item_data.get("personaname") or self.item_data.get("creator", "Unknown Creator")
 
         appid = self.item_data.get("consumer_appid", "Unknown AppID")
-        yield Label(f"[b]{title}[/b] ({wid})")
-        yield Label(f"By: {creator} | AppID: {appid}")
+        
+        is_queued = self.item_data.get("is_queued_for_subscription", 0)
+        prefix = "[green]*[/green] " if is_queued else "  "
+
+        with Horizontal():
+            yield Static(prefix, classes="sub-indicator")
+            with Vertical():
+                yield Label(f"[b]{title}[/b] ({wid})")
+                yield Label(f"By: {creator} | AppID: {appid}")
 
 
 class SearchRow(Horizontal):
@@ -407,19 +467,31 @@ class DatabaseCommands(Provider):
             self.app.action_clear_pending,
             help="Remove all unscraped/pending items from the database",
         )
+        yield DiscoveryHit(
+            "Show Subscription Queue",
+            self.app.action_show_sub_queue,
+            help="Show items queued for subscription as clickable links",
+        )
 
     async def search(self, query: str) -> Iterable[Hit]:
         """Search for database commands matching the query."""
         matcher = self.matcher(query)
-        label = "Clear Pending Database"
-        score = matcher.match(label)
-        if score > 0:
-            yield Hit(
-                score,
-                matcher.highlight(label),
-                self.app.action_clear_pending,
-                help="Remove all unscraped/pending items from the database",
-            )
+        
+        commands = {
+            "Clear Pending Database": self.app.action_clear_pending,
+            "Show Subscription Queue": self.app.action_show_sub_queue,
+        }
+        
+        for label, action in commands.items():
+            score = matcher.match(label)
+            if score > 0:
+                yield Hit(
+                    score,
+                    matcher.highlight(label),
+                    action,
+                    help=f"Action: {label}",
+                )
+
 class ScraperApp(App):
     """A Terminal GUI for searching the Steam Workshop database."""
 
@@ -427,6 +499,7 @@ class ScraperApp(App):
 
     BINDINGS = [
         ("ctrl+q", "quit", "Quit"),
+        ("s", "toggle_queue", "Queue for Sub"),
         ("ctrl+s", "save_filter_for_scraper", "Save Filter"),
         ("ctrl+t", "request_translation", "Translate"),
         ("ctrl+w", "toggle_translation", "Toggle Translation"),
@@ -512,6 +585,9 @@ class ScraperApp(App):
         border: solid $success;
         margin: 0;
     }
+    .sub-indicator {
+        width: 2;
+    }
     #sort-container {
         height: auto;
         layout: horizontal;
@@ -552,7 +628,7 @@ class ScraperApp(App):
     #top-left-buttons {
         width: 1fr;
     }
-    #top-left-buttons Button {
+    .details-button {
         height: 1;
         border: none;
         padding: 0 1;
@@ -602,6 +678,19 @@ class ScraperApp(App):
         padding: 0;
         height: auto;
     }
+    #sub-queue-container {
+        width: 80%;
+        height: 80%;
+        background: $surface;
+        border: thick $primary;
+        padding: 1;
+    }
+    #sub-queue-title {
+        width: 100%;
+        text-align: center;
+        text-style: bold;
+        padding-bottom: 1;
+    }
     """
 
     def get_system_commands(self, screen):
@@ -622,6 +711,7 @@ class ScraperApp(App):
         self.db_path = self.config["database"]["path"]
         initialize_database(self.db_path)
         self.current_item_creator = None
+        self.pause_lock_file = ".pauselock"
         
         # Pagination state
         self.current_offset = 0
@@ -869,7 +959,9 @@ class ScraperApp(App):
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses (e.g., Jump to Author, Translation, Search Builder buttons)."""
-        if event.button.id == "btn-execute-search":
+        if event.button.id in ("btn-queue-sub", "btn-unqueue-sub"):
+            await self.action_toggle_queue()
+        elif event.button.id == "btn-execute-search":
             await self.execute_search()
         elif event.button.id == "btn-save-filter":
             await self.action_save_filter_for_scraper()
@@ -990,6 +1082,44 @@ class ScraperApp(App):
     def action_toggle_translation(self) -> None:
         detail_pane = self.query_one("#item-details", DetailsPane)
         detail_pane.show_translated = not detail_pane.show_translated
+        
+    async def action_toggle_queue(self) -> None:
+        """Toggles the subscription queue status of the highlighted item."""
+        list_view = self.query_one("#results-list", ListView)
+        if list_view.index is None:
+            return
+
+        item = list_view.highlighted_child
+        if not item or not hasattr(item, "item_data"):
+            return
+
+        workshop_id = item.item_data.get("workshop_id")
+        if not workshop_id:
+            return
+
+        # Toggle in DB
+        toggle_subscription_queue_status(self.db_path, workshop_id)
+        
+        # Update UI state in place
+        item.item_data["is_queued_for_subscription"] = not item.item_data.get("is_queued_for_subscription", 0)
+        
+        # Re-compose the ListItem to show the change
+        is_queued = item.item_data["is_queued_for_subscription"]
+        prefix = "[green]*[/green] " if is_queued else "  "
+        item.query_one(".sub-indicator", Static).update(prefix)
+
+        # Update details pane if it's showing the same item
+        detail_pane = self.query_one("#item-details", DetailsPane)
+        if detail_pane.workshop_id == workshop_id:
+            detail_pane.item_data["is_queued_for_subscription"] = is_queued
+            detail_pane.update_content()
+        
+        # Move to next item
+        if list_view.index < len(list_view) - 1:
+            list_view.index += 1
+        
+        # Scroll to keep highlight visible if needed
+        list_view.scroll_to_highlight()
 
     def action_request_translation(self) -> None:
         detail_pane = self.query_one("#item-details", DetailsPane)
@@ -1027,6 +1157,10 @@ class ScraperApp(App):
         count = clear_pending_items(self.db_path)
         self.notify(f"Database cleared: {count} pending items removed.")
         self.run_worker(self.execute_search())
+        
+    def action_show_sub_queue(self) -> None:
+        """Shows the subscription queue modal screen."""
+        self.push_screen(SubscriptionQueueScreen(self.db_path, self.pause_lock_file))
 
 def main():
     config_path = "config.yaml"
