@@ -495,6 +495,7 @@ class Daemon:
                 elif page > 10:
                     window_size = max(window_size // 2, 3600)
 
+                page = 1
                 if discovery_interrupted_early:
                     break # Break from outer loop for this appid
 
