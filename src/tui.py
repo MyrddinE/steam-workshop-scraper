@@ -330,11 +330,8 @@ class WorkshopItem(ListItem):
         is_queued = self.item_data.get("is_queued_for_subscription", 0)
         prefix = "[green]*[/green] " if is_queued else "  "
 
-        with Horizontal():
-            yield Static(prefix, classes="sub-indicator")
-            with Vertical():
-                yield Label(f"[b]{title}[/b] ({wid})")
-                yield Label(f"By: {creator} | AppID: {appid}")
+        yield Label(f"{prefix}[b]{title}[/b] ({wid})")
+        yield Label(f"  By: {creator} | AppID: {appid}")
 
 
 class SearchRow(Horizontal):
@@ -584,9 +581,6 @@ class ScraperApp(App):
         height: 1fr;
         border: solid $success;
         margin: 0;
-    }
-    .sub-indicator {
-        width: 2;
     }
     #sort-container {
         height: auto;
