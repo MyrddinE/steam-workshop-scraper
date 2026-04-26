@@ -96,7 +96,8 @@ def initialize_database(db_path: str):
         last_historical_date_scanned INTEGER,
         filter_text TEXT DEFAULT '',
         required_tags TEXT DEFAULT '[]',
-        excluded_tags TEXT DEFAULT '[]'
+        excluded_tags TEXT DEFAULT '[]',
+        window_size INTEGER DEFAULT 2592000
     )
     """)
 
@@ -104,7 +105,8 @@ def initialize_database(db_path: str):
     app_tracking_new_cols = [
         ("filter_text", "TEXT DEFAULT ''"),
         ("required_tags", "TEXT DEFAULT '[]'"),
-        ("excluded_tags", "TEXT DEFAULT '[]'")
+        ("excluded_tags", "TEXT DEFAULT '[]'"),
+        ("window_size", "INTEGER DEFAULT 2592000")
     ]
     for col_name, col_type in app_tracking_new_cols:
         try:

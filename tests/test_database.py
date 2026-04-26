@@ -310,17 +310,19 @@ def test_app_tracking(db_path):
     assert get_app_tracking(db_path, 4000) is None
     
     # Test update_app_tracking (last_historical_date_scanned)
-    update_app_tracking(db_path, 4000, 1600000000)
+    update_app_tracking(db_path, 4000, 1600000000, 3600*24*30)
     tracking = get_app_tracking(db_path, 4000)
     assert tracking["last_historical_date_scanned"] == 1600000000
+    assert tracking["window_size"] == 3600*24*30
     assert tracking["filter_text"] == ''
     assert tracking["required_tags"] == '[]'
     assert tracking["excluded_tags"] == '[]'
     
     # Update again
-    update_app_tracking(db_path, 4000, 1700000000)
+    update_app_tracking(db_path, 4000, 1700000000, 3600*24*30*2)
     tracking = get_app_tracking(db_path, 4000)
     assert tracking["last_historical_date_scanned"] == 1700000000
+    assert tracking["window_size"] == 3600*24*30*2
 
     # Test save_app_filter
     save_app_filter(db_path, 4000, "test search", ["tag1", "tag2"], ["excl1"])

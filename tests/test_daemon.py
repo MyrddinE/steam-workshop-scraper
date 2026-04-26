@@ -416,7 +416,7 @@ def test_daemon_historical_forward_strategy(mock_time, mock_discover, tmp_path):
     daemon.last_filters = {1062090: {"hash": None, "start_time": None}}
 
     # Initialize app_tracking for AppID 1062090 to prevent TypeError on initial get_app_tracking calls
-    update_app_tracking(str(db_path), 1062090, 0)
+    update_app_tracking(str(db_path), 1062090, 0, 3600*24*30)
 
     # Scenario 1: Initial run, no prior tracking, no filter
     with patch('src.daemon.Daemon._find_initial_start_date', return_value=1000000) as mock_find_initial:
@@ -458,7 +458,7 @@ def test_daemon_historical_forward_strategy(mock_time, mock_discover, tmp_path):
 
     # Scenario 3: No filter change, app recently scanned. Should skip discovery.
     # Update tracking to 12 hours ago
-    update_app_tracking(str(db_path), 1062090, now - (12 * 3600))
+    update_app_tracking(str(db_path), 1062090, now - (12 * 3600), 3600*24*30)
     # Ensure daemon's internal hash matches DB so no change is detected
     new_tracking = get_app_tracking(str(db_path), 1062090)
     current_filter = {"text": new_tracking["filter_text"], "req_tags": sorted(json.loads(new_tracking["required_tags"])), "excl_tags": sorted(json.loads(new_tracking["excluded_tags"]))}
@@ -468,7 +468,7 @@ def test_daemon_historical_forward_strategy(mock_time, mock_discover, tmp_path):
     mock_discover.assert_not_called()
 
     # Scenario 4: No filter change, app not recently scanned. Should perform discovery.
-    update_app_tracking(str(db_path), 1062090, now - (30 * 86400)) # 30 days ago
+    update_app_tracking(str(db_path), 1062090, now - (30 * 86400), 3600*24*30) # 30 days ago
     mock_discover.return_value = [7, 8, 9] # Simulate items found
     daemon.seed_database(target_new=40)
     

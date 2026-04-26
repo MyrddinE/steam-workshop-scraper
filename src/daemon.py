@@ -389,6 +389,7 @@ class Daemon:
             saved_filter_text = app_tracking["filter_text"] if app_tracking else ""
             saved_required_tags = json.loads(app_tracking["required_tags"]) if app_tracking and app_tracking["required_tags"] else []
             saved_excluded_tags = json.loads(app_tracking["excluded_tags"]) if app_tracking and app_tracking["excluded_tags"] else []
+            window_size = 30 * 24 * 3600 # Start with a 30-day window
 
             # Compare current filter with last used filter (stored in daemon instance)
             current_filter = {
@@ -411,7 +412,7 @@ class Daemon:
                 last_scanned_date = start_time # Update tracking to new starting point
                 self.last_filters[appid]["hash"] = current_filter_hash
                 self.last_filters[appid]["start_time"] = start_time
-                update_app_tracking(self.db_path, appid, start_time) # Also update DB to reflect new start
+                update_app_tracking(self.db_path, appid, start_time, window_size) # Also update DB to reflect new start
             else:
                 start_time = last_scanned_date
                 self.last_filters[appid]["hash"] = current_filter_hash
@@ -424,7 +425,6 @@ class Daemon:
 
             logging.info(f"Discovering items for AppID {appid} starting from timestamp {start_time}...")
             new_discovered_count = 0
-            window_size = 30 * 24 * 3600 # Start with a 30-day window
             last_successful_window_end_time = start_time # Track the furthest point successfully scanned
 
             # Continue looping while we're finding new items or haven't reached current time
@@ -503,7 +503,7 @@ class Daemon:
             if not discovery_interrupted_early:
                 if last_successful_window_end_time > last_scanned_date: # Only update if we made progress
                     logging.info(f"Updating last scanned date for AppID {appid} to {datetime.fromtimestamp(last_successful_window_end_time, timezone.utc).date()}.")
-                    update_app_tracking(self.db_path, appid, last_historical_date_scanned, window_size)
+                    update_app_tracking(self.db_path, appid, last_successful_window_end_time, window_size)
                 else:
                     logging.info(f"Discovery for AppID {appid} completed naturally, but no new full windows scanned. Last scanned date remains {datetime.fromtimestamp(last_scanned_date, timezone.utc).date()}.")
             else:

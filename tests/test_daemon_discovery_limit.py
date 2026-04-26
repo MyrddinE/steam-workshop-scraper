@@ -25,7 +25,7 @@ async def test_seed_database_queue_limit(mock_sleep, mock_discover, mock_time, t
     mock_time.return_value = now
     
     # Setup tracking to force discovery (last scanned 30 days ago)
-    update_app_tracking(db_path, 1062090, now - (30 * 86400))
+    update_app_tracking(db_path, 1062090, now - (30 * 86400), 3600*24*30)
     daemon.last_filters[1062090] = {"hash": json.dumps({"text": "", "req_tags": [], "excl_tags": []}), "start_time": now - (30 * 86400)}
     
     # Mock _find_initial_start_date to just return a fixed value
@@ -79,7 +79,7 @@ async def test_seed_database_no_tracking_update_on_early_exit(mock_sleep, mock_d
     mock_time.return_value = now
     
     initial_last_scanned = now - (100 * 86400) # 100 days ago
-    update_app_tracking(db_path, 1062090, initial_last_scanned)
+    update_app_tracking(db_path, 1062090, initial_last_scanned, 3600*24*30)
     daemon.last_filters[1062090] = {"hash": json.dumps({"text": "", "req_tags": [], "excl_tags": []}), "start_time": initial_last_scanned}
     
     # Mock _find_initial_start_date to just return a fixed value
@@ -129,7 +129,7 @@ async def test_seed_database_updates_on_empty_window(mock_sleep, mock_discover, 
     mock_time.return_value = now
     
     initial_last_scanned = now - (100 * 86400) # 100 days ago
-    update_app_tracking(db_path, 1062090, initial_last_scanned)
+    update_app_tracking(db_path, 1062090, initial_last_scanned, 3600*24*30)
     daemon.last_filters[1062090] = {"hash": json.dumps({"text": "", "req_tags": [], "excl_tags": []}), "start_time": initial_last_scanned}
     
     window_end_time = initial_last_scanned + (30 * 24 * 3600) # One 30-day window

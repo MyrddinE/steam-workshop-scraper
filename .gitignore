@@ -20,6 +20,7 @@ ENV/
 htmlcov/
 .tox/
 .nosepy
+.env
 
 # Distribution / Build
 build/
