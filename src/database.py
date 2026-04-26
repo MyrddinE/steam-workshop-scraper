@@ -523,13 +523,13 @@ def save_app_filter(db_path: str, appid: int, filter_text: str = "", required_ta
     conn.commit()
     conn.close()
 
-def update_app_tracking(db_path: str, appid: int, last_date: int) -> None:
+def update_app_tracking(db_path: str, appid: int, last_date: int, window_size: int) -> None:
     """Updates the last_historical_date_scanned for a given appid."""
     conn = get_connection(db_path)
     conn.execute(
-        "INSERT INTO app_tracking (appid, last_historical_date_scanned) VALUES (?, ?) "
-        "ON CONFLICT(appid) DO UPDATE SET last_historical_date_scanned = excluded.last_historical_date_scanned",
-        (appid, last_date)
+        "INSERT INTO app_tracking (appid, last_historical_date_scanned, window_size) VALUES (?, ?, ?) "
+        "ON CONFLICT(appid) DO UPDATE SET last_historical_date_scanned = excluded.last_historical_date_scanned, window_size = excluded.window_size",
+        (appid, last_date, window_size)
     )
     conn.commit()
     conn.close()

@@ -430,6 +430,7 @@ class Daemon:
             # Continue looping while we're finding new items or haven't reached current time
             # And we haven't been explicitly told to stop
             discovery_interrupted_early = False
+            page = 1
             while start_time < now and self.running:
                 end_time = min(start_time + window_size, now)
                 if end_time == start_time: # Avoid infinite loop if start_time catches up to now exactly
@@ -438,7 +439,6 @@ class Daemon:
                 logging.info(f"Querying window: {start_time} to {end_time} ({round((end_time-start_time)/86400, 1)} days)")
 
                 window_new_count = 0
-                page = 1
                 # Flag to check if this specific window's pages were fully processed
                 pages_completed_for_window = True
 
@@ -454,7 +454,6 @@ class Daemon:
                         if insert_or_update_item(self.db_path, {"workshop_id": item_id}):
                             page_new_count += 1
 
-                    window_new_count += page_new_count
                     logging.info(f"Page {page} provided {page_new_count} new items.")
                     
                     # Check if queue reached capacity after this page
@@ -488,12 +487,12 @@ class Daemon:
                 start_time = end_time
 
                 # Dynamic adjustment of next window size based on density
-                if window_new_count == 0:
+                if page == 1:
                     # Nothing found, aggressively widen window (max 1 year)
                     window_size = min(window_size * 4, 365 * 24 * 3600)
-                elif window_new_count < 100:
+                elif page < 4:
                     window_size = min(window_size * 2, 365 * 24 * 3600)
-                elif window_new_count > 500:
+                elif page > 10:
                     window_size = max(window_size // 2, 3600)
 
                 if discovery_interrupted_early:
@@ -504,7 +503,7 @@ class Daemon:
             if not discovery_interrupted_early:
                 if last_successful_window_end_time > last_scanned_date: # Only update if we made progress
                     logging.info(f"Updating last scanned date for AppID {appid} to {datetime.fromtimestamp(last_successful_window_end_time, timezone.utc).date()}.")
-                    update_app_tracking(self.db_path, appid, last_historical_date_scanned)
+                    update_app_tracking(self.db_path, appid, last_historical_date_scanned, window_size)
                 else:
                     logging.info(f"Discovery for AppID {appid} completed naturally, but no new full windows scanned. Last scanned date remains {datetime.fromtimestamp(last_scanned_date, timezone.utc).date()}.")
             else:
