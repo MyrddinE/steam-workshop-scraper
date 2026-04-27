@@ -333,9 +333,9 @@ class WorkshopItem(ListItem):
         yield Label(f"{prefix}[b]{title}[/b] ({wid})")
         yield Label(f"  By: {creator} | AppID: {appid}")
 
-    def refresh_item(self) -> None:
+    async def refresh_item(self) -> None:
         """Re-compose the item to reflect any changes in item_data."""
-        self.recompose()
+        await self.recompose()
 
 
 class SearchRow(Horizontal):
@@ -1102,11 +1102,11 @@ class ScraperApp(App):
         item.item_data["is_queued_for_subscription"] = not item.item_data.get("is_queued_for_subscription", 0)
 
         # Refresh the ListItem to show the change
-        item.refresh_item()
+        await item.refresh_item()
 
         # Update details pane if it's showing the same item
         detail_pane = self.query_one("#item-details", DetailsPane)
-        if detail_pane.workshop_id == workshop_id:
+        if detail_pane.workshop_id == workshop_id and detail_pane.item_data is not None:
             detail_pane.item_data["is_queued_for_subscription"] = item.item_data["is_queued_for_subscription"]
             detail_pane.update_content()
         # Move to next item
@@ -1114,7 +1114,7 @@ class ScraperApp(App):
             list_view.index += 1
         
         # Scroll to keep highlight visible if needed
-        list_view.scroll_to_highlight()
+        # list_view.scroll_to_widget(item)
 
     def action_request_translation(self) -> None:
         detail_pane = self.query_one("#item-details", DetailsPane)

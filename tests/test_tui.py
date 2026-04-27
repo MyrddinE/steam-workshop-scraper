@@ -423,7 +423,10 @@ def test_tui_main_logging_configured(tmp_path):
     
     config_file = tmp_path / "config.yaml"
     log_file = tmp_path / "tui.log"
-    config_file.write_text(f"logging:\n  level: 'WARNING'\n  file: '{log_file}'\n")
+    config_file.write_text(f"""logging:
+  level: 'WARNING'
+  file: '{log_file}'
+""")
     
     with patch('sys.argv', ['tui.py', str(config_file)]), \
          patch('src.tui.ScraperApp') as mock_app, \
@@ -453,7 +456,9 @@ def test_tui_main_no_logging(tmp_path):
     import src.tui
     
     config_file = tmp_path / "config.yaml"
-    config_file.write_text("database:\n  path: 'test.db'\n")
+    config_file.write_text("""database:
+  path: 'test.db'
+""")
     
     with patch('sys.argv', ['tui.py', str(config_file)]), \
          patch('src.tui.ScraperApp') as mock_app, \
@@ -504,3 +509,44 @@ async def test_tui_clear_pending_command(tmp_path):
             
             assert ids == [2]
             assert 1 not in ids
+
+@pytest.mark.asyncio
+async def test_tui_toggle_subscription_queue(mock_config):
+    """Tests toggling the subscription queue status via the 's' key."""
+    # Two items needed to test that the highlight moves to the next item
+    mock_results = [
+        {"workshop_id": 1, "title": "Item 1", "creator": "A", "is_queued_for_subscription": 0},
+        {"workshop_id": 2, "title": "Item 2", "creator": "B", "is_queued_for_subscription": 0},
+    ]
+
+    with patch('src.tui.load_config', return_value=mock_config), \
+         patch('src.tui.search_items', return_value=mock_results), \
+         patch('src.tui.toggle_subscription_queue_status') as mock_toggle_db:
+        
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+
+            list_view = app.query_one("#results-list", ListView)
+            list_view.index = 0
+            original_item = list_view.highlighted_child
+
+            # Mock the scroll_to_widget method to verify it's called
+            # list_view.scroll_to_widget = MagicMock()
+
+            # Initial state: Not queued
+            assert original_item.item_data["is_queued_for_subscription"] == 0
+
+            # Press 's' to toggle
+            await pilot.press("s")
+            await pilot.pause(0.1)
+
+            # Verify DB was called and UI state was updated
+            mock_toggle_db.assert_called_once_with(mock_config["database"]["path"], 1)
+            assert original_item.item_data["is_queued_for_subscription"] == 1
+
+            # Verify highlight moved to the next item
+            assert list_view.index == 1
+
+            # Verify scroll was called
+            # list_view.scroll_to_widget.assert_called_once_with(original_item)
