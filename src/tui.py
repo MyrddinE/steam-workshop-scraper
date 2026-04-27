@@ -501,6 +501,7 @@ class ScraperApp(App):
     BINDINGS = [
         ("ctrl+q", "quit", "Quit"),
         ("s", "toggle_queue", "Queue for Sub"),
+        ("l", "show_sub_queue", "List Queued Items"),
         ("ctrl+s", "save_filter_for_scraper", "Save Filter"),
         ("ctrl+t", "request_translation", "Translate"),
         ("ctrl+w", "toggle_translation", "Toggle Translation"),

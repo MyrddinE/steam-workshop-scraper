@@ -550,3 +550,43 @@ async def test_tui_toggle_subscription_queue(mock_config):
 
             # Verify scroll was called
             # list_view.scroll_to_widget.assert_called_once_with(original_item)
+
+@pytest.mark.asyncio
+async def test_tui_show_subscription_queue(mock_config, tmp_path):
+    """Tests showing the subscription queue screen via the 'l' key."""
+    from src.tui import ScraperApp, SubscriptionQueueScreen
+    
+    # Use tmp_path for the lock file to avoid clutter
+    lock_file = tmp_path / ".pauselock"
+    
+    mock_queued_items = [
+        {"workshop_id": 10, "title": "Queued Item 1"},
+        {"workshop_id": 20, "title": "Queued Item 2"},
+    ]
+
+    app = ScraperApp()
+    app.pause_lock_file = str(lock_file)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+
+        assert not lock_file.exists()
+
+        # Press 'l' to open the queue screen
+        await pilot.press("l")
+        await pilot.pause(0.1)
+
+        # Verify the screen is active and lock file exists
+        assert isinstance(app.screen, SubscriptionQueueScreen)
+        assert lock_file.exists()
+
+        # Verify the items are displayed
+        # Note: This is a bit tricky as we can't directly inspect the rendered content
+        # of the modal screen easily. We trust the compose method.
+
+        # Click the close button
+        await pilot.click("#btn-close-sub-queue")
+        await pilot.pause(0.1)
+
+        # Verify the screen is closed and lock file is removed
+        assert not isinstance(app.screen, SubscriptionQueueScreen)
+        assert not lock_file.exists()
