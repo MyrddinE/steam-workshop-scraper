@@ -1,4 +1,5 @@
 import time
+import math
 import signal
 import json
 import logging
@@ -130,20 +131,20 @@ class Daemon:
     def process_batch(self):
         """Processes a single batch of workshop items."""
         # Proactive user discovery check
-#    try:
-        self.expand_user_discovery()
-            
-        # Seeding check: If we have fewer than 100 unscraped items, fetch the next page
-        unscraped = count_unscraped_items(self.db_path)
-        if unscraped < 100:
-            logging.info(f"Low unscraped queue ({unscraped}). Expanding discovery...")
-            self.seed_database()
+        try:
+            self.expand_user_discovery()
+                
+            # Seeding check: If we have fewer than 100 unscraped items, fetch the next page
+            unscraped = count_unscraped_items(self.db_path)
+            if unscraped < 10:
+                logging.info(f"Low unscraped queue ({unscraped}). Expanding discovery...")
+                self.seed_database()
 
-        items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size)
-#        except Exception as e:
-#            logging.error(f"Database error in process_batch: {e}")
-#            time.sleep(5)
-#            return
+            items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size)
+        except Exception as e:
+            logging.error(f"Database error in process_batch: {e}")
+            time.sleep(5)
+            return
         
         if not items_to_scrape:
             # If still nothing, sleep
@@ -174,10 +175,12 @@ class Daemon:
             if api_status == 404:
                 logging.warning(f"[{item_id}] Item not found (404) via API, it may have been deleted.")
                 insert_or_update_item(self.db_path, merged_data)
+                time.sleep(self.delay)
                 continue # Skip to next item
             elif api_status == 500:
                 logging.error(f"[{item_id}] API request failed (500). Retrying later.")
                 insert_or_update_item(self.db_path, merged_data)
+                time.sleep(self.delay*2)
                 continue # Skip to next item
 
             # If API call was successful, proceed with processing its data
@@ -425,12 +428,14 @@ class Daemon:
                 continue # Skip to next appid
 
             app_tracking = get_app_tracking(self.db_path, appid)
-            last_scanned_date = app_tracking["last_historical_date_scanned"] or 1274400000
+            if app_tracking is None:
+                app_tracking = {}
+            last_scanned_date = app_tracking.get("last_historical_date_scanned") or 1274400000
             initial_start_time = last_scanned_date # Store this for the log message on early exit
-            saved_filter_text = app_tracking["filter_text"] if app_tracking else ""
-            saved_required_tags = json.loads(app_tracking["required_tags"]) if app_tracking and app_tracking["required_tags"] else []
-            saved_excluded_tags = json.loads(app_tracking["excluded_tags"]) if app_tracking and app_tracking["excluded_tags"] else []
-            window_size = 30 * 24 * 3600 # Start with a 30-day window
+            saved_filter_text = app_tracking.get("filter_text") or ""
+            saved_required_tags = json.loads(app_tracking.get("required_tags") or "[]")
+            saved_excluded_tags = json.loads(app_tracking.get("excluded_tags") or "[]")
+            window_size = app_tracking.get("window_size") or 30 * 24 * 3600 # Start with a 30-day window
 
             # Compare current filter with last used filter (stored in daemon instance)
             current_filter = {
@@ -469,25 +474,34 @@ class Daemon:
             last_successful_window_end_time = start_time # Track the furthest point successfully scanned
 
             # Continue looping while we're finding new items or haven't reached current time
-            # And we haven't been explicitly told to stop
-            discovery_interrupted_early = False
             page = 1
             while start_time < now and self.running:
                 end_time = min(start_time + window_size, now)
                 if end_time == start_time: # Avoid infinite loop if start_time catches up to now exactly
                     break
 
-                logging.info(f"Querying window: {start_time} to {end_time} ({round((end_time-start_time)/86400, 1)} days)")
+                logging.info(f"Querying window: {datetime.fromtimestamp(start_time, timezone.utc).date()} to {datetime.fromtimestamp(end_time, timezone.utc).date()} ({round((end_time-start_time)/86400, 1)} days)")
 
                 window_new_count = 0
-                # Flag to check if this specific window's pages were fully processed
-                pages_completed_for_window = True
+                window_has_errors = False
+                known_total_pages = 1
 
                 while self.running:
-                    found_items = discover_items_by_date_html(appid, start_time, end_time, page=page, search_text=saved_filter_text, required_tags=saved_required_tags, excluded_tags=saved_excluded_tags)
+                    found_items, current_total_pages = discover_items_by_date_html(appid, start_time, end_time, page=page, search_text=saved_filter_text, required_tags=saved_required_tags, excluded_tags=saved_excluded_tags)
 
-                    if not found_items:
+                    if current_total_pages == -1:
+                        window_has_errors = True
+                        logging.warning(f"Page {page} failed to fetch due to an error. Flagging window for retry.")
+                    else:
+                        known_total_pages = current_total_pages
+
+                    if known_total_pages == 0:
+                        # Legitimately empty window
                         break
+
+                    if current_total_pages != -1 and len(found_items) < 30 and page < known_total_pages:
+                        window_has_errors = True
+                        logging.warning(f"Page {page}/{known_total_pages} returned only {len(found_items)} items. Flagging window for retry.")
 
                     page_new_count = 0
                     for item_id in found_items:
@@ -495,50 +509,39 @@ class Daemon:
                         if insert_or_update_item(self.db_path, {"workshop_id": item_id}):
                             page_new_count += 1
 
-                    logging.info(f"Page {page} provided {page_new_count} new items.")
+                    if current_total_pages != -1:
+                        logging.info(f"Page {page}/{known_total_pages} provided {page_new_count} new items.")
                     
-                    # Check if queue reached capacity after this page
-                    if count_unscraped_items(self.db_path) >= target_new:
-                        logging.info(f"Queue appropriately filled (>= {target_new}) after page {page}. Interrupting discovery.")
-                        pages_completed_for_window = False # This window was not fully completed
-                        discovery_interrupted_early = True # Overall discovery for appid interrupted
-                        break # Break from inner page loop
-
-                    # If we got fewer than 30 items, it's likely the last page
-                    if len(found_items) < 30:
-                        break
-
-                    # Safety limit for paging
-                    if page >= 100: # 3000 items per window max
-                        logging.warning("Hit safety limit of 100 pages for a single date window.")
+                    window_new_count += page_new_count
+                    time.sleep(self.delay) # Be polite
+                    
+                    # Stop if we have reached or exceeded the total number of pages
+                    if page >= known_total_pages:
                         break
 
                     page += 1
-                    time.sleep(self.delay) # Be polite
 
                 new_discovered_count += window_new_count
                 logging.info(f"Window provided {window_new_count} new items. (Total new this seed: {new_discovered_count})")
 
-                # Only advance last_successful_window_end_time if all pages within this window were processed
-                # This variable is now solely for logging/final update if no early exit
-                if pages_completed_for_window:
+                if not window_has_errors:
                     last_successful_window_end_time = end_time
-
-                # Move window forward
-                start_time = end_time
+                    # Move window forward
+                    start_time = end_time
+                else:
+                    logging.warning(f"Window encountered errors or partial pages. Halting discovery for AppID {appid} to retry later.")
+                    break # Break out of discovery loop for this appid
 
                 # Dynamic adjustment of next window size based on density
-                if page == 1:
-                    # Nothing found, aggressively widen window (max 1 year)
-                    window_size = min(window_size * 4, 365 * 24 * 3600)
-                elif page < 4:
-                    window_size = min(window_size * 2, 365 * 24 * 3600)
-                elif page > 10:
-                    window_size = max(window_size // 2, 3600)
+                window_adjustment = 2/max(math.log2(page),0.5)
+                window_size *= window_adjustment
+                window_size = min(window_size, 240 * 24 * 3600) # cap at 240 day window
+                window_size = max(window_size, 3600) # no lower than 1 hour window
 
                 page = 1
-                if discovery_interrupted_early:
-                    break # Break from outer loop for this appid
+
+                if new_discovered_count > 100:
+                    break
 
             # After the discovery loop for this appid, update tracking to the furthest successful point
             if last_successful_window_end_time > last_scanned_date: # Only update if we made progress

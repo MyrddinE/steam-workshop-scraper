@@ -25,12 +25,11 @@ class TestLiveWebScraper:
         end_date = int(time.time())
         start_date = end_date - (365 * 24 * 3600) # Last 12 months
 
-        items = discover_items_by_date_html(
-            self.APPID, start_date, end_date, 
-            search_text=search_text, 
+        items, total_pages = discover_items_by_date_html(
+            self.APPID, start_date, end_date,
+            search_text=search_text,
             required_tags=required_tags
-        )
-        
+        )        
         assert len(items) > 0, "Should find some items for 'Vampire' with 'Translation' tag in the last 12 months."
         
         for item_id in items:

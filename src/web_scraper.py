@@ -31,9 +31,10 @@ def scrape_extended_details(item_url: str) -> dict | None:
     except requests.exceptions.RequestException:
         return None
 
-def discover_items_by_date_html(appid: int, start_date: int, end_date: int, page: int = 1, search_text: str = "", required_tags: list[str] = None, excluded_tags: list[str] = None, appids_required_for_use: list[int] = None) -> list[int]:
+def discover_items_by_date_html(appid: int, start_date: int, end_date: int, page: int = 1, search_text: str = "", required_tags: list[str] = None, excluded_tags: list[str] = None, appids_required_for_use: list[int] = None) -> tuple[list[int], int]:
     """
     Scrapes the Steam Workshop browse page using date filters.
+    Returns a tuple of (list_of_ids, total_pages).
     """
     # workshop_preferences_v2 cookie value is: {"bOptedIn":true}
     cookies = {
@@ -97,6 +98,12 @@ def discover_items_by_date_html(appid: int, start_date: int, end_date: int, page
                 if match:
                     ids.append(int(match.group(1)))
 
-        return list(set(ids))
+        total_pages = 1
+        page_pattern = re.compile(r'\\\\\\\"total_pages\\\\\\\":(\d+)')
+        page_match = page_pattern.search(response.text)
+        if page_match:
+            total_pages = int(page_match.group(1))
+
+        return list(set(ids)), total_pages
     except (requests.exceptions.RequestException, Exception):
-        return []
+        return [], -1

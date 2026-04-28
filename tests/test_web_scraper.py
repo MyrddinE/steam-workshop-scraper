@@ -152,7 +152,7 @@ def test_discover_items_by_date_html_success():
         content_type="text/html"
     )
 
-    ids = discover_items_by_date_html(appid, start_date, end_date, page)
+    ids, total_pages = discover_items_by_date_html(appid, start_date, end_date, page)
     assert len(ids) == 2
     assert 5001 in ids
     assert 5002 in ids
@@ -165,6 +165,7 @@ def test_discover_items_by_date_html_exception():
         mock_instance = mock_session.return_value
         mock_instance.get.side_effect = requests.exceptions.RequestException("Timeout")
         
-        result = discover_items_by_date_html(4000, 0, 0) # Call with dummy dates
+        result, pages = discover_items_by_date_html(4000, 0, 0)
         assert result == []
+
 
