@@ -130,20 +130,20 @@ class Daemon:
     def process_batch(self):
         """Processes a single batch of workshop items."""
         # Proactive user discovery check
-        try:
-            self.expand_user_discovery()
+#    try:
+        self.expand_user_discovery()
             
-            # Seeding check: If we have fewer than 100 unscraped items, fetch the next page
-            unscraped = count_unscraped_items(self.db_path)
-            if unscraped < 100:
-                logging.info(f"Low unscraped queue ({unscraped}). Expanding discovery...")
-                self.seed_database()
+        # Seeding check: If we have fewer than 100 unscraped items, fetch the next page
+        unscraped = count_unscraped_items(self.db_path)
+        if unscraped < 100:
+            logging.info(f"Low unscraped queue ({unscraped}). Expanding discovery...")
+            self.seed_database()
 
-            items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size)
-        except Exception as e:
-            logging.error(f"Database error in process_batch: {e}")
-            time.sleep(5)
-            return
+        items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size)
+#        except Exception as e:
+#            logging.error(f"Database error in process_batch: {e}")
+#            time.sleep(5)
+#            return
         
         if not items_to_scrape:
             # If still nothing, sleep
@@ -425,7 +425,7 @@ class Daemon:
                 continue # Skip to next appid
 
             app_tracking = get_app_tracking(self.db_path, appid)
-            last_scanned_date = app_tracking["last_historical_date_scanned"] if app_tracking else 0
+            last_scanned_date = app_tracking["last_historical_date_scanned"] or 1274400000
             initial_start_time = last_scanned_date # Store this for the log message on early exit
             saved_filter_text = app_tracking["filter_text"] if app_tracking else ""
             saved_required_tags = json.loads(app_tracking["required_tags"]) if app_tracking and app_tracking["required_tags"] else []
