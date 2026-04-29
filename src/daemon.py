@@ -530,6 +530,7 @@ class Daemon:
                     start_time = end_time
                 else:
                     logging.warning(f"Window encountered errors or partial pages. Halting discovery for AppID {appid} to retry later.")
+                    last_successful_window_end_time -= window_size / 2
                     break # Break out of discovery loop for this appid
 
                 # Dynamic adjustment of next window size based on density
@@ -544,7 +545,7 @@ class Daemon:
                     break
 
             # After the discovery loop for this appid, update tracking to the furthest successful point
-            if last_successful_window_end_time > last_scanned_date: # Only update if we made progress
+            if last_successful_window_end_time != last_scanned_date: # Only update if we made progress
                 logging.info(f"Updating last scanned date for AppID {appid} to {datetime.fromtimestamp(last_successful_window_end_time, timezone.utc).date()}.")
                 update_app_tracking(self.db_path, appid, last_successful_window_end_time, window_size)
             else:

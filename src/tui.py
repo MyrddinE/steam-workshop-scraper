@@ -38,6 +38,12 @@ class StatsScreen(Screen):
                     yield DataTable(id="tag-stats-table")
         yield Footer()
 
+        yield Button("Close", id="btn-close-sub-queue")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-close-sub-queue":
+            self.app.pop_screen()
+
     def on_mount(self) -> None:
         self.update_stats()
         self.set_interval(10.0, self.update_stats)
@@ -125,7 +131,7 @@ class SubscriptionQueueScreen(ModalScreen):
                     title = item['title']
                     url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}"
                     # Use Textual's @click handler for hyperlinks
-                    yield Label(f"[@click=app.open_link('{url}')]{title}[/]")
+                    yield Label(f"{url} : {title}")
             
             yield Button("Close", id="btn-close-sub-queue")
 

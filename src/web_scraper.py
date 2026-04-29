@@ -2,6 +2,8 @@ from requests_html import HTMLSession
 import requests
 import re
 import requests.utils
+import logging
+from src.config import load_config
 
 def scrape_extended_details(item_url: str) -> dict | None:
     """
@@ -36,9 +38,19 @@ def discover_items_by_date_html(appid: int, start_date: int, end_date: int, page
     Scrapes the Steam Workshop browse page using date filters.
     Returns a tuple of (list_of_ids, total_pages).
     """
+    config_path = "config.yaml"
+    try:
+        config = load_config(config_path)
+    except FileNotFoundError:
+        logging.error(f"Configuration file not found: {config_path}")
+        sys.exit(1)
+
+    session_id = config.get("session", {}).get("id", "")
+
     # workshop_preferences_v2 cookie value is: {"bOptedIn":true}
     cookies = {
-        'workshop_preferences_v2': '%7B%22bOptedIn%22%3Atrue%7D'
+        'workshop_preferences_v2': '%7B%22bOptedIn%22%3Atrue%7D',
+        'sessionid': session_id
     }
     
     # Use 'mostrecent' to get chronological results, then apply date range
@@ -68,6 +80,7 @@ def discover_items_by_date_html(appid: int, start_date: int, end_date: int, page
             url_params.append(f"appids_required_for_use[]={required_appid}")
 
     url = f"https://steamcommunity.com/workshop/browse?" + "&".join(url_params)
+    logging.debug(url)
     
     session = HTMLSession()
     try:
