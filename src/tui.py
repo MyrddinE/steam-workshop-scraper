@@ -6,13 +6,87 @@ from textual.command import Provider, Hit, DiscoveryHit
 from textual.system_commands import SystemCommandsProvider
 from typing import Iterable
 from textual.screen import Screen, ModalScreen
-from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button, Markdown
-from textual.containers import Horizontal, Vertical, VerticalScroll, Center
+from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button, Markdown, DataTable
+from textual.containers import Horizontal, Vertical, VerticalScroll, Center, Grid
 from textual.reactive import reactive
-from src.database import search_items, get_all_authors, initialize_database, flag_for_translation, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items
+from src.database import search_items, get_all_authors, initialize_database, flag_for_translation, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, get_db_stats
 from src.config import load_config
 import os
 import yaml
+import datetime
+
+class StatsScreen(Screen):
+    """A screen that displays database statistics."""
+
+    def __init__(self, db_path: str):
+        super().__init__()
+        self.db_path = db_path
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Horizontal():
+            with Vertical(id="stats-left-col"):
+                yield Label("[b]General Statistics[/b]", classes="stats-header")
+                yield Static(id="general-stats-content")
+                yield Label("\n[b]Translation Status[/b]", classes="stats-header")
+                yield Static(id="translation-stats-content")
+                yield Label("\n[b]App Tracking[/b]", classes="stats-header")
+                yield DataTable(id="app-stats-table")
+            with Vertical(id="stats-right-col"):
+                yield Label("[b]Tag Statistics[/b]", classes="stats-header")
+                with VerticalScroll(id="tag-stats-scroll"):
+                    yield DataTable(id="tag-stats-table")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.update_stats()
+        self.set_interval(10.0, self.update_stats)
+
+    def update_stats(self) -> None:
+        stats = get_db_stats(self.db_path)
+        
+        # General Stats
+        highest_dt = stats.get("highest_dt_updated") or "N/A"
+        status_text = ""
+        for row in stats["status_counts"]:
+            status_text += f"  Status {row['status']}: {row['count']}\n"
+        
+        dt_text = ""
+        for category, count in stats["dt_updated_counts"].items():
+            dt_text += f"  {category}: {count}\n"
+
+        general_content = (
+            f"Highest dt_updated: {highest_dt}\n\n"
+            f"Record count by status:\n{status_text}\n"
+            f"Record count by dt_updated:\n{dt_text}"
+        )
+        self.query_one("#general-stats-content", Static).update(general_content)
+
+        # Translation Stats
+        trans_text = ""
+        for status, count in stats["translation_status"].items():
+            trans_text += f"  {status}: {count}\n"
+        self.query_one("#translation-stats-content", Static).update(trans_text)
+
+        # App Stats Table
+        app_table = self.query_one("#app-stats-table", DataTable)
+        app_table.clear(columns=True)
+        app_table.add_columns("AppID", "Last Valid Date", "Window Size")
+        for app in stats["app_stats"]:
+            last_date = "N/A"
+            if app["last_historical_date_scanned"]:
+                try:
+                    last_date = datetime.datetime.fromtimestamp(app["last_historical_date_scanned"]).strftime('%Y-%m-%d')
+                except: pass
+            app_table.add_row(str(app["appid"]), last_date, str(app["window_size"]))
+
+        # Tag Stats Table
+        tag_table = self.query_one("#tag-stats-table", DataTable)
+        tag_table.clear(columns=True)
+        tag_table.add_columns("Tag", "Count")
+        sorted_tags = sorted(stats["tag_counts"].items(), key=lambda x: x[1], reverse=True)
+        for tag, count in sorted_tags:
+            tag_table.add_row(tag, str(count))
 
 class SubscriptionQueueScreen(ModalScreen):
     """A modal screen that displays the subscription queue with clickable links."""
@@ -500,6 +574,7 @@ class ScraperApp(App):
 
     BINDINGS = [
         ("ctrl+q", "quit", "Quit"),
+        ("ctrl+d", "show_stats", "Stats"),
         ("s", "toggle_queue", "Queue for Sub"),
         ("l", "show_sub_queue", "List Queued Items"),
         ("ctrl+s", "save_filter_for_scraper", "Save Filter"),
@@ -513,6 +588,26 @@ class ScraperApp(App):
     CSS = """
     #_default {
         layout: vertical;
+    }
+    #stats-left-col {
+        width: 40%;
+        padding: 1;
+        border-right: tall $primary;
+    }
+    #stats-right-col {
+        width: 60%;
+        padding: 1;
+    }
+    .stats-header {
+        color: $accent;
+        margin-bottom: 1;
+    }
+    #tag-stats-scroll {
+        height: 1fr;
+    }
+    #tag-stats-table, #app-stats-table {
+        height: auto;
+        border: none;
     }
     #search-container {
         height: auto;
@@ -1153,6 +1248,10 @@ class ScraperApp(App):
         count = clear_pending_items(self.db_path)
         self.notify(f"Database cleared: {count} pending items removed.")
         self.run_worker(self.execute_search())
+
+    def action_show_stats(self) -> None:
+        """Shows the database statistics screen."""
+        self.push_screen(StatsScreen(self.db_path))
         
     def action_show_sub_queue(self) -> None:
         """Shows the subscription queue modal screen."""

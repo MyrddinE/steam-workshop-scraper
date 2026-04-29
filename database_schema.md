@@ -14,7 +14,7 @@ This table stores the metadata for each Steam Workshop item.
 | `dt_attempted` | TEXT | ISO 8601 timestamp of the last attempt to fetch metadata. |
 | `status` | INTEGER | The status code of the last fetch attempt (e.g., 200 for success, 404 for not found). |
 | `title` | TEXT | The title of the workshop item. |
-| `creator` | TEXT | The Steam ID of the item's creator. |
+| `creator` | INTEGER | The Steam ID of the item's creator. |
 | `creator_appid` | INTEGER | The App ID of the tool used to create the item. |
 | `consumer_appid` | INTEGER | The App ID of the game this item is for. |
 | `filename` | TEXT | The name of the primary file. |
@@ -35,8 +35,43 @@ This table stores the metadata for each Steam Workshop item.
 | `views` | INTEGER | The number of times the item has been viewed. |
 | `tags` | TEXT | A JSON array of tags associated with the item. |
 | `extended_description` | TEXT | The full, scraped description from the workshop page. |
+| `language` | INTEGER | The detected language ID. |
+| `lifetime_subscriptions` | INTEGER | Total lifetime subscriptions. |
+| `lifetime_favorited` | INTEGER | Total lifetime favorites. |
+| `title_en` | TEXT | Translated English title. |
+| `short_description_en` | TEXT | Translated English short description. |
+| `extended_description_en` | TEXT | Translated English extended description. |
+| `dt_translated` | TEXT | ISO 8601 timestamp of translation. |
+| `translation_priority` | INTEGER | Priority for translation queue. |
+| `is_queued_for_subscription` | INTEGER | Boolean (0 or 1) for TUI subscription queue. |
 
 **Primary Key:** `workshop_id`
+
+## `users` table
+
+Stores metadata for Steam users (creators).
+
+| Column Name | Data Type | Description |
+|---|---|---|
+| `steamid` | INTEGER | The unique Steam ID 64. Primary Key. |
+| `personaname` | TEXT | The user's persona name. |
+| `personaname_en` | TEXT | Translated English persona name. |
+| `dt_updated` | TEXT | ISO 8601 timestamp of last update. |
+| `dt_translated` | TEXT | ISO 8601 timestamp of translation. |
+| `translation_priority` | INTEGER | Priority for translation queue. |
+
+## `app_tracking` table
+
+Tracks scraping progress and filters per AppID.
+
+| Column Name | Data Type | Description |
+|---|---|---|
+| `appid` | INTEGER | The Steam AppID. Primary Key. |
+| `last_historical_date_scanned` | INTEGER | Unix timestamp of the last scanned item for historical scraping. |
+| `filter_text` | TEXT | Text filter for scraping. |
+| `required_tags` | TEXT | JSON array of required tags for scraping. |
+| `excluded_tags` | TEXT | JSON array of excluded tags for scraping. |
+| `window_size` | INTEGER | The time window (in seconds) for scraping. |
 
 ## Indexes
 

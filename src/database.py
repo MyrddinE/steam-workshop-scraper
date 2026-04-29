@@ -528,6 +528,111 @@ def get_all_authors(db_path: str) -> list[str]:
     conn.close()
     return results
 
+def get_db_stats(db_path: str) -> dict:
+    """Returns comprehensive statistics about the database."""
+    from datetime import datetime, timedelta
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+
+    # 1. Record count by status
+    cursor.execute("SELECT status, COUNT(*) as count FROM workshop_items GROUP BY status")
+    status_counts = [dict(row) for row in cursor.fetchall()]
+
+    # 2. Translation and date processing
+    cursor.execute("""
+        SELECT 
+            dt_updated, 
+            title, 
+            short_description, 
+            extended_description, 
+            translation_priority, 
+            title_en, 
+            short_description_en, 
+            extended_description_en 
+        FROM workshop_items
+    """)
+    all_items = cursor.fetchall()
+
+    translation_status = {
+        "No data (dt_updated is empty)": 0,
+        "No translation needed (is_ascii==True)": 0,
+        "Queued": 0,
+        "Translated": 0,
+        "Needs Translation (Unicode detected)": 0
+    }
+    
+    dt_updated_counts = {
+        "blank": 0,
+        "less than 7 days ago": 0,
+        "more than 7 days ago": 0,
+    }
+
+    seven_days_ago_dt = datetime.now() - timedelta(days=7)
+
+    for item in all_items:
+        # Translation Status
+        title = item["title"] or ""
+        short_desc = item["short_description"] or ""
+        ext_desc = item["extended_description"] or ""
+
+        if not item["dt_updated"]:
+            translation_status["No data (dt_updated is empty)"] += 1
+        elif item["title_en"] or item["short_description_en"] or item["extended_description_en"]:
+            translation_status["Translated"] += 1
+        elif item["translation_priority"] and item["translation_priority"] > 0:
+            translation_status["Queued"] += 1
+        elif title.isascii() and short_desc.isascii() and ext_desc.isascii():
+            translation_status["No translation needed (is_ascii==True)"] += 1
+        else:
+            translation_status["Needs Translation (Unicode detected)"] += 1
+
+        # Date updated logic
+        try:
+            if not item["dt_updated"]:
+                dt_updated_counts["blank"] += 1
+            else:
+                updated_dt = datetime.fromisoformat(item["dt_updated"].replace("Z", "+00:00"))
+                if updated_dt.tzinfo is None:
+                    updated_dt = updated_dt.replace(tzinfo=seven_days_ago_dt.tzinfo)
+
+                if updated_dt >= seven_days_ago_dt:
+                    dt_updated_counts["less than 7 days ago"] += 1
+                else:
+                    dt_updated_counts["more than 7 days ago"] += 1
+        except (ValueError, TypeError):
+            dt_updated_counts["blank"] += 1
+
+    # 3. Tag counts
+    cursor.execute("SELECT tags FROM workshop_items WHERE tags IS NOT NULL AND tags != ''")
+    tag_counts = {}
+    for row in cursor.fetchall():
+        try:
+            tags_list = json.loads(row["tags"])
+            if isinstance(tags_list, list):
+                for tag_item in tags_list:
+                    tag_value = tag_item.get('tag') if isinstance(tag_item, dict) else tag_item
+                    if tag_value:
+                        tag_counts[tag_value] = tag_counts.get(tag_value, 0) + 1
+        except: continue
+
+    # 4. Global tracking info
+    cursor.execute("SELECT MAX(dt_updated) FROM workshop_items")
+    highest_dt_updated = cursor.fetchone()[0]
+
+    # 5. App tracking info (Window Size, Last Scanned)
+    cursor.execute("SELECT appid, last_historical_date_scanned, window_size FROM app_tracking")
+    app_stats = [dict(row) for row in cursor.fetchall()]
+
+    conn.close()
+    return {
+        "status_counts": status_counts,
+        "translation_status": translation_status,
+        "tag_counts": tag_counts,
+        "dt_updated_counts": dt_updated_counts,
+        "highest_dt_updated": highest_dt_updated,
+        "app_stats": app_stats
+    }
+
 def get_app_tracking(db_path: str, appid: int) -> dict | None:
     """
     Returns the app tracking data for a given appid, including scan date and filters.
