@@ -80,7 +80,7 @@ def discover_items_by_date_html(appid: int, start_date: int, end_date: int, page
             url_params.append(f"appids_required_for_use[]={required_appid}")
 
     url = f"https://steamcommunity.com/workshop/browse?" + "&".join(url_params)
-    logging.debug(url)
+    logging.info(url)
     
     session = HTMLSession()
     try:

@@ -4,6 +4,7 @@ import signal
 import json
 import logging
 import os
+import random
 from datetime import datetime, timezone
 from src.database import (
     get_next_items_to_scrape, 
@@ -530,7 +531,7 @@ class Daemon:
                     start_time = end_time
                 else:
                     logging.warning(f"Window encountered errors or partial pages. Halting discovery for AppID {appid} to retry later.")
-                    last_successful_window_end_time -= window_size / 2
+                    last_successful_window_end_time -= window_size * random.random()
                     break # Break out of discovery loop for this appid
 
                 # Dynamic adjustment of next window size based on density
