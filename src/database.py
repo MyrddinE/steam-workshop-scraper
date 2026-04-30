@@ -629,7 +629,7 @@ def get_db_stats(db_path: str) -> dict:
         "status_counts": status_counts,
         "translation_status": translation_status,
         "tag_counts": tag_counts,
-        "dt_attempted_counts": dt_updated_counts,
+        "dt_attempted_counts": dt_attempted_counts,
         "highest_dt_updated": highest_dt_updated,
         "app_stats": app_stats
     }
