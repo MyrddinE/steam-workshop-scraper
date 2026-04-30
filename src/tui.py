@@ -58,13 +58,13 @@ class StatsScreen(Screen):
             status_text += f"  Status {row['status']}: {row['count']}\n"
         
         dt_text = ""
-        for category, count in stats["dt_updated_counts"].items():
+        for category, count in stats["dt_attempted_counts"].items():
             dt_text += f"  {category}: {count}\n"
 
         general_content = (
             f"Highest dt_updated: {highest_dt}\n\n"
             f"Record count by status:\n{status_text}\n"
-            f"Record count by dt_updated:\n{dt_text}"
+            f"Record count by dt_attempted:\n{dt_text}"
         )
         self.query_one("#general-stats-content", Static).update(general_content)
 

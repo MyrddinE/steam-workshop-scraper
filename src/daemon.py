@@ -223,7 +223,7 @@ class Daemon:
                         logging.debug(f"Discarding unknown (empty) API column: '{k}' for item {item_id}")
                 
             merged_data = clean_api_data # Overwrite merged_data with only allowed keys
-            merged_data["dt_updated"] = now_iso
+            merged_data["dt_attempted"] = now_iso
 
             # Check if tags were provided as list, JSON stringify for SQLite
             if "tags" in merged_data:

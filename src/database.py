@@ -218,19 +218,19 @@ def get_next_items_to_scrape(db_path: str, limit: int = 10) -> list[dict]:
         WHERE
             status IS NULL OR
             status = 206 OR
-            (status = 200 AND dt_updated < date('now', '-7 days'))
+            (status = 200 AND dt_attempted < date('now', '-7 days'))
         ORDER BY
             CASE
                 WHEN status IS NULL THEN 0
                 WHEN status = 206 THEN 1
-                WHEN status = 200 AND dt_updated < date('now', '-7 days') THEN 2
+                WHEN status = 200 AND dt_attempted < date('now', '-7 days') THEN 2
                 ELSE 3 -- Fallback for other statuses, e.g., 404, 500, or very new 200s
             END ASC,
             CASE
                 WHEN status = 206 THEN subscriptions
                 ELSE NULL
             END DESC, -- Prioritize higher subscriptions for 206 status
-            dt_updated ASC -- General secondary sort, also for status=200 old items
+            dt_attempted ASC -- General secondary sort, also for status=200 old items
         LIMIT ?
     """
     cursor.execute(sql, (limit,))
@@ -541,7 +541,7 @@ def get_db_stats(db_path: str) -> dict:
     # 2. Translation and date processing
     cursor.execute("""
         SELECT 
-            dt_updated, 
+            dt_attempted, 
             title, 
             short_description, 
             extended_description, 
@@ -554,14 +554,14 @@ def get_db_stats(db_path: str) -> dict:
     all_items = cursor.fetchall()
 
     translation_status = {
-        "No data (dt_updated is empty)": 0,
+        "No data (dt_translated is empty)": 0,
         "No translation needed (is_ascii==True)": 0,
         "Queued": 0,
         "Translated": 0,
         "Needs Translation (Unicode detected)": 0
     }
     
-    dt_updated_counts = {
+    dt_attempted_counts = {
         "blank": 0,
         "less than 7 days ago": 0,
         "more than 7 days ago": 0,
@@ -575,8 +575,8 @@ def get_db_stats(db_path: str) -> dict:
         short_desc = item["short_description"] or ""
         ext_desc = item["extended_description"] or ""
 
-        if not item["dt_updated"]:
-            translation_status["No data (dt_updated is empty)"] += 1
+        if not item["dt_translated"]:
+            translation_status["No data (dt_translated is empty)"] += 1
         elif item["title_en"] or item["short_description_en"] or item["extended_description_en"]:
             translation_status["Translated"] += 1
         elif item["translation_priority"] and item["translation_priority"] > 0:
@@ -588,19 +588,19 @@ def get_db_stats(db_path: str) -> dict:
 
         # Date updated logic
         try:
-            if not item["dt_updated"]:
-                dt_updated_counts["blank"] += 1
+            if not item["dt_attempted"]:
+                dt_attempted_counts["blank"] += 1
             else:
-                updated_dt = datetime.fromisoformat(item["dt_updated"].replace("Z", "+00:00"))
-                if updated_dt.tzinfo is None:
-                    updated_dt = updated_dt.replace(tzinfo=seven_days_ago_dt.tzinfo)
+                attempted_dt = datetime.fromisoformat(item["dt_attempted"].replace("Z", "+00:00"))
+                if attempted_dt.tzinfo is None:
+                    attempted_dt = attempted_dt.replace(tzinfo=seven_days_ago_dt.tzinfo)
 
-                if updated_dt >= seven_days_ago_dt:
-                    dt_updated_counts["less than 7 days ago"] += 1
+                if attempted_dt >= seven_days_ago_dt:
+                    dt_attempted_counts["less than 7 days ago"] += 1
                 else:
-                    dt_updated_counts["more than 7 days ago"] += 1
+                    dt_attempted_counts["more than 7 days ago"] += 1
         except (ValueError, TypeError):
-            dt_updated_counts["blank"] += 1
+            dt_attempted_counts["blank"] += 1
 
     # 3. Tag counts
     cursor.execute("SELECT tags FROM workshop_items WHERE tags IS NOT NULL AND tags != ''")
@@ -628,7 +628,7 @@ def get_db_stats(db_path: str) -> dict:
         "status_counts": status_counts,
         "translation_status": translation_status,
         "tag_counts": tag_counts,
-        "dt_updated_counts": dt_updated_counts,
+        "dt_attempted_counts": dt_updated_counts,
         "highest_dt_updated": highest_dt_updated,
         "app_stats": app_stats
     }
