@@ -542,6 +542,7 @@ def get_db_stats(db_path: str) -> dict:
     cursor.execute("""
         SELECT 
             dt_attempted, 
+            dt_translated, 
             title, 
             short_description, 
             extended_description, 
