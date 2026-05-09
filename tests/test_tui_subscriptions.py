@@ -2,6 +2,7 @@ import pytest
 from textual.widgets import ListView
 from src.tui import ScraperApp, SubscriptionQueueScreen
 from unittest.mock import patch
+from tests.conftest import ASYNC_PAUSE
 
 @pytest.mark.asyncio
 async def test_tui_toggle_subscription_queue(mock_config):
@@ -16,7 +17,7 @@ async def test_tui_toggle_subscription_queue(mock_config):
         
         app = ScraperApp()
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await pilot.pause(ASYNC_PAUSE)
 
             list_view = app.query_one("#results-list", ListView)
             list_view.index = 0
@@ -25,7 +26,7 @@ async def test_tui_toggle_subscription_queue(mock_config):
             assert original_item.item_data["is_queued_for_subscription"] == 0
 
             await pilot.press("s")
-            await pilot.pause(0.1)
+            await pilot.pause(ASYNC_PAUSE)
 
             mock_toggle_db.assert_called_once_with(mock_config["database"]["path"], 1)
             assert original_item.item_data["is_queued_for_subscription"] == 1
@@ -38,18 +39,18 @@ async def test_tui_show_subscription_queue(mock_config, tmp_path):
     app = ScraperApp()
     app.pause_lock_file = str(lock_file)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await pilot.pause(ASYNC_PAUSE)
 
         assert not lock_file.exists()
 
         await pilot.press("l")
-        await pilot.pause(0.1)
+        await pilot.pause(ASYNC_PAUSE)
 
         assert isinstance(app.screen, SubscriptionQueueScreen)
         assert lock_file.exists()
 
         await pilot.click("#btn-close-sub-queue")
-        await pilot.pause(0.1)
+        await pilot.pause(ASYNC_PAUSE)
 
         assert not isinstance(app.screen, SubscriptionQueueScreen)
         assert not lock_file.exists()

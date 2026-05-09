@@ -2,6 +2,8 @@ import pytest
 import os
 from src.database import initialize_database
 
+ASYNC_PAUSE = 0.25
+
 @pytest.fixture
 def mock_config():
     return {

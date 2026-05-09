@@ -1,6 +1,7 @@
 import pytest
 import random
 from src.tui import ScraperApp, SearchBuilder
+from tests.conftest import ASYNC_PAUSE
 from textual.widgets import Select, Input
 
 @pytest.mark.asyncio
@@ -44,7 +45,7 @@ async def test_random_filters_save_load(mock_config):
         
         app = ScraperApp()
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await pilot.pause(ASYNC_PAUSE)
             
             builder = app.query_one("#search-builder", SearchBuilder)
             
@@ -53,7 +54,7 @@ async def test_random_filters_save_load(mock_config):
                 builder.set_filters(filters)
                 
                 # Wait for call_after_refresh to run
-                await pilot.pause(0.2)
+                await pilot.pause(ASYNC_PAUSE * 2)
                 
                 # Retrieve the filters
                 loaded_filters = builder.get_filters()

@@ -2,6 +2,7 @@ import pytest
 from textual.color import Color
 from textual.widgets import Label, Button, Select, ListItem, ListView, Markdown
 from src.tui import ScraperApp, DetailsPane
+from tests.conftest import ASYNC_PAUSE
 from unittest.mock import patch
 
 @pytest.fixture
@@ -46,10 +47,10 @@ async def test_details_pane_contrast(mock_config):
         
         app = ScraperApp()
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await pilot.pause(ASYNC_PAUSE)
             list_view = app.query_one(ListView)
             list_view.index = 0
-            await pilot.pause(0.1)
+            await pilot.pause(ASYNC_PAUSE)
             
             detail_pane = app.query_one("#item-details", DetailsPane)
             title = detail_pane.query_one("#item-title")
@@ -61,7 +62,7 @@ async def test_command_palette_contrast(mock_config):
     app = ScraperApp()
     async with app.run_test() as pilot:
         await pilot.press("ctrl+p")
-        await pilot.pause(0.1)
+        await pilot.pause(ASYNC_PAUSE)
         
         # Check the top-most screen (should be CommandPalette)
         top_screen = pilot.app.screen_stack[-1]
@@ -70,7 +71,7 @@ async def test_command_palette_contrast(mock_config):
         
         # Type something to get hits
         await pilot.press("c", "l", "e", "a", "r")
-        await pilot.pause(0.2)
+        await pilot.pause(ASYNC_PAUSE * 2)
         
         # Verify there are hits in the CommandList
         from textual.command import CommandList
@@ -91,7 +92,7 @@ async def test_select_dropdown_contrast(mock_config):
     app = ScraperApp()
     async with app.run_test() as pilot:
         await pilot.click(Select)
-        await pilot.pause(0.1)
+        await pilot.pause(ASYNC_PAUSE)
         
         # Select opens an overlay on the current screen
         from textual.widgets._select import SelectOverlay

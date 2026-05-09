@@ -1,5 +1,6 @@
 import pytest
 from textual.widgets import Static, ListView
+from tests.conftest import ASYNC_PAUSE
 from src.tui import ScraperApp
 from unittest.mock import patch
 
@@ -46,7 +47,7 @@ async def test_tui_no_markup_error_on_bbcode(mock_config, mock_results_with_bbco
         
         app = ScraperApp()
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await pilot.pause(ASYNC_PAUSE)
 
             list_view = app.query_one(ListView)
             list_view.index = 0
@@ -61,7 +62,7 @@ async def test_tui_no_markup_error_on_bbcode(mock_config, mock_results_with_bbco
             detail_content = detail_pane.query_one("#detail-content", Markdown)
             
             # Wait for any async updates
-            await pilot.pause(0.1)
+            await pilot.pause(ASYNC_PAUSE)
             
             # Verify title is converted to bold in Label (using render() to get the text with styles)
             assert "Bold Title" in str(title_label.render())

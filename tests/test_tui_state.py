@@ -1,6 +1,7 @@
 import os
 import pytest
 from src.tui import load_tui_state, save_tui_state
+from tests.conftest import ASYNC_PAUSE
 
 def test_save_and_load_tui_state(tmp_path):
     state_file = tmp_path / ".tui_state.yaml"
@@ -45,7 +46,7 @@ async def test_tui_app_loads_state(mock_config):
         
         app = ScraperApp()
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await pilot.pause(ASYNC_PAUSE)
             
             # Verify sort was applied
             assert app.query_one("#sort-by", Select).value == "file_size"
@@ -76,12 +77,12 @@ async def test_tui_app_saves_state(mock_config):
         
         app = ScraperApp()
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await pilot.pause(ASYNC_PAUSE)
             
             # Change sort order
             sort_order = app.query_one("#sort-order", Select)
             sort_order.value = "DESC"
-            await pilot.pause(0.1)
+            await pilot.pause(ASYNC_PAUSE)
             
             # It should have called save_tui_state
             assert mock_save.called
