@@ -815,6 +815,7 @@ class ScraperApp(App):
             self.config = {"database": {"path": "workshop.db"}}
         self.db_path = self.config["database"]["path"]
         initialize_database(self.db_path)
+        self._paginating_allowed = False
         self.current_item_creator = None
         self.pause_lock_file = ".pauselock"
         
@@ -885,14 +886,15 @@ class ScraperApp(App):
 
     def _check_scroll_bottom(self, scroll_y: float) -> None:
         self.save_state()
-        try:
-            list_view = self.query_one("#results-list", ListView)
-            if list_view.max_scroll_y == 0:
-                return
-            if scroll_y >= list_view.max_scroll_y - 5:
-                self.run_worker(self.load_more_items())
-        except Exception:
-            pass
+        if self._paginating_allowed:
+            try:
+                list_view = self.query_one("#results-list", ListView)
+                if list_view.max_scroll_y == 0:
+                    return
+                if scroll_y >= list_view.max_scroll_y - 5:
+                    self.run_worker(self.load_more_items())
+            except Exception:
+                pass
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -1013,6 +1015,7 @@ class ScraperApp(App):
             self.has_more_results = False
             
         self.is_loading = False
+        self._paginating_allowed = True
 
         if not self._has_restored_state:
             self._has_restored_state = True
@@ -1039,7 +1042,7 @@ class ScraperApp(App):
         list_view = event.list_view
         if list_view.id == "results-list":
             # If we are within 10 items of the end, fetch more
-            if list_view.index is not None and list_view.index >= len(list_view) - 10:
+            if self._paginating_allowed and list_view.index is not None and list_view.index >= len(list_view) - 10:
                 await self.load_more_items()
                 
             if event.item and hasattr(event.item, 'item_data'):
