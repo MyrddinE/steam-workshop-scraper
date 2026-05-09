@@ -38,7 +38,9 @@ def test_discover_items_by_date_html_url_construction():
     </body></html>
     '''
     # Mock the actual request to verify the URL
-    with patch('src.web_scraper.HTMLSession') as mock_session_class:
+    with patch('src.web_scraper.HTMLSession') as mock_session_class, \
+         patch('src.web_scraper.load_config') as mock_load_config:
+        mock_load_config.return_value = {"session": {"id": "test_session"}}
         mock_session = mock_session_class.return_value
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -105,25 +107,12 @@ def test_scrape_extended_details_not_found():
     assert details["description"] is None
 
 @responses.activate
-def test_scrape_extended_details_http_error():
-    """Test scraping handles HTTP 404 appropriately."""
-    responses.add(
-        responses.GET,
-        STEAM_WORKSHOP_URL,
-        status=404
-    )
-
-    details = scrape_extended_details("https://steamcommunity.com/sharedfiles/filedetails/?id=123")
-    assert details is None
-
-@responses.activate
-def test_scrape_extended_details_timeout():
-    """Test handling of request timeouts."""
-    responses.add(
-        responses.GET,
-        STEAM_WORKSHOP_URL,
-        body=requests.exceptions.Timeout()
-    )
+@pytest.mark.parametrize("setup_fn", [
+    pytest.param(lambda url: responses.add(responses.GET, url, status=404), id="http_error"),
+    pytest.param(lambda url: responses.add(responses.GET, url, body=requests.exceptions.Timeout()), id="timeout"),
+])
+def test_scrape_extended_details_returns_none_on_failure(setup_fn):
+    setup_fn(STEAM_WORKSHOP_URL)
     details = scrape_extended_details("https://steamcommunity.com/sharedfiles/filedetails/?id=123")
     assert details is None
 
@@ -152,7 +141,9 @@ def test_discover_items_by_date_html_success():
         content_type="text/html"
     )
 
-    ids, total_pages = discover_items_by_date_html(appid, start_date, end_date, page)
+    with patch('src.web_scraper.load_config') as mock_load_config:
+        mock_load_config.return_value = {"session": {"id": "test_session"}}
+        ids, total_pages = discover_items_by_date_html(appid, start_date, end_date, page)
     assert len(ids) == 2
     assert 5001 in ids
     assert 5002 in ids
@@ -161,7 +152,9 @@ def test_discover_items_by_date_html_success():
 @responses.activate
 def test_discover_items_by_date_html_exception():
     """Test handling of exceptions during discover_items_by_date_html."""
-    with patch('src.web_scraper.HTMLSession') as mock_session:
+    with patch('src.web_scraper.HTMLSession') as mock_session, \
+         patch('src.web_scraper.load_config') as mock_load_config:
+        mock_load_config.return_value = {"session": {"id": "test_session"}}
         mock_instance = mock_session.return_value
         mock_instance.get.side_effect = requests.exceptions.RequestException("Timeout")
         

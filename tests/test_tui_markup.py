@@ -4,13 +4,6 @@ from src.tui import ScraperApp
 from unittest.mock import patch
 
 @pytest.fixture
-def mock_config():
-    return {
-        "database": {"path": "test.db"},
-        "logging": {"level": "INFO"}
-    }
-
-@pytest.fixture
 def mock_results_with_bbcode():
     return [
         {

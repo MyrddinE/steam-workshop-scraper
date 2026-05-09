@@ -5,11 +5,10 @@ from unittest.mock import patch, MagicMock
 from src.daemon import Daemon
 from src.database import initialize_database, get_connection, count_unscraped_items, update_app_tracking, get_app_tracking
 
-@pytest.mark.asyncio
 @patch('src.daemon.time.time')
 @patch('src.daemon.discover_items_by_date_html')
 @patch('src.daemon.time.sleep')
-async def test_seed_database_halts_on_error(mock_sleep, mock_discover, mock_time, tmp_path):
+def test_seed_database_halts_on_error(mock_sleep, mock_discover, mock_time, tmp_path):
     """Test that seed_database halts window progression if an error occurs."""
     db_path = str(tmp_path / "halt_error.db")
     initialize_database(db_path)
@@ -40,11 +39,10 @@ async def test_seed_database_halts_on_error(mock_sleep, mock_discover, mock_time
         tracking = get_app_tracking(db_path, 1062090)
         assert tracking["last_historical_date_scanned"] == initial_scanned
 
-@pytest.mark.asyncio
 @patch('src.daemon.time.time')
 @patch('src.daemon.discover_items_by_date_html')
 @patch('src.daemon.time.sleep')
-async def test_seed_database_halts_on_partial_page(mock_sleep, mock_discover, mock_time, tmp_path):
+def test_seed_database_halts_on_partial_page(mock_sleep, mock_discover, mock_time, tmp_path):
     """Test that seed_database halts window progression if a non-last page returns < 30 items."""
     db_path = str(tmp_path / "halt_partial.db")
     initialize_database(db_path)
@@ -76,11 +74,10 @@ async def test_seed_database_halts_on_partial_page(mock_sleep, mock_discover, mo
         tracking = get_app_tracking(db_path, 1062090)
         assert tracking["last_historical_date_scanned"] == initial_scanned
 
-@pytest.mark.asyncio
 @patch('src.daemon.time.time')
 @patch('src.daemon.discover_items_by_date_html')
 @patch('src.daemon.time.sleep')
-async def test_process_batch_with_db_locked(mock_sleep, mock_discover, mock_time, tmp_path):
+def test_process_batch_with_db_locked(mock_sleep, mock_discover, mock_time, tmp_path):
     """Test that process_batch handles potential database locking issues (though WAL should prevent it)."""
     db_path = str(tmp_path / "locked.db")
     initialize_database(db_path)

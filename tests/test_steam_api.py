@@ -1,7 +1,7 @@
 import pytest
 import responses
 import requests
-from src.steam_api import get_workshop_details_api, query_workshop_items
+from src.steam_api import get_workshop_details_api, query_workshop_items, query_files_by_date, get_player_summaries
 
 STEAM_API_URL = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
 QUERY_API_URL = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
@@ -71,73 +71,17 @@ def test_get_workshop_details_api_success():
     assert details["description"].startswith("A small script")
 
 @responses.activate
-def test_get_workshop_details_api_404():
-    """Test handling of 404 Not Found."""
-    responses.add(
-        responses.POST,
-        STEAM_API_URL,
-        status=404
-    )
+@pytest.mark.parametrize("setup_fn,expected_status", [
+    pytest.param(lambda url: responses.add(responses.POST, url, status=404), 500, id="http_404"),
+    pytest.param(lambda url: responses.add(responses.POST, url, status=429), 500, id="http_429"),
+    pytest.param(lambda url: responses.add(responses.POST, url, body=requests.exceptions.Timeout()), 500, id="timeout"),
+    pytest.param(lambda url: responses.add(responses.POST, url, json={"response": {"result": 1, "resultcount": 0, "publishedfiledetails": []}}, status=200), 404, id="empty_details"),
+    pytest.param(lambda url: responses.add(responses.POST, url, json={"response": {"result": 1, "resultcount": 1, "publishedfiledetails": [{"publishedfileid": "123", "result": 9}]}}, status=200), 404, id="invalid_item"),
+])
+def test_get_workshop_details_api_errors(setup_fn, expected_status):
+    setup_fn(STEAM_API_URL)
     details = get_workshop_details_api(item_id=123, api_key="TEST_KEY")
-    assert details["status"] == 500
-@responses.activate
-def test_get_workshop_details_api_429():
-    """Test handling of 429 Too Many Requests."""
-    responses.add(
-        responses.POST,
-        STEAM_API_URL,
-        status=429
-    )
-    details = get_workshop_details_api(item_id=123, api_key="TEST_KEY")
-    assert details["status"] == 500
-@responses.activate
-def test_get_workshop_details_api_timeout():
-    """Test handling of request timeouts."""
-    responses.add(
-        responses.POST,
-        STEAM_API_URL,
-        body=requests.exceptions.Timeout()
-    )
-    details = get_workshop_details_api(item_id=123, api_key="TEST_KEY")
-    assert details["status"] == 500
-@responses.activate
-def test_get_workshop_details_api_empty_details():
-    """Test when Steam API returns an empty publishedfiledetails array."""
-    mock_json = {
-        "response": {
-            "result": 1,
-            "resultcount": 0,
-            "publishedfiledetails": []
-        }
-    }
-    responses.add(
-        responses.POST,
-        STEAM_API_URL,
-        json=mock_json,
-        status=200
-    )
-    details = get_workshop_details_api(item_id=123, api_key="TEST_KEY")
-    assert details["status"] == 404
-@responses.activate
-def test_get_workshop_details_api_invalid_item():
-    """Test when Steam API returns 200 but item doesn't exist (result != 1)."""
-    mock_json = {
-        "response": {
-            "result": 1,
-            "resultcount": 1,
-            "publishedfiledetails": [
-                {"publishedfileid": "123", "result": 9} # 9 usually means file not found
-            ]
-        }
-    }
-    responses.add(
-        responses.POST,
-        STEAM_API_URL,
-        json=mock_json,
-        status=200
-    )
-    details = get_workshop_details_api(item_id=123, api_key="TEST_KEY")
-    assert details["status"] == 404
+    assert details["status"] == expected_status
 @responses.activate
 def test_get_player_summaries_success():
     url = "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/"
@@ -202,9 +146,27 @@ def test_query_files_by_date_empty():
 
 @responses.activate
 def test_query_files_by_date_error():
-    from src.steam_api import query_files_by_date
     url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
     responses.add(responses.GET, url, status=500)
     result = query_files_by_date(4000, 100, 2000, "TEST_KEY", page=1)
     assert result["total"] == 0
     assert len(result["items"]) == 0
+
+@responses.activate
+def test_query_workshop_items_empty():
+    responses.add(responses.GET, QUERY_API_URL, json={"response": {"publishedfiledetails": []}}, status=200)
+    ids = query_workshop_items(appid=294100, api_key="TEST_KEY")
+    assert ids == []
+
+@responses.activate
+def test_query_workshop_items_error():
+    responses.add(responses.GET, QUERY_API_URL, status=500)
+    ids = query_workshop_items(appid=294100, api_key="TEST_KEY")
+    assert ids == []
+
+@responses.activate
+def test_query_files_by_date_partial_response():
+    url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
+    responses.add(responses.GET, url, json={}, status=200)
+    result = query_files_by_date(4000, 100, 2000, "TEST_KEY", page=1)
+    assert result["total"] == 0

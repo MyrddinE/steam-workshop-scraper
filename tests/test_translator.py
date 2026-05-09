@@ -157,6 +157,16 @@ def test_translate_item_json_decode_error(tmp_path):
         # Should catch JSONDecodeError and not crash
         translate_item(db_path, 1, config, "workshop_item")
 
+def test_is_ascii():
+    from src.translator import is_ascii
+    assert is_ascii("Hello World") is True
+    assert is_ascii("") is True
+    assert is_ascii("123!@#") is True
+    assert is_ascii("Hello café") is False
+    assert is_ascii("你好世界") is False
+    assert is_ascii("🚀") is False
+    assert is_ascii(None) is True
+
 def test_translator_daemon_exception():
     from src.translator import TranslatorThread
     daemon = TranslatorThread({"database": {"path": "dummy"}, "openai": {"api_key": "dummy"}})

@@ -1,6 +1,7 @@
 from requests_html import HTMLSession
 import requests
 import re
+import sys
 import requests.utils
 import logging
 from src.config import load_config

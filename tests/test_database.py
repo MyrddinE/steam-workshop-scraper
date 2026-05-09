@@ -6,7 +6,6 @@ import pytest
 import json
 from datetime import datetime, timezone, timedelta
 from src.database import (
-    initialize_database,
     insert_or_update_item,
     get_next_items_to_scrape,
     search_items,
@@ -14,13 +13,6 @@ from src.database import (
     count_unscraped_items,
     clear_pending_items
 )
-
-@pytest.fixture
-def db_path(tmp_path):
-    """Fixture providing a temporary database for testing."""
-    path = str(tmp_path / "test_workshop.db")
-    initialize_database(path)
-    return path
 
 def test_count_unscraped_items(db_path):
     """Test counting items that have never been attempted."""
@@ -70,9 +62,9 @@ def test_insert_or_update_item(db_path):
 
 def test_get_next_items_to_scrape(db_path):
     """Tests that items are fetched in order of oldest dt_attempted (NULLs first)."""
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "dt_updated": "2023-10-02"})
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "dt_updated": "2023-10-02", "dt_attempted": "2023-10-01T00:00:00"})
     insert_or_update_item(db_path, {"workshop_id": 2, "status": None}) # NULL status, should come first
-    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "dt_updated": "2023-10-01"})
+    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "dt_updated": "2023-10-01", "dt_attempted": "2023-10-02T00:00:00"})
     
     items = get_next_items_to_scrape(db_path, limit=3)
     assert len(items) == 3
@@ -80,9 +72,9 @@ def test_get_next_items_to_scrape(db_path):
     
     # Extract IDs to check order
     item_ids = [item['workshop_id'] for item in items]
-    assert item_ids[0] == 2 # NULL comes first
-    assert item_ids[1] == 3 # Older date comes second
-    assert item_ids[2] == 1 # Newest date comes last
+    assert item_ids[0] == 2
+    assert item_ids[1] == 1
+    assert item_ids[2] == 3
 
 def test_search_items(db_path):
     """Tests search capabilities over title and description, and filtering by appid."""
@@ -219,8 +211,10 @@ def test_concurrent_read_write(db_path):
     t1.join()
     t2.join()
     
-    # If no 'sqlite3.OperationalError: database is locked' exception was thrown, WAL is working
-    assert True
+    conn = get_connection(db_path)
+    count = conn.execute("SELECT COUNT(*) as c FROM workshop_items").fetchone()["c"]
+    conn.close()
+    assert count == 20
 
 def test_get_next_translation_item_none(db_path):
     from src.database import get_next_translation_item
@@ -352,10 +346,10 @@ def test_get_next_items_to_scrape_priority(db_path):
     from src.database import get_next_items_to_scrape, insert_or_update_item
     
     # 1. Successfully scraped items, stalest first (status = 200)
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "dt_updated": "2023-01-01"})
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "dt_updated": "2023-01-01", "dt_attempted": "2023-01-01T00:00:00"})
     # Item 2 is recent, so it should be excluded from re-scraping
     recent_date = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "dt_updated": recent_date})
+    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "dt_updated": recent_date, "dt_attempted": recent_date})
     
     # 2. Partially failed items (status = 206) - with different subscription counts
     insert_or_update_item(db_path, {"workshop_id": 3, "status": 206, "dt_updated": "2025-01-01", "subscriptions": 100})
@@ -367,7 +361,7 @@ def test_get_next_items_to_scrape_priority(db_path):
     
     # 4. Old items (older than 7 days)
     # This item is older than #2, but should be lower priority than the NULL and 206 statuses
-    insert_or_update_item(db_path, {"workshop_id": 7, "status": 200, "dt_updated": "2022-01-01"})
+    insert_or_update_item(db_path, {"workshop_id": 7, "status": 200, "dt_updated": "2022-01-01", "dt_attempted": "2022-01-01T00:00:00"})
 
     items = get_next_items_to_scrape(db_path, limit=7)
     item_ids = [item['workshop_id'] for item in items]
@@ -382,3 +376,61 @@ def test_get_next_items_to_scrape_priority(db_path):
     assert set(item_ids[0:2]) == {5, 6}
     assert item_ids[2:4] == [4, 3]
     assert item_ids[4:6] == [7, 1]
+
+def test_get_user_not_found(db_path):
+    from src.database import get_user
+    assert get_user(db_path, 99999) is None
+
+def test_get_item_details_missing_user(db_path):
+    from src.database import insert_or_update_item, get_item_details
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Orphan Item", "creator": 99999})
+    details = get_item_details(db_path, 1)
+    assert details is not None
+    assert details["title"] == "Orphan Item"
+    assert details.get("personaname") is None
+
+def test_toggle_and_query_queued_items(db_path):
+    from src.database import toggle_subscription_queue_status, get_queued_items
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Item A"})
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": "Item B"})
+
+    toggle_subscription_queue_status(db_path, 1)
+    queued = get_queued_items(db_path)
+    assert len(queued) == 1
+    assert queued[0]["workshop_id"] == 1
+    assert queued[0]["title"] == "Item A"
+
+    toggle_subscription_queue_status(db_path, 1)
+    queued = get_queued_items(db_path)
+    assert len(queued) == 0
+
+def test_get_db_stats_empty(db_path):
+    from src.database import get_db_stats
+    stats = get_db_stats(db_path)
+    assert stats["status_counts"] == []
+    assert "translation_status" in stats
+
+def test_get_db_stats_with_data(db_path):
+    from src.database import get_db_stats, insert_or_update_item
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Test", "status": 200, "tags": json.dumps([{"tag": "mod"}])})
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": None, "status": None})
+    stats = get_db_stats(db_path)
+    assert len(stats["status_counts"]) == 2
+    assert stats["tag_counts"].get("mod", 0) >= 1
+
+def test_get_db_stats_tracking_missing(db_path):
+    from src.database import get_db_stats, get_app_tracking
+    stats = get_db_stats(db_path)
+    assert stats["app_stats"] == []
+
+def test_get_app_tracking_missing(db_path):
+    from src.database import get_app_tracking
+    assert get_app_tracking(db_path, 999) is None
+
+def test_save_app_filter_defaults(db_path):
+    from src.database import save_app_filter, get_app_tracking
+    save_app_filter(db_path, 5000)
+    tracking = get_app_tracking(db_path, 5000)
+    assert tracking["filter_text"] == ""
+    assert tracking["required_tags"] == "[]"
+    assert tracking["excluded_tags"] == "[]"

@@ -1,19 +1,13 @@
-import sqlite3
-import os
-import threading
-import time
 import pytest
 from src.database import (
-    initialize_database,
     insert_or_update_item,
-    get_next_items_to_scrape,
     search_items,
-    get_connection,
     get_all_authors
 )
 
 @pytest.fixture
 def db_path(tmp_path):
+    from src.database import initialize_database
     path = str(tmp_path / "test_adv_search.db")
     initialize_database(path)
     # Populate with diverse data for advanced search

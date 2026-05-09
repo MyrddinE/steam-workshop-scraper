@@ -2,7 +2,7 @@ import os
 import yaml
 import pytest
 from unittest.mock import patch
-from src.config import load_config
+from src.config import load_config, save_config
 
 @patch.dict(os.environ, {}, clear=True)
 def test_load_config_yaml(tmp_path):
@@ -86,12 +86,40 @@ def test_load_config_missing_file():
         load_config("non_existent_file.yaml")
 
 def test_load_config_openai_env_key_no_block(tmp_path):
-    # Test when OPENAI_API_KEY is in env, but config has no "openai" block
     config_file = tmp_path / "config.yaml"
     config_file.write_text("database:\n  path: 'test.db'\n")
-    import os
-    from src.config import load_config
     from unittest.mock import patch
     with patch.dict(os.environ, {"OPENAI_API_KEY": "env_key_only"}):
         config = load_config(str(config_file))
         assert config["openai"]["api_key"] == "env_key_only"
+
+def test_save_config_does_not_strip_non_env_key(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("database:\n  path: 'test.db'\n")
+    save_config(str(config_file), {"api": {"key": "yaml_key"}})
+    with open(config_file) as f:
+        saved = yaml.safe_load(f)
+    assert saved["api"]["key"] == "yaml_key"
+
+def test_save_config_skips_if_file_missing(tmp_path):
+    missing = str(tmp_path / "nonexistent.yaml")
+    save_config(missing, {"api": {"key": "x"}})
+    assert not os.path.exists(missing)
+
+def test_save_config_strips_env_secrets(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("database:\n  path: 'test.db'\n")
+    with patch.dict(os.environ, {"STEAM_API_KEY": "secret_key"}):
+        save_config(str(config_file), {"api": {"key": "secret_key"}})
+    with open(config_file) as f:
+        saved = yaml.safe_load(f)
+    assert "key" not in saved.get("api", {})
+
+def test_save_config_preserves_existing_keys(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("existing_key: value\n")
+    save_config(str(config_file), {"new_key": "new_value"})
+    with open(config_file) as f:
+        saved = yaml.safe_load(f)
+    assert saved["existing_key"] == "value"
+    assert saved["new_key"] == "new_value"

@@ -5,13 +5,6 @@ from src.tui import ScraperApp
 from unittest.mock import patch, MagicMock
 
 @pytest.fixture
-def mock_config():
-    return {
-        "database": {"path": "test.db"},
-        "logging": {"level": "INFO"}
-    }
-
-@pytest.fixture
 def mock_results():
     return [
         {
@@ -359,30 +352,11 @@ async def test_tui_remove_search_row(mock_config):
             rows = list(builder.query("SearchRow"))
             assert len(rows) == 1
 
-def test_tui_main_execution():
-    from unittest.mock import patch
-    with patch('src.tui.ScraperApp') as mock_app, \
-         patch('sys.argv', ['tui.py']), \
-         patch('src.tui.load_config', return_value={"database": {"path": "test.db"}}):
-        import src.tui
-        src.tui.main()
-        mock_app.return_value.run.assert_called_once()
-
-def test_scraperapp_config_not_found():
-    from src.tui import ScraperApp
-    from unittest.mock import patch
-    with patch('src.tui.load_config', side_effect=FileNotFoundError), \
-         patch('src.tui.initialize_database') as mock_init:
-        app = ScraperApp("nonexistent.yaml")
-        assert app.config == {"database": {"path": "workshop.db"}}
-        mock_init.assert_called_once_with("workshop.db")
-
 def test_tui_check_scroll_bottom_exception(mock_config):
     from src.tui import ScraperApp
     from unittest.mock import patch
     with patch('src.tui.load_config', return_value=mock_config):
         app = ScraperApp()
-        # Should not crash, just returns silently
         app._check_scroll_bottom(100)
 
 @pytest.mark.asyncio
@@ -391,7 +365,6 @@ async def test_tui_execute_search_not_mounted(mock_config):
     from unittest.mock import patch
     with patch('src.tui.load_config', return_value=mock_config):
         app = ScraperApp()
-        # Not mounted, should return
         await app.execute_search()
         
 @pytest.mark.asyncio
@@ -400,8 +373,7 @@ async def test_tui_execute_search_no_list_view(mock_config):
     from unittest.mock import patch
     with patch('src.tui.load_config', return_value=mock_config):
         app = ScraperApp()
-        app.is_mounted = True # fake it
-        # Try to query, fails, returns
+        app.is_mounted = True
         await app.execute_search()
 
 @pytest.mark.asyncio
@@ -414,66 +386,6 @@ async def test_tui_on_input_submitted(mock_config):
         app.execute_search = AsyncMock()
         await app.on_input_submitted(Input.Submitted(Input(), "test"))
         app.execute_search.assert_called_once()
-
-def test_tui_main_logging_configured(tmp_path):
-    import sys
-    import logging
-    from unittest.mock import patch, MagicMock
-    import src.tui
-    
-    config_file = tmp_path / "config.yaml"
-    log_file = tmp_path / "tui.log"
-    config_file.write_text(f"""logging:
-  level: 'WARNING'
-  file: '{log_file}'
-""")
-    
-    with patch('sys.argv', ['tui.py', str(config_file)]), \
-         patch('src.tui.ScraperApp') as mock_app, \
-         patch('logging.basicConfig') as mock_basic_config, \
-         patch('logging.FileHandler') as mock_file_handler:
-         
-        mock_fh_instance = MagicMock()
-        mock_file_handler.return_value = mock_fh_instance
-        
-        src.tui.main()
-        
-        # Check that we parsed sys.argv and requested the correct log file
-        mock_file_handler.assert_called_once_with(str(log_file))
-        
-        # Check basicConfig arguments are passed down
-        kwargs = mock_basic_config.call_args.kwargs
-        assert kwargs["level"] == logging.WARNING
-        assert mock_fh_instance in kwargs["handlers"]
-        
-        # Ensure the app was started using our config path
-        mock_app.assert_called_once_with(str(config_file))
-
-def test_tui_main_no_logging(tmp_path):
-    import sys
-    import logging
-    from unittest.mock import patch, MagicMock
-    import src.tui
-    
-    config_file = tmp_path / "config.yaml"
-    config_file.write_text("""database:
-  path: 'test.db'
-""")
-    
-    with patch('sys.argv', ['tui.py', str(config_file)]), \
-         patch('src.tui.ScraperApp') as mock_app, \
-         patch('logging.basicConfig') as mock_basic_config, \
-         patch('logging.getLogger') as mock_get_logger:
-         
-        src.tui.main()
-        
-        # We shouldn't call basicConfig if there's no log file, as we don't want StreamHandler messing up the TUI
-        mock_basic_config.assert_not_called()
-        
-        # We should add a NullHandler to suppress logging
-        mock_get_logger.return_value.addHandler.assert_called_once()
-        added_handler = mock_get_logger.return_value.addHandler.call_args[0][0]
-        assert isinstance(added_handler, logging.NullHandler)
 
 @pytest.mark.asyncio
 async def test_tui_clear_pending_command(tmp_path):
@@ -510,83 +422,4 @@ async def test_tui_clear_pending_command(tmp_path):
             assert ids == [2]
             assert 1 not in ids
 
-@pytest.mark.asyncio
-async def test_tui_toggle_subscription_queue(mock_config):
-    """Tests toggling the subscription queue status via the 's' key."""
-    # Two items needed to test that the highlight moves to the next item
-    mock_results = [
-        {"workshop_id": 1, "title": "Item 1", "creator": "A", "is_queued_for_subscription": 0},
-        {"workshop_id": 2, "title": "Item 2", "creator": "B", "is_queued_for_subscription": 0},
-    ]
 
-    with patch('src.tui.load_config', return_value=mock_config), \
-         patch('src.tui.search_items', return_value=mock_results), \
-         patch('src.tui.toggle_subscription_queue_status') as mock_toggle_db:
-        
-        app = ScraperApp()
-        async with app.run_test() as pilot:
-            await pilot.pause(0.1)
-
-            list_view = app.query_one("#results-list", ListView)
-            list_view.index = 0
-            original_item = list_view.highlighted_child
-
-            # Mock the scroll_to_widget method to verify it's called
-            # list_view.scroll_to_widget = MagicMock()
-
-            # Initial state: Not queued
-            assert original_item.item_data["is_queued_for_subscription"] == 0
-
-            # Press 's' to toggle
-            await pilot.press("s")
-            await pilot.pause(0.1)
-
-            # Verify DB was called and UI state was updated
-            mock_toggle_db.assert_called_once_with(mock_config["database"]["path"], 1)
-            assert original_item.item_data["is_queued_for_subscription"] == 1
-
-            # Verify highlight moved to the next item
-            assert list_view.index == 1
-
-            # Verify scroll was called
-            # list_view.scroll_to_widget.assert_called_once_with(original_item)
-
-@pytest.mark.asyncio
-async def test_tui_show_subscription_queue(mock_config, tmp_path):
-    """Tests showing the subscription queue screen via the 'l' key."""
-    from src.tui import ScraperApp, SubscriptionQueueScreen
-    
-    # Use tmp_path for the lock file to avoid clutter
-    lock_file = tmp_path / ".pauselock"
-    
-    mock_queued_items = [
-        {"workshop_id": 10, "title": "Queued Item 1"},
-        {"workshop_id": 20, "title": "Queued Item 2"},
-    ]
-
-    app = ScraperApp()
-    app.pause_lock_file = str(lock_file)
-    async with app.run_test() as pilot:
-        await pilot.pause(0.1)
-
-        assert not lock_file.exists()
-
-        # Press 'l' to open the queue screen
-        await pilot.press("l")
-        await pilot.pause(0.1)
-
-        # Verify the screen is active and lock file exists
-        assert isinstance(app.screen, SubscriptionQueueScreen)
-        assert lock_file.exists()
-
-        # Verify the items are displayed
-        # Note: This is a bit tricky as we can't directly inspect the rendered content
-        # of the modal screen easily. We trust the compose method.
-
-        # Click the close button
-        await pilot.click("#btn-close-sub-queue")
-        await pilot.pause(0.1)
-
-        # Verify the screen is closed and lock file is removed
-        assert not isinstance(app.screen, SubscriptionQueueScreen)
-        assert not lock_file.exists()

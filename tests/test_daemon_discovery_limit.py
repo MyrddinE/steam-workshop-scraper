@@ -5,11 +5,10 @@ from unittest.mock import patch, MagicMock
 from src.daemon import Daemon
 from src.database import initialize_database, get_connection, count_unscraped_items, update_app_tracking
 
-@pytest.mark.asyncio
 @patch('src.daemon.time.time')
 @patch('src.daemon.discover_items_by_date_html')
 @patch('src.daemon.time.sleep')
-async def test_seed_database_fetches_multiple_windows(mock_sleep, mock_discover, mock_time, tmp_path):
+def test_seed_database_fetches_multiple_windows(mock_sleep, mock_discover, mock_time, tmp_path):
     """Test that seed_database fetches another window if the first yields < 100 results."""
     db_path = str(tmp_path / "multiple_windows.db")
     initialize_database(db_path)
@@ -45,11 +44,10 @@ async def test_seed_database_fetches_multiple_windows(mock_sleep, mock_discover,
         assert count_unscraped_items(db_path) == 120
 
 
-@pytest.mark.asyncio
 @patch('src.daemon.time.time')
 @patch('src.daemon.discover_items_by_date_html')
 @patch('src.daemon.time.sleep')
-async def test_seed_database_stops_after_one_window(mock_sleep, mock_discover, mock_time, tmp_path):
+def test_seed_database_stops_after_one_window(mock_sleep, mock_discover, mock_time, tmp_path):
     """Test that seed_database stops after one window if >= 100 results are found."""
     db_path = str(tmp_path / "single_window.db")
     initialize_database(db_path)

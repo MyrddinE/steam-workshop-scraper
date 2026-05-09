@@ -3,21 +3,26 @@ import sys
 import os
 
 def run_tests():
-    """
-    Helper script to run pytest with coverage and correct environment settings.
-    """
-    # Ensure we are in the project root
     project_root = os.path.dirname(os.path.abspath(__file__))
     os.chdir(project_root)
 
-    cmd = [
-        sys.executable, "-m", "pytest",
-        "tests/"
-    ]
+    cmd = [sys.executable, "-m", "pytest", "tests/"]
     
-    # Add any extra arguments passed to this script
-    if len(sys.argv) > 1:
-        cmd.extend(sys.argv[1:])
+    args = sys.argv[1:]
+    # Interpret convenience shortcuts
+    if "--quick" in args:
+        args.remove("--quick")
+        cmd += ["-k", "not fuzz and not test_seed_database_halts"]
+    if "--unit" in args:
+        args.remove("--unit")
+        cmd += [
+            "-k", "not fuzz and not test_seed_database_halts",
+            "--ignore=tests/test_system_e2e.py",
+            "--ignore=tests/test_web_scraper_live.py",
+            "--ignore=tests/test_api_reachability.py",
+        ]
+
+    cmd.extend(args)
 
     print(f"Executing: {' '.join(cmd)}")
     try:
