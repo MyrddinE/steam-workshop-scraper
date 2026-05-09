@@ -17,7 +17,8 @@ from src.database import (
     save_app_filter,
     get_connection,
     get_item_details,
-    normalize_tags
+    normalize_tags,
+    _evaluate_filters
 )
 from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries, query_workshop_files
 from src.web_scraper import scrape_extended_details
@@ -133,37 +134,33 @@ class Daemon:
 
     def _should_enrich(self, appid: int, item: dict) -> bool:
         """Returns True if the item matches enrichment filters for its AppID.
-        Non-matching items get basic API metadata stored but skip extended scraping."""
+        Evaluates the stored filter list using the same logic as the TUI search builder."""
         if appid is None or appid not in self.target_appids:
             return True
         app_tracking = get_app_tracking(self.db_path, appid)
         if app_tracking is None:
             return True
-        filter_text = (app_tracking.get("filter_text") or "").strip()
-        required_tags = json.loads(app_tracking.get("required_tags") or "[]")
-        excluded_tags = json.loads(app_tracking.get("excluded_tags") or "[]")
-        if not filter_text and not required_tags and not excluded_tags:
+        enrichment = app_tracking.get("enrichment_filters") or "[]"
+        try:
+            filters = json.loads(enrichment)
+        except (json.JSONDecodeError, TypeError):
             return True
-        if filter_text:
-            title = (item.get("title") or "").lower()
-            desc = (item.get("short_description") or "").lower()
-            if filter_text.lower() not in title and filter_text.lower() not in desc:
-                return False
-        if required_tags:
-            item_tags = []
-            try:
-                item_tags = json.loads(item.get("tags") or "[]")
-            except: pass
-            if not all(t in item_tags for t in required_tags):
-                return False
-        if excluded_tags:
-            item_tags = []
-            try:
-                item_tags = json.loads(item.get("tags") or "[]")
-            except: pass
-            if any(t in item_tags for t in excluded_tags):
-                return False
-        return True
+        if not filters:
+            # Fallback to legacy columns for backward compat
+            filter_text = (app_tracking.get("filter_text") or "").strip()
+            required_tags = json.loads(app_tracking.get("required_tags") or "[]")
+            excluded_tags = json.loads(app_tracking.get("excluded_tags") or "[]")
+            if not filter_text and not required_tags and not excluded_tags:
+                return True
+            # Convert legacy columns to filter format for evaluation
+            filters = []
+            if filter_text:
+                filters.append({"field": "Title", "op": "contains", "value": filter_text})
+            for tag in required_tags:
+                filters.append({"field": "Tags", "op": "contains", "value": tag})
+            for tag in excluded_tags:
+                filters.append({"field": "Tags", "op": "does_not_contain", "value": tag})
+        return _evaluate_filters(item, filters)
 
     def _load_initial_filter_state(self):
         """Pre-loads filter state and page tracking from the DB on startup."""

@@ -1128,44 +1128,16 @@ class ScraperApp(App):
             self.action_request_translation()
 
     async def action_save_filter_for_scraper(self) -> None:
-        """
-        Extracts current filters from the TUI and saves them to the database
-        for use by the background scraper.
-        """
         builder = self.query_one("#search-builder", SearchBuilder)
         filters = builder.get_filters()
-        
-        filter_text = ""
-        required_tags = []
-        excluded_tags = []
-
-        for f in filters:
-            field = f.get("field")
-            op = f.get("op")
-            value = f.get("value", "")
-            
-            if field == "Title" and op == "contains":
-                filter_text = value
-            elif field == "Tags" and op == "contains":
-                # Split tags by comma or space for simplicity, then add
-                for tag in re.split(r'[\s,]+', value):
-                    if tag:
-                        required_tags.append(tag)
-            elif field == "Tags" and op == "does_not_contain":
-                for tag in re.split(r'[\s,]+', value):
-                    if tag:
-                        excluded_tags.append(tag)
-            # Numeric filters are ignored as per requirements
-
-        # Get currently active appid from config or default
-        current_appid = self.config.get("daemon", {}).get("target_appids", [None])[0] # Get first appid for simplicity
+        current_appid = self.config.get("daemon", {}).get("target_appids", [None])[0]
 
         if current_appid is None:
             self.notify("No target AppID configured for saving filter.", severity="error")
             return
-            
-        save_app_filter(self.db_path, current_appid, filter_text, required_tags, excluded_tags)
-        self.notify(f"Filter saved for AppID {current_appid}. Scraper will use this filter.")
+
+        save_app_filter(self.db_path, current_appid, enrichment_filters=json.dumps(filters))
+        self.notify(f"Filter saved for AppID {current_appid}. Scraper will use this for enrichment.")
 
     def action_toggle_translation(self) -> None:
         detail_pane = self.query_one("#item-details", DetailsPane)

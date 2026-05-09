@@ -93,6 +93,84 @@ def _build_json_tag_clause(db_col: str, op: str, val) -> tuple[str, list]:
         return (f"({db_col} IS NOT NULL AND {db_col} != '' AND {db_col} != '[]')", [])
     return ("", [])
 
+def _evaluate_single_filter(item: dict, db_col: str, op: str, val) -> bool:
+    """Checks whether an in-memory item dict matches a single filter criterion."""
+    is_tags = db_col == "tags"
+    if is_tags:
+        return _evaluate_tag_filter(item, op, val)
+
+    item_val = item.get(db_col)
+    numeric_cols = {"file_size", "subscriptions", "favorited", "views"}
+
+    if db_col in numeric_cols and op not in ("is_empty", "is_not_empty", "contains", "does_not_contain"):
+        try:
+            item_val = int(item_val or 0)
+            val = int(val)
+        except (ValueError, TypeError):
+            return True
+
+    if op == "contains":
+        if item_val is None:
+            return False
+        return str(val).lower() in str(item_val).lower()
+    if op == "does_not_contain":
+        if item_val is None:
+            return True
+        return str(val).lower() not in str(item_val).lower()
+    if op == "is":
+        return str(item_val) == str(val)
+    if op == "is_not":
+        return str(item_val) != str(val)
+    if op == "gt":
+        return item_val > val
+    if op == "lt":
+        return item_val < val
+    if op == "gte":
+        return item_val >= val
+    if op == "lte":
+        return item_val <= val
+    if op == "is_empty":
+        return item_val is None or str(item_val).strip() == ""
+    if op == "is_not_empty":
+        return item_val is not None and str(item_val).strip() != ""
+    return True
+
+def _evaluate_tag_filter(item: dict, op: str, val) -> bool:
+    """Evaluates a filter against the item's tags field (JSON array)."""
+    tags_raw = item.get("tags") or "[]"
+    tag_set = set()
+    try:
+        tags_list = json.loads(tags_raw) if isinstance(tags_raw, str) else tags_raw
+        if isinstance(tags_list, list):
+            tag_set = {str(t) for t in tags_list}
+    except: pass
+
+    if op == "contains":
+        return val in tag_set
+    if op == "does_not_contain":
+        return val not in tag_set
+    if op == "is_empty":
+        return len(tag_set) == 0
+    if op == "is_not_empty":
+        return len(tag_set) > 0
+    return True
+
+def _evaluate_filters(item: dict, filters: list[dict]) -> bool:
+    """True if an in-memory item dict matches all specified filters.
+    Filters use the same format as get_filters() in the TUI search builder."""
+    if not filters:
+        return True
+    for f in filters:
+        field = f.get("field")
+        op = f.get("op")
+        val = f.get("value")
+        if not field or not op:
+            continue
+        db_col = FIELD_NAME_MAP.get(field, field)
+        if not _evaluate_single_filter(item, db_col, op, val):
+            return False
+    return True
+
 def _build_sort_clause(sort_by: str, sort_order: str) -> str:
     """Returns an ORDER BY clause with whitelist validation."""
     if sort_by not in VALID_SORT_COLS:
@@ -199,7 +277,8 @@ def initialize_database(db_path: str):
         required_tags TEXT DEFAULT '[]',
         excluded_tags TEXT DEFAULT '[]',
         window_size INTEGER DEFAULT 2592000,
-        last_page_scanned INTEGER DEFAULT 0
+        last_page_scanned INTEGER DEFAULT 0,
+        enrichment_filters TEXT DEFAULT '[]'
     )
     """)
 
@@ -209,7 +288,8 @@ def initialize_database(db_path: str):
         ("required_tags", "TEXT DEFAULT '[]'"),
         ("excluded_tags", "TEXT DEFAULT '[]'"),
         ("window_size", "INTEGER DEFAULT 2592000"),
-        ("last_page_scanned", "INTEGER DEFAULT 0")
+        ("last_page_scanned", "INTEGER DEFAULT 0"),
+        ("enrichment_filters", "TEXT DEFAULT '[]'")
     ])
 
     # Data Migration: Populate app_tracking from existing workshop_items if empty, 
@@ -653,26 +733,27 @@ def get_app_tracking(db_path: str, appid: int) -> dict | None:
     return dict(row) if row else None
 
 
-def save_app_filter(db_path: str, appid: int, filter_text: str = "", required_tags: list[str] = None, excluded_tags: list[str] = None) -> None:
+def save_app_filter(db_path: str, appid: int, filter_text: str = "", required_tags: list[str] = None,
+                     excluded_tags: list[str] = None, enrichment_filters: str = None) -> None:
     """
     Saves the filter settings for a given appid in the app_tracking table.
-    Tags lists are JSON-serialized.
+    If enrichment_filters is provided (JSON string), it is used as the canonical filter spec.
+    Legacy columns (filter_text, required_tags, excluded_tags) are kept for backward compat.
     """
     conn = get_connection(db_path)
-    
-    # Ensure tags are JSON serialized
     json_required_tags = json.dumps(required_tags) if required_tags is not None else '[]'
     json_excluded_tags = json.dumps(excluded_tags) if excluded_tags is not None else '[]'
+    enrichment = enrichment_filters if enrichment_filters is not None else '[]'
 
-    # Update only the filter-related columns. 
-    # last_historical_date_scanned is NOT updated here; it's handled by daemon.
     conn.execute(
-        "INSERT INTO app_tracking (appid, filter_text, required_tags, excluded_tags) VALUES (?, ?, ?, ?) "
+        "INSERT INTO app_tracking (appid, filter_text, required_tags, excluded_tags, enrichment_filters) "
+        "VALUES (?, ?, ?, ?, ?) "
         "ON CONFLICT(appid) DO UPDATE SET "
         "filter_text = excluded.filter_text, "
         "required_tags = excluded.required_tags, "
-        "excluded_tags = excluded.excluded_tags",
-        (appid, filter_text, json_required_tags, json_excluded_tags)
+        "excluded_tags = excluded.excluded_tags, "
+        "enrichment_filters = excluded.enrichment_filters",
+        (appid, filter_text, json_required_tags, json_excluded_tags, enrichment)
     )
     conn.commit()
     conn.close()
