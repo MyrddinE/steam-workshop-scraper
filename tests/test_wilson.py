@@ -71,7 +71,7 @@ def test_wilson_score_sort(db_path):
 
 def test_compute_wilson_cutoffs_empty(db_path):
     result = compute_wilson_cutoffs(db_path)
-    assert result.get("fav_p99") == 0
+    assert result.get("wilson_favorite_p99") == 0
 
 def test_compute_wilson_cutoffs_small_set(db_path):
     for i in range(1, 6):
@@ -89,14 +89,14 @@ def test_compute_wilson_cutoffs_large_set(db_path):
         })
 
     result = compute_wilson_cutoffs(db_path)
-    assert "fav_p99" in result
-    assert "sub_p99" in result
+    assert "wilson_favorite_p99" in result
+    assert "wilson_subscription_p99" in result
 
     expected_p99 = 0.2 + 0.6 * (9900 / 10000.0)
-    assert abs(result["fav_p99"] - expected_p99) < 0.01
+    assert abs(result["wilson_favorite_p99"] - expected_p99) < 0.01
 
     expected_p50 = 0.2 + 0.6 * (5000 / 10000.0)
-    assert abs(result["fav_p50"] - expected_p50) < 0.02
+    assert abs(result["wilson_favorite_p50"] - expected_p50) < 0.02
 
 def test_compute_wilson_cutoffs_with_filters(db_path):
     """Filtering by score > 0.5 should shift all cutoffs upward vs. unfiltered."""
@@ -110,9 +110,9 @@ def test_compute_wilson_cutoffs_with_filters(db_path):
     result_filtered = compute_wilson_cutoffs(db_path, filters=[
         {"field": "Favorite Score", "op": "gt", "value": 0.5}
     ])
-    assert result_filtered["fav_p50"] > result_all["fav_p50"]
-    assert result_filtered["sub_p50"] > result_all["sub_p50"]
-    assert result_filtered["fav_p99"] > result_all["fav_p99"]
+    assert result_filtered["wilson_favorite_p50"] > result_all["wilson_favorite_p50"]
+    assert result_filtered["wilson_subscription_p50"] > result_all["wilson_subscription_p50"]
+    assert result_filtered["wilson_favorite_p99"] > result_all["wilson_favorite_p99"]
 
 def test_schema_version_is_set(db_path):
     """Verify PRAGMA user_version is updated after migration."""

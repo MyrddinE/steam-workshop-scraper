@@ -899,17 +899,17 @@ def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None) -> dict:
                    NTILE(100) OVER (ORDER BY wilson_subscription_score DESC NULLS LAST) AS bucket
             FROM scores WHERE wilson_subscription_score IS NOT NULL
         )
-        SELECT 'fav_p99' as key, COALESCE(MIN(wilson_favorite_score), 0) as val
+        SELECT 'wilson_favorite_p99' as key, COALESCE(MIN(wilson_favorite_score), 0) as val
         FROM fav_ntile WHERE bucket = 1
-        UNION ALL SELECT 'fav_p90', COALESCE(MIN(wilson_favorite_score), 0)
+        UNION ALL SELECT 'wilson_favorite_p90', COALESCE(MIN(wilson_favorite_score), 0)
         FROM fav_ntile WHERE bucket = 10
-        UNION ALL SELECT 'fav_p50', COALESCE(MIN(wilson_favorite_score), 0)
+        UNION ALL SELECT 'wilson_favorite_p50', COALESCE(MIN(wilson_favorite_score), 0)
         FROM fav_ntile WHERE bucket = 50
-        UNION ALL SELECT 'sub_p99', COALESCE(MIN(wilson_subscription_score), 0)
+        UNION ALL SELECT 'wilson_subscription_p99', COALESCE(MIN(wilson_subscription_score), 0)
         FROM sub_ntile WHERE bucket = 1
-        UNION ALL SELECT 'sub_p90', COALESCE(MIN(wilson_subscription_score), 0)
+        UNION ALL SELECT 'wilson_subscription_p90', COALESCE(MIN(wilson_subscription_score), 0)
         FROM sub_ntile WHERE bucket = 10
-        UNION ALL SELECT 'sub_p50', COALESCE(MIN(wilson_subscription_score), 0)
+        UNION ALL SELECT 'wilson_subscription_p50', COALESCE(MIN(wilson_subscription_score), 0)
         FROM sub_ntile WHERE bucket = 50
     """
     try:
