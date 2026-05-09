@@ -248,7 +248,6 @@ class Daemon:
     def process_batch(self):
         """Processes a single batch of workshop items."""
         try:
-            self.expand_user_discovery()
             items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size,
                                                        staleness_days=self.item_staleness_days)
         except Exception as e:
