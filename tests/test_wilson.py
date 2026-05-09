@@ -119,7 +119,7 @@ def test_schema_version_is_set(db_path):
     conn = get_connection(db_path)
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert version == 1
+    assert version == 2
 
 def test_subscriber_score_uses_retention_formula(db_path):
     """Verify subscriber score uses subscriptions/lifetime_subscriptions ratio."""
@@ -142,3 +142,30 @@ def test_subscriber_score_uses_retention_formula(db_path):
     conn.close()
     assert row["wilson_subscription_score"] < 0.99
     assert row["wilson_subscription_score"] > 0.5
+
+def test_tag_migration_normalizes_malformed_json(db_path):
+    """Migration 1→2 fixes Python-repr tags to valid JSON."""
+    insert_or_update_item(db_path, {
+        "workshop_id": 8801,
+        "title": "Legacy Item",
+        "tags": "['fruit', 'sweet']",
+    })
+    insert_or_update_item(db_path, {
+        "workshop_id": 8802,
+        "title": "Valid Item",
+        "tags": '["mod", "tool"]',
+    })
+    conn = get_connection(db_path)
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+
+    initialize_database(db_path)
+
+    conn = get_connection(db_path)
+    for wid in (8801, 8802):
+        tags = conn.execute(
+            "SELECT tags FROM workshop_items WHERE workshop_id=?", (wid,)).fetchone()["tags"]
+        parsed = json.loads(tags)
+        assert isinstance(parsed, list)
+    conn.close()

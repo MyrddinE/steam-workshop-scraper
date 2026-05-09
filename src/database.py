@@ -2,6 +2,7 @@ import sqlite3
 import shlex
 import re
 import json
+import logging
 from datetime import datetime, timedelta
 
 WORKSHOP_ITEM_COLUMNS = frozenset({
@@ -366,7 +367,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 1
+    EXPECTED_VERSION = 2
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
 
     if db_version < 1:
@@ -393,7 +394,28 @@ def initialize_database(db_path: str):
                 (fav_score, sub_score, row["workshop_id"])
             )
         conn.commit()
-        cursor.execute(f"PRAGMA user_version = {EXPECTED_VERSION}")
+        cursor.execute("PRAGMA user_version = 1")
+
+    if db_version < 2:
+        # Migration 1→2: normalize malformed JSON tags to valid JSON arrays
+        cursor.execute("""
+            SELECT workshop_id, tags FROM workshop_items
+            WHERE tags IS NOT NULL AND tags != '' AND tags != '[]'
+        """)
+        fixed = 0
+        for row in cursor.fetchall():
+            try:
+                json.loads(row["tags"])
+            except (json.JSONDecodeError, TypeError):
+                cursor.execute(
+                    "UPDATE workshop_items SET tags = ? WHERE workshop_id = ?",
+                    (normalize_tags(row["tags"]), row["workshop_id"])
+                )
+                fixed += 1
+        if fixed:
+            conn.commit()
+            logging.info(f"Migration 1→2: normalized {fixed} malformed tag entries.")
+        cursor.execute("PRAGMA user_version = 2")
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
@@ -760,16 +782,30 @@ def _classify_attempted_recency(dt_attempted: str, staleness_days: int = 30) -> 
         return "blank"
 
 def _compute_tag_frequencies(cursor) -> dict:
-    """Queries all tag values and returns a frequency dictionary using json_each.
-    Handles both string arrays (normalized) and object arrays (API raw format)."""
-    cursor.execute("""
-        SELECT COALESCE(json_extract(value, '$.tag'), value) as tag_value, COUNT(*) as cnt
-        FROM workshop_items, json_each(workshop_items.tags)
-        WHERE tags IS NOT NULL AND tags != ''
-        GROUP BY tag_value
-        ORDER BY cnt DESC
-    """)
-    return {row["tag_value"]: row["cnt"] for row in cursor.fetchall()}
+    """Queries all tag values and returns a frequency dictionary.
+    Tries json_each first, falls back to Python parsing for legacy malformed JSON."""
+    try:
+        cursor.execute("""
+            SELECT COALESCE(json_extract(value, '$.tag'), value) as tag_value, COUNT(*) as cnt
+            FROM workshop_items, json_each(workshop_items.tags)
+            WHERE tags IS NOT NULL AND tags != ''
+            GROUP BY tag_value
+            ORDER BY cnt DESC
+        """)
+        return {row["tag_value"]: row["cnt"] for row in cursor.fetchall()}
+    except sqlite3.OperationalError:
+        cursor.execute("SELECT tags FROM workshop_items WHERE tags IS NOT NULL AND tags != ''")
+        tag_counts = {}
+        for row in cursor.fetchall():
+            try:
+                tags_list = json.loads(row["tags"])
+                if isinstance(tags_list, list):
+                    for tag_item in tags_list:
+                        tag_value = tag_item.get('tag') if isinstance(tag_item, dict) else tag_item
+                        if tag_value:
+                            tag_counts[str(tag_value)] = tag_counts.get(str(tag_value), 0) + 1
+            except: continue
+        return tag_counts
 
 def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
     """Returns comprehensive statistics about the database."""
