@@ -10,6 +10,7 @@ from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, L
 from textual.containers import Horizontal, Vertical, VerticalScroll, Center, Grid
 from textual.reactive import reactive
 from src.database import search_items, get_all_authors, initialize_database, flag_for_translation, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, get_db_stats, compute_wilson_cutoffs
+from src.analysis import view_window_analysis
 from src.config import load_config
 import os
 import yaml
@@ -148,6 +149,71 @@ class StatsScreen(Screen):
         sorted_tags = sorted(stats["tag_counts"].items(), key=lambda x: x[1], reverse=True)
         for tag, count in sorted_tags:
             tag_table.add_row(tag, str(count))
+
+class AnalysisScreen(Screen):
+    """Screen that analyzes the view window for Steam Workshop items."""
+
+    def __init__(self, db_path: str):
+        super().__init__()
+        self.db_path = db_path
+        self.bucket_days = 7
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Label("[b]View Window Analysis[/b]", id="analysis-title")
+        with Horizontal(id="analysis-controls"):
+            yield Label("Bucket size (days): ", classes="control-label")
+            yield Input(value="7", id="analysis-bucket-size", type="integer")
+            yield Button("Recalculate", id="btn-analysis-recalc")
+        yield Static(id="analysis-summary")
+        with VerticalScroll(id="analysis-table-scroll"):
+            yield DataTable(id="analysis-table")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.run_analysis()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-analysis-recalc":
+            self.run_analysis()
+        elif event.button.id == "btn-close-sub-queue":
+            self.app.pop_screen()
+
+    def run_analysis(self) -> None:
+        try:
+            bucket_val = self.query_one("#analysis-bucket-size", Input).value
+            self.bucket_days = max(1, int(bucket_val or "7"))
+        except ValueError:
+            self.bucket_days = 7
+
+        result = view_window_analysis(self.db_path, bucket_days=self.bucket_days)
+        table = self.query_one("#analysis-table", DataTable)
+        table.clear(columns=True)
+        table.add_columns("Age Range", "Items", "Median Views", "P10", "P90", "Relative")
+
+        max_median = max((b["median"] for b in result["buckets"]), default=1)
+
+        for b in result["buckets"]:
+            bar_len = int(b["median"] / max(max_median, 1) * 40)
+            bar = "█" * bar_len
+            table.add_row(
+                f"{b['age_start']}-{b['age_end']}d",
+                str(b["count"]),
+                str(b["median"]),
+                str(b["p10"]),
+                str(b["p90"]),
+                f"[white]{bar}[/white]",
+            )
+
+        if result["estimated_window_days"]:
+            summary = (f"[b]Estimated view window: ~{result['estimated_window_days']} days[/b]  "
+                       f"(analyzed {result['items_analyzed']:,} items, "
+                       f"{len(result['buckets'])} buckets)")
+        else:
+            summary = (f"Insufficient data to estimate view window. "
+                       f"({result['items_analyzed']:,} items analyzed, "
+                       f"{len(result['buckets'])} buckets)")
+        self.query_one("#analysis-summary", Static).update(summary)
 
 class SubscriptionQueueScreen(ModalScreen):
     """A modal screen that displays the subscription queue with clickable links."""
@@ -655,6 +721,7 @@ class ScraperApp(App):
         ("ctrl+a", "add_and_row", "AND"),
         ("ctrl+o", "add_or_row", "OR"),
         ("ctrl+x", "delete_bottom_row", "Delete Row"),
+        ("ctrl+question_mark", "show_analysis", "Analysis"),
     ]
 
     CSS = """
@@ -1295,6 +1362,10 @@ class ScraperApp(App):
     def action_show_sub_queue(self) -> None:
         """Shows the subscription queue modal screen."""
         self.push_screen(SubscriptionQueueScreen(self.db_path, self.pause_lock_file))
+
+    def action_show_analysis(self) -> None:
+        """Shows the view window analysis screen."""
+        self.push_screen(AnalysisScreen(self.db_path))
 
 def main():
     config_path = "config.yaml"
