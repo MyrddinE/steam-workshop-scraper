@@ -24,6 +24,8 @@ def test_daemon_init_defaults():
     assert daemon.batch_size == 10
     assert daemon.api_delay == 1.5
     assert daemon.web_delay == 5.0
+    assert daemon.item_staleness_days == 30
+    assert daemon.user_staleness_days == 90
     assert daemon.target_appids == [456]
 
 def test_daemon_init_missing_appids():
@@ -54,7 +56,7 @@ def test_daemon_process_batch_success(mock_sleep, mock_insert, mock_insert_user,
     daemon = Daemon(mock_config)
     daemon.process_batch()
 
-    mock_get_items.assert_called_once_with("test.db", limit=2)
+    mock_get_items.assert_called_once_with("test.db", limit=2, staleness_days=30)
     mock_api.assert_called_once_with(123, "TEST_KEY")
     mock_scrape.assert_called_once_with("https://steamcommunity.com/sharedfiles/filedetails/?id=123")
     

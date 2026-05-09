@@ -467,7 +467,7 @@ def insert_or_update_item(db_path: str, item_data: dict) -> bool:
     conn.close()
     return is_new
 
-def get_next_items_to_scrape(db_path: str, limit: int = 10) -> list[dict]:
+def get_next_items_to_scrape(db_path: str, limit: int = 10, staleness_days: int = 30) -> list[dict]:
     """
     Retrieves the next batch of workshop items to be scraped.
     Prioritizes items that have never been scraped, then those with partial
@@ -477,28 +477,29 @@ def get_next_items_to_scrape(db_path: str, limit: int = 10) -> list[dict]:
     """
     conn = get_connection(db_path)
     cursor = conn.cursor()
+    stale_param = f'-{staleness_days} days'
 
     sql = """
         SELECT * FROM workshop_items
         WHERE
             status IS NULL OR
             status = 206 OR
-            (status = 200 AND dt_attempted < date('now', '-7 days'))
+            (status = 200 AND dt_attempted < datetime('now', ?))
         ORDER BY
             CASE
                 WHEN status IS NULL THEN 0
                 WHEN status = 206 THEN 1
-                WHEN status = 200 AND dt_attempted < date('now', '-7 days') THEN 2
-                ELSE 3 -- Fallback for other statuses, e.g., 404, 500, or very new 200s
+                WHEN status = 200 AND dt_attempted < datetime('now', ?) THEN 2
+                ELSE 3
             END ASC,
             CASE
                 WHEN status = 206 THEN subscriptions
                 ELSE NULL
-            END DESC, -- Prioritize higher subscriptions for 206 status
-            dt_attempted ASC -- General secondary sort, also for status=200 old items
+            END DESC,
+            dt_attempted ASC
         LIMIT ?
     """
-    cursor.execute(sql, (limit,))
+    cursor.execute(sql, (stale_param, stale_param, limit))
     
     # Return full dictionaries
     items = [dict(row) for row in cursor.fetchall()]

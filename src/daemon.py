@@ -53,9 +53,24 @@ class Daemon:
         daemon_config = config.get("daemon", {})
         self.api_delay = daemon_config.get("api_delay_seconds") or daemon_config.get("request_delay_seconds", 1.5)
         self.web_delay = daemon_config.get("web_delay_seconds") or daemon_config.get("request_delay_seconds", 5.0)
+        self.item_staleness_days = int(daemon_config.get("item_staleness_days") or 30)
+        self.user_staleness_days = int(daemon_config.get("user_staleness_days") or 90)
         set_api_delay(self.api_delay)
         set_web_delay(self.web_delay)
-        logging.info(f"Delays: API={self.api_delay}s, Web={self.web_delay}s")
+        logging.info(f"Delays: API={self.api_delay}s, Web={self.web_delay}s, "
+                     f"Staleness: item={self.item_staleness_days}d, user={self.user_staleness_days}d")
+
+        # Write default config keys if absent
+        changed = False
+        if "daemon" not in self.config:
+            self.config["daemon"] = {}
+        for key, val in [("item_staleness_days", self.item_staleness_days),
+                          ("user_staleness_days", self.user_staleness_days)]:
+            if key not in self.config["daemon"]:
+                self.config["daemon"][key] = val
+                changed = True
+        if changed:
+            save_config(self.config_path, self.config)
         self.pause_lock_file = ".pauselock"
         
         # Translator thread
@@ -234,7 +249,8 @@ class Daemon:
         """Processes a single batch of workshop items."""
         try:
             self.expand_user_discovery()
-            items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size)
+            items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size,
+                                                       staleness_days=self.item_staleness_days)
         except Exception as e:
             logging.error(f"Database error in process_batch: {e}")
             time.sleep(5)
@@ -244,7 +260,8 @@ class Daemon:
             logging.debug("No items to scrape. Expanding discovery...")
             self.seed_database()
             try:
-                items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size)
+                items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size,
+                                                           staleness_days=self.item_staleness_days)
             except Exception as e:
                 logging.error(f"Database error after seeding: {e}")
                 time.sleep(5)
@@ -345,7 +362,7 @@ class Daemon:
                     should_update_user = True
                     if existing_user and existing_user.get("dt_updated"):
                         last_upd = datetime.fromisoformat(existing_user["dt_updated"])
-                        if (datetime.now(timezone.utc) - last_upd).days < 7:
+                        if (datetime.now(timezone.utc) - last_upd).days < self.user_staleness_days:
                             should_update_user = False
                     if should_update_user:
                         summaries = get_player_summaries([creator_id], self.api_key)
