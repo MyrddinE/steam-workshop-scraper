@@ -269,30 +269,40 @@ class Daemon:
             appid = merged_data.get("consumer_appid")
             enriched = False
             if self._should_enrich(appid, merged_data):
-                url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={item_id}"
-                scrape_data = scrape_extended_details(url)
+                old_time_updated = existing_data.get("time_updated")
+                new_time_updated = merged_data.get("time_updated")
+                unchanged = (existing_data.get("extended_description") is not None
+                             and old_time_updated is not None
+                             and old_time_updated == new_time_updated)
 
-                if not scrape_data:
-                    merged_data["status"] = 206
-                    insert_or_update_item(self.db_path, merged_data)
-                    logging.warning(
-                        f"[{item_id}] '{display_title}' | Scraper failed, partial data saved. "
-                        f"API data saved, but extended description could not be scraped."
-                    )
-                    self.consecutive_failures += 1
-                    self.consecutive_successes = 0
-                    if self.consecutive_failures >= 2 and self.had_recent_success_streak:
-                        old_delay = self.delay
-                        self.delay += max(1.0, round(self.delay * 0.10))
-                        logging.info(f"Multiple consecutive failures after a success streak! Increasing delay from {old_delay} to {self.delay} seconds.")
-                        self._persist_delay()
-                        self.had_recent_success_streak = False
-                    time.sleep(self.delay)
-                    continue
+                if unchanged:
+                    merged_data["extended_description"] = existing_data["extended_description"]
+                    enriched = True
+                else:
+                    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={item_id}"
+                    scrape_data = scrape_extended_details(url)
 
-                merged_data["extended_description"] = scrape_data.get("description")
-                merged_data = self._evaluate_translation_needs(merged_data, existing_data)
-                enriched = True
+                    if not scrape_data:
+                        merged_data["status"] = 206
+                        insert_or_update_item(self.db_path, merged_data)
+                        logging.warning(
+                            f"[{item_id}] '{display_title}' | Scraper failed, partial data saved. "
+                            f"API data saved, but extended description could not be scraped."
+                        )
+                        self.consecutive_failures += 1
+                        self.consecutive_successes = 0
+                        if self.consecutive_failures >= 2 and self.had_recent_success_streak:
+                            old_delay = self.delay
+                            self.delay += max(1.0, round(self.delay * 0.10))
+                            logging.info(f"Multiple consecutive failures after a success streak! Increasing delay from {old_delay} to {self.delay} seconds.")
+                            self._persist_delay()
+                            self.had_recent_success_streak = False
+                        time.sleep(self.delay)
+                        continue
+
+                    merged_data["extended_description"] = scrape_data.get("description")
+                    merged_data = self._evaluate_translation_needs(merged_data, existing_data)
+                    enriched = True
 
             merged_data["status"] = 200
             insert_or_update_item(self.db_path, merged_data)
