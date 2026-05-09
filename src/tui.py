@@ -15,6 +15,35 @@ import os
 import yaml
 import datetime
 
+def format_ts(ts):
+    """Converts a Unix timestamp to YYYY-MM-DD string."""
+    if not ts: return "N/A"
+    try:
+        return datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d')
+    except:
+        return "N/A"
+
+def format_size(size_bytes):
+    """Converts bytes to human-readable KB/MB/GB with Rich markup."""
+    if not size_bytes: return "N/A"
+    try:
+        kb = float(size_bytes) / 1024
+        if kb < 1024: return f"[gray]{kb:.1f} KB[/gray]"
+        mb = kb / 1024
+        if mb < 1024: return f"[white]{mb:.1f} MB[/white]"
+        gb = mb / 1024
+        return f"[yellow]{gb:.1f} GB[/yellow]"
+    except: return "N/A"
+
+def parse_tags(tags) -> list[str]:
+    """Parses the tags JSON field (string or list) into a list of tag-name strings."""
+    tags_list = []
+    try:
+        parsed = json.loads(tags) if isinstance(tags, str) else tags
+        tags_list = [str(t.get("tag") if isinstance(t, dict) else t) for t in (parsed if isinstance(parsed, list) else [])]
+    except: pass
+    return tags_list
+
 class StatsScreen(Screen):
     """A screen that displays database statistics."""
 
@@ -335,31 +364,7 @@ class DetailsPane(VerticalScroll):
         req_btn = self.query_one("#btn-request-translation")
         req_btn.display = True
 
-        tags = item.get("tags", "[]")
-        tags_list = []
-        try:
-            parsed = json.loads(tags) if isinstance(tags, str) else tags
-            tags_list = [str(t.get("tag") if isinstance(t, dict) else t) for t in (parsed if isinstance(parsed, list) else [])]
-        except: pass
-        
-        def format_ts(ts):
-            if not ts: return "N/A"
-            try:
-                import datetime
-                return datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d')
-            except:
-                return "N/A"
-                
-        def format_size(size_bytes):
-            if not size_bytes: return "N/A"
-            try:
-                kb = float(size_bytes) / 1024
-                if kb < 1024: return f"[gray]{kb:.1f} KB[/gray]"
-                mb = kb / 1024
-                if mb < 1024: return f"[white]{mb:.1f} MB[/white]"
-                gb = mb / 1024
-                return f"[yellow]{gb:.1f} GB[/yellow]"
-            except: return "N/A"
+        tags_list = parse_tags(item.get("tags", "[]"))
 
         for stat in ["id", "created", "updated", "tags", "size", "views", "subs", "favs"]:
             self.query_one(f"#stat-{stat}", Label).display = True

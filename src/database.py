@@ -13,6 +13,97 @@ def get_connection(db_path: str):
     conn.execute("PRAGMA journal_mode=WAL;")
     return conn
 
+def normalize_tags(raw_tags) -> str:
+    """Accepts tags as list-of-dicts, list-of-strings, JSON string, or bare string.
+    Returns a sorted, deduplicated JSON string."""
+    normalized = []
+    if isinstance(raw_tags, list):
+        for t in raw_tags:
+            if isinstance(t, dict) and "tag" in t:
+                normalized.append(t["tag"])
+            elif isinstance(t, str):
+                normalized.append(t)
+    elif isinstance(raw_tags, str):
+        try:
+            t_list = json.loads(raw_tags)
+            if isinstance(t_list, list):
+                for t in t_list:
+                    if isinstance(t, dict) and "tag" in t:
+                        normalized.append(t["tag"])
+                    elif isinstance(t, str):
+                        normalized.append(t)
+            else:
+                normalized = [raw_tags]
+        except json.JSONDecodeError:
+            normalized = [raw_tags]
+    return json.dumps(sorted(set(normalized)), ensure_ascii=False)
+
+FIELD_NAME_MAP = {
+    "Title": "title", "Description": "short_description", "Filename": "filename",
+    "Tags": "tags", "Author ID": "creator", "File Size": "file_size",
+    "Subs": "subscriptions", "Favs": "favorited", "Views": "views",
+    "Workshop ID": "workshop_id", "AppID": "consumer_appid", "Language ID": "language"
+}
+
+VALID_SORT_COLS = {
+    "title", "file_size", "subscriptions", "favorited", "views",
+    "workshop_id", "time_created", "time_updated"
+}
+
+def _build_text_search_clauses(sql: str, params: list, q_str: str, cols: list[str]) -> tuple[str, list]:
+    """Applies positive/negative text search tokens to SQL via LIKE clauses."""
+    pos_tokens, neg_tokens = _parse_query(q_str)
+    for token in pos_tokens:
+        clauses = [f"{col} LIKE ?" for col in cols]
+        sql += f" AND ({' OR '.join(clauses)})"
+        params.extend([f"%{token}%"] * len(cols))
+    for token in neg_tokens:
+        for col in cols:
+            sql += f" AND ({col} IS NULL OR {col} NOT LIKE ?)"
+            params.append(f"%{token}%")
+    return sql, params
+
+def _build_filter_clause(db_col: str, op: str, val) -> tuple[str, list]:
+    """Converts an operator and value into a SQL clause string and param list."""
+    op_map = {
+        "contains": (f"{db_col} LIKE ?", [f"%{val}%"]),
+        "does_not_contain": (f"({db_col} IS NULL OR {db_col} NOT LIKE ?)", [f"%{val}%"]),
+        "is": (f"{db_col} = ?", [val]),
+        "is_not": (f"{db_col} != ?", [val]),
+        "gt": (f"{db_col} > ?", [val]),
+        "lt": (f"{db_col} < ?", [val]),
+        "gte": (f"{db_col} >= ?", [val]),
+        "lte": (f"{db_col} <= ?", [val]),
+        "is_empty": (f"({db_col} IS NULL OR {db_col} = '')", []),
+        "is_not_empty": (f"({db_col} IS NOT NULL AND {db_col} != '')", []),
+    }
+    return op_map.get(op, ("", []))
+
+def _build_sort_clause(sort_by: str, sort_order: str) -> str:
+    """Returns an ORDER BY clause with whitelist validation."""
+    if sort_by not in VALID_SORT_COLS:
+        return ""
+    order = "DESC" if sort_order.upper() == "DESC" else "ASC"
+    return f" ORDER BY {sort_by} {order}"
+
+def _build_limit_offset(limit: int, offset: int) -> tuple[str, list]:
+    """Returns (LIMIT...OFFSET clause, params list)."""
+    params = []
+    if limit is not None:
+        params.append(limit)
+        if offset is not None:
+            return f" LIMIT ? OFFSET ?", params + [offset]
+        return f" LIMIT ?", params
+    return "", []
+
+def _safe_add_columns(cursor, table: str, columns: list[tuple[str, str]]):
+    """Safely adds columns to an existing table, ignoring duplicates."""
+    for col_name, col_type in columns:
+        try:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}")
+        except sqlite3.OperationalError:
+            pass
+
 def initialize_database(db_path: str):
     """
     Initializes the SQLite database and creates the workshop_items table and indexes.
@@ -73,7 +164,7 @@ def initialize_database(db_path: str):
     """)
 
     # Safe migrations for existing databases
-    new_cols = [
+    _safe_add_columns(cursor, "workshop_items", [
         ("language", "INTEGER"),
         ("lifetime_subscriptions", "INTEGER"),
         ("lifetime_favorited", "INTEGER"),
@@ -83,12 +174,7 @@ def initialize_database(db_path: str):
         ("dt_translated", "TEXT"),
         ("translation_priority", "INTEGER DEFAULT 0"),
         ("is_queued_for_subscription", "INTEGER DEFAULT 0")
-    ]
-    for col_name, col_type in new_cols:
-        try:
-            cursor.execute(f"ALTER TABLE workshop_items ADD COLUMN {col_name} {col_type}")
-        except sqlite3.OperationalError:
-            pass # Column already exists
+    ])
 
     # Create app_tracking table for historical scraping and filter storage
     cursor.execute("""
@@ -103,17 +189,12 @@ def initialize_database(db_path: str):
     """)
 
     # Safe migrations for existing databases to add new filter columns
-    app_tracking_new_cols = [
+    _safe_add_columns(cursor, "app_tracking", [
         ("filter_text", "TEXT DEFAULT ''"),
         ("required_tags", "TEXT DEFAULT '[]'"),
         ("excluded_tags", "TEXT DEFAULT '[]'"),
         ("window_size", "INTEGER DEFAULT 2592000")
-    ]
-    for col_name, col_type in app_tracking_new_cols:
-        try:
-            cursor.execute(f"ALTER TABLE app_tracking ADD COLUMN {col_name} {col_type}")
-        except sqlite3.OperationalError:
-            pass # Column already exists
+    ])
 
     # Data Migration: Populate app_tracking from existing workshop_items if empty, 
     # and drop the obsolete app_state table.
@@ -385,32 +466,17 @@ def search_items(db_path: str, query: str = "", appid: int = None,
     sql = f"SELECT {cols} FROM workshop_items w LEFT JOIN users u ON w.creator = u.steamid WHERE 1=1"
     params = []
 
-    def apply_query_to_columns(q_str: str, cols: list[str]):
-        nonlocal sql, params
-        pos_tokens, neg_tokens = _parse_query(q_str)
-        
-        for token in pos_tokens:
-            clauses = [f"{col} LIKE ?" for col in cols]
-            sql += f" AND ({' OR '.join(clauses)})"
-            params.extend([f"%{token}%"] * len(cols))
-            
-        for token in neg_tokens:
-            for col in cols:
-                # Need to handle NULLs, as NOT LIKE fails if field is NULL
-                sql += f" AND ({col} IS NULL OR {col} NOT LIKE ?)"
-                params.append(f"%{token}%")
-
     if query:
-        apply_query_to_columns(query, ["title", "short_description", "extended_description"])
+        sql, params = _build_text_search_clauses(sql, params, query, ["title", "short_description", "extended_description"])
     if title_query:
-        apply_query_to_columns(title_query, ["title"])
+        sql, params = _build_text_search_clauses(sql, params, title_query, ["title"])
     if desc_query:
-        apply_query_to_columns(desc_query, ["short_description", "extended_description"])
+        sql, params = _build_text_search_clauses(sql, params, desc_query, ["short_description", "extended_description"])
     if filename_query:
-        apply_query_to_columns(filename_query, ["filename"])
+        sql, params = _build_text_search_clauses(sql, params, filename_query, ["filename"])
     if tags_query:
-        apply_query_to_columns(tags_query, ["tags"])
-    if tags: # Legacy fallback for older test_database.py
+        sql, params = _build_text_search_clauses(sql, params, tags_query, ["tags"])
+    if tags:
         sql += " AND tags LIKE ?"
         params.append(f"%{tags}%")
 
@@ -430,90 +496,30 @@ def search_items(db_path: str, query: str = "", appid: int = None,
 
     if filters:
         filter_clauses = []
-        for i, f in enumerate(filters):
+        for f in filters:
             logic = f.get("logic", "AND").upper()
             field = f.get("field")
             op = f.get("op")
             val = f.get("value")
-
             if not field or not op:
                 continue
-            
-            # Map common names to DB columns
-            field_map = {
-                "Title": "title",
-                "Description": "short_description",
-                "Filename": "filename",
-                "Tags": "tags",
-                "Author ID": "creator",
-                "File Size": "file_size",
-                "Subs": "subscriptions",
-                "Favs": "favorited",
-                "Views": "views",
-                "Workshop ID": "workshop_id",
-                "AppID": "consumer_appid",
-                "Language ID": "language"
-            }
-            db_col = field_map.get(field, field)
-            
-            clause = ""
-            if op == "contains":
-                clause = f"{db_col} LIKE ?"
-                params.append(f"%{val}%")
-            elif op == "does_not_contain":
-                clause = f"({db_col} IS NULL OR {db_col} NOT LIKE ?)"
-                params.append(f"%{val}%")
-            elif op == "is":
-                clause = f"{db_col} = ?"
-                params.append(val)
-            elif op == "is_not":
-                clause = f"{db_col} != ?"
-                params.append(val)
-            elif op == "gt":
-                clause = f"{db_col} > ?"
-                params.append(val)
-            elif op == "lt":
-                clause = f"{db_col} < ?"
-                params.append(val)
-            elif op == "gte":
-                clause = f"{db_col} >= ?"
-                params.append(val)
-            elif op == "lte":
-                clause = f"{db_col} <= ?"
-                params.append(val)
-            elif op == "is_empty":
-                clause = f"({db_col} IS NULL OR {db_col} = '')"
-            elif op == "is_not_empty":
-                clause = f"({db_col} IS NOT NULL AND {db_col} != '')"
-            
+            db_col = FIELD_NAME_MAP.get(field, field)
+            clause, clause_params = _build_filter_clause(db_col, op, val)
             if clause:
+                params.extend(clause_params)
                 filter_clauses.append((logic, clause))
-                
         if filter_clauses:
             sql += " AND ("
             for idx, (logic, clause) in enumerate(filter_clauses):
-                if idx == 0:
-                    sql += clause
-                else:
-                    sql += f" {logic} {clause}"
+                sql += f" {logic} " if idx > 0 else ""
+                sql += clause
             sql += ")"
 
-    if sort_by:
-        # Simple whitelist for safety
-        valid_sort_cols = {
-            "title", "file_size", "subscriptions", "favorited", "views", 
-            "workshop_id", "time_created", "time_updated"
-        }
-        if sort_by in valid_sort_cols:
-            order = "DESC" if sort_order.upper() == "DESC" else "ASC"
-            sql += f" ORDER BY {sort_by} {order}"
-            
-    if limit is not None:
-        sql += " LIMIT ?"
-        params.append(limit)
-        if offset is not None:
-            sql += " OFFSET ?"
-            params.append(offset)
+    sort_sql = _build_sort_clause(sort_by, sort_order) if sort_by else ""
+    sql += sort_sql
+    limit_sql, limit_params = _build_limit_offset(limit, offset) if limit is not None else ("", [])
+    sql += limit_sql
+    params.extend(limit_params)
         
     cursor = conn.execute(sql, params)
     results = [dict(row) for row in cursor.fetchall()]
@@ -528,82 +534,35 @@ def get_all_authors(db_path: str) -> list[str]:
     conn.close()
     return results
 
-def get_db_stats(db_path: str) -> dict:
-    """Returns comprehensive statistics about the database."""
-    from datetime import datetime, timedelta
-    conn = get_connection(db_path)
-    cursor = conn.cursor()
+def _classify_translation_status(item) -> str:
+    """Classifies an item's translation state into a bucket name."""
+    if not item["dt_translated"]:
+        return "No data (dt_translated is empty)"
+    if item["title_en"] or item["short_description_en"] or item["extended_description_en"]:
+        return "Translated"
+    if item["translation_priority"] and item["translation_priority"] > 0:
+        return "Queued"
+    title = item["title"] or ""
+    short_desc = item["short_description"] or ""
+    ext_desc = item["extended_description"] or ""
+    if title.isascii() and short_desc.isascii() and ext_desc.isascii():
+        return "No translation needed (is_ascii==True)"
+    return "Needs Translation (Unicode detected)"
 
-    # 1. Record count by status
-    cursor.execute("SELECT status, COUNT(*) as count FROM workshop_items GROUP BY status")
-    status_counts = [dict(row) for row in cursor.fetchall()]
+def _classify_attempted_recency(dt_attempted: str, reference_dt) -> str:
+    """Classifies a dt_attempted timestamp as 'blank', 'less than 7 days ago', or 'more than 7 days ago'."""
+    if not dt_attempted:
+        return "blank"
+    try:
+        attempted_dt = datetime.fromisoformat(dt_attempted.replace("Z", "+00:00"))
+        if attempted_dt.tzinfo is None:
+            attempted_dt = attempted_dt.replace(tzinfo=reference_dt.tzinfo)
+        return "less than 7 days ago" if attempted_dt >= reference_dt else "more than 7 days ago"
+    except (ValueError, TypeError):
+        return "blank"
 
-    # 2. Translation and date processing
-    cursor.execute("""
-        SELECT 
-            dt_attempted, 
-            dt_translated, 
-            title, 
-            short_description, 
-            extended_description, 
-            translation_priority, 
-            title_en, 
-            short_description_en, 
-            extended_description_en 
-        FROM workshop_items
-    """)
-    all_items = cursor.fetchall()
-
-    translation_status = {
-        "No data (dt_translated is empty)": 0,
-        "No translation needed (is_ascii==True)": 0,
-        "Queued": 0,
-        "Translated": 0,
-        "Needs Translation (Unicode detected)": 0
-    }
-    
-    dt_attempted_counts = {
-        "blank": 0,
-        "less than 7 days ago": 0,
-        "more than 7 days ago": 0,
-    }
-
-    seven_days_ago_dt = datetime.now() - timedelta(days=7)
-
-    for item in all_items:
-        # Translation Status
-        title = item["title"] or ""
-        short_desc = item["short_description"] or ""
-        ext_desc = item["extended_description"] or ""
-
-        if not item["dt_translated"]:
-            translation_status["No data (dt_translated is empty)"] += 1
-        elif item["title_en"] or item["short_description_en"] or item["extended_description_en"]:
-            translation_status["Translated"] += 1
-        elif item["translation_priority"] and item["translation_priority"] > 0:
-            translation_status["Queued"] += 1
-        elif title.isascii() and short_desc.isascii() and ext_desc.isascii():
-            translation_status["No translation needed (is_ascii==True)"] += 1
-        else:
-            translation_status["Needs Translation (Unicode detected)"] += 1
-
-        # Date updated logic
-        try:
-            if not item["dt_attempted"]:
-                dt_attempted_counts["blank"] += 1
-            else:
-                attempted_dt = datetime.fromisoformat(item["dt_attempted"].replace("Z", "+00:00"))
-                if attempted_dt.tzinfo is None:
-                    attempted_dt = attempted_dt.replace(tzinfo=seven_days_ago_dt.tzinfo)
-
-                if attempted_dt >= seven_days_ago_dt:
-                    dt_attempted_counts["less than 7 days ago"] += 1
-                else:
-                    dt_attempted_counts["more than 7 days ago"] += 1
-        except (ValueError, TypeError):
-            dt_attempted_counts["blank"] += 1
-
-    # 3. Tag counts
+def _compute_tag_frequencies(cursor) -> dict:
+    """Queries all non-empty tags and returns a frequency dictionary."""
     cursor.execute("SELECT tags FROM workshop_items WHERE tags IS NOT NULL AND tags != ''")
     tag_counts = {}
     for row in cursor.fetchall():
@@ -615,15 +574,44 @@ def get_db_stats(db_path: str) -> dict:
                     if tag_value:
                         tag_counts[tag_value] = tag_counts.get(tag_value, 0) + 1
         except: continue
+    return tag_counts
 
-    # 4. Global tracking info
+def get_db_stats(db_path: str) -> dict:
+    """Returns comprehensive statistics about the database."""
+    from datetime import datetime, timedelta
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT status, COUNT(*) as count FROM workshop_items GROUP BY status")
+    status_counts = [dict(row) for row in cursor.fetchall()]
+
+    cursor.execute("""
+        SELECT dt_attempted, dt_translated, title, short_description, extended_description,
+               translation_priority, title_en, short_description_en, extended_description_en
+        FROM workshop_items
+    """)
+    all_items = cursor.fetchall()
+
+    translation_status = {
+        "No data (dt_translated is empty)": 0,
+        "No translation needed (is_ascii==True)": 0,
+        "Queued": 0, "Translated": 0,
+        "Needs Translation (Unicode detected)": 0
+    }
+    dt_attempted_counts = {"blank": 0, "less than 7 days ago": 0, "more than 7 days ago": 0}
+    seven_days_ago_dt = datetime.now() - timedelta(days=7)
+
+    for item in all_items:
+        translation_status[_classify_translation_status(item)] += 1
+        dt_attempted_counts[_classify_attempted_recency(item["dt_attempted"], seven_days_ago_dt)] += 1
+
     cursor.execute("SELECT MAX(dt_updated) FROM workshop_items")
     highest_dt_updated = cursor.fetchone()[0]
 
-    # 5. App tracking info (Window Size, Last Scanned)
     cursor.execute("SELECT appid, last_historical_date_scanned, window_size FROM app_tracking")
     app_stats = [dict(row) for row in cursor.fetchall()]
 
+    tag_counts = _compute_tag_frequencies(cursor)
     conn.close()
     return {
         "status_counts": status_counts,

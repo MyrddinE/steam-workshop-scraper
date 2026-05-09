@@ -17,7 +17,8 @@ from src.database import (
     update_app_tracking,
     save_app_filter,
     get_connection,
-    get_item_details
+    get_item_details,
+    normalize_tags
 )
 from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries, query_files_by_date
 from src.web_scraper import scrape_extended_details, discover_items_by_date_html
@@ -138,7 +139,7 @@ class Daemon:
             # Seeding check: If we have fewer than 100 unscraped items, fetch the next page
             unscraped = count_unscraped_items(self.db_path)
             if unscraped < 10:
-                logging.info(f"Low unscraped queue ({unscraped}). Expanding discovery...")
+                logging.debug(f"Low unscraped queue ({unscraped}). Expanding discovery...")
                 self.seed_database()
 
             items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size)
@@ -225,31 +226,8 @@ class Daemon:
             merged_data = clean_api_data # Overwrite merged_data with only allowed keys
             merged_data["dt_attempted"] = now_iso
 
-            # Check if tags were provided as list, JSON stringify for SQLite
             if "tags" in merged_data:
-                api_tags = merged_data.get("tags")
-                normalized_api_tags = []
-                if isinstance(api_tags, list):
-                    for t in api_tags:
-                        if isinstance(t, dict) and "tag" in t:
-                            normalized_api_tags.append(t["tag"])
-                        elif isinstance(t, str):
-                            normalized_api_tags.append(t)
-                elif isinstance(api_tags, str):
-                    try:
-                        t_list = json.loads(api_tags)
-                        if isinstance(t_list, list):
-                            for t in t_list:
-                                if isinstance(t, dict) and "tag" in t:
-                                    normalized_api_tags.append(t["tag"])
-                                elif isinstance(t, str):
-                                    normalized_api_tags.append(t)
-                        else:
-                             normalized_api_tags = [api_tags]
-                    except json.JSONDecodeError:
-                        normalized_api_tags = [api_tags]
-                
-                merged_data["tags"] = json.dumps(sorted(list(set(normalized_api_tags))), ensure_ascii=False)
+                merged_data["tags"] = normalize_tags(merged_data["tags"])
 
             # Step 2: Scrape Extended Details
             url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={item_id}"
