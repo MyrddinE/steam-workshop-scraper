@@ -1,7 +1,7 @@
 import pytest
 import responses
 import requests
-from src.steam_api import get_workshop_details_api, query_workshop_items, query_files_by_date, get_player_summaries
+from src.steam_api import get_workshop_details_api, query_workshop_items, query_workshop_files, get_player_summaries
 
 STEAM_API_URL = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
 QUERY_API_URL = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
@@ -114,10 +114,8 @@ def test_get_player_summaries_exception():
     assert result == {}
 
 @responses.activate
-def test_query_files_by_date_success():
-    from src.steam_api import query_files_by_date
+def test_query_workshop_files_success():
     url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
-    
     mock_data = {
         "response": {
             "total": 2,
@@ -127,28 +125,33 @@ def test_query_files_by_date_success():
             ]
         }
     }
-    
     responses.add(responses.GET, url, json=mock_data, status=200)
-    
-    result = query_files_by_date(4000, 100, 2000, "TEST_KEY", page=1)
+    result = query_workshop_files(4000, page=1, api_key="TEST_KEY")
     assert result["total"] == 2
     assert len(result["items"]) == 2
     assert result["items"][0]["publishedfileid"] == "111"
 
 @responses.activate
-def test_query_files_by_date_empty():
-    from src.steam_api import query_files_by_date
+def test_query_workshop_files_empty():
     url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
     responses.add(responses.GET, url, json={"response": {}}, status=200)
-    result = query_files_by_date(4000, 100, 2000, "TEST_KEY", page=1)
+    result = query_workshop_files(4000, page=1, api_key="TEST_KEY")
     assert result["total"] == 0
     assert len(result["items"]) == 0
 
 @responses.activate
-def test_query_files_by_date_error():
+def test_query_workshop_files_error():
     url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
     responses.add(responses.GET, url, status=500)
-    result = query_files_by_date(4000, 100, 2000, "TEST_KEY", page=1)
+    result = query_workshop_files(4000, page=1, api_key="TEST_KEY")
+    assert result["total"] == 0
+    assert len(result["items"]) == 0
+
+@responses.activate
+def test_query_workshop_files_partial_response():
+    url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
+    responses.add(responses.GET, url, json={}, status=200)
+    result = query_workshop_files(4000, page=1, api_key="TEST_KEY")
     assert result["total"] == 0
     assert len(result["items"]) == 0
 
@@ -164,9 +167,4 @@ def test_query_workshop_items_error():
     ids = query_workshop_items(appid=294100, api_key="TEST_KEY")
     assert ids == []
 
-@responses.activate
-def test_query_files_by_date_partial_response():
-    url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
-    responses.add(responses.GET, url, json={}, status=200)
-    result = query_files_by_date(4000, 100, 2000, "TEST_KEY", page=1)
-    assert result["total"] == 0
+

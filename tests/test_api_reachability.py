@@ -3,7 +3,7 @@ import os
 import requests
 import time
 import logging
-from src.steam_api import query_files_by_date, get_workshop_details_api
+from src.steam_api import query_workshop_files, get_workshop_details_api
 from src.web_scraper import discover_items_by_date_html
 
 # This test is designed to verify the depth limit of the Steam API vs Web Scraping.
@@ -28,11 +28,7 @@ def test_compare_api_vs_web_reachability():
     # if we can reach the bottom of the stack without date filters if we could.
     # Actually, the API wrapper in src/steam_api.py uses query_type=1 (Publication Date).
     
-    # Let's use a very wide date range for the API to simulate 'all time'
-    start_all = 1317484800 # Oct 2011
-    end_all = int(time.time())
-    
-    api_result = query_files_by_date(appid, start_all, end_all, API_KEY, page=max_page)
+    api_result = query_workshop_files(appid, page=max_page, api_key=API_KEY)
     
     if not api_result["items"]:
         logging.warning("API returned no items at page 500. It might be empty or restricted.")

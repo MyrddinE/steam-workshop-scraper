@@ -99,27 +99,25 @@ def get_player_summaries(steamids: list[int], api_key: str) -> dict[int, dict]:
     except (requests.exceptions.RequestException, ValueError, KeyError):
         return {}
 
-def query_files_by_date(appid: int, start_time: int, end_time: int, api_key: str, page: int = 1) -> dict:
+def query_workshop_files(appid: int, page: int, api_key: str, numperpage: int = 100) -> dict:
     """
     Queries the Steam Workshop using IPublishedFileService/QueryFiles,
-    filtering by date_range_updated.
+    sorted by publication date (newest first).
     Returns a dict with 'total' and 'items'.
     """
-    import json
     url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
     params = {
         "key": api_key,
-        "input_json": json.dumps({
-            "appid": appid,
-            "query_type": 1, # RankedByPublicationDate, but we are filtering by date window anyway
-            "return_details": True,
-            "numperpage": 100,
-            "page": page,
-            "date_range_updated": {
-                "start_time": start_time,
-                "end_time": end_time
-            }
-        })
+        "query_type": 1,
+        "page": page,
+        "numperpage": numperpage,
+        "appid": appid,
+        "return_short_description": True,
+        "return_tags": True,
+        "return_previews": False,
+        "return_children": False,
+        "return_for_sale_data": False,
+        "return_metadata": False,
     }
     
     try:
