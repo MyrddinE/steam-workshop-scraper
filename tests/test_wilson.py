@@ -99,15 +99,17 @@ def test_compute_wilson_cutoffs_large_set(db_path):
     assert abs(result["fav_p50"] - expected_p50) < 0.02
 
 def test_compute_wilson_cutoffs_with_filters(db_path):
-    for i in range(100):
+    """Filtering by score > 0.5 should shift all cutoffs upward vs. unfiltered."""
+    for i in range(1000):
         insert_or_update_item(db_path, {
             "workshop_id": i + 1,
-            "title": f"Item {i}",
-            "wilson_favorite_score": 0.1 + 0.8 * (i / 99.0),
+            "wilson_favorite_score": 0.1 + 0.8 * (i / 999.0),
+            "wilson_subscription_score": 0.1 + 0.7 * (i / 999.0),
         })
-    result = compute_wilson_cutoffs(db_path)
-    assert result.get("fav_p99", 0) > 0.8
+    result_all = compute_wilson_cutoffs(db_path)
     result_filtered = compute_wilson_cutoffs(db_path, filters=[
-        {"field": "Title", "op": "contains", "value": "Item 1"}
+        {"field": "Favorite Score", "op": "gt", "value": 0.5}
     ])
-    assert len(result_filtered) >= 1
+    assert result_filtered["fav_p50"] > result_all["fav_p50"]
+    assert result_filtered["sub_p50"] > result_all["sub_p50"]
+    assert result_filtered["fav_p99"] > result_all["fav_p99"]
