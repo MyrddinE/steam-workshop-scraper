@@ -384,9 +384,9 @@ class Daemon:
             merged_data["status"] = 200
             insert_or_update_item(self.db_path, merged_data)
             
-            # Step 3: Fetch User/Creator details
+            # Step 3: Fetch User/Creator details (only for enriched items)
             creator_id = merged_data.get("creator")
-            if creator_id:
+            if creator_id and enriched:
                 try:
                     creator_id = int(creator_id)
                     existing_user = get_user(self.db_path, creator_id)
