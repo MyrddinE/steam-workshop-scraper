@@ -581,19 +581,16 @@ def _classify_attempted_recency(dt_attempted: str, reference_dt) -> str:
         return "blank"
 
 def _compute_tag_frequencies(cursor) -> dict:
-    """Queries all non-empty tags and returns a frequency dictionary."""
-    cursor.execute("SELECT tags FROM workshop_items WHERE tags IS NOT NULL AND tags != ''")
-    tag_counts = {}
-    for row in cursor.fetchall():
-        try:
-            tags_list = json.loads(row["tags"])
-            if isinstance(tags_list, list):
-                for tag_item in tags_list:
-                    tag_value = tag_item.get('tag') if isinstance(tag_item, dict) else tag_item
-                    if tag_value:
-                        tag_counts[tag_value] = tag_counts.get(tag_value, 0) + 1
-        except: continue
-    return tag_counts
+    """Queries all tag values and returns a frequency dictionary using json_each.
+    Handles both string arrays (normalized) and object arrays (API raw format)."""
+    cursor.execute("""
+        SELECT COALESCE(json_extract(value, '$.tag'), value) as tag_value, COUNT(*) as cnt
+        FROM workshop_items, json_each(workshop_items.tags)
+        WHERE tags IS NOT NULL AND tags != ''
+        GROUP BY tag_value
+        ORDER BY cnt DESC
+    """)
+    return {row["tag_value"]: row["cnt"] for row in cursor.fetchall()}
 
 def get_db_stats(db_path: str) -> dict:
     """Returns comprehensive statistics about the database."""
