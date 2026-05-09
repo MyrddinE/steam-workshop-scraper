@@ -209,16 +209,8 @@ class Daemon:
 
     def process_batch(self):
         """Processes a single batch of workshop items."""
-        # Proactive user discovery check
         try:
             self.expand_user_discovery()
-                
-            # Seeding check: If we have fewer than 100 unscraped items, fetch the next page
-            unscraped = count_unscraped_items(self.db_path)
-            if unscraped < 10:
-                logging.debug(f"Low unscraped queue ({unscraped}). Expanding discovery...")
-                self.seed_database()
-
             items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size)
         except Exception as e:
             logging.error(f"Database error in process_batch: {e}")
@@ -226,7 +218,16 @@ class Daemon:
             return
         
         if not items_to_scrape:
-            # If still nothing, sleep
+            logging.debug("No items to scrape. Expanding discovery...")
+            self.seed_database()
+            try:
+                items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size)
+            except Exception as e:
+                logging.error(f"Database error after seeding: {e}")
+                time.sleep(5)
+                return
+        
+        if not items_to_scrape:
             time.sleep(self.delay * 5)
             return
 
