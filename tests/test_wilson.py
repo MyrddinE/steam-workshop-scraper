@@ -3,7 +3,7 @@ import json
 from src.daemon import wilson_lower
 from src.database import (
     initialize_database, insert_or_update_item, _evaluate_filters,
-    compute_wilson_cutoffs, normalize_tags, search_items
+    compute_wilson_cutoffs, normalize_tags, search_items, get_connection
 )
 
 # ── wilson_lower ─────────────────────────────────────────────────────────────
@@ -113,3 +113,32 @@ def test_compute_wilson_cutoffs_with_filters(db_path):
     assert result_filtered["fav_p50"] > result_all["fav_p50"]
     assert result_filtered["sub_p50"] > result_all["sub_p50"]
     assert result_filtered["fav_p99"] > result_all["fav_p99"]
+
+def test_schema_version_is_set(db_path):
+    """Verify PRAGMA user_version is updated after migration."""
+    conn = get_connection(db_path)
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.close()
+    assert version == 1
+
+def test_subscriber_score_uses_retention_formula(db_path):
+    """Verify subscriber score uses subscriptions/lifetime_subscriptions ratio."""
+    insert_or_update_item(db_path, {
+        "workshop_id": 991,
+        "subscriptions": 80,
+        "lifetime_subscriptions": 100,
+        "wilson_favorite_score": 0.5,
+        "wilson_subscription_score": 0.99,  # old/wrong formula
+    })
+    # Force migration by resetting version
+    conn = get_connection(db_path)
+    conn.execute("PRAGMA user_version = 0")
+    conn.commit()
+    conn.close()
+    initialize_database(db_path)
+    conn = get_connection(db_path)
+    row = conn.execute(
+        "SELECT wilson_subscription_score FROM workshop_items WHERE workshop_id=991").fetchone()
+    conn.close()
+    assert row["wilson_subscription_score"] < 0.99
+    assert row["wilson_subscription_score"] > 0.5

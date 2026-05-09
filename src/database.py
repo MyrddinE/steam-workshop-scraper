@@ -364,32 +364,35 @@ def initialize_database(db_path: str):
         )
         conn.commit()
 
-    # Wilson score backfill: compute scores for existing items that lack them
-    cursor.execute("""
-        SELECT workshop_id, favorited, lifetime_subscriptions, views
-        FROM workshop_items
-        WHERE views > 0 AND (wilson_favorite_score IS NULL OR wilson_subscription_score IS NULL)
-    """)
-    to_update = cursor.fetchall()
-    if to_update:
+    # Schema versioning: run migrations cumulatively from current to expected version
+    EXPECTED_VERSION = 1
+    db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
+
+    if db_version < 1:
         import math
-        for row in to_update:
-            views = row["views"] or 0
-            if views == 0:
-                continue
+        # Migration 0→1: recalculate Wilson subscriber score with correct formula
+        # (subscriptions/lifetime_subscriptions instead of lifetime_subscriptions/views)
+        cursor.execute("""
+            SELECT workshop_id, favorited, subscriptions, lifetime_subscriptions, views
+            FROM workshop_items
+        """)
+        for row in cursor.fetchall():
             def wl(s, v):
+                if v == 0:
+                    return 0.0
                 p = min(float(s) / v, 1.0)
                 z2 = 1.96 * 1.96
                 d = 1 + z2 / v
                 n = p + z2 / (2*v) - 1.96 * math.sqrt(max(0.0, p*(1-p)/v) + z2/(4*v*v))
                 return max(0.0, min(1.0, n / d))
-            fav_score = wl(row["favorited"] or 0, views)
-            sub_score = wl(row["lifetime_subscriptions"] or 0, views)
+            fav_score = wl(row["favorited"] or 0, row["views"] or 0)
+            sub_score = wl(row["subscriptions"] or 0, row["lifetime_subscriptions"] or 0)
             cursor.execute(
                 "UPDATE workshop_items SET wilson_favorite_score = ?, wilson_subscription_score = ? WHERE workshop_id = ?",
                 (fav_score, sub_score, row["workshop_id"])
             )
         conn.commit()
+        cursor.execute(f"PRAGMA user_version = {EXPECTED_VERSION}")
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")

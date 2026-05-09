@@ -332,7 +332,8 @@ class Daemon:
             merged_data["wilson_favorite_score"] = wilson_lower(
                 merged_data.get("favorited", 0) or 0, views)
             merged_data["wilson_subscription_score"] = wilson_lower(
-                merged_data.get("lifetime_subscriptions", 0) or 0, views)
+                merged_data.get("subscriptions", 0) or 0,
+                merged_data.get("lifetime_subscriptions", 0) or 0)
 
             appid = merged_data.get("consumer_appid")
             enriched = False
