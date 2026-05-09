@@ -1,4 +1,23 @@
 import requests
+import time
+import logging
+
+_last_api_call = 0.0
+_API_DELAY = 1.5
+
+
+def set_api_delay(seconds: float):
+    global _API_DELAY
+    _API_DELAY = seconds
+
+
+def _rate_limit():
+    global _last_api_call
+    elapsed = time.time() - _last_api_call
+    if 0 < elapsed < _API_DELAY:
+        time.sleep(_API_DELAY - elapsed)
+    _last_api_call = time.time()
+
 
 def get_workshop_details_api(item_id: int, api_key: str) -> dict | None:
     """
@@ -18,6 +37,7 @@ def get_workshop_details_api(item_id: int, api_key: str) -> dict | None:
         "key": api_key
     }
     
+    _rate_limit()
     try:
         response = requests.post(url, data=data, timeout=10)
         response.raise_for_status()
@@ -58,6 +78,7 @@ def query_workshop_items(appid: int, api_key: str, count: int = 50, page: int = 
         "return_vote_data": 1
     }
     
+    _rate_limit()
     try:
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
@@ -84,6 +105,7 @@ def get_player_summaries(steamids: list[int], api_key: str) -> dict[int, dict]:
         "steamids": ids_str
     }
     
+    _rate_limit()
     try:
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
@@ -120,6 +142,7 @@ def query_workshop_files(appid: int, page: int, api_key: str, numperpage: int = 
         "return_metadata": False,
     }
     
+    _rate_limit()
     try:
         response = requests.get(url, params=params, timeout=15)
         response.raise_for_status()

@@ -2,9 +2,27 @@ from requests_html import HTMLSession
 import requests
 import re
 import sys
+import time
 import requests.utils
 import logging
 from src.config import load_config
+
+_last_web_call = 0.0
+_WEB_DELAY = 5.0
+
+
+def set_web_delay(seconds: float):
+    global _WEB_DELAY
+    _WEB_DELAY = seconds
+
+
+def _rate_limit():
+    global _last_web_call
+    elapsed = time.time() - _last_web_call
+    if 0 < elapsed < _WEB_DELAY:
+        time.sleep(_WEB_DELAY - elapsed)
+    _last_web_call = time.time()
+
 
 def _build_workshop_cookies(config: dict) -> dict:
     """Builds cookies dict for Steam Workshop requests."""
@@ -67,14 +85,9 @@ def _extract_total_pages(response) -> int:
 def scrape_extended_details(item_url: str) -> dict | None:
     """
     Scrapes the extended description and tags from a Steam Workshop page.
-
-    Args:
-        item_url: The URL of the workshop item page.
-
-    Returns:
-        A dictionary with 'description' and 'tags', or None if scraping fails.
     """
     session = HTMLSession()
+    _rate_limit()
     try:
         response = session.get(item_url, timeout=10)
         response.raise_for_status()

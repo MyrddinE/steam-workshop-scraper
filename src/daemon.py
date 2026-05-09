@@ -20,8 +20,8 @@ from src.database import (
     normalize_tags,
     _evaluate_filters
 )
-from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries, query_workshop_files
-from src.web_scraper import scrape_extended_details
+from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries, query_workshop_files, set_api_delay
+from src.web_scraper import scrape_extended_details, set_web_delay
 from src.translator import TranslatorThread, is_ascii
 from src.config import save_config
 
@@ -37,16 +37,23 @@ class Daemon:
         self.db_path = config.get("database", {}).get("path", "workshop.db")
         self.api_key = config.get("api", {}).get("key", "")
         self.batch_size = config.get("daemon", {}).get("batch_size", 10)
-        self.delay = config.get("daemon", {}).get("request_delay_seconds", 5)
+        daemon_config = config.get("daemon", {})
+        self.api_delay = daemon_config.get("api_delay_seconds") or daemon_config.get("request_delay_seconds", 1.5)
+        self.web_delay = daemon_config.get("web_delay_seconds") or daemon_config.get("request_delay_seconds", 5.0)
+        set_api_delay(self.api_delay)
+        set_web_delay(self.web_delay)
         self.pause_lock_file = ".pauselock"
         
         # Translator thread
         self.translator = TranslatorThread(config)
         
         # State variables for dynamic delay adjustment
-        self.consecutive_successes = 0
-        self.consecutive_failures = 0
-        self.had_recent_success_streak = False
+        self.api_successes = 0
+        self.api_failures = 0
+        self.api_had_streak = False
+        self.web_successes = 0
+        self.web_failures = 0
+        self.web_had_streak = False
 
         # Enforce required target_appids
         self.target_appids = config.get("daemon", {}).get("target_appids")
@@ -61,10 +68,11 @@ class Daemon:
         signal.signal(signal.SIGTERM, self.handle_shutdown)
 
     def _persist_delay(self):
-        """Saves the current delay to config file."""
+        """Saves the current delays to config file."""
         if "daemon" not in self.config:
             self.config["daemon"] = {}
-        self.config["daemon"]["request_delay_seconds"] = self.delay
+        self.config["daemon"]["api_delay_seconds"] = self.api_delay
+        self.config["daemon"]["web_delay_seconds"] = self.web_delay
         save_config(self.config_path, self.config)
 
     def _build_user_record(self, steamid: int, personaname: str) -> dict:
@@ -228,7 +236,7 @@ class Daemon:
                 return
         
         if not items_to_scrape:
-            time.sleep(self.delay * 5)
+            time.sleep(600)
             return
 
         for existing_data in items_to_scrape:
@@ -255,13 +263,11 @@ class Daemon:
             if api_status == 404:
                 logging.warning(f"[{item_id}] Item not found (404) via API, it may have been deleted.")
                 insert_or_update_item(self.db_path, merged_data)
-                time.sleep(self.delay)
-                continue # Skip to next item
+                continue
             elif api_status == 500:
                 logging.error(f"[{item_id}] API request failed (500). Retrying later.")
                 insert_or_update_item(self.db_path, merged_data)
-                time.sleep(self.delay*2)
-                continue # Skip to next item
+                continue
 
             merged_data = self._merge_and_clean_api_data(api_data, merged_data, item_id, now_iso)
             display_title = merged_data.get('title_en') or merged_data.get('title', 'Unknown Title')
@@ -289,20 +295,22 @@ class Daemon:
                             f"[{item_id}] '{display_title}' | Scraper failed, partial data saved. "
                             f"API data saved, but extended description could not be scraped."
                         )
-                        self.consecutive_failures += 1
-                        self.consecutive_successes = 0
-                        if self.consecutive_failures >= 2 and self.had_recent_success_streak:
-                            old_delay = self.delay
-                            self.delay += max(1.0, round(self.delay * 0.10))
-                            logging.info(f"Multiple consecutive failures after a success streak! Increasing delay from {old_delay} to {self.delay} seconds.")
+                        self.web_failures += 1
+                        self.web_successes = 0
+                        if self.web_failures >= 2 and self.web_had_streak:
+                            old_delay = self.web_delay
+                            self.web_delay += max(1.0, round(self.web_delay * 0.10))
+                            set_web_delay(self.web_delay)
+                            logging.info(f"Multiple consecutive web scrape failures! Increasing web delay from {old_delay} to {self.web_delay} seconds.")
                             self._persist_delay()
-                            self.had_recent_success_streak = False
-                        time.sleep(self.delay)
+                            self.web_had_streak = False
                         continue
 
                     merged_data["extended_description"] = scrape_data.get("description")
                     merged_data = self._evaluate_translation_needs(merged_data, existing_data)
                     enriched = True
+                    self.web_successes += 1
+                    self.web_failures = 0
 
             merged_data["status"] = 200
             insert_or_update_item(self.db_path, merged_data)
@@ -327,20 +335,18 @@ class Daemon:
 
             logging.info(f"[{item_id}] \"{display_title}\"{' — \033[31mignored\033[0m' if not enriched else ''}")
             
-            self.consecutive_successes += 1
-            self.consecutive_failures = 0
-            if self.consecutive_successes >= 5:
-                self.had_recent_success_streak = True
-            if self.consecutive_successes >= 100:
-                old_delay = self.delay
-                self.delay = max(1.0, self.delay - 0.1)
-                if old_delay != self.delay:
-                    logging.info(f"100 consecutive successes! Decreasing delay from {old_delay} to {self.delay} seconds.")
+            self.api_successes += 1
+            self.api_failures = 0
+            if self.api_successes >= 5:
+                self.api_had_streak = True
+            if self.api_successes >= 100:
+                old_delay = self.api_delay
+                self.api_delay = max(1.0, self.api_delay - 0.1)
+                if old_delay != self.api_delay:
+                    set_api_delay(self.api_delay)
+                    logging.info(f"100 consecutive API successes! Decreasing API delay from {old_delay} to {self.api_delay} seconds.")
                     self._persist_delay()
-                self.consecutive_successes = 0
-            
-            # Polite delay between items
-            time.sleep(self.delay)
+                self.api_successes = 0
 
     def run(self):
         """Main loop that continuously queries and scrapes."""
@@ -392,7 +398,6 @@ class Daemon:
                 new_discovered_count += page_new_count
                 logging.info(f"Page {page}/{max_pages} provided {page_new_count} new items. (Total new: {new_discovered_count})")
                 update_app_tracking_page(self.db_path, appid, page)
-                time.sleep(self.delay)
 
                 if new_discovered_count >= target_new:
                     logging.info(f"Discovered {new_discovered_count} new items for AppID {appid}, enough for now.")

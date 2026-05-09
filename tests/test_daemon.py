@@ -22,7 +22,8 @@ def test_daemon_init_defaults():
     assert daemon.db_path == "workshop.db"
     assert daemon.api_key == ""
     assert daemon.batch_size == 10
-    assert daemon.delay == 5
+    assert daemon.api_delay == 1.5
+    assert daemon.web_delay == 5.0
     assert daemon.target_appids == [456]
 
 def test_daemon_init_missing_appids():
@@ -123,8 +124,8 @@ def test_daemon_process_batch_empty(mock_sleep, mock_seed, mock_get_items, mock_
     daemon = Daemon(mock_config)
     daemon.process_batch()
     
-    # It should sleep for delay * 5 because it's still empty
-    mock_sleep.assert_called_once_with(0.05) 
+    # Should sleep for 10 minutes when no items to scrape
+    mock_sleep.assert_called_once_with(600)
 
 @patch('src.daemon.count_unscraped_items')
 @patch('src.daemon.get_next_items_to_scrape')
