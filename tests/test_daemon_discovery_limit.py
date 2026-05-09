@@ -1,16 +1,14 @@
 import pytest
-import time
 import json
 from unittest.mock import patch, MagicMock
 from src.daemon import Daemon
-from src.database import initialize_database, get_connection, count_unscraped_items, update_app_tracking
+from src.database import initialize_database, count_unscraped_items, update_app_tracking_page
 
-@patch('src.daemon.time.time')
-@patch('src.daemon.discover_items_by_date_html')
+@patch('src.daemon.query_workshop_files')
 @patch('src.daemon.time.sleep')
-def test_seed_database_fetches_multiple_windows(mock_sleep, mock_discover, mock_time, tmp_path):
-    """Test that seed_database fetches another window if the first yields < 100 results."""
-    db_path = str(tmp_path / "multiple_windows.db")
+def test_seed_database_fetches_multiple_pages(mock_sleep, mock_query, tmp_path):
+    """Test that seed_database fetches multiple pages if first yields < 100 new items."""
+    db_path = str(tmp_path / "multi_page.db")
     initialize_database(db_path)
 
     config = {
@@ -20,36 +18,22 @@ def test_seed_database_fetches_multiple_windows(mock_sleep, mock_discover, mock_
     }
     daemon = Daemon(config)
 
-    now = 1700000000
-    mock_time.return_value = now
+    mock_query.side_effect = [
+        {"total": 200, "items": [{"publishedfileid": str(i)} for i in range(1, 61)]},   # Page 1: 60 items
+        {"total": 200, "items": [{"publishedfileid": str(i)} for i in range(61, 121)]}, # Page 2: 60 items
+    ]
 
-    # Setup tracking to force discovery
-    initial_scanned = now - (100 * 86400)
-    update_app_tracking(db_path, 1062090, initial_scanned, 3600*24*30)
-    daemon.last_filters[1062090] = {"hash": json.dumps({"text": "", "req_tags": [], "excl_tags": []}), "start_time": initial_scanned}
+    daemon.seed_database(target_new=100)
 
-    with patch.object(Daemon, '_find_initial_start_date', return_value=initial_scanned):
-        mock_discover.side_effect = [
-            ([i for i in range(1, 61)], 1),   # Window 1: 60 items
-            ([i for i in range(61, 121)], 1), # Window 2: 60 items (Total 120 > 100)
-            ([], 1) # Fallback
-        ]
-
-        daemon.seed_database(target_new=100)
-
-        # Assert discover was called at least twice for different windows
-        assert mock_discover.call_count >= 2
-
-        # Queue should have all 120 items
-        assert count_unscraped_items(db_path) == 120
+    assert mock_query.call_count == 2
+    assert count_unscraped_items(db_path) == 120
 
 
-@patch('src.daemon.time.time')
-@patch('src.daemon.discover_items_by_date_html')
+@patch('src.daemon.query_workshop_files')
 @patch('src.daemon.time.sleep')
-def test_seed_database_stops_after_one_window(mock_sleep, mock_discover, mock_time, tmp_path):
-    """Test that seed_database stops after one window if >= 100 results are found."""
-    db_path = str(tmp_path / "single_window.db")
+def test_seed_database_stops_after_enough_items(mock_sleep, mock_query, tmp_path):
+    """Test that seed_database stops after discovering >= target_new items."""
+    db_path = str(tmp_path / "enough.db")
     initialize_database(db_path)
 
     config = {
@@ -59,24 +43,39 @@ def test_seed_database_stops_after_one_window(mock_sleep, mock_discover, mock_ti
     }
     daemon = Daemon(config)
 
-    now = 1700000000
-    mock_time.return_value = now
+    mock_query.return_value = {
+        "total": 500,
+        "items": [{"publishedfileid": str(i)} for i in range(1, 111)]
+    }
 
-    initial_scanned = now - (100 * 86400)
-    update_app_tracking(db_path, 1062090, initial_scanned, 3600*24*30)
-    daemon.last_filters[1062090] = {"hash": json.dumps({"text": "", "req_tags": [], "excl_tags": []}), "start_time": initial_scanned}
+    daemon.seed_database(target_new=100)
 
-    with patch.object(Daemon, '_find_initial_start_date', return_value=initial_scanned):
-        # One window yields 110 items across 2 pages
-        mock_discover.side_effect = [
-            ([i for i in range(1, 81)], 2),    # Window 1, Page 1: 80 items
-            ([i for i in range(81, 111)], 2),  # Window 1, Page 2: 30 items
-            ([], 1) # Fallback
-        ]
+    assert mock_query.call_count == 1
+    assert count_unscraped_items(db_path) == 110
 
-        daemon.seed_database(target_new=100)
 
-        # Called twice for the two pages of the SAME window, but shouldn't start a new window
-        assert mock_discover.call_count == 2
-        
-        assert count_unscraped_items(db_path) == 110
+@patch('src.daemon.query_workshop_files')
+@patch('src.daemon.time.sleep')
+def test_seed_database_continues_from_last_page(mock_sleep, mock_query, tmp_path):
+    """Test that seed_database continues from last_page_scanned + 1."""
+    db_path = str(tmp_path / "continue.db")
+    initialize_database(db_path)
+
+    update_app_tracking_page(db_path, 1062090, 3)
+
+    config = {
+        "database": {"path": db_path},
+        "api": {"key": "test_key"},
+        "daemon": {"target_appids": [1062090], "batch_size": 10, "request_delay_seconds": 0}
+    }
+    daemon = Daemon(config)
+
+    mock_query.return_value = {
+        "total": 500,
+        "items": [{"publishedfileid": str(i)} for i in range(1, 121)]
+    }
+
+    daemon.seed_database(target_new=100)
+
+    mock_query.assert_called_once_with(1062090, page=4, api_key="test_key")
+    assert count_unscraped_items(db_path) == 120

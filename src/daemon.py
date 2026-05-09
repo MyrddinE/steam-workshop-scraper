@@ -20,7 +20,7 @@ from src.database import (
     normalize_tags
 )
 from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries, query_workshop_files
-from src.web_scraper import scrape_extended_details, discover_items_by_date_html
+from src.web_scraper import scrape_extended_details
 from src.translator import TranslatorThread, is_ascii
 from src.config import save_config
 
