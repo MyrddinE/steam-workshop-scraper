@@ -295,10 +295,28 @@ class Daemon:
             if api_status == 404:
                 logging.warning(f"[{item_id}] Item not found (404) via API, it may have been deleted.")
                 insert_or_update_item(self.db_path, merged_data)
+                self.api_failures += 1
+                self.api_successes = 0
+                if self.api_failures >= 2 and self.api_had_streak:
+                    old_delay = self.api_delay
+                    self.api_delay += max(0.01, round(self.api_delay * 0.10))
+                    set_api_delay(self.api_delay)
+                    logging.info(f"Multiple consecutive API failures! Increasing API delay from {old_delay} to {self.api_delay}s.")
+                    self._persist_delay()
+                    self.api_had_streak = False
                 continue
             elif api_status == 500:
                 logging.error(f"[{item_id}] API request failed (500). Retrying later.")
                 insert_or_update_item(self.db_path, merged_data)
+                self.api_failures += 1
+                self.api_successes = 0
+                if self.api_failures >= 2 and self.api_had_streak:
+                    old_delay = self.api_delay
+                    self.api_delay += max(0.01, round(self.api_delay * 0.10))
+                    set_api_delay(self.api_delay)
+                    logging.info(f"Multiple consecutive API failures! Increasing API delay from {old_delay} to {self.api_delay}s.")
+                    self._persist_delay()
+                    self.api_had_streak = False
                 continue
 
             merged_data = self._merge_and_clean_api_data(api_data, merged_data, item_id, now_iso)
@@ -379,7 +397,7 @@ class Daemon:
                 self.api_had_streak = True
             if self.api_successes >= 100:
                 old_delay = self.api_delay
-                self.api_delay = max(1.0, self.api_delay - 0.1)
+                self.api_delay = max(0.01, self.api_delay - 0.1)
                 if old_delay != self.api_delay:
                     set_api_delay(self.api_delay)
                     logging.info(f"100 consecutive API successes! Decreasing API delay from {old_delay} to {self.api_delay} seconds.")
