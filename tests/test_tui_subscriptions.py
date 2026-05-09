@@ -1,5 +1,5 @@
 import pytest
-from textual.widgets import ListView, Label, Markdown
+from textual.widgets import ListView, Static
 from src.tui import ScraperApp, SubscriptionQueueScreen
 from unittest.mock import patch
 from tests.conftest import ASYNC_PAUSE
@@ -76,5 +76,5 @@ async def test_queue_renders_links_without_crash(mock_config, tmp_path):
 
             screen = app.screen
             assert isinstance(screen, SubscriptionQueueScreen)
-            md_widgets = screen.query(Markdown)
-            assert any("steamcommunity.com" in str(m._markdown) for m in md_widgets)
+            statics = screen.query(Static)
+            assert any("steamcommunity.com" in str(s.render()) for s in statics)

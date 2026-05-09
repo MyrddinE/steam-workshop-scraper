@@ -245,6 +245,7 @@ class SubscriptionQueueScreen(ModalScreen):
             logging.error(f"Failed to remove pause lock file: {e}")
 
     def compose(self) -> ComposeResult:
+        from rich.text import Text as RichText
         with Vertical(id="sub-queue-container"):
             yield Label("Subscription Queue", id="sub-queue-title")
             
@@ -256,8 +257,8 @@ class SubscriptionQueueScreen(ModalScreen):
                     wid = item['workshop_id']
                     title = item['title']
                     url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}"
-                    # Use Textual's @click handler for hyperlinks
-                    yield Markdown(f"[{title}]({url})")
+                    link_text = RichText.from_markup(f"[link={url}]{url}[/link] : {title}")
+                    yield Static(link_text)
             
             yield Button("Close", id="btn-close-sub-queue")
 
