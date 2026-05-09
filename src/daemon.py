@@ -367,6 +367,16 @@ class Daemon:
                     enriched = True
                     self.web_successes += 1
                     self.web_failures = 0
+                    if self.web_successes >= 5:
+                        self.web_had_streak = True
+                    if self.web_successes >= 100:
+                        old_delay = self.web_delay
+                        self.web_delay = max(1.0, round(self.web_delay / 1.05, 2))
+                        if old_delay != self.web_delay:
+                            set_web_delay(self.web_delay)
+                            logging.info(f"100 consecutive web scrape successes! Decreasing web delay from {old_delay} to {self.web_delay}s.")
+                            self._persist_delay()
+                        self.web_successes = 0
 
             merged_data["status"] = 200
             insert_or_update_item(self.db_path, merged_data)
