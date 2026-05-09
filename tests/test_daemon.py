@@ -126,8 +126,9 @@ def test_daemon_process_batch_empty(mock_sleep, mock_seed, mock_get_items, mock_
     daemon = Daemon(mock_config)
     daemon.process_batch()
     
-    # Should sleep for 10 minutes when no items to scrape
-    mock_sleep.assert_called_once_with(600)
+    # Should sleep in 1-second checks for pollable shutdown (600 checks)
+    mock_sleep.assert_called_with(1)
+    assert mock_sleep.call_count == 600
 
 @patch('src.daemon.count_unscraped_items')
 @patch('src.daemon.get_next_items_to_scrape')

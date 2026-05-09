@@ -268,7 +268,10 @@ class Daemon:
                 return
         
         if not items_to_scrape:
-            time.sleep(600)
+            for _ in range(600):
+                if not self.running:
+                    return
+                time.sleep(1)
             return
 
         for existing_data in items_to_scrape:
@@ -419,18 +422,26 @@ class Daemon:
         logging.info("Starting daemon loop...")
         self.translator.start()
         while self.running:
-            while os.path.exists(self.pause_lock_file):
+            while os.path.exists(self.pause_lock_file) and self.running:
                 logging.info("Scraping paused by TUI...")
-                time.sleep(5)
+                time.sleep(1)
             
             self.process_batch()
         logging.info("Daemon gracefully exited.")
+        self.translator.running = False
+        self.translator.join(timeout=5)
+        logging.info("Translator thread stopped.")
 
     def seed_database(self, target_new: int = 100):
         """
         Discovers workshop items via IPublishedFileService/QueryFiles API.
         Paginates from page 1 (newest first) until target_new new items found.
         """
+        if not self.api_key:
+            logging.error("No Steam API key configured. Discovery cannot run. "
+                          "Set STEAM_API_KEY environment variable or add api.key to config.yaml.")
+            return
+
         for appid in self.target_appids:
             if count_unscraped_items(self.db_path) >= target_new:
                 logging.info(f"Queue appropriately filled (>= {target_new}) for AppID {appid}. Skipping discovery.")
@@ -447,6 +458,9 @@ class Daemon:
 
             while page <= max_pages and self.running:
                 result = query_workshop_files(appid, page=page, api_key=self.api_key)
+                if result.get("error"):
+                    logging.error(f"API error for AppID {appid} page {page}. Halting discovery.")
+                    break
                 if not result["items"] and total is None:
                     break
 

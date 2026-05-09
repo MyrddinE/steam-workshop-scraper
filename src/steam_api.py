@@ -152,5 +152,10 @@ def query_workshop_files(appid: int, page: int, api_key: str, numperpage: int = 
             "total": data.get("total", 0),
             "items": data.get("publishedfiledetails", [])
         }
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 403:
+            logging.error(f"Steam API returned 403 Forbidden for QueryFiles. "
+                          "API key may be missing or invalid.")
+        return {"total": 0, "items": [], "error": True}
     except (requests.exceptions.RequestException, ValueError, KeyError):
-        return {"total": 0, "items": []}
+        return {"total": 0, "items": [], "error": True}
