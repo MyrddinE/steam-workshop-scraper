@@ -3,7 +3,7 @@ import shlex
 import re
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 WORKSHOP_ITEM_COLUMNS = frozenset({
     "workshop_id", "dt_found", "dt_updated", "dt_attempted", "dt_translated",
@@ -758,18 +758,19 @@ def get_all_authors(db_path: str) -> list[str]:
 
 def _classify_translation_status(item) -> str:
     """Classifies an item's translation state into a bucket name."""
-    if not item["dt_translated"]:
-        return "No data (dt_translated is empty)"
-    if item["title_en"] or item["short_description_en"] or item["extended_description_en"]:
-        return "Translated"
-    if item["translation_priority"] and item["translation_priority"] > 0:
-        return "Queued"
     title = item["title"] or ""
     short_desc = item["short_description"] or ""
     ext_desc = item["extended_description"] or ""
+
+    if item["title_en"] or item["short_description_en"] or item["extended_description_en"]:
+        return "Translated"
     if title.isascii() and short_desc.isascii() and ext_desc.isascii():
-        return "No translation needed (is_ascii==True)"
-    return "Needs Translation (Unicode detected)"
+        return "No translation needed (ASCII)"
+    if item["translation_priority"] and item["translation_priority"] > 0:
+        return "Queued"
+    if not title:
+        return "No data (never scraped)"
+    return "Needs Translation (Unicode)"
 
 def _classify_attempted_recency(dt_attempted: str, staleness_days: int = 30) -> str:
     """Classifies a dt_attempted timestamp as 'fresh', 'stale', or 'blank'."""
@@ -777,9 +778,9 @@ def _classify_attempted_recency(dt_attempted: str, staleness_days: int = 30) -> 
         return "blank"
     try:
         attempted_dt = datetime.fromisoformat(dt_attempted.replace("Z", "+00:00"))
-        threshold = datetime.now() - timedelta(days=staleness_days)
+        threshold = datetime.now(timezone.utc) - timedelta(days=staleness_days)
         if attempted_dt.tzinfo is None:
-            attempted_dt = attempted_dt.replace(tzinfo=threshold.tzinfo)
+            attempted_dt = attempted_dt.replace(tzinfo=timezone.utc)
         return "fresh" if attempted_dt >= threshold else "stale"
     except (ValueError, TypeError):
         return "blank"
@@ -826,10 +827,10 @@ def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
     all_items = cursor.fetchall()
 
     translation_status = {
-        "No data (dt_translated is empty)": 0,
-        "No translation needed (is_ascii==True)": 0,
+        "No translation needed (ASCII)": 0,
+        "Needs Translation (Unicode)": 0,
         "Queued": 0, "Translated": 0,
-        "Needs Translation (Unicode detected)": 0
+        "No data (never scraped)": 0,
     }
     dt_attempted_counts = {"fresh": 0, "stale": 0, "blank": 0}
 
