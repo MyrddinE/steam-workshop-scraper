@@ -3,7 +3,7 @@
 | # | Status | Priority | Difficulty | Impact | Issue |
 |---|---|---|---|---|---|---|---|---|
 | 1 | pushed | medium | medium | medium | **Tags as JSON TEXT, queried via LIKE** — false positives, no structured querying, no index benefit |
-| 2 | pending | medium | easy | medium | **No composite indexes** — `(consumer_appid, status)`, `(creator, dt_updated)` etc. missing |
+| 2 | pushed | medium | easy | medium | **No composite indexes** — Added `(status, dt_attempted)`, `(consumer_appid, status)`, `(creator, dt_updated)`, `(translation_priority)`. |
 | 3 | pending | medium | medium | medium | **No Full-Text Search (FTS5)** — `LIKE '%...%'` on text fields scales poorly |
 | 4 | pending | low | easy | low | **No foreign key constraints** — `creator` → `users.steamid` unenforced |
 | 5 | pending | low | easy | low | **Mixed timestamp formats** — ISO 8601 TEXT in some columns, Unix INTEGER in others |
