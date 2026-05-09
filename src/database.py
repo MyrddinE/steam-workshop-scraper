@@ -79,6 +79,19 @@ def _build_filter_clause(db_col: str, op: str, val) -> tuple[str, list]:
     }
     return op_map.get(op, ("", []))
 
+def _build_json_tag_clause(db_col: str, op: str, val) -> tuple[str, list]:
+    """Like _build_filter_clause but uses json_each for JSON array columns (tags).
+    Avoids false positives from JSON structural characters."""
+    if op == "contains":
+        return (f"EXISTS (SELECT 1 FROM json_each({db_col}) WHERE value LIKE ?)", [f"%{val}%"])
+    if op == "does_not_contain":
+        return (f"NOT EXISTS (SELECT 1 FROM json_each({db_col}) WHERE value LIKE ?)", [f"%{val}%"])
+    if op == "is_empty":
+        return (f"({db_col} IS NULL OR {db_col} = '' OR {db_col} = '[]')", [])
+    if op == "is_not_empty":
+        return (f"({db_col} IS NOT NULL AND {db_col} != '' AND {db_col} != '[]')", [])
+    return ("", [])
+
 def _build_sort_clause(sort_by: str, sort_order: str) -> str:
     """Returns an ORDER BY clause with whitelist validation."""
     if sort_by not in VALID_SORT_COLS:
@@ -477,8 +490,9 @@ def search_items(db_path: str, query: str = "", appid: int = None,
     if tags_query:
         sql, params = _build_text_search_clauses(sql, params, tags_query, ["tags"])
     if tags:
-        sql += " AND tags LIKE ?"
-        params.append(f"%{tags}%")
+        clause, clause_params = _build_json_tag_clause("tags", "contains", tags)
+        sql += f" AND {clause}"
+        params.extend(clause_params)
 
     if creator:
         sql += " AND creator = ?"
@@ -504,7 +518,12 @@ def search_items(db_path: str, query: str = "", appid: int = None,
             if not field or not op:
                 continue
             db_col = FIELD_NAME_MAP.get(field, field)
-            clause, clause_params = _build_filter_clause(db_col, op, val)
+            if db_col == "tags":
+                if op in ("is", "is_not"):
+                    continue
+                clause, clause_params = _build_json_tag_clause(db_col, op, val)
+            else:
+                clause, clause_params = _build_filter_clause(db_col, op, val)
             if clause:
                 params.extend(clause_params)
                 filter_clauses.append((logic, clause))
