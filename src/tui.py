@@ -291,10 +291,8 @@ class DetailsPane(VerticalScroll):
             yield Label("", id="item-title")
             yield Label("", id="item-creator")
         
-        with Horizontal(id="wilson-scores-row"):
-            yield Label("", id="wilson-scores")
-            
-        yield Static(id="spacer-1", classes="blank-line")
+        yield Label("", id="wilson-scores")
+        yield Static(classes="blank-line")
             
         with Horizontal(id="stats-row"):
             with Vertical(classes="stats-col"):

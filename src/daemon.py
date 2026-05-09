@@ -305,7 +305,7 @@ class Daemon:
                 self.api_successes = 0
                 if self.api_failures >= 2 and self.api_had_streak:
                     old_delay = self.api_delay
-                    self.api_delay = round(self.api_delay * (1.05 ** 10), 2)
+                    self.api_delay = round(self.api_delay * (1.05 ** 10), 3)
                     set_api_delay(self.api_delay)
                     logging.info(f"Multiple consecutive API failures! Increasing API delay from {old_delay} to {self.api_delay}s.")
                     self._persist_delay()
@@ -318,7 +318,7 @@ class Daemon:
                 self.api_successes = 0
                 if self.api_failures >= 2 and self.api_had_streak:
                     old_delay = self.api_delay
-                    self.api_delay = round(self.api_delay * (1.05 ** 10), 2)
+                    self.api_delay = round(self.api_delay * (1.05 ** 10), 3)
                     set_api_delay(self.api_delay)
                     logging.info(f"Multiple consecutive API failures! Increasing API delay from {old_delay} to {self.api_delay}s.")
                     self._persist_delay()
@@ -361,7 +361,7 @@ class Daemon:
                         self.web_successes = 0
                         if self.web_failures >= 2 and self.web_had_streak:
                             old_delay = self.web_delay
-                            self.web_delay = max(1.0, round(self.web_delay * (1.05 ** 10), 2))
+                            self.web_delay = max(1.0, round(self.web_delay * (1.05 ** 10), 3))
                             set_web_delay(self.web_delay)
                             logging.info(f"Multiple consecutive web scrape failures! Increasing web delay from {old_delay} to {self.web_delay} seconds.")
                             self._persist_delay()
@@ -377,7 +377,7 @@ class Daemon:
                         self.web_had_streak = True
                     if self.web_successes >= 100:
                         old_delay = self.web_delay
-                        self.web_delay = max(1.0, round(self.web_delay / 1.05, 2))
+                        self.web_delay = max(1.0, round(self.web_delay / 1.05, 3))
                         if old_delay != self.web_delay:
                             set_web_delay(self.web_delay)
                             logging.info(f"100 consecutive web scrape successes! Decreasing web delay from {old_delay} to {self.web_delay}s.")
@@ -413,7 +413,7 @@ class Daemon:
                 self.api_had_streak = True
             if self.api_successes >= 100:
                 old_delay = self.api_delay
-                self.api_delay = max(0.01, round(self.api_delay / 1.05, 2))
+                self.api_delay = max(0.01, round(self.api_delay / 1.05, 3))
                 if old_delay != self.api_delay:
                     set_api_delay(self.api_delay)
                     logging.info(f"100 consecutive API successes! Decreasing API delay from {old_delay} to {self.api_delay} seconds.")
