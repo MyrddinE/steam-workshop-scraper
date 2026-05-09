@@ -1122,27 +1122,10 @@ class ScraperApp(App):
             self.call_after_refresh(self.execute_search)
 
         elif event.button.id == "btn-toggle-translation":
-            detail_pane = self.query_one("#item-details", DetailsPane)
-            detail_pane.show_translated = not detail_pane.show_translated
-            
-        elif event.button.id == "btn-request-translation":
-            detail_pane = self.query_one("#item-details", DetailsPane)
-            if detail_pane.item_data:
-                item = detail_pane.item_data
-                wid = item.get("workshop_id")
-                
-                # Check if it already has a priority set
-                if item.get("translation_priority", 0) > 0:
-                    self.notify(f"Item {wid} is already in the translation queue.", severity="warning")
-                    return
+            self.action_toggle_translation()
 
-                flag_for_translation(self.db_path, wid, priority=10)
-                
-                # Update local state immediately so UI can show 'queued'
-                item["translation_priority"] = 10
-                detail_pane.update_content()
-                
-                self.notify(f"Item {wid} flagged for high-priority translation.")
+        elif event.button.id == "btn-request-translation":
+            self.action_request_translation()
 
     async def action_save_filter_for_scraper(self) -> None:
         """
