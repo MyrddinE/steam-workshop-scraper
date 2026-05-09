@@ -88,6 +88,60 @@ class Daemon:
             record["translation_priority"] = 1
         return record
 
+    def _merge_and_clean_api_data(self, api_data: dict, existing_data: dict, item_id: int, now_iso: str) -> dict:
+        """Merges API response into existing data, remaps column names, and filters to allowed keys."""
+        merged = existing_data.copy()
+        api_data.pop("publishedfileid", None)
+        api_data.pop("status", None)
+        merged.update(api_data)
+
+        if "creator_app_id" in merged:
+            merged["creator_appid"] = merged.pop("creator_app_id")
+        if "consumer_app_id" in merged:
+            merged["consumer_appid"] = merged.pop("consumer_app_id")
+        if "description" in merged:
+            merged["short_description"] = merged.pop("description")
+
+        allowed_keys = {
+            "workshop_id", "dt_found", "dt_updated", "dt_attempted", "dt_translated", "status", "title", "title_en",
+            "creator", "creator_appid", "consumer_appid", "filename", "file_size", "preview_url",
+            "hcontent_file", "hcontent_preview", "short_description", "short_description_en", "time_created",
+            "time_updated", "visibility", "banned", "ban_reason", "app_name", "file_type",
+            "subscriptions", "favorited", "views", "tags", "extended_description", "extended_description_en", "language",
+            "lifetime_subscriptions", "lifetime_favorited", "translation_priority"
+        }
+        known_ignored_keys = {"result", "is_queued_for_subscription"}
+        clean = {}
+        for k, v in merged.items():
+            if k in allowed_keys:
+                clean[k] = v
+            elif k not in known_ignored_keys:
+                val_preview = str(v)[:20] + "..." if len(str(v)) > 20 else str(v)
+                logger = logging.info if v is not None and str(v).strip() != "" else logging.debug
+                logger(f"Discarding unknown API column: '{k}' with value '{val_preview}' for item {item_id}")
+
+        clean["dt_attempted"] = now_iso
+        if "tags" in clean:
+            clean["tags"] = normalize_tags(clean["tags"])
+        return clean
+
+    def _evaluate_translation_needs(self, merged_data: dict, existing_data: dict) -> dict:
+        """Sets translation_priority on merged_data if fields contain non-ASCII and are new/changed."""
+        is_unicode = (
+            not is_ascii(merged_data.get("title", ""))
+            or not is_ascii(merged_data.get("short_description", ""))
+            or not is_ascii(merged_data.get("extended_description", ""))
+        )
+        is_translated = merged_data.get("dt_translated") is not None
+        is_changed = (
+            merged_data.get("title") != existing_data.get("title")
+            or merged_data.get("short_description") != existing_data.get("short_description")
+            or merged_data.get("extended_description") != existing_data.get("extended_description")
+        )
+        if is_unicode and (not is_translated or is_changed):
+            merged_data["translation_priority"] = 1
+        return merged_data
+
     def _load_initial_filter_state(self):
         """Pre-loads the last known filter state from the DB on startup."""
         logging.info("Loading initial filter state from database...")
@@ -193,49 +247,7 @@ class Daemon:
                 time.sleep(self.delay*2)
                 continue # Skip to next item
 
-            # If API call was successful, proceed with processing its data
-            # Merge API data (it will contain actual item details if status != 404/500)
-            # Ensure the API data does not override workshop_id, dt_attempted, status which are already set in merged_data
-            api_data.pop("publishedfileid", None) # Remove it if present, as it's mapped to workshop_id
-            api_data.pop("status", None) # Remove status as we already set it
-            merged_data.update(api_data)
-
-            # Map keys that differ from our schema (these keys were already removed in steam_api.py, but for safety.)
-            if "creator_app_id" in merged_data:
-                merged_data["creator_appid"] = merged_data.pop("creator_app_id")
-            if "consumer_app_id" in merged_data:
-                merged_data["consumer_appid"] = merged_data.pop("consumer_app_id")
-            if "description" in merged_data:
-                merged_data["short_description"] = merged_data.pop("description")
-
-            # Remove keys that don't match our schema
-            allowed_keys = {
-                "workshop_id", "dt_found", "dt_updated", "dt_attempted", "dt_translated", "status", "title", "title_en",
-                "creator", "creator_appid", "consumer_appid", "filename", "file_size", "preview_url",
-                "hcontent_file", "hcontent_preview", "short_description", "short_description_en", "time_created",
-                "time_updated", "visibility", "banned", "ban_reason", "app_name", "file_type",
-                "subscriptions", "favorited", "views", "tags", "extended_description", "extended_description_en", "language",
-                "lifetime_subscriptions", "lifetime_favorited", "translation_priority"
-            }
-            
-            clean_api_data = {}
-            known_ignored_keys = {"result", "is_queued_for_subscription"} # 'result' is handled by steam_api.py, should not appear here
-            
-            for k, v in merged_data.items():
-                if k in allowed_keys:
-                    clean_api_data[k] = v
-                elif k not in known_ignored_keys:
-                    val_preview = str(v)[:20] + "..." if len(str(v)) > 20 else str(v)
-                    if v is not None and str(v).strip() != "":
-                        logging.info(f"Discarding unknown API column: '{k}' with value '{val_preview}' for item {item_id}")
-                    else:
-                        logging.debug(f"Discarding unknown (empty) API column: '{k}' for item {item_id}")
-                
-            merged_data = clean_api_data # Overwrite merged_data with only allowed keys
-            merged_data["dt_attempted"] = now_iso
-
-            if "tags" in merged_data:
-                merged_data["tags"] = normalize_tags(merged_data["tags"])
+            merged_data = self._merge_and_clean_api_data(api_data, merged_data, item_id, now_iso)
 
             # Step 2: Scrape Extended Details
             url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={item_id}"
@@ -271,25 +283,8 @@ class Daemon:
                 time.sleep(self.delay)
                 continue
 
-            # Merge Scrape Data
             merged_data["extended_description"] = scrape_data.get("description")
-            
-            # Check if translation is needed (contains non-ASCII)
-            is_unicode = (
-                not is_ascii(merged_data.get("title", "")) or 
-                not is_ascii(merged_data.get("short_description", "")) or 
-                not is_ascii(merged_data.get("extended_description", ""))
-            )
-            is_translated = merged_data.get('dt_translated') is not None
-            is_changed = (
-                merged_data.get('title') != existing_data.get('title') or
-                merged_data.get('short_description') != existing_data.get('short_description') or
-                merged_data.get('extended_description') != existing_data.get('extended_description')
-            )
-            needs_trans = is_unicode and (not is_translated or is_changed)
-
-            if needs_trans:
-                merged_data["translation_priority"] = 1
+            merged_data = self._evaluate_translation_needs(merged_data, existing_data)
 
             merged_data["status"] = 200 # OK
             insert_or_update_item(self.db_path, merged_data)
