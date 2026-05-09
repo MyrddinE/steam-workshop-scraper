@@ -345,6 +345,10 @@ def initialize_database(db_path: str):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator ON workshop_items (creator)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_short_description ON workshop_items (short_description)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_extended_description ON workshop_items (extended_description)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_status_dt_attempted ON workshop_items (status, dt_attempted)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_appid_status ON workshop_items (consumer_appid, status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_dt_updated ON workshop_items (creator, dt_updated)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_translation_priority ON workshop_items (translation_priority)")
 
     conn.commit()
     conn.close()
