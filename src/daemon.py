@@ -131,6 +131,40 @@ class Daemon:
             merged_data["translation_priority"] = 1
         return merged_data
 
+    def _should_enrich(self, appid: int, item: dict) -> bool:
+        """Returns True if the item matches enrichment filters for its AppID.
+        Non-matching items get basic API metadata stored but skip extended scraping."""
+        if appid is None or appid not in self.target_appids:
+            return True
+        app_tracking = get_app_tracking(self.db_path, appid)
+        if app_tracking is None:
+            return True
+        filter_text = (app_tracking.get("filter_text") or "").strip()
+        required_tags = json.loads(app_tracking.get("required_tags") or "[]")
+        excluded_tags = json.loads(app_tracking.get("excluded_tags") or "[]")
+        if not filter_text and not required_tags and not excluded_tags:
+            return True
+        if filter_text:
+            title = (item.get("title") or "").lower()
+            desc = (item.get("short_description") or "").lower()
+            if filter_text.lower() not in title and filter_text.lower() not in desc:
+                return False
+        if required_tags:
+            item_tags = []
+            try:
+                item_tags = json.loads(item.get("tags") or "[]")
+            except: pass
+            if not all(t in item_tags for t in required_tags):
+                return False
+        if excluded_tags:
+            item_tags = []
+            try:
+                item_tags = json.loads(item.get("tags") or "[]")
+            except: pass
+            if any(t in item_tags for t in excluded_tags):
+                return False
+        return True
+
     def _load_initial_filter_state(self):
         """Pre-loads filter state and page tracking from the DB on startup."""
         for appid in self.target_appids:
@@ -232,45 +266,37 @@ class Daemon:
                 continue # Skip to next item
 
             merged_data = self._merge_and_clean_api_data(api_data, merged_data, item_id, now_iso)
-
-            # Step 2: Scrape Extended Details
-            url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={item_id}"
-            scrape_data = scrape_extended_details(url)
             display_title = merged_data.get('title_en') or merged_data.get('title', 'Unknown Title')
-            
-            if not scrape_data:
-                merged_data["status"] = 206 # Partial Content
-                logging.debug(f"DEBUG: Calling insert_or_update_item with merged_data: {merged_data}")
-                insert_or_update_item(self.db_path, merged_data)
 
-                # Assemble detailed log message
-                successful_fields = [k for k, v in merged_data.items() if v is not None]
+            appid = merged_data.get("consumer_appid")
+            if self._should_enrich(appid, merged_data):
+                url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={item_id}"
+                scrape_data = scrape_extended_details(url)
 
-                failed_fields = ["extended_description", "tags"] # Known scrape targets
-                logging.warning(
-                    f"[{item_id}] '{display_title}' | Scraper failed, partial data saved. "
-                    f"Successfully pulled from API: {successful_fields}. "
-                    f"Failed to scrape from web: {failed_fields}."
-                )
-                
-                # Record Failure and Adjust Delay
-                self.consecutive_failures += 1
-                self.consecutive_successes = 0
-                
-                if self.consecutive_failures >= 2 and self.had_recent_success_streak:
-                    old_delay = self.delay
-                    self.delay += max(1.0, round(self.delay * 0.10))
-                    logging.info(f"Multiple consecutive failures after a success streak! Increasing delay from {old_delay} to {self.delay} seconds.")
-                    self._persist_delay()
-                    self.had_recent_success_streak = False
-                
-                time.sleep(self.delay)
-                continue
+                if not scrape_data:
+                    merged_data["status"] = 206
+                    insert_or_update_item(self.db_path, merged_data)
+                    logging.warning(
+                        f"[{item_id}] '{display_title}' | Scraper failed, partial data saved. "
+                        f"API data saved, but extended description could not be scraped."
+                    )
+                    self.consecutive_failures += 1
+                    self.consecutive_successes = 0
+                    if self.consecutive_failures >= 2 and self.had_recent_success_streak:
+                        old_delay = self.delay
+                        self.delay += max(1.0, round(self.delay * 0.10))
+                        logging.info(f"Multiple consecutive failures after a success streak! Increasing delay from {old_delay} to {self.delay} seconds.")
+                        self._persist_delay()
+                        self.had_recent_success_streak = False
+                    time.sleep(self.delay)
+                    continue
 
-            merged_data["extended_description"] = scrape_data.get("description")
-            merged_data = self._evaluate_translation_needs(merged_data, existing_data)
+                merged_data["extended_description"] = scrape_data.get("description")
+                merged_data = self._evaluate_translation_needs(merged_data, existing_data)
+            else:
+                logging.info(f"[{item_id}] '{display_title}' does not match enrichment filters for AppID {appid}. Storing API data only.")
 
-            merged_data["status"] = 200 # OK
+            merged_data["status"] = 200
             insert_or_update_item(self.db_path, merged_data)
             
             # Step 3: Fetch User/Creator details
