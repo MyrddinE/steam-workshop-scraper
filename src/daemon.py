@@ -60,6 +60,34 @@ class Daemon:
         signal.signal(signal.SIGINT, self.handle_shutdown)
         signal.signal(signal.SIGTERM, self.handle_shutdown)
 
+    @staticmethod
+    def _compute_filter_hash(filter_text: str, required_tags: list[str], excluded_tags: list[str]) -> str:
+        """Returns a deterministic hash of the current filter state for detecting changes."""
+        current_filter = {
+            "text": filter_text,
+            "req_tags": sorted(required_tags or []),
+            "excl_tags": sorted(excluded_tags or [])
+        }
+        return json.dumps(current_filter, sort_keys=True)
+
+    def _persist_delay(self):
+        """Saves the current delay to config file."""
+        if "daemon" not in self.config:
+            self.config["daemon"] = {}
+        self.config["daemon"]["request_delay_seconds"] = self.delay
+        save_config(self.config_path, self.config)
+
+    def _build_user_record(self, steamid: int, personaname: str) -> dict:
+        """Builds a user record dict for upsert, flagging for translation if non-ASCII."""
+        record = {
+            "steamid": steamid,
+            "personaname": personaname,
+            "dt_updated": datetime.now(timezone.utc).isoformat()
+        }
+        if not is_ascii(personaname):
+            record["translation_priority"] = 1
+        return record
+
     def _load_initial_filter_state(self):
         """Pre-loads the last known filter state from the DB on startup."""
         logging.info("Loading initial filter state from database...")
@@ -69,14 +97,7 @@ class Daemon:
                 saved_filter_text = app_tracking.get("filter_text", "")
                 saved_required_tags = json.loads(app_tracking.get("required_tags", "[]"))
                 saved_excluded_tags = json.loads(app_tracking.get("excluded_tags", "[]"))
-
-                current_filter = {
-                    "text": saved_filter_text,
-                    "req_tags": sorted(saved_required_tags),
-                    "excl_tags": sorted(saved_excluded_tags)
-                }
-                current_filter_hash = json.dumps(current_filter, sort_keys=True)
-                
+                current_filter_hash = self._compute_filter_hash(saved_filter_text, saved_required_tags, saved_excluded_tags)
                 self.last_filters[appid] = {"hash": current_filter_hash, "start_time": app_tracking.get("last_historical_date_scanned")}
 
     def handle_shutdown(self, signum, frame):
@@ -109,24 +130,11 @@ class Daemon:
                 for sid in missing_ids:
                     if sid in summaries:
                         pdata = summaries[sid]
-                        user_record = {
-                            "steamid": sid,
-                            "personaname": pdata.get("personaname"),
-                            "dt_updated": datetime.now(timezone.utc).isoformat()
-                        }
-                        if not is_ascii(user_record["personaname"]):
-                            user_record["translation_priority"] = 1
-                            logging.info(f"User {sid} ('{user_record['personaname']}') flagged for translation.")
-                        
+                        user_record = self._build_user_record(sid, pdata.get("personaname"))
                         insert_or_update_user(self.db_path, user_record)
                         logging.info(f"Updated profile for user {sid}: '{user_record['personaname']}'")
                     else:
-                        # Insert a placeholder so we don't keep trying every batch
-                        insert_or_update_user(self.db_path, {
-                            "steamid": sid, 
-                            "personaname": f"SteamID:{sid}",
-                            "dt_updated": datetime.now(timezone.utc).isoformat()
-                        })
+                        insert_or_update_user(self.db_path, self._build_user_record(sid, f"SteamID:{sid}"))
             except Exception as e:
                 logging.error(f"Error expanding user discovery: {e}")
 
@@ -255,15 +263,10 @@ class Daemon:
                 
                 if self.consecutive_failures >= 2 and self.had_recent_success_streak:
                     old_delay = self.delay
-                    increase = max(1.0, round(self.delay * 0.10))
-                    self.delay += increase
+                    self.delay += max(1.0, round(self.delay * 0.10))
                     logging.info(f"Multiple consecutive failures after a success streak! Increasing delay from {old_delay} to {self.delay} seconds.")
-                    if "daemon" not in self.config:
-                        self.config["daemon"] = {}
-                    self.config["daemon"]["request_delay_seconds"] = self.delay
-                    save_config(self.config_path, self.config)
-                    
-                    self.had_recent_success_streak = False # Reset so we don't spam increases
+                    self._persist_delay()
+                    self.had_recent_success_streak = False
                 
                 time.sleep(self.delay)
                 continue
@@ -296,47 +299,31 @@ class Daemon:
             if creator_id:
                 try:
                     creator_id = int(creator_id)
-                    # Check if we need to update user (missing or older than 7 days)
                     existing_user = get_user(self.db_path, creator_id)
                     should_update_user = True
                     if existing_user and existing_user.get("dt_updated"):
                         last_upd = datetime.fromisoformat(existing_user["dt_updated"])
                         if (datetime.now(timezone.utc) - last_upd).days < 7:
                             should_update_user = False
-                    
                     if should_update_user:
-                        user_summaries = get_player_summaries([creator_id], self.api_key)
-                        if creator_id in user_summaries:
-                            pdata = user_summaries[creator_id]
-                            user_record = {
-                                "steamid": creator_id,
-                                "personaname": pdata.get("personaname"),
-                                "dt_updated": datetime.now(timezone.utc).isoformat()
-                            }
-                            if not is_ascii(user_record["personaname"]):
-                                user_record["translation_priority"] = 1
-                            insert_or_update_user(self.db_path, user_record)
+                        summaries = get_player_summaries([creator_id], self.api_key)
+                        if creator_id in summaries:
+                            insert_or_update_user(self.db_path, self._build_user_record(creator_id, summaries[creator_id].get("personaname")))
                 except (ValueError, TypeError):
-                    pass # Not a numeric SteamID
+                    pass
 
-            # populated_fields = [k for k, v in merged_data.items() if v is not None and v != ""]
-            logging.info(f"[{item_id}] \"{display_title}\"") # | Populated: {populated_fields}")
+            logging.info(f"[{item_id}] \"{display_title}\"")
             
-            # Record Success and Adjust Delay
             self.consecutive_successes += 1
             self.consecutive_failures = 0
             if self.consecutive_successes >= 5:
                 self.had_recent_success_streak = True
-            
             if self.consecutive_successes >= 100:
                 old_delay = self.delay
                 self.delay = max(1.0, self.delay - 0.1)
                 if old_delay != self.delay:
                     logging.info(f"100 consecutive successes! Decreasing delay from {old_delay} to {self.delay} seconds.")
-                    if "daemon" not in self.config:
-                        self.config["daemon"] = {}
-                    self.config["daemon"]["request_delay_seconds"] = self.delay
-                    save_config(self.config_path, self.config)
+                    self._persist_delay()
                 self.consecutive_successes = 0
             
             # Polite delay between items
@@ -416,13 +403,7 @@ class Daemon:
             saved_excluded_tags = json.loads(app_tracking.get("excluded_tags") or "[]")
             window_size = app_tracking.get("window_size") or 30 * 24 * 3600 # Start with a 30-day window
 
-            # Compare current filter with last used filter (stored in daemon instance)
-            current_filter = {
-                "text": saved_filter_text,
-                "req_tags": sorted(saved_required_tags),
-                "excl_tags": sorted(saved_excluded_tags)
-            }
-            current_filter_hash = json.dumps(current_filter, sort_keys=True)
+            current_filter_hash = self._compute_filter_hash(saved_filter_text, saved_required_tags, saved_excluded_tags)
 
             if appid not in self.last_filters:
                 self.last_filters[appid] = {"hash": None, "start_time": None}
