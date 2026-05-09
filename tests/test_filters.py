@@ -1,8 +1,10 @@
 import pytest
 import json
+import sqlite3
 from src.database import (
     _evaluate_single_filter, _evaluate_filters, _evaluate_tag_filter,
-    initialize_database, insert_or_update_item, save_app_filter, get_app_tracking
+    initialize_database, insert_or_update_item, save_app_filter, get_app_tracking,
+    get_connection
 )
 
 # ── _evaluate_single_filter: text fields ────────────────────────────────────
@@ -165,3 +167,39 @@ def test_save_still_sets_legacy_columns(db_path):
     assert tracking["filter_text"] == "test"
     assert tracking["required_tags"] == json.dumps(["mod"])
     assert tracking["excluded_tags"] == json.dumps(["broken"])
+
+def test_legacy_filter_migration(tmp_path):
+    """Verify legacy filter columns are migrated to enrichment_filters on startup."""
+    db_path = str(tmp_path / "migrate.db")
+    # Create old-style DB manually (without enrichment_filters column)
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE app_tracking (
+            appid INTEGER PRIMARY KEY,
+            filter_text TEXT DEFAULT '',
+            required_tags TEXT DEFAULT '[]',
+            excluded_tags TEXT DEFAULT '[]'
+        )
+    """)
+    conn.execute("""
+        INSERT INTO app_tracking (appid, filter_text, required_tags, excluded_tags)
+        VALUES (294100, 'Vampire', '["Translation"]', '["Broken"]')
+    """)
+    conn.commit()
+    conn.close()
+
+    initialize_database(db_path)
+
+    tracking = get_app_tracking(db_path, 294100)
+    assert tracking is not None
+    filters = json.loads(tracking["enrichment_filters"])
+    assert len(filters) == 3
+    assert {"field": "Title", "op": "contains", "value": "Vampire"} in filters
+    assert {"field": "Tags", "op": "contains", "value": "Translation"} in filters
+    assert {"field": "Tags", "op": "does_not_contain", "value": "Broken"} in filters
+
+def test_legacy_filter_migration_no_legacy_data(db_path):
+    """Migration should not create enrichment_filters if there are no legacy filters."""
+    save_app_filter(db_path, 294100)
+    tracking = get_app_tracking(db_path, 294100)
+    assert tracking["enrichment_filters"] == '[]'

@@ -306,6 +306,35 @@ def initialize_database(db_path: str):
     
     cursor.execute("DROP TABLE IF EXISTS app_state")
 
+    # Legacy filter migration: convert old filter columns to unified enrichment_filters JSON
+    cursor.execute("""
+        SELECT appid, filter_text, required_tags, excluded_tags, enrichment_filters
+        FROM app_tracking
+        WHERE (enrichment_filters IS NULL OR enrichment_filters = '' OR enrichment_filters = '[]')
+    """)
+    for row in cursor.fetchall():
+        filter_text = (row["filter_text"] or "").strip()
+        try:
+            required_tags = json.loads(row["required_tags"] or "[]")
+        except: required_tags = []
+        try:
+            excluded_tags = json.loads(row["excluded_tags"] or "[]")
+        except: excluded_tags = []
+        if not filter_text and not required_tags and not excluded_tags:
+            continue
+        filters = []
+        if filter_text:
+            filters.append({"field": "Title", "op": "contains", "value": filter_text})
+        for tag in required_tags:
+            filters.append({"field": "Tags", "op": "contains", "value": tag})
+        for tag in excluded_tags:
+            filters.append({"field": "Tags", "op": "does_not_contain", "value": tag})
+        cursor.execute(
+            "UPDATE app_tracking SET enrichment_filters = ? WHERE appid = ?",
+            (json.dumps(filters), row["appid"])
+        )
+        conn.commit()
+
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON workshop_items (status)")
