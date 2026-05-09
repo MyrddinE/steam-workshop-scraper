@@ -132,14 +132,14 @@ class StatsScreen(Screen):
         # App Stats Table
         app_table = self.query_one("#app-stats-table", DataTable)
         app_table.clear(columns=True)
-        app_table.add_columns("AppID", "Last Valid Date", "Window Size")
+        app_table.add_columns("AppID", "Last Page", "Last Cursor")
         for app in stats["app_stats"]:
-            last_date = "N/A"
-            if app["last_historical_date_scanned"]:
-                try:
-                    last_date = datetime.datetime.fromtimestamp(app["last_historical_date_scanned"]).strftime('%Y-%m-%d')
-                except: pass
-            app_table.add_row(str(app["appid"]), last_date, str(app["window_size"]))
+            cursor_str = str(app.get("last_cursor", "") or "")
+            app_table.add_row(
+                str(app["appid"]),
+                str(app.get("last_page_scanned", 0) or 0),
+                cursor_str[:30] + "..." if len(cursor_str) > 30 else cursor_str,
+            )
 
         # Tag Stats Table
         tag_table = self.query_one("#tag-stats-table", DataTable)

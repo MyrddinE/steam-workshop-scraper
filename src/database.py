@@ -2,6 +2,7 @@ import sqlite3
 import shlex
 import re
 import json
+from datetime import datetime, timedelta
 
 WORKSHOP_ITEM_COLUMNS = frozenset({
     "workshop_id", "dt_found", "dt_updated", "dt_attempted", "dt_translated",
@@ -745,15 +746,16 @@ def _classify_translation_status(item) -> str:
         return "No translation needed (is_ascii==True)"
     return "Needs Translation (Unicode detected)"
 
-def _classify_attempted_recency(dt_attempted: str, reference_dt) -> str:
-    """Classifies a dt_attempted timestamp as 'blank', 'less than 7 days ago', or 'more than 7 days ago'."""
+def _classify_attempted_recency(dt_attempted: str, staleness_days: int = 30) -> str:
+    """Classifies a dt_attempted timestamp as 'fresh', 'stale', or 'blank'."""
     if not dt_attempted:
         return "blank"
     try:
         attempted_dt = datetime.fromisoformat(dt_attempted.replace("Z", "+00:00"))
+        threshold = datetime.now() - timedelta(days=staleness_days)
         if attempted_dt.tzinfo is None:
-            attempted_dt = attempted_dt.replace(tzinfo=reference_dt.tzinfo)
-        return "less than 7 days ago" if attempted_dt >= reference_dt else "more than 7 days ago"
+            attempted_dt = attempted_dt.replace(tzinfo=threshold.tzinfo)
+        return "fresh" if attempted_dt >= threshold else "stale"
     except (ValueError, TypeError):
         return "blank"
 
@@ -769,9 +771,8 @@ def _compute_tag_frequencies(cursor) -> dict:
     """)
     return {row["tag_value"]: row["cnt"] for row in cursor.fetchall()}
 
-def get_db_stats(db_path: str) -> dict:
+def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
     """Returns comprehensive statistics about the database."""
-    from datetime import datetime, timedelta
     conn = get_connection(db_path)
     cursor = conn.cursor()
 
@@ -791,17 +792,16 @@ def get_db_stats(db_path: str) -> dict:
         "Queued": 0, "Translated": 0,
         "Needs Translation (Unicode detected)": 0
     }
-    dt_attempted_counts = {"blank": 0, "less than 7 days ago": 0, "more than 7 days ago": 0}
-    seven_days_ago_dt = datetime.now() - timedelta(days=7)
+    dt_attempted_counts = {"fresh": 0, "stale": 0, "blank": 0}
 
     for item in all_items:
         translation_status[_classify_translation_status(item)] += 1
-        dt_attempted_counts[_classify_attempted_recency(item["dt_attempted"], seven_days_ago_dt)] += 1
+        dt_attempted_counts[_classify_attempted_recency(item["dt_attempted"], staleness_days)] += 1
 
     cursor.execute("SELECT MAX(dt_updated) FROM workshop_items")
     highest_dt_updated = cursor.fetchone()[0]
 
-    cursor.execute("SELECT appid, last_historical_date_scanned, window_size FROM app_tracking")
+    cursor.execute("SELECT appid, last_page_scanned, last_cursor FROM app_tracking")
     app_stats = [dict(row) for row in cursor.fetchall()]
 
     tag_counts = _compute_tag_frequencies(cursor)
