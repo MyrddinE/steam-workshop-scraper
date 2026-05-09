@@ -266,6 +266,7 @@ class Daemon:
             display_title = merged_data.get('title_en') or merged_data.get('title', 'Unknown Title')
 
             appid = merged_data.get("consumer_appid")
+            enriched = False
             if self._should_enrich(appid, merged_data):
                 url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={item_id}"
                 scrape_data = scrape_extended_details(url)
@@ -290,8 +291,7 @@ class Daemon:
 
                 merged_data["extended_description"] = scrape_data.get("description")
                 merged_data = self._evaluate_translation_needs(merged_data, existing_data)
-            else:
-                logging.info(f"[{item_id}] '{display_title}' does not match enrichment filters for AppID {appid}. Storing API data only.")
+                enriched = True
 
             merged_data["status"] = 200
             insert_or_update_item(self.db_path, merged_data)
@@ -314,7 +314,7 @@ class Daemon:
                 except (ValueError, TypeError):
                     pass
 
-            logging.info(f"[{item_id}] \"{display_title}\"")
+            logging.info(f"[{item_id}] \"{display_title}\"{' — \033[31mignored\033[0m' if not enriched else ''}")
             
             self.consecutive_successes += 1
             self.consecutive_failures = 0
