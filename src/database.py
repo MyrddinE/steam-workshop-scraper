@@ -369,8 +369,10 @@ def initialize_database(db_path: str):
     # Schema versioning: run migrations cumulatively from current to expected version
     EXPECTED_VERSION = 2
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
+    logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
     if db_version < 1:
+        logging.info("Running migration 0→1: recalculating Wilson subscriber scores...")
         import math
         # Migration 0→1: recalculate Wilson subscriber score with correct formula
         # (subscriptions/lifetime_subscriptions instead of lifetime_subscriptions/views)
@@ -395,9 +397,10 @@ def initialize_database(db_path: str):
             )
         conn.commit()
         cursor.execute("PRAGMA user_version = 1")
+        logging.info("Migration 0→1 complete.")
 
     if db_version < 2:
-        # Migration 1→2: normalize malformed JSON tags to valid JSON arrays
+        logging.info("Running migration 1→2: normalizing malformed JSON tags...")
         cursor.execute("""
             SELECT workshop_id, tags FROM workshop_items
             WHERE tags IS NOT NULL AND tags != '' AND tags != '[]'
@@ -414,8 +417,8 @@ def initialize_database(db_path: str):
                 fixed += 1
         if fixed:
             conn.commit()
-            logging.info(f"Migration 1→2: normalized {fixed} malformed tag entries.")
         cursor.execute("PRAGMA user_version = 2")
+        logging.info(f"Migration 1→2 complete. Fixed {fixed} malformed tag entries.")
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
