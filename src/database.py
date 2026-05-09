@@ -80,12 +80,13 @@ def _build_filter_clause(db_col: str, op: str, val) -> tuple[str, list]:
     return op_map.get(op, ("", []))
 
 def _build_json_tag_clause(db_col: str, op: str, val) -> tuple[str, list]:
-    """Like _build_filter_clause but uses json_each for JSON array columns (tags).
-    Avoids false positives from JSON structural characters."""
+    """Uses json_each for JSON array columns (tags).
+    Contains/does_not_contain use exact tag value match (not substring),
+    since tag names are discrete identifiers, not free text."""
     if op == "contains":
-        return (f"EXISTS (SELECT 1 FROM json_each({db_col}) WHERE value LIKE ?)", [f"%{val}%"])
+        return (f"EXISTS (SELECT 1 FROM json_each({db_col}) WHERE value = ?)", [val])
     if op == "does_not_contain":
-        return (f"NOT EXISTS (SELECT 1 FROM json_each({db_col}) WHERE value LIKE ?)", [f"%{val}%"])
+        return (f"NOT EXISTS (SELECT 1 FROM json_each({db_col}) WHERE value = ?)", [val])
     if op == "is_empty":
         return (f"({db_col} IS NULL OR {db_col} = '' OR {db_col} = '[]')", [])
     if op == "is_not_empty":

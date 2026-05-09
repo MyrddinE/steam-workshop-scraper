@@ -46,8 +46,7 @@ def test_normalize_tags_none():
 
 def test_tags_structural_safety_bracket_open(tagged_db):
     results = search_items(tagged_db, filters=[{"field": "Tags", "op": "contains", "value": "["}])
-    ids = {r["workshop_id"] for r in results}
-    assert ids == {6}
+    assert len(results) == 0
 
 def test_tags_structural_safety_comma(tagged_db):
     results = search_items(tagged_db, filters=[{"field": "Tags", "op": "contains", "value": ","}])
@@ -57,14 +56,18 @@ def test_tags_structural_safety_quote(tagged_db):
     results = search_items(tagged_db, filters=[{"field": "Tags", "op": "contains", "value": '"'}])
     assert len(results) == 0
 
-# ── Tag contains / does_not_contain (substring match per tag value) ──────────
+# ── Tag contains / does_not_contain (exact tag value match) ──────────────────
 
-def test_tags_contains_matches(tagged_db):
+def test_tags_contains_exact_match(tagged_db):
     results = search_items(tagged_db, filters=[{"field": "Tags", "op": "contains", "value": "Fruit"}])
     ids = {r["workshop_id"] for r in results}
     assert 1 in ids
     assert 3 in ids
-    assert 7 in ids
+
+def test_tags_contains_no_substring_false_positive(tagged_db):
+    results = search_items(tagged_db, filters=[{"field": "Tags", "op": "contains", "value": "Fruit"}])
+    ids = {r["workshop_id"] for r in results}
+    assert 7 not in ids
 
 def test_tags_contains_excludes_other(tagged_db):
     results = search_items(tagged_db, filters=[{"field": "Tags", "op": "contains", "value": "Fruit"}])
@@ -74,22 +77,35 @@ def test_tags_contains_excludes_other(tagged_db):
     assert 5 not in ids
 
 def test_tags_multi_word_tag_contains(tagged_db):
-    results = search_items(tagged_db, filters=[{"field": "Tags", "op": "contains", "value": "Very Cool"}])
+    results = search_items(tagged_db, filters=[{"field": "Tags", "op": "contains", "value": "Very Cool Mod"}])
     ids = {r["workshop_id"] for r in results}
     assert 4 in ids
     assert 1 not in ids
+
+def test_tags_contains_module(tagged_db):
+    insert_or_update_item(tagged_db, {"workshop_id": 100, "title": "Module Demo", "tags": normalize_tags(["Module", "Tutorial"])})
+    results = search_items(tagged_db, filters=[{"field": "Tags", "op": "contains", "value": "Module"}])
+    ids = {r["workshop_id"] for r in results}
+    assert 100 in ids
+    assert 4 not in ids
+
+def test_tags_contains_mod_does_not_match_module(tagged_db):
+    insert_or_update_item(tagged_db, {"workshop_id": 100, "title": "Module Demo", "tags": normalize_tags(["Module", "Tutorial"])})
+    results = search_items(tagged_db, filters=[{"field": "Tags", "op": "contains", "value": "Mod"}])
+    ids = {r["workshop_id"] for r in results}
+    assert 100 not in ids
 
 def test_tags_does_not_contain(tagged_db):
     results = search_items(tagged_db, filters=[{"field": "Tags", "op": "does_not_contain", "value": "Cereal"}])
     ids = {r["workshop_id"] for r in results}
     assert 2 not in ids
 
-def test_tags_does_not_contain_partial(tagged_db):
+def test_tags_does_not_contain_exact(tagged_db):
     results = search_items(tagged_db, filters=[{"field": "Tags", "op": "does_not_contain", "value": "Fruit"}])
     ids = {r["workshop_id"] for r in results}
     assert 1 not in ids
     assert 2 in ids
-    assert 7 not in ids
+    assert 7 in ids  # "FruitLoops" does not equal "Fruit"
 
 # ── Compound filters with AND/OR on tag field ────────────────────────────────
 
@@ -101,6 +117,13 @@ def test_tags_and_filters(tagged_db):
     ids = {r["workshop_id"] for r in results}
     assert 1 in ids
     assert 3 in ids
+
+def test_tags_and_filters_excludes_partial(tagged_db):
+    results = search_items(tagged_db, filters=[
+        {"field": "Tags", "op": "contains", "value": "Food"},
+        {"logic": "AND", "field": "Tags", "op": "contains", "value": "Fruit"},
+    ])
+    ids = {r["workshop_id"] for r in results}
     assert 7 not in ids
 
 def test_tags_or_filters(tagged_db):
