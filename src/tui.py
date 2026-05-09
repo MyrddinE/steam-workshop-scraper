@@ -160,23 +160,29 @@ class AnalysisScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Label("[b]View Window Analysis[/b]", id="analysis-title")
-        with Horizontal(id="analysis-controls"):
-            yield Label("Bucket size (days): ")
-            yield Input(value="7", id="analysis-bucket-size")
-            yield Button("Recalculate", id="btn-analysis-recalc")
-        yield Static(id="analysis-summary")
-        with VerticalScroll(id="analysis-table-scroll"):
-            yield DataTable(id="analysis-table")
+        with Horizontal(id="analysis-main"):
+            with Vertical(id="analysis-sidebar"):
+                yield Label("[b]View Window Analysis[/b]", id="analysis-title")
+                yield Label("Bucket size\n(days):", id="analysis-bucket-label")
+                yield Input(value="7", id="analysis-bucket-size")
+                yield Button("Recalculate", id="btn-analysis-recalc")
+                yield Button("Close", id="btn-analysis-close", variant="error")
+            with Vertical(id="analysis-right"):
+                yield Static(id="analysis-summary")
+                with VerticalScroll(id="analysis-table-scroll"):
+                    yield DataTable(id="analysis-table")
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#analysis-bucket-size").styles.width = 6
+        self.query_one("#analysis-bucket-size").styles.width = 10
+        self.query_one("#analysis-sidebar").styles.width = 22
         self.run_analysis()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-analysis-recalc":
             self.run_analysis()
+        elif event.button.id == "btn-analysis-close":
+            self.app.pop_screen()
 
     def run_analysis(self) -> None:
         try:
