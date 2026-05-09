@@ -376,10 +376,10 @@ def initialize_database(db_path: str):
             if views == 0:
                 continue
             def wl(s, v):
-                p = s / v
+                p = min(float(s) / v, 1.0)
                 z2 = 1.96 * 1.96
                 d = 1 + z2 / v
-                n = p + z2 / (2*v) - 1.96 * math.sqrt(p*(1-p)/v + z2/(4*v*v))
+                n = p + z2 / (2*v) - 1.96 * math.sqrt(max(0.0, p*(1-p)/v) + z2/(4*v*v))
                 return max(0.0, min(1.0, n / d))
             fav_score = wl(row["favorited"] or 0, views)
             sub_score = wl(row["lifetime_subscriptions"] or 0, views)

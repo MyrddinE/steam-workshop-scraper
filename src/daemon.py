@@ -32,10 +32,10 @@ def wilson_lower(successes: int, trials: int, z: float = 1.96) -> float:
     Returns 0.0–1.0; penalizes small sample sizes."""
     if trials == 0:
         return 0.0
-    p = successes / trials
+    p = min(float(successes) / trials, 1.0)
     z2 = z * z
     denom = 1 + z2 / trials
-    numer = p + z2 / (2 * trials) - z * math.sqrt(p * (1 - p) / trials + z2 / (4 * trials * trials))
+    numer = p + z2 / (2 * trials) - z * math.sqrt(max(0.0, p * (1 - p) / trials) + z2 / (4 * trials * trials))
     return max(0.0, min(1.0, numer / denom))
 
 
