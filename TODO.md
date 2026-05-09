@@ -2,7 +2,7 @@
 
 | # | Issue | Impact | Difficulty | Priority | Status |
 |---|---|---|---|---|---|---|
-| 1 | **Tags as JSON TEXT, queried via LIKE** — false positives, no structured querying, no index benefit | medium | medium | medium | pending |
+| 1 | **Tags as JSON TEXT, queried via LIKE** — false positives, no structured querying, no index benefit | medium | medium | medium | pushed |
 | 2 | **No composite indexes** — `(consumer_appid, status)`, `(creator, dt_updated)` etc. missing | medium | easy | medium | pending |
 | 3 | **No Full-Text Search (FTS5)** — `LIKE '%...%'` on text fields scales poorly | medium | medium | medium | pending |
 | 4 | **No foreign key constraints** — `creator` → `users.steamid` unenforced | low | easy | low | pending |
