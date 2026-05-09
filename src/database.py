@@ -198,7 +198,8 @@ def initialize_database(db_path: str):
         filter_text TEXT DEFAULT '',
         required_tags TEXT DEFAULT '[]',
         excluded_tags TEXT DEFAULT '[]',
-        window_size INTEGER DEFAULT 2592000
+        window_size INTEGER DEFAULT 2592000,
+        last_page_scanned INTEGER DEFAULT 0
     )
     """)
 
@@ -207,7 +208,8 @@ def initialize_database(db_path: str):
         ("filter_text", "TEXT DEFAULT ''"),
         ("required_tags", "TEXT DEFAULT '[]'"),
         ("excluded_tags", "TEXT DEFAULT '[]'"),
-        ("window_size", "INTEGER DEFAULT 2592000")
+        ("window_size", "INTEGER DEFAULT 2592000"),
+        ("last_page_scanned", "INTEGER DEFAULT 0")
     ])
 
     # Data Migration: Populate app_tracking from existing workshop_items if empty, 
@@ -682,6 +684,17 @@ def update_app_tracking(db_path: str, appid: int, last_date: int, window_size: i
         "INSERT INTO app_tracking (appid, last_historical_date_scanned, window_size) VALUES (?, ?, ?) "
         "ON CONFLICT(appid) DO UPDATE SET last_historical_date_scanned = excluded.last_historical_date_scanned, window_size = excluded.window_size",
         (appid, last_date, window_size)
+    )
+    conn.commit()
+    conn.close()
+
+def update_app_tracking_page(db_path: str, appid: int, last_page: int) -> None:
+    """Updates the last_page_scanned for a given appid."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT INTO app_tracking (appid, last_page_scanned) VALUES (?, ?) "
+        "ON CONFLICT(appid) DO UPDATE SET last_page_scanned = excluded.last_page_scanned",
+        (appid, last_page)
     )
     conn.commit()
     conn.close()
