@@ -3,6 +3,22 @@ import shlex
 import re
 import json
 
+WORKSHOP_ITEM_COLUMNS = frozenset({
+    "workshop_id", "dt_found", "dt_updated", "dt_attempted", "dt_translated",
+    "status", "title", "title_en", "creator", "creator_appid", "consumer_appid",
+    "filename", "file_size", "preview_url", "hcontent_file", "hcontent_preview",
+    "short_description", "short_description_en", "time_created", "time_updated",
+    "visibility", "banned", "ban_reason", "app_name", "file_type",
+    "subscriptions", "favorited", "views", "tags", "extended_description",
+    "extended_description_en", "language", "lifetime_subscriptions",
+    "lifetime_favorited", "translation_priority", "is_queued_for_subscription",
+})
+
+USER_COLUMNS = frozenset({
+    "steamid", "personaname", "personaname_en",
+    "dt_updated", "dt_translated", "translation_priority",
+})
+
 def get_connection(db_path: str):
     """
     Returns a SQLite connection with WAL mode enabled and Row factory.
@@ -189,12 +205,13 @@ def _build_limit_offset(limit: int, offset: int) -> tuple[str, list]:
     return "", []
 
 def _safe_add_columns(cursor, table: str, columns: list[tuple[str, str]]):
-    """Safely adds columns to an existing table, ignoring duplicates."""
+    """Safely adds columns to an existing table, ignoring duplicate-column errors."""
     for col_name, col_type in columns:
         try:
             cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}")
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e):
+                raise
 
 def initialize_database(db_path: str):
     """
@@ -206,12 +223,15 @@ def initialize_database(db_path: str):
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS workshop_items (
         workshop_id INTEGER PRIMARY KEY,
+        -- dt_* columns: daemon-managed timestamps (ISO 8601 TEXT)
+        -- time_* columns: Steam-side timestamps (Unix INTEGER)
         dt_found TEXT,
         dt_updated TEXT,
         dt_attempted TEXT,
         status INTEGER,
         title TEXT,
-        creator INTEGER,
+        creator INTEGER, -- FK to users.steamid (LEFT JOIN used; FK omitted
+                        --   because items are discovered before users are fetched)
         creator_appid INTEGER,
         consumer_appid INTEGER,
         filename TEXT,
@@ -383,7 +403,8 @@ def insert_or_update_item(db_path: str, item_data: dict) -> bool:
     """
     conn = get_connection(db_path)
     
-    # Check if item exists to determine if this is a new discovery
+    columns = [col for col in item_data.keys() if col in WORKSHOP_ITEM_COLUMNS]
+    
     cursor = conn.execute("SELECT 1 FROM workshop_items WHERE workshop_id = ?", (item_data["workshop_id"],))
     is_new = cursor.fetchone() is None
 
@@ -462,7 +483,7 @@ def count_unscraped_items(db_path: str) -> int:
 def insert_or_update_user(db_path: str, user_data: dict):
     """Inserts or updates a user in the users table."""
     conn = get_connection(db_path)
-    columns = list(user_data.keys())
+    columns = [col for col in user_data.keys() if col in USER_COLUMNS]
     placeholders = ",".join(["?"] * len(columns))
     updates = ",".join([f"{col}=excluded.{col}" for col in columns if col != "steamid"])
     
