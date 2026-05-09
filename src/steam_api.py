@@ -121,18 +121,19 @@ def get_player_summaries(steamids: list[int], api_key: str) -> dict[int, dict]:
     except (requests.exceptions.RequestException, ValueError, KeyError):
         return {}
 
-def query_workshop_files(appid: int, page: int, api_key: str, numperpage: int = 100) -> dict:
+def query_workshop_files(appid: int, cursor: str, api_key: str) -> dict:
     """
     Queries the Steam Workshop using IPublishedFileService/QueryFiles,
-    sorted by publication date (newest first).
-    Returns a dict with 'total' and 'items'.
+    sorted by publication date (newest first). Uses cursor-based pagination
+    for unlimited depth (pass '*' for the first page).
+    Returns a dict with 'total', 'items', and 'next_cursor'.
     """
     url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
     params = {
         "key": api_key,
         "query_type": 1,
-        "page": page,
-        "numperpage": numperpage,
+        "cursor": cursor,
+        "numperpage": 100,
         "appid": appid,
         "return_short_description": True,
         "return_tags": True,
@@ -150,12 +151,13 @@ def query_workshop_files(appid: int, page: int, api_key: str, numperpage: int = 
         
         return {
             "total": data.get("total", 0),
-            "items": data.get("publishedfiledetails", [])
+            "items": data.get("publishedfiledetails", []),
+            "next_cursor": data.get("next_cursor", ""),
         }
     except requests.exceptions.HTTPError as e:
         if e.response is not None and e.response.status_code == 403:
             logging.error(f"Steam API returned 403 Forbidden for QueryFiles. "
                           "API key may be missing or invalid.")
-        return {"total": 0, "items": [], "error": True}
+        return {"total": 0, "items": [], "next_cursor": "", "error": True}
     except (requests.exceptions.RequestException, ValueError, KeyError):
-        return {"total": 0, "items": [], "error": True}
+        return {"total": 0, "items": [], "next_cursor": "", "error": True}

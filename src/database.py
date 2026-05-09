@@ -305,7 +305,8 @@ def initialize_database(db_path: str):
         excluded_tags TEXT DEFAULT '[]',
         window_size INTEGER DEFAULT 2592000,
         last_page_scanned INTEGER DEFAULT 0,
-        enrichment_filters TEXT DEFAULT '[]'
+        enrichment_filters TEXT DEFAULT '[]',
+        last_cursor TEXT DEFAULT ''
     )
     """)
 
@@ -316,7 +317,8 @@ def initialize_database(db_path: str):
         ("excluded_tags", "TEXT DEFAULT '[]'"),
         ("window_size", "INTEGER DEFAULT 2592000"),
         ("last_page_scanned", "INTEGER DEFAULT 0"),
-        ("enrichment_filters", "TEXT DEFAULT '[]'")
+        ("enrichment_filters", "TEXT DEFAULT '[]'"),
+        ("last_cursor", "TEXT DEFAULT ''"),
     ])
 
     # Data Migration: Populate app_tracking from existing workshop_items if empty, 
@@ -931,6 +933,17 @@ def update_app_tracking_page(db_path: str, appid: int, last_page: int) -> None:
         "INSERT INTO app_tracking (appid, last_page_scanned) VALUES (?, ?) "
         "ON CONFLICT(appid) DO UPDATE SET last_page_scanned = excluded.last_page_scanned",
         (appid, last_page)
+    )
+    conn.commit()
+    conn.close()
+
+def update_app_tracking_cursor(db_path: str, appid: int, cursor: str) -> None:
+    """Updates the last_cursor for a given appid."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT INTO app_tracking (appid, last_cursor) VALUES (?, ?) "
+        "ON CONFLICT(appid) DO UPDATE SET last_cursor = excluded.last_cursor",
+        (appid, cursor)
     )
     conn.commit()
     conn.close()

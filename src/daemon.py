@@ -15,6 +15,7 @@ from src.database import (
     get_app_tracking,
     update_app_tracking,
     update_app_tracking_page,
+    update_app_tracking_cursor,
     save_app_filter,
     get_connection,
     get_item_details,
@@ -205,7 +206,10 @@ class Daemon:
         for appid in self.target_appids:
             app_tracking = get_app_tracking(self.db_path, appid)
             if app_tracking:
-                self.last_filters[appid] = {"last_page": app_tracking.get("last_page_scanned", 0) or 0}
+                self.last_filters[appid] = {
+                    "last_page": app_tracking.get("last_page_scanned", 0) or 0,
+                    "last_cursor": app_tracking.get("last_cursor") or ""
+                }
 
     def handle_shutdown(self, signum, frame):
         """Signals the loop to stop and finishes the current batch safely."""
@@ -433,8 +437,8 @@ class Daemon:
 
     def seed_database(self, target_new: int = 100):
         """
-        Discovers workshop items via IPublishedFileService/QueryFiles API.
-        Paginates from page 1 (newest first) until target_new new items found.
+        Discovers workshop items via IPublishedFileService/QueryFiles API
+        using cursor-based pagination (unlimited depth).
         """
         if not self.api_key:
             logging.error("No Steam API key configured. Discovery cannot run. "
@@ -447,26 +451,19 @@ class Daemon:
                 continue
 
             app_tracking = get_app_tracking(self.db_path, appid)
-            last_page = (app_tracking or {}).get("last_page_scanned", 0) or 0
-            max_pages = 500
-
-            logging.info(f"Discovering items for AppID {appid}, starting from page {last_page + 1}...")
+            cursor = (app_tracking or {}).get("last_cursor") or "*"
             new_discovered_count = 0
-            total = None
-            page = last_page + 1
+            pages = 0
 
-            while page <= max_pages and self.running:
-                result = query_workshop_files(appid, page=page, api_key=self.api_key)
+            logging.info(f"Discovering items for AppID {appid}, resuming from cursor...")
+            while cursor and self.running:
+                result = query_workshop_files(appid, cursor=cursor, api_key=self.api_key)
                 if result.get("error"):
-                    logging.error(f"API error for AppID {appid} page {page}. Halting discovery.")
-                    break
-                if not result["items"] and total is None:
+                    logging.error(f"API error for AppID {appid}. Halting discovery.")
                     break
 
-                if total is None and result["total"]:
-                    total = result["total"]
-                    max_pages = min(max_pages, max(1, (total + 99) // 100))
-                    logging.info(f"AppID {appid} has ~{total} total items across {max_pages} pages.")
+                if pages == 0 and result["total"]:
+                    logging.info(f"AppID {appid} has ~{result['total']} total items.")
 
                 page_new_count = 0
                 for item in result["items"]:
@@ -475,17 +472,17 @@ class Daemon:
                         page_new_count += 1
 
                 new_discovered_count += page_new_count
-                logging.info(f"Page {page}/{max_pages} provided {page_new_count} new items. (Total new: {new_discovered_count})")
-                update_app_tracking_page(self.db_path, appid, page)
+                pages += 1
+                logging.info(f"Cursor page {pages} provided {page_new_count} new items. (Total new: {new_discovered_count})")
+
+                cursor = result.get("next_cursor") or ""
+                if cursor:
+                    update_app_tracking_cursor(self.db_path, appid, cursor)
+                time.sleep(self.api_delay)
 
                 if new_discovered_count >= target_new:
                     logging.info(f"Discovered {new_discovered_count} new items for AppID {appid}, enough for now.")
                     break
 
-                if len(result["items"]) == 0:
-                    break
-
-                page += 1
-
-            if page > last_page + 1:
-                logging.info(f"Finished scanning pages {last_page + 1}-{page} for AppID {appid}. Discovered {new_discovered_count} new items.")
+            if pages:
+                logging.info(f"Finished scanning {pages} pages for AppID {appid}. Discovered {new_discovered_count} new items.")

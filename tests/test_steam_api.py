@@ -122,28 +122,31 @@ def test_query_workshop_files_success():
             "publishedfiledetails": [
                 {"publishedfileid": "111", "time_updated": 1000},
                 {"publishedfileid": "222", "time_updated": 2000}
-            ]
+            ],
+            "next_cursor": "abc"
         }
     }
     responses.add(responses.GET, url, json=mock_data, status=200)
-    result = query_workshop_files(4000, page=1, api_key="TEST_KEY")
+    result = query_workshop_files(4000, cursor="*", api_key="TEST_KEY")
     assert result["total"] == 2
     assert len(result["items"]) == 2
     assert result["items"][0]["publishedfileid"] == "111"
+    assert result["next_cursor"] == "abc"
 
 @responses.activate
 def test_query_workshop_files_empty():
     url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
     responses.add(responses.GET, url, json={"response": {}}, status=200)
-    result = query_workshop_files(4000, page=1, api_key="TEST_KEY")
+    result = query_workshop_files(4000, cursor="*", api_key="TEST_KEY")
     assert result["total"] == 0
     assert len(result["items"]) == 0
+    assert result["next_cursor"] == ""
 
 @responses.activate
 def test_query_workshop_files_error():
     url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
     responses.add(responses.GET, url, status=500)
-    result = query_workshop_files(4000, page=1, api_key="TEST_KEY")
+    result = query_workshop_files(4000, cursor="*", api_key="TEST_KEY")
     assert result["total"] == 0
     assert len(result["items"]) == 0
 
@@ -151,7 +154,7 @@ def test_query_workshop_files_error():
 def test_query_workshop_files_partial_response():
     url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
     responses.add(responses.GET, url, json={}, status=200)
-    result = query_workshop_files(4000, page=1, api_key="TEST_KEY")
+    result = query_workshop_files(4000, cursor="*", api_key="TEST_KEY")
     assert result["total"] == 0
     assert len(result["items"]) == 0
 
