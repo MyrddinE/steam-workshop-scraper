@@ -9,6 +9,21 @@ from src.database import get_connection, get_next_translation_item
 # Silence httpx logging which openai uses internally
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
+def _validate_openai_api_key(config: dict) -> str | None:
+    """Returns the OpenAI API key from config, or None if not configured."""
+    openai_config = config.get("openai", {})
+    api_key = openai_config.get("api_key")
+    if api_key and "YOUR_OPENAI_API_KEY" not in api_key:
+        return api_key
+    return None
+
+def _create_openai_client(openai_config: dict) -> OpenAI:
+    """Creates an OpenAI client from the config's openai section."""
+    return OpenAI(
+        api_key=openai_config.get("api_key"),
+        base_url=openai_config.get("endpoint", "https://api.openai.com/v1")
+    )
+
 def is_ascii(s: str) -> bool:
     """Returns True if the string is entirely ASCII."""
     if not s:
@@ -20,9 +35,7 @@ def translate_item(db_path: str, item_id: int, config: dict, item_type: str = "w
     Fetches the row for workshop_id or steamid, translates relevant fields via OpenAI,
     and updates the database with the results.
     """
-    openai_config = config.get("openai", {})
-    api_key = openai_config.get("api_key")
-    if not api_key or "YOUR_OPENAI_API_KEY" in api_key:
+    if not _validate_openai_api_key(config):
         return
 
     conn = get_connection(db_path)
@@ -43,7 +56,7 @@ def translate_item(db_path: str, item_id: int, config: dict, item_type: str = "w
         }
         id_col = "workshop_id"
         table = "workshop_items"
-    else: # user
+    else:
         cursor = conn.execute(
             "SELECT personaname FROM users WHERE steamid = ?",
             (item_id,)
@@ -58,11 +71,8 @@ def translate_item(db_path: str, item_id: int, config: dict, item_type: str = "w
         id_col = "steamid"
         table = "users"
 
-    # Prepare OpenAI Client
-    client = OpenAI(
-        api_key=api_key,
-        base_url=openai_config.get("endpoint", "https://api.openai.com/v1")
-    )
+    openai_config = config.get("openai", {})
+    client = _create_openai_client(openai_config)
 
     prompt = f"""
     Translate the following Steam Workshop {'item metadata' if item_type == 'workshop_item' else 'user name'} into English. 
