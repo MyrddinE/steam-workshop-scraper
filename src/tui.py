@@ -14,6 +14,9 @@ from src.analysis import view_window_analysis
 from src.config import load_config
 import os
 import yaml
+import threading
+import socket
+import webbrowser
 import datetime
 
 def format_ts(ts):
@@ -950,6 +953,8 @@ class ScraperApp(App):
         self.db_path = self.config["database"]["path"]
         initialize_database(self.db_path)
         self._wilson_cutoffs = {}
+        self._web_port = None
+        self._start_webserver()
         self.current_item_creator = None
         self.pause_lock_file = ".pauselock"
         
@@ -1044,6 +1049,8 @@ class ScraperApp(App):
             id="search-container"
         )
         search_container.border_title = "Filters"
+        if self._web_port:
+            search_container.border_subtitle = f"web :{self._web_port}"
 
         sort_options = [
             ("Title", "title"),
@@ -1372,6 +1379,34 @@ class ScraperApp(App):
     def action_show_analysis(self) -> None:
         """Shows the view window analysis screen."""
         self.push_screen(AnalysisScreen(self.db_path))
+
+    def _start_webserver(self) -> None:
+        """Starts the embedded web server in a background thread."""
+        try:
+            from src.webserver import app, init_webserver
+            # Find a free port
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.bind(('0.0.0.0', 0))
+            self._web_port = s.getsockname()[1]
+            s.close()
+
+            init_webserver(self.db_path, self.config)
+
+            def run_server():
+                import werkzeug.serving
+                # Silence Flask/Werkzeug startup log
+                from flask.logging import create_logger
+                import logging
+                app.logger = create_logger(app)
+                app.logger.setLevel(logging.WARNING)
+                werkzeug.serving.WSGIRequestHandler.log = lambda *a, **kw: None
+                app.run(host='0.0.0.0', port=self._web_port, debug=False, use_reloader=False)
+
+            self._web_thread = threading.Thread(target=run_server, daemon=True)
+            self._web_thread.start()
+            logging.info(f"Web server started on port {self._web_port}")
+        except Exception as e:
+            logging.warning(f"Web server failed to start: {e}")
 
 def main():
     config_path = "config.yaml"

@@ -15,7 +15,8 @@ dependencies = [
     "pyyaml",
     "textual",
     "lxml_html_clean",
-    "openai"
+    "openai",
+    "flask"
 ]
 
 [project.scripts]

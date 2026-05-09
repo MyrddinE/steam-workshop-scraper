@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Steam Workshop Scraper</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+<style>
+:root { --pico-font-size: 85%; }
+body { min-height: 100vh; display: flex; flex-direction: column; }
+header { padding: .5rem 1rem; border-bottom: 1px solid var(--pico-muted-border-color); }
+main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
+#results-pane { flex: 0 0 300px; overflow-y: auto; border-right: 1px solid var(--pico-muted-border-color); padding-right: .5rem; }
+#detail-pane { flex: 1; overflow-y: auto; padding-left: .5rem; }
+.stats-row { display: grid; grid-template-columns: 1fr 1fr; gap: .25rem; }
+.stat-label { color: var(--pico-muted-color); }
+.stat-wilson { font-weight: bold; }
+.wilson-p99 { color: #ffd700; }
+.wilson-p90 { color: #ffd700; }
+.wilson-p50 { color: #e0e0e0; }
+.wilson-low { color: #888; }
+.ignored { color: #ff4444; }
+#search-builder { margin-bottom: .5rem; }
+.filter-row { display: flex; gap: .25rem; align-items: center; margin-bottom: .25rem; }
+.filter-row select, .filter-row input { padding: 2px 4px; }
+.filter-row select.field-select { flex: 2; }
+.filter-row select.op-select { flex: 2; }
+.filter-row input.value-input { flex: 3; }
+.filter-row button { padding: 2px 6px; min-width: 2rem; }
+#results-list .result-item { cursor: pointer; padding: .25rem .5rem; border-bottom: 1px solid var(--pico-muted-border-color); }
+#results-list .result-item:hover { background: var(--pico-primary-hover-background); }
+#results-list .result-item.selected { background: var(--pico-primary-background); }
+#results-list .queued { color: #44aa44; }
+header { display: flex; justify-content: space-between; align-items: center; }
+#port-display { font-size: .8rem; color: var(--pico-muted-color); }
+#load-more { width: 100%; margin-top: .5rem; display: none; }
+
+@media (max-width: 768px) {
+  main { flex-direction: column; }
+  #results-pane { flex: 0 0 40%; border-right: none; border-bottom: 1px solid var(--pico-muted-border-color); }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1 style="margin:0;font-size:1.2rem">Workshop Scraper</h1>
+  <span id="port-display"></span>
+</header>
+<main>
+  <div id="results-pane">
+    <div id="search-builder">
+      <div id="filter-rows"></div>
+      <div style="display:flex;gap:.25rem;margin-top:.25rem">
+        <button id="btn-search" style="flex:2">Search</button>
+        <button id="btn-save-filter" title="Save for scraper">💾</button>
+        <button id="btn-and" style="flex:1">AND</button>
+        <button id="btn-or" style="flex:1">OR</button>
+      </div>
+      <div style="display:flex;gap:.25rem;margin-top:.25rem">
+        <select id="sort-by" style="flex:2">
+          <option value="title">Title</option>
+          <option value="file_size">File Size</option>
+          <option value="subscriptions">Subscriptions</option>
+          <option value="favorited">Favorites</option>
+          <option value="views">Views</option>
+          <option value="workshop_id">Workshop ID</option>
+          <option value="time_created">Created Time</option>
+          <option value="time_updated">Updated Time</option>
+          <option value="wilson_subscription_score">Subscriber Score</option>
+          <option value="wilson_favorite_score">Favorite Score</option>
+        </select>
+        <select id="sort-order" style="flex:1">
+          <option value="ASC">ASC</option>
+          <option value="DESC">DESC</option>
+        </select>
+        <a href="/api/stats" id="btn-stats" style="flex:0.5">📊</a>
+      </div>
+    </div>
+    <div id="results-list"></div>
+    <button id="load-more">Load more...</button>
+  </div>
+  <div id="detail-pane">
+    <p class="stat-label">Select an item to see details.</p>
+  </div>
+</main>
+
+<script>
+const FIELD_OPS = {
+  text: ['contains','does_not_contain','is','is_not','is_empty','is_not_empty'],
+  numeric: ['is','is_not','gt','lt','gte','lte','is_empty','is_not_empty'],
+  id: ['is','is_not']
+};
+const NUMERIC_FIELDS = ['File Size','Subs','Favs','Views','Language ID','Subscriber Score','Favorite Score'];
+const ID_FIELDS = ['Author ID','Workshop ID','AppID'];
+const ALL_FIELDS = ['Title','Description','Filename','Tags','Author ID','File Size','Subs','Favs','Views','Workshop ID','AppID','Language ID','Subscriber Score','Favorite Score'];
+
+let currentOffset = 0;
+let hasMore = true;
+let loading = false;
+
+function updateOps(row) {
+  const field = row.querySelector('.field-select').value;
+  const opSelect = row.querySelector('.op-select');
+  let ops;
+  if (ID_FIELDS.includes(field)) ops = FIELD_OPS.id;
+  else if (NUMERIC_FIELDS.includes(field)) ops = FIELD_OPS.numeric;
+  else ops = FIELD_OPS.text;
+  opSelect.innerHTML = ops.map(o => `<option value="${o}">${o.replace(/_/g,' ')}</option>`).join('');
+}
+
+function addRow(logic) {
+  const container = document.getElementById('filter-rows');
+  const div = document.createElement('div');
+  div.className = 'filter-row';
+  if (logic) div.dataset.logic = logic;
+  div.innerHTML = `
+    <select class="field-select">${ALL_FIELDS.map(f => `<option value="${f}">${f}</option>`).join('')}</select>
+    <select class="op-select"></select>
+    <input class="value-input" type="text" placeholder="value">
+    <button onclick="removeRow(this.parentElement)">✕</button>
+  `;
+  container.appendChild(div);
+  updateOps(div);
+}
+
+function removeRow(row) { row.remove(); }
+
+function getFilters() {
+  const rows = document.querySelectorAll('#filter-rows .filter-row');
+  const filters = [];
+  rows.forEach(r => {
+    const f = {
+      field: r.querySelector('.field-select').value,
+      op: r.querySelector('.op-select').value,
+      value: r.querySelector('.value-input').value
+    };
+    if (r.dataset.logic) f.logic = r.dataset.logic;
+    filters.push(f);
+  });
+  return filters;
+}
+
+async function doSearch(reset = true) {
+  if (loading) return;
+  loading = true;
+  if (reset) { currentOffset = 0; hasMore = true; document.getElementById('results-list').innerHTML = ''; }
+  
+  const filters = getFilters();
+  const sortBy = document.getElementById('sort-by').value;
+  const sortOrder = document.getElementById('sort-order').value;
+  
+  const resp = await fetch('/api/search', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({filters, sort_by: sortBy, sort_order: sortOrder, offset: currentOffset, limit: 50})
+  });
+  const items = await resp.json();
+  
+  const list = document.getElementById('results-list');
+  items.forEach(item => {
+    const div = document.createElement('div');
+    div.className = 'result-item';
+    if (item.is_queued_for_subscription) div.classList.add('queued');
+    const title = item.title_en || item.title || 'Untitled';
+    const creator = item.personaname_en || item.personaname || item.creator || 'Unknown';
+    div.innerHTML = `${item.is_queued_for_subscription ? '★ ' : ''}<b>${title}</b> <small>by ${creator}</small>`;
+    div.onclick = () => showDetail(item.workshop_id);
+    list.appendChild(div);
+  });
+  
+  currentOffset += items.length;
+  hasMore = items.length >= 50;
+  document.getElementById('load-more').style.display = hasMore ? 'block' : 'none';
+  loading = false;
+}
+
+async function showDetail(wid) {
+  const pane = document.getElementById('detail-pane');
+  pane.innerHTML = '<p>Loading...</p>';
+  const resp = await fetch('/api/item/' + wid);
+  const item = await resp.json();
+  if (item.error) { pane.innerHTML = '<p>Item not found.</p>'; return; }
+  
+  const title = item.title_en || item.title || 'N/A';
+  const creator = item.personaname_en || item.personaname || item.creator || 'N/A';
+  
+  const views = item.views ? item.views.toLocaleString() : 'N/A';
+  const subs = item.subscriptions ? item.subscriptions.toLocaleString() : 'N/A';
+  const lsubs = item.lifetime_subscriptions ? item.lifetime_subscriptions.toLocaleString() : 'N/A';
+  const favs = item.favorited ? item.favorited.toLocaleString() : 'N/A';
+  const lfavs = item.lifetime_favorited ? item.lifetime_favorited.toLocaleString() : 'N/A';
+  
+  const wfs = item.wilson_favorite_score != null ? (item.wilson_favorite_score * 100).toFixed(1) + '%' : 'N/A';
+  const wss = item.wilson_subscription_score != null ? (item.wilson_subscription_score * 100).toFixed(1) + '%' : 'N/A';
+  
+  const tags = Array.isArray(item.tags) ? item.tags.join(', ') : 'None';
+  const size = item.file_size ? (item.file_size / 1024 / 1024).toFixed(1) + ' MB' : 'N/A';
+  const created = item.time_created ? new Date(item.time_created * 1000).toISOString().slice(0, 10) : 'N/A';
+  
+  const steamUrl = `https://steamcommunity.com/sharedfiles/filedetails/?id=${item.workshop_id}`;
+  
+  pane.innerHTML = `
+    <h2><a href="${steamUrl}" target="_blank">${title}</a></h2>
+    <p>by <b>${creator}</b> — <small>Workshop ID: ${item.workshop_id}</small></p>
+    <p class="stat-wilson">Subscriber Score: ${wss} &nbsp; Favorite Score: ${wfs}</p>
+    <div class="stats-row">
+      <div><span class="stat-label">Views:</span> ${views}</div>
+      <div><span class="stat-label">Size:</span> ${size}</div>
+      <div><span class="stat-label">Subs:</span> ${subs} / ${lsubs}</div>
+      <div><span class="stat-label">Favs:</span> ${favs} / ${lfavs}</div>
+      <div><span class="stat-label">Created:</span> ${created}</div>
+      <div><span class="stat-label">Tags:</span> <small>${tags}</small></div>
+    </div>
+    <p><a href="${steamUrl}" target="_blank">Open on Steam</a></p>
+  `;
+  document.querySelectorAll('#results-list .result-item').forEach(el => el.classList.remove('selected'));
+}
+
+document.getElementById('load-more').onclick = () => doSearch(false);
+document.getElementById('btn-search').onclick = () => doSearch(true);
+document.getElementById('btn-and').onclick = () => addRow('AND');
+document.getElementById('btn-or').onclick = () => addRow('OR');
+document.getElementById('btn-save-filter').onclick = async () => {
+  await fetch('/api/save_filter', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({filters: getFilters()})
+  });
+  alert('Filter saved for scraper.');
+};
+document.getElementById('sort-by').onchange = () => doSearch(true);
+document.getElementById('sort-order').onchange = () => doSearch(true);
+
+addRow();
+doSearch(true);
+</script>
+</body>
+</html>
