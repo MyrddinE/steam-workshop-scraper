@@ -1,5 +1,5 @@
 import pytest
-from textual.widgets import ListView
+from textual.widgets import ListView, Label, Markdown
 from src.tui import ScraperApp, SubscriptionQueueScreen
 from unittest.mock import patch
 from tests.conftest import ASYNC_PAUSE
@@ -54,3 +54,27 @@ async def test_tui_show_subscription_queue(mock_config, tmp_path):
 
         assert not isinstance(app.screen, SubscriptionQueueScreen)
         assert not lock_file.exists()
+
+@pytest.mark.asyncio
+async def test_queue_renders_links_without_crash(mock_config, tmp_path):
+    from src.database import initialize_database, toggle_subscription_queue_status, insert_or_update_item
+    db_path = str(tmp_path / "queue_render.db")
+    initialize_database(db_path)
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "[b]Bold Title[/b]", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": "Plain Title", "status": 200})
+    toggle_subscription_queue_status(db_path, 1)
+    toggle_subscription_queue_status(db_path, 2)
+
+    config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
+    with patch('src.tui.load_config', return_value=config):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+
+            await pilot.press("l")
+            await pilot.pause(ASYNC_PAUSE * 2)
+
+            screen = app.screen
+            assert isinstance(screen, SubscriptionQueueScreen)
+            md_widgets = screen.query(Markdown)
+            assert any("steamcommunity.com" in str(m._markdown) for m in md_widgets)

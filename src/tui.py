@@ -257,7 +257,7 @@ class SubscriptionQueueScreen(ModalScreen):
                     title = item['title']
                     url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}"
                     # Use Textual's @click handler for hyperlinks
-                    yield Label(f"[link={url}]{url}[/link] : {title}")
+                    yield Markdown(f"[{title}]({url})")
             
             yield Button("Close", id="btn-close-sub-queue")
 
