@@ -12,6 +12,7 @@ WORKSHOP_ITEM_COLUMNS = frozenset({
     "subscriptions", "favorited", "views", "tags", "extended_description",
     "extended_description_en", "language", "lifetime_subscriptions",
     "lifetime_favorited", "translation_priority", "is_queued_for_subscription",
+    "wilson_favorite_score", "wilson_subscription_score",
 })
 
 USER_COLUMNS = frozenset({
@@ -58,12 +59,14 @@ FIELD_NAME_MAP = {
     "Title": "title", "Description": "short_description", "Filename": "filename",
     "Tags": "tags", "Author ID": "creator", "File Size": "file_size",
     "Subs": "subscriptions", "Favs": "favorited", "Views": "views",
-    "Workshop ID": "workshop_id", "AppID": "consumer_appid", "Language ID": "language"
+    "Workshop ID": "workshop_id", "AppID": "consumer_appid", "Language ID": "language",
+    "Subscriber Score": "wilson_subscription_score", "Favorite Score": "wilson_favorite_score",
 }
 
 VALID_SORT_COLS = {
     "title", "file_size", "subscriptions", "favorited", "views",
-    "workshop_id", "time_created", "time_updated"
+    "workshop_id", "time_created", "time_updated",
+    "wilson_favorite_score", "wilson_subscription_score",
 }
 
 def _build_text_search_clauses(sql: str, params: list, q_str: str, cols: list[str]) -> tuple[str, list]:
@@ -259,7 +262,9 @@ def initialize_database(db_path: str):
         short_description_en TEXT,
         extended_description_en TEXT,
         dt_translated TEXT,
-        translation_priority INTEGER DEFAULT 0
+        translation_priority INTEGER DEFAULT 0,
+        wilson_favorite_score REAL DEFAULT NULL,
+        wilson_subscription_score REAL DEFAULT NULL
     )
     """)
 
@@ -285,7 +290,9 @@ def initialize_database(db_path: str):
         ("extended_description_en", "TEXT"),
         ("dt_translated", "TEXT"),
         ("translation_priority", "INTEGER DEFAULT 0"),
-        ("is_queued_for_subscription", "INTEGER DEFAULT 0")
+        ("is_queued_for_subscription", "INTEGER DEFAULT 0"),
+        ("wilson_favorite_score", "REAL DEFAULT NULL"),
+        ("wilson_subscription_score", "REAL DEFAULT NULL"),
     ])
 
     # Create app_tracking table for historical scraping and filter storage
@@ -353,6 +360,33 @@ def initialize_database(db_path: str):
             "UPDATE app_tracking SET enrichment_filters = ? WHERE appid = ?",
             (json.dumps(filters), row["appid"])
         )
+        conn.commit()
+
+    # Wilson score backfill: compute scores for existing items that lack them
+    cursor.execute("""
+        SELECT workshop_id, favorited, lifetime_subscriptions, views
+        FROM workshop_items
+        WHERE views > 0 AND (wilson_favorite_score IS NULL OR wilson_subscription_score IS NULL)
+    """)
+    to_update = cursor.fetchall()
+    if to_update:
+        import math
+        for row in to_update:
+            views = row["views"] or 0
+            if views == 0:
+                continue
+            def wl(s, v):
+                p = s / v
+                z2 = 1.96 * 1.96
+                d = 1 + z2 / v
+                n = p + z2 / (2*v) - 1.96 * math.sqrt(p*(1-p)/v + z2/(4*v*v))
+                return max(0.0, min(1.0, n / d))
+            fav_score = wl(row["favorited"] or 0, views)
+            sub_score = wl(row["lifetime_subscriptions"] or 0, views)
+            cursor.execute(
+                "UPDATE workshop_items SET wilson_favorite_score = ?, wilson_subscription_score = ? WHERE workshop_id = ?",
+                (fav_score, sub_score, row["workshop_id"])
+            )
         conn.commit()
 
     # Create indexes for faster querying
@@ -774,6 +808,72 @@ def get_db_stats(db_path: str) -> dict:
         "highest_dt_updated": highest_dt_updated,
         "app_stats": app_stats
     }
+
+def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None) -> dict:
+    """Returns percentile cutoff scores for Wilson metrics across items matching filters.
+    Uses NTILE(100) — returns p99, p90, p50 thresholds for both scores.
+    Returns empty dict if fewer than 10 items in the filtered set."""
+    conn = get_connection(db_path)
+    sql = "SELECT workshop_id, wilson_favorite_score, wilson_subscription_score FROM workshop_items"
+    params = []
+    if filters:
+        filter_clauses = []
+        for f in filters:
+            field = f.get("field")
+            op = f.get("op")
+            val = f.get("value")
+            if not field or not op:
+                continue
+            db_col = FIELD_NAME_MAP.get(field, field)
+            clause, clause_params = _build_filter_clause(db_col, op, val)
+            if clause:
+                params.extend(clause_params)
+                filter_clauses.append((f.get("logic", "AND").upper(), clause))
+        if filter_clauses:
+            sql += " WHERE "
+            for idx, (logic, clause) in enumerate(filter_clauses):
+                sql += f" {logic} " if idx > 0 else ""
+                sql += clause
+
+    cutoff_sql = f"""
+        WITH base AS (
+            {sql}
+            ORDER BY workshop_id
+        ),
+        scores AS (
+            SELECT wilson_favorite_score, wilson_subscription_score FROM base
+        ),
+        fav_ntile AS (
+            SELECT wilson_favorite_score,
+                   NTILE(100) OVER (ORDER BY wilson_favorite_score DESC NULLS LAST) AS bucket
+            FROM scores WHERE wilson_favorite_score IS NOT NULL
+        ),
+        sub_ntile AS (
+            SELECT wilson_subscription_score,
+                   NTILE(100) OVER (ORDER BY wilson_subscription_score DESC NULLS LAST) AS bucket
+            FROM scores WHERE wilson_subscription_score IS NOT NULL
+        )
+        SELECT 'fav_p99' as key, COALESCE(MIN(wilson_favorite_score), 0) as val
+        FROM fav_ntile WHERE bucket = 1
+        UNION ALL SELECT 'fav_p90', COALESCE(MIN(wilson_favorite_score), 0)
+        FROM fav_ntile WHERE bucket = 10
+        UNION ALL SELECT 'fav_p50', COALESCE(MIN(wilson_favorite_score), 0)
+        FROM fav_ntile WHERE bucket = 50
+        UNION ALL SELECT 'sub_p99', COALESCE(MIN(wilson_subscription_score), 0)
+        FROM sub_ntile WHERE bucket = 1
+        UNION ALL SELECT 'sub_p90', COALESCE(MIN(wilson_subscription_score), 0)
+        FROM sub_ntile WHERE bucket = 10
+        UNION ALL SELECT 'sub_p50', COALESCE(MIN(wilson_subscription_score), 0)
+        FROM sub_ntile WHERE bucket = 50
+    """
+    try:
+        cursor = conn.execute(cutoff_sql, params)
+        result = {row["key"]: row["val"] for row in cursor.fetchall()}
+        conn.close()
+        return result
+    except Exception:
+        conn.close()
+        return {}
 
 def get_app_tracking(db_path: str, appid: int) -> dict | None:
     """

@@ -1,4 +1,5 @@
 import time
+import math
 import signal
 import json
 import logging
@@ -26,6 +27,18 @@ from src.translator import TranslatorThread, is_ascii
 from src.config import save_config
 
 
+def wilson_lower(successes: int, trials: int, z: float = 1.96) -> float:
+    """Wilson score confidence interval lower bound for a Bernoulli parameter.
+    Returns 0.0–1.0; penalizes small sample sizes."""
+    if trials == 0:
+        return 0.0
+    p = successes / trials
+    z2 = z * z
+    denom = 1 + z2 / trials
+    numer = p + z2 / (2 * trials) - z * math.sqrt(p * (1 - p) / trials + z2 / (4 * trials * trials))
+    return max(0.0, min(1.0, numer / denom))
+
+
 class Daemon:
     def __init__(self, config: dict, config_path: str = "config.yaml"):
         self.config = config
@@ -42,6 +55,7 @@ class Daemon:
         self.web_delay = daemon_config.get("web_delay_seconds") or daemon_config.get("request_delay_seconds", 5.0)
         set_api_delay(self.api_delay)
         set_web_delay(self.web_delay)
+        logging.info(f"Delays: API={self.api_delay}s, Web={self.web_delay}s")
         self.pause_lock_file = ".pauselock"
         
         # Translator thread
@@ -106,7 +120,8 @@ class Daemon:
             "hcontent_file", "hcontent_preview", "short_description", "short_description_en", "time_created",
             "time_updated", "visibility", "banned", "ban_reason", "app_name", "file_type",
             "subscriptions", "favorited", "views", "tags", "extended_description", "extended_description_en", "language",
-            "lifetime_subscriptions", "lifetime_favorited", "translation_priority"
+            "lifetime_subscriptions", "lifetime_favorited", "translation_priority",
+            "wilson_favorite_score", "wilson_subscription_score",
         }
         known_ignored_keys = {"result", "is_queued_for_subscription"}
         clean = {}
@@ -271,6 +286,12 @@ class Daemon:
 
             merged_data = self._merge_and_clean_api_data(api_data, merged_data, item_id, now_iso)
             display_title = merged_data.get('title_en') or merged_data.get('title', 'Unknown Title')
+
+            views = merged_data.get("views", 0) or 0
+            merged_data["wilson_favorite_score"] = wilson_lower(
+                merged_data.get("favorited", 0) or 0, views)
+            merged_data["wilson_subscription_score"] = wilson_lower(
+                merged_data.get("lifetime_subscriptions", 0) or 0, views)
 
             appid = merged_data.get("consumer_appid")
             enriched = False

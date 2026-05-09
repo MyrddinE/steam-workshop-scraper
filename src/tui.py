@@ -9,7 +9,7 @@ from textual.screen import Screen, ModalScreen
 from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button, Markdown, DataTable
 from textual.containers import Horizontal, Vertical, VerticalScroll, Center, Grid
 from textual.reactive import reactive
-from src.database import search_items, get_all_authors, initialize_database, flag_for_translation, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, get_db_stats
+from src.database import search_items, get_all_authors, initialize_database, flag_for_translation, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, get_db_stats, compute_wilson_cutoffs
 from src.config import load_config
 import os
 import yaml
@@ -34,6 +34,32 @@ def format_size(size_bytes):
         gb = mb / 1024
         return f"[yellow]{gb:.1f} GB[/yellow]"
     except: return "N/A"
+
+def format_count(n):
+    """Humanizes a number to 3 significant digits with K/M suffix and color markup."""
+    if not n or n == 0:
+        return "[gray]N/A[/gray]"
+    try:
+        n = int(n)
+    except (ValueError, TypeError):
+        return "[gray]N/A[/gray]"
+    if n < 1000:
+        return f"[gray]{n}[/gray]"
+    if n < 1_000_000:
+        if n < 10_000:
+            return f"[white]{n/1000:.2f}K[/white]"
+        elif n < 100_000:
+            return f"[white]{n/1000:.1f}K[/white]"
+        else:
+            return f"[white]{n/1000:.0f}K[/white]"
+    # >= 1M
+    v = n / 1_000_000
+    if n < 10_000_000:
+        return f"[yellow]{v:.2f}M[/yellow]"
+    elif n < 100_000_000:
+        return f"[yellow]{v:.1f}M[/yellow]"
+    else:
+        return f"[yellow]{v:.0f}M[/yellow]"
 
 def parse_tags(tags) -> list[str]:
     """Parses the tags JSON field (string or list) into a list of tag-name strings."""
@@ -264,6 +290,9 @@ class DetailsPane(VerticalScroll):
         with Horizontal(id="title-creator-row"):
             yield Label("", id="item-title")
             yield Label("", id="item-creator")
+        
+        with Horizontal(id="wilson-scores-row"):
+            yield Label("", id="wilson-scores")
             
         yield Static(id="spacer-1", classes="blank-line")
             
@@ -323,6 +352,7 @@ class DetailsPane(VerticalScroll):
             
             for stat in ["id", "created", "updated", "tags", "size", "views", "subs", "favs"]:
                 self.query_one(f"#stat-{stat}", Label).display = False
+            self.query_one("#wilson-scores", Label).update("")
             return
 
         item = self.item_data
@@ -383,17 +413,49 @@ class DetailsPane(VerticalScroll):
             updated_label.update(f"[b]Updated:[/b] {updated_str}")
         
         self.query_one("#stat-tags", Label).update(f"[b]Tags:[/b] {', '.join(tags_list) if tags_list else 'None'}")
-
         self.query_one("#stat-size", Label).update(f"[b]Size:[/b] {format_size(item.get('file_size'))}")
-        self.query_one("#stat-views", Label).update(f"[b]Views:[/b] {item.get('views', 0):,}")
-        self.query_one("#stat-subs", Label).update(f"[b]Subscribers:[/b] {item.get('subscriptions', 0):,}")
-        self.query_one("#stat-favs", Label).update(f"[b]Favorites:[/b] {item.get('favorited', 0):,}")
+        self.query_one("#stat-views", Label).update(f"[b]Views:[/b] {format_count(item.get('views', 0))}")
+        
+        subs_current = format_count(item.get('subscriptions', 0))
+        subs_lifetime = format_count(item.get('lifetime_subscriptions', 0))
+        self.query_one("#stat-subs", Label).update(f"[b]Subscribers:[/b] {subs_current} / {subs_lifetime}")
+        
+        favs_current = format_count(item.get('favorited', 0))
+        favs_lifetime = format_count(item.get('lifetime_favorited', 0))
+        self.query_one("#stat-favs", Label).update(f"[b]Favorites:[/b] {favs_current} / {favs_lifetime}")
+
+        wilson_label = self.query_one("#wilson-scores", Label)
+        app = self.app
+        cutoffs = getattr(app, '_wilson_cutoffs', {}) if app else {}
+        wilson_label.update(self._format_wilson_scores(item, cutoffs))
+        wilson_label.display = bool(item.get("wilson_favorite_score") is not None)
 
         md_content = bbcode_to_markdown(desc)
         if item.get("translation_priority", 0) > 0 and not item.get("dt_translated"):
              md_content = f"> *[yellow]Translation requested, currently in queue...[/yellow]*\n\n{md_content}"
              
         self.query_one("#detail-content", Markdown).update(md_content)
+
+    def _format_wilson_scores(self, item: dict, cutoffs: dict) -> str:
+        """Formats Wilson scores with percentile-based coloring."""
+        def colorize(label, score_key):
+            score = item.get(score_key)
+            if score is None:
+                return f"[gray]{label}: N/A[/gray]"
+            pct = score * 100
+            p99 = cutoffs.get(score_key.replace("score", "p99"), 0) or 0
+            p90 = cutoffs.get(score_key.replace("score", "p90"), 0) or 0
+            p50 = cutoffs.get(score_key.replace("score", "p50"), 0) or 0
+            if score >= p99:
+                return f"[yellow]{label}: ! {pct:.1f}% ![/yellow]"
+            if score >= p90:
+                return f"[yellow]{label}: {pct:.1f}%[/yellow]"
+            if score >= p50:
+                return f"[white]{label}: {pct:.1f}%[/white]"
+            return f"[gray]{label}: {pct:.1f}%[/gray]"
+        fav = colorize("Favorite Score", "wilson_favorite_score")
+        sub = colorize("Subscriber Score", "wilson_subscription_score")
+        return f"{sub}   {fav}"
 
 class WorkshopItem(ListItem):
     """A list item representing a workshop item."""
@@ -471,7 +533,7 @@ class SearchRow(Horizontal):
             # Determine field type to show relevant operators
             if field == "Author ID" or field == "Workshop ID" or field == "AppID":
                 op_type = "id"
-            elif field in ["File Size", "Subs", "Favs", "Views", "Language ID"]:
+            elif field in ["File Size", "Subs", "Favs", "Views", "Language ID", "Subscriber Score", "Favorite Score"]:
                 op_type = "numeric"
             else:
                 op_type = "text"
@@ -499,7 +561,8 @@ class SearchBuilder(VerticalScroll):
     def compose(self) -> ComposeResult:
         self.fields = [
             "Title", "Description", "Filename", "Tags", "Author ID",
-            "File Size", "Subs", "Favs", "Views", "Workshop ID", "AppID", "Language ID"
+            "File Size", "Subs", "Favs", "Views", "Workshop ID", "AppID", "Language ID",
+            "Subscriber Score", "Favorite Score",
         ]
         self.operators = {
             "text": ["contains", "does_not_contain", "is", "is_not", "is_empty", "is_not_empty"],
@@ -815,6 +878,7 @@ class ScraperApp(App):
             self.config = {"database": {"path": "workshop.db"}}
         self.db_path = self.config["database"]["path"]
         initialize_database(self.db_path)
+        self._wilson_cutoffs = {}
         self.current_item_creator = None
         self.pause_lock_file = ".pauselock"
         
@@ -919,6 +983,8 @@ class ScraperApp(App):
             ("Workshop ID", "workshop_id"),
             ("Created Time", "time_created"),
             ("Updated Time", "time_updated"),
+            ("Subscriber Score", "wilson_subscription_score"),
+            ("Favorite Score", "wilson_favorite_score"),
         ]
         
         sort_container = Horizontal(
@@ -972,8 +1038,17 @@ class ScraperApp(App):
         except Exception:
             return
         await list_view.clear()
-        
+        self._compute_percentiles()
         await self.load_more_items()
+
+    def _compute_percentiles(self) -> None:
+        """Computes Wilson score percentile cutoffs for the current filter set."""
+        try:
+            builder = self.query_one("#search-builder", SearchBuilder)
+            filters = builder.get_filters()
+        except Exception:
+            return
+        self._wilson_cutoffs = compute_wilson_cutoffs(self.db_path, filters)
 
     async def load_more_items(self) -> None:
         """Fetches the next chunk of items from the database."""
