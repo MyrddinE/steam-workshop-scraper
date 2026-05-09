@@ -1,10 +1,8 @@
 import time
-import math
 import signal
 import json
 import logging
 import os
-import random
 from datetime import datetime, timezone
 from src.database import (
     get_next_items_to_scrape, 
@@ -15,6 +13,7 @@ from src.database import (
     flag_for_translation,
     get_app_tracking,
     update_app_tracking,
+    update_app_tracking_page,
     save_app_filter,
     get_connection,
     get_item_details,
@@ -59,16 +58,6 @@ class Daemon:
         # Setup graceful shutdown
         signal.signal(signal.SIGINT, self.handle_shutdown)
         signal.signal(signal.SIGTERM, self.handle_shutdown)
-
-    @staticmethod
-    def _compute_filter_hash(filter_text: str, required_tags: list[str], excluded_tags: list[str]) -> str:
-        """Returns a deterministic hash of the current filter state for detecting changes."""
-        current_filter = {
-            "text": filter_text,
-            "req_tags": sorted(required_tags or []),
-            "excl_tags": sorted(excluded_tags or [])
-        }
-        return json.dumps(current_filter, sort_keys=True)
 
     def _persist_delay(self):
         """Saves the current delay to config file."""
@@ -143,16 +132,11 @@ class Daemon:
         return merged_data
 
     def _load_initial_filter_state(self):
-        """Pre-loads the last known filter state from the DB on startup."""
-        logging.info("Loading initial filter state from database...")
+        """Pre-loads filter state and page tracking from the DB on startup."""
         for appid in self.target_appids:
             app_tracking = get_app_tracking(self.db_path, appid)
             if app_tracking:
-                saved_filter_text = app_tracking.get("filter_text", "")
-                saved_required_tags = json.loads(app_tracking.get("required_tags", "[]"))
-                saved_excluded_tags = json.loads(app_tracking.get("excluded_tags", "[]"))
-                current_filter_hash = self._compute_filter_hash(saved_filter_text, saved_required_tags, saved_excluded_tags)
-                self.last_filters[appid] = {"hash": current_filter_hash, "start_time": app_tracking.get("last_historical_date_scanned")}
+                self.last_filters[appid] = {"last_page": app_tracking.get("last_page_scanned", 0) or 0}
 
     def handle_shutdown(self, signum, frame):
         """Signals the loop to stop and finishes the current batch safely."""
@@ -336,172 +320,54 @@ class Daemon:
             self.process_batch()
         logging.info("Daemon gracefully exited.")
 
-    def _find_initial_start_date(self, appid: int, search_text: str = "", required_tags: list[str] = None, excluded_tags: list[str] = None) -> int:
-        """
-        Performs a binary search to find the Unix timestamp of the oldest 
-        date range containing workshop items for the appid, given filter criteria.
-        Returns a timestamp just before the first items appear.
-        """
-        logging.info(f"AppID {appid} has no tracking history. Performing binary search to find the very first mod release...")
-        
-        low = 1317484800 # October 1st, 2011 (Workshop Release)
-        now = int(time.time())
-        high = now
-        
-        while high - low > 86400: # 1-day resolution
-            if not self.running:
-                logging.info("Binary search interrupted by shutdown signal.")
-                break
-            mid = low + (high - low) // 2
-            logging.info(f"Binary search checking range up to {mid} ({datetime.fromtimestamp(mid, timezone.utc).date()})...")
-            
-            # Use web scraper since API doesn't support date filtering
-            found_items = discover_items_by_date_html(appid, low, mid, page=1, search_text=search_text, required_tags=required_tags, excluded_tags=excluded_tags)
-            
-            if len(found_items) > 0:
-                # Items found in this left half. The first item is somewhere in here.
-                # So we move our upper bound down to mid.
-                high = mid
-            else:
-                # No items found in the left half. The first item must be after mid.
-                # So we move our lower bound up to mid.
-                low = mid
-                
-            time.sleep(1) # Be polite to API during search
-            
-        # Move back exactly one window size just to be safe, but no earlier than Workshop release
-        final_start = max(1317484800, low - 86400)
-        logging.info(f"Binary search complete. First items appeared around {datetime.fromtimestamp(final_start, timezone.utc).date()}.")
-        return final_start
-
     def seed_database(self, target_new: int = 100):
         """
-        Historical forward scraping strategy. Uses IPublishedFileService/QueryFiles
-        to find items within dynamic date ranges.
+        Discovers workshop items via IPublishedFileService/QueryFiles API.
+        Paginates from page 1 (newest first) until target_new new items found.
         """
-        now = int(time.time())
-
-        # AppID-specific discovery loop for initial seeding
-        for appid in self.config["daemon"]["target_appids"]:
-            # Check if queue is already appropriately filled before starting discovery for this appid
+        for appid in self.target_appids:
             if count_unscraped_items(self.db_path) >= target_new:
                 logging.info(f"Queue appropriately filled (>= {target_new}) for AppID {appid}. Skipping discovery.")
-                continue # Skip to next appid
-
-            app_tracking = get_app_tracking(self.db_path, appid)
-            if app_tracking is None:
-                app_tracking = {}
-            last_scanned_date = app_tracking.get("last_historical_date_scanned") or 1274400000
-            initial_start_time = last_scanned_date # Store this for the log message on early exit
-            saved_filter_text = app_tracking.get("filter_text") or ""
-            saved_required_tags = json.loads(app_tracking.get("required_tags") or "[]")
-            saved_excluded_tags = json.loads(app_tracking.get("excluded_tags") or "[]")
-            window_size = app_tracking.get("window_size") or 30 * 24 * 3600 # Start with a 30-day window
-
-            current_filter_hash = self._compute_filter_hash(saved_filter_text, saved_required_tags, saved_excluded_tags)
-
-            if appid not in self.last_filters:
-                self.last_filters[appid] = {"hash": None, "start_time": None}
-
-            filter_changed = (self.last_filters[appid]["hash"] != current_filter_hash)
-
-            if filter_changed:
-                logging.info(f"Filter changed for AppID {appid}. Resetting historical scan.")
-                # If filter changed, reset the scan to the very beginning.
-                # The binary search will find the first item under the new filter.
-                start_time = self._find_initial_start_date(appid, saved_filter_text, saved_required_tags, saved_excluded_tags)
-                last_scanned_date = start_time # Update tracking to new starting point
-                self.last_filters[appid]["hash"] = current_filter_hash
-                self.last_filters[appid]["start_time"] = start_time
-                update_app_tracking(self.db_path, appid, start_time, window_size) # Also update DB to reflect new start
-            else:
-                start_time = last_scanned_date
-                self.last_filters[appid]["hash"] = current_filter_hash
-                self.last_filters[appid]["start_time"] = start_time
-
-            # If the app was scanned recently, skip for now.
-            if (now - last_scanned_date) < (24 * 3600) and not filter_changed:
-                logging.info(f"AppID {appid} is up to date (last scanned within 24h). Skipping discovery.")
                 continue
 
-            logging.info(f"Discovering items for AppID {appid} starting from timestamp {start_time}...")
+            app_tracking = get_app_tracking(self.db_path, appid)
+            last_page = (app_tracking or {}).get("last_page_scanned", 0) or 0
+            max_pages = 500
+
+            logging.info(f"Discovering items for AppID {appid}, starting from page {last_page + 1}...")
             new_discovered_count = 0
-            last_successful_window_end_time = start_time # Track the furthest point successfully scanned
+            total = None
+            page = last_page + 1
 
-            # Continue looping while we're finding new items or haven't reached current time
-            page = 1
-            while start_time < now and self.running:
-                end_time = min(start_time + window_size, now)
-                if end_time == start_time: # Avoid infinite loop if start_time catches up to now exactly
+            while page <= max_pages and self.running:
+                result = query_workshop_files(appid, page=page, api_key=self.api_key)
+                if not result["items"] and total is None:
                     break
 
-                logging.info(f"Querying window: {datetime.fromtimestamp(start_time, timezone.utc).date()} to {datetime.fromtimestamp(end_time, timezone.utc).date()} ({round((end_time-start_time)/86400, 1)} days)")
+                if total is None and result["total"]:
+                    total = result["total"]
+                    max_pages = min(max_pages, max(1, (total + 99) // 100))
+                    logging.info(f"AppID {appid} has ~{total} total items across {max_pages} pages.")
 
-                window_new_count = 0
-                window_has_errors = False
-                known_total_pages = 1
+                page_new_count = 0
+                for item in result["items"]:
+                    wid = int(item.get("publishedfileid", 0))
+                    if wid and insert_or_update_item(self.db_path, {"workshop_id": wid}):
+                        page_new_count += 1
 
-                while self.running:
-                    found_items, current_total_pages = discover_items_by_date_html(appid, start_time, end_time, page=page, search_text=saved_filter_text, required_tags=saved_required_tags, excluded_tags=saved_excluded_tags)
+                new_discovered_count += page_new_count
+                logging.info(f"Page {page}/{max_pages} provided {page_new_count} new items. (Total new: {new_discovered_count})")
+                update_app_tracking_page(self.db_path, appid, page)
+                time.sleep(self.delay)
 
-                    if current_total_pages == -1:
-                        window_has_errors = True
-                        logging.warning(f"Page {page} failed to fetch due to an error. Flagging window for retry.")
-                    else:
-                        known_total_pages = current_total_pages
-
-                    if known_total_pages == 0:
-                        # Legitimately empty window
-                        break
-
-                    if current_total_pages != -1 and len(found_items) < 30 and page < known_total_pages:
-                        window_has_errors = True
-                        logging.warning(f"Page {page}/{known_total_pages} returned only {len(found_items)} items. Flagging window for retry.")
-
-                    page_new_count = 0
-                    for item_id in found_items:
-                        # discover_items_by_date_html now returns a list of IDs
-                        if insert_or_update_item(self.db_path, {"workshop_id": item_id}):
-                            page_new_count += 1
-
-                    if current_total_pages != -1:
-                        logging.info(f"Page {page}/{known_total_pages} provided {page_new_count} new items.")
-                    
-                    window_new_count += page_new_count
-                    time.sleep(self.delay) # Be polite
-                    
-                    # Stop if we have reached or exceeded the total number of pages
-                    if page >= known_total_pages:
-                        break
-
-                    page += 1
-
-                new_discovered_count += window_new_count
-                logging.info(f"Window provided {window_new_count} new items. (Total new this seed: {new_discovered_count})")
-
-                if not window_has_errors:
-                    last_successful_window_end_time = end_time
-                    # Move window forward
-                    start_time = end_time
-                else:
-                    logging.warning(f"Window encountered errors or partial pages. Halting discovery for AppID {appid} to retry later.")
-                    last_successful_window_end_time -= window_size * random.random()
-                    break # Break out of discovery loop for this appid
-
-                # Dynamic adjustment of next window size based on density
-                window_adjustment = 2/max(math.log2(page),0.5)
-                window_size *= window_adjustment
-                window_size = min(window_size, 240 * 24 * 3600) # cap at 240 day window
-                window_size = max(window_size, 3600) # no lower than 1 hour window
-
-                page = 1
-
-                if new_discovered_count > 100:
+                if new_discovered_count >= target_new:
+                    logging.info(f"Discovered {new_discovered_count} new items for AppID {appid}, enough for now.")
                     break
 
-            # After the discovery loop for this appid, update tracking to the furthest successful point
-            if last_successful_window_end_time != last_scanned_date: # Only update if we made progress
-                logging.info(f"Updating last scanned date for AppID {appid} to {datetime.fromtimestamp(last_successful_window_end_time, timezone.utc).date()}.")
-                update_app_tracking(self.db_path, appid, last_successful_window_end_time, window_size)
-            else:
-                logging.info(f"Discovery for AppID {appid} completed naturally, but no new full windows scanned. Last scanned date remains {datetime.fromtimestamp(last_scanned_date, timezone.utc).date()}.")
+                if len(result["items"]) == 0:
+                    break
+
+                page += 1
+
+            if page > last_page + 1:
+                logging.info(f"Finished scanning pages {last_page + 1}-{page} for AppID {appid}. Discovered {new_discovered_count} new items.")
