@@ -16,7 +16,8 @@ dependencies = [
     "textual",
     "lxml_html_clean",
     "openai",
-    "flask"
+    "flask",
+    "puremagic"
 ]
 
 [project.scripts]

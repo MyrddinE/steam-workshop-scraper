@@ -18,6 +18,15 @@ MIME_MAP = {
     "image/jpg": "jpg",
 }
 
+MAGIC_EXT_MAP = {
+    ".jpeg": "jpg",
+    ".jpg": "jpg",
+    ".png": "png",
+    ".gif": "gif",
+    ".webp": "webp",
+    ".bmp": "bmp",
+}
+
 
 class ImageScraperThread(threading.Thread):
     def __init__(self, db_path: str, pause_lock_file: str, daemon_config: dict = None, save_callback = None):
@@ -62,12 +71,26 @@ class ImageScraperThread(threading.Thread):
                 ct = resp.headers.get("Content-Type", "")
                 mime = ct.split(";")[0].strip().lower()
                 ext = MIME_MAP.get(mime, "")
+                magic_header = b""
+
+                if not ext:
+                    try:
+                        import puremagic
+                        magic_header = next(resp.iter_content(8192), b"")
+                        magic_ext = puremagic.from_string(magic_header)
+                        ext = MAGIC_EXT_MAP.get(magic_ext, "")
+                        if ext:
+                            logging.info(f"[I:{wid}] Puremagic detected {magic_ext} → .{ext}")
+                    except Exception:
+                        pass
 
                 if not ext:
                     raise Exception(f"Unknown MIME type: {mime}")
 
                 img_path = os.path.join("images", f"{wid}.{ext}")
                 with open(img_path, "wb") as f:
+                    if magic_header:
+                        f.write(magic_header)
                     for chunk in resp.iter_content(8192):
                         f.write(chunk)
 
