@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import logging
 import queue
 from flask import Flask, request, jsonify, render_template, send_from_directory, Response
 from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection
@@ -18,14 +19,14 @@ _event_queues: list[queue.Queue] = []
 def _notify_web_clients(event_type: str, data: dict):
     """Thread-safe: pushes an event to all connected SSE clients."""
     payload = json.dumps({"type": event_type, **data})
-    import sys
-    print(f"[SSE] notify: {event_type} wid={data.get('workshop_id','?')} (queues: {len(_event_queues)})", file=sys.stderr, flush=True)
+    logging.info(f"[SSE] notify: {event_type} wid={data.get('workshop_id','?')} (queues: {len(_event_queues)})")
     if not _event_queues:
-        print("[SSE] no connected clients, discarding event", file=sys.stderr, flush=True)
+        logging.info("[SSE] no connected clients, discarding event")
     for q in _event_queues[:]:
         try:
             q.put_nowait(payload)
-        except Exception:
+        except Exception as e:
+            logging.warning(f"[SSE] failed to push event: {e}")
             _event_queues.remove(q)
 
 
@@ -113,8 +114,7 @@ def api_events():
     """SSE endpoint: streams real-time notifications to web clients."""
     q = queue.Queue()
     _event_queues.append(q)
-    import sys
-    print(f"[SSE] client connected (total: {len(_event_queues)})", file=sys.stderr, flush=True)
+    logging.info(f"[SSE] client connected (total: {len(_event_queues)})")
 
     def generator():
         try:
@@ -128,7 +128,7 @@ def api_events():
         finally:
             if q in _event_queues:
                 _event_queues.remove(q)
-                print(f"[SSE] client disconnected (remaining: {len(_event_queues)})", file=sys.stderr, flush=True)
+                logging.info(f"[SSE] client disconnected (remaining: {len(_event_queues)})")
 
     response = Response(generator(), mimetype="text/event-stream")
     response.headers["Cache-Control"] = "no-cache"
