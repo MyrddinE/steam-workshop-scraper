@@ -251,7 +251,7 @@ class DaemonManagerScreen(Screen):
     def on_mount(self) -> None:
         self.query_one("#dm-controls").styles.width = 20
         self._update_status()
-        self._start_tail()
+        # self._start_tail()  # commented out: too slow
 
     def on_unmount(self) -> None:
         if self._tail_proc:
@@ -341,8 +341,6 @@ class DaemonManagerScreen(Screen):
         if event.button.id == "dm-start":
             self._start_daemon()
             self._update_status()
-            if not self._tail_proc:
-                self._start_tail()
         elif event.button.id == "dm-stop":
             self._stop_daemon()
             self._update_status()
@@ -350,8 +348,6 @@ class DaemonManagerScreen(Screen):
             self._stop_daemon()
             self._start_daemon()
             self._update_status()
-            if not self._tail_proc:
-                self._start_tail()
         elif event.button.id == "dm-close":
             self.app.pop_screen()
 
