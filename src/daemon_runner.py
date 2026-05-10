@@ -3,6 +3,21 @@ from src.daemon import Daemon
 from src.config import load_config
 from src.database import initialize_database
 import sys
+import os
+
+
+def _daemonize():
+    """Double-fork to detach from terminal and become a background process."""
+    if os.fork():
+        sys.exit(0)  # parent exits
+    os.setsid()
+    if os.fork():
+        sys.exit(0)  # first child exits
+    # Redirect std* to /dev/null
+    devnull = os.open(os.devnull, os.O_RDWR)
+    os.dup2(devnull, sys.stdin.fileno())
+    os.dup2(devnull, sys.stdout.fileno())
+    os.dup2(devnull, sys.stderr.fileno())
 
 
 def main():
@@ -18,6 +33,10 @@ def main():
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
         logging.error(f"Configuration file not found: {config_path}")
         sys.exit(1)
+
+    if is_daemon:
+        _daemonize()
+
         
     log_config = config.get("logging", {})
     level_str = log_config.get("level", "INFO").upper()

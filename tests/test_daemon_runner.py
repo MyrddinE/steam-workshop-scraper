@@ -27,6 +27,7 @@ def test_main_config_not_found():
 def test_main_daemon_flag_strips_from_args():
     """--daemon flag is stripped, config path still passed through."""
     with patch('sys.argv', ['daemon_runner.py', '--daemon', 'myconfig.yaml']), \
+         patch('src.daemon_runner._daemonize'), \
          patch('src.daemon_runner.load_config') as mock_load, \
          patch('src.daemon_runner.initialize_database'), \
          patch('src.daemon_runner.Daemon') as mock_daemon:
@@ -60,6 +61,7 @@ def test_main_logging_daemon_with_file():
     """--daemon with log file: FileHandler + stderr (2 handlers)."""
     import logging
     with patch('sys.argv', ['daemon_runner.py', '--daemon']), \
+         patch('src.daemon_runner._daemonize'), \
          patch('src.daemon_runner.load_config') as mock_load, \
          patch('src.daemon_runner.initialize_database'), \
          patch('src.daemon_runner.Daemon'), \
