@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="userscript-version" content="1">
 <title>Steam Workshop Scraper</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
 <style>
@@ -355,6 +356,7 @@ async function showDetail(wid) {
 }
 
 const US_RAW_URL = 'https://raw.githubusercontent.com/MyrddinE/steam-workshop-scraper/main/userscripts/steam_subscribe.user.js';
+const US_EXPECTED_VER = parseInt(document.querySelector('meta[name="userscript-version"]')?.content || '1', 10);
 
 async function doSubscribe(wid, appid) {
   if (!appid) { alert('Item has no AppID — cannot subscribe.'); return; }
@@ -366,6 +368,18 @@ async function doSubscribe(wid, appid) {
       '2. Click OK to open the userscript — Tampermonkey will offer to install it\n' +
       '3. Visit steamcommunity.com once to capture your session\n\n' +
       'The script automates the same POST Steam uses for its own Subscribe button.'
+    );
+    if (ok) {
+      window.open(US_RAW_URL, '_blank');
+    }
+    return;
+  }
+
+  const usVer = typeof steamSubscribeVersion !== 'undefined' ? steamSubscribeVersion : 0;
+  if (usVer < US_EXPECTED_VER) {
+    const ok = confirm(
+      `Your Subscribe Bridge userscript is outdated (v${usVer}). The page expects v${US_EXPECTED_VER}.\n\n` +
+      'Click OK to open the latest version for installation.'
     );
     if (ok) {
       window.open(US_RAW_URL, '_blank');

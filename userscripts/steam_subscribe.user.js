@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Workshop Scraper — Subscribe Bridge
 // @namespace    https://github.com/MyrddinE/steam-workshop-scraper
-// @version      1.0
+// @version      1
 // @description  Bridges Steam session to the Workshop Scraper web UI for one-click subscribing.
 // @author       MyrddinE
 // @match        https://steamcommunity.com/*
@@ -12,6 +12,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_info
 // @run-at       document-end
 // ==/UserScript==
 
@@ -44,6 +45,20 @@
   if (!isScraper) return;
 
   const API_BASE = location.origin;
+
+  // ── Version check ─────────────────────────────────────────────────
+  const EXPECTED_VER = parseInt(
+    document.querySelector('meta[name="userscript-version"]')?.content || '0',
+    10
+  );
+  const CURRENT_VER = parseInt((GM_info?.script?.version || '0'), 10);
+  if (EXPECTED_VER > CURRENT_VER) {
+    const msg = `[SubscribeBridge] This userscript is out of date (v${CURRENT_VER}). ` +
+      `The page expects v${EXPECTED_VER}. Please update from the install URL.`;
+    console.warn(msg);
+    alert(msg);
+    return;  // Prevent injection of outdated bridge
+  }
 
   function getSessionId() {
     return GM_getValue('steam_sessionid', '');
@@ -81,7 +96,8 @@
 
   // Inject the function into the page scope
   unsafeWindow.steamSubscribe = steamSubscribe;
-  console.log('[SubscribeBridge] steamSubscribe() injected into page');
+  unsafeWindow.steamSubscribeVersion = CURRENT_VER;
+  console.log(`[SubscribeBridge] steamSubscribe() v${CURRENT_VER} injected into page`);
 
   // Also send sessionid to the backend so the TUI can use it
   function pushSessionToBackend() {
