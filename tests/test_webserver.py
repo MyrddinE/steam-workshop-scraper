@@ -20,6 +20,44 @@ def test_index_returns_html(web_client):
     assert b'<!DOCTYPE html>' in resp.data
 
 
+def test_layout_constrains_viewport(web_client):
+    """Verify CSS rules that prevent page from expanding beyond viewport."""
+    client, _ = web_client
+    resp = client.get('/')
+    html = resp.data.decode()
+    assert 'height: 100vh' in html
+    assert 'overflow: hidden' in html
+    assert 'overflow-y: auto' in html
+    assert 'flex-direction: column' in html
+    assert 'min-height: 0' in html
+
+
+def test_results_scroll_container_exists(web_client):
+    """Verify the results list wraps in a dedicated scroll container."""
+    client, _ = web_client
+    resp = client.get('/')
+    html = resp.data.decode()
+    assert 'id="results-scroll"' in html
+    assert 'id="results-pane"' in html
+    assert 'id="results-list"' in html
+    # results-list must be INSIDE results-scroll, not inside results-pane directly
+    import re
+    # Check order: results-scroll contains results-list
+    match = re.search(r'id="results-scroll".*?id="results-list"', html, re.DOTALL)
+    assert match is not None
+
+
+def test_search_builder_not_in_scroll(web_client):
+    """Verify search builder is outside the scroll container (pinned)."""
+    client, _ = web_client
+    resp = client.get('/')
+    html = resp.data.decode()
+    # search-builder should appear BEFORE results-scroll in the DOM
+    sb_pos = html.index('id="search-builder"')
+    rs_pos = html.index('id="results-scroll"')
+    assert sb_pos < rs_pos
+
+
 def test_search_returns_json(web_client):
     client, db_path = web_client
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "Test Mod", "creator": 100, "status": 200})
