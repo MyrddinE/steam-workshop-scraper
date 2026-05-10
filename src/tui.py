@@ -1096,6 +1096,7 @@ class ScraperApp(App):
     def __init__(self, config_path: str = "config.yaml"):
         super().__init__()
         self.theme = "textual-dark"
+        self.config_path = config_path
         
         try:
             self.config = load_config(config_path)

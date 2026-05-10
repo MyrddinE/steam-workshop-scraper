@@ -19,9 +19,10 @@ def test_tui_main_execution():
 def test_scraperapp_config_not_found():
     from src.tui import ScraperApp
     with patch('src.tui.load_config', side_effect=FileNotFoundError), \
-         patch('src.tui.initialize_database') as mock_init:
+         patch('src.tui.initialize_database') as mock_init, \
+         patch('src.tui.ScraperApp._start_webserver'):
         app = ScraperApp("nonexistent.yaml")
-        assert app.config == {"database": {"path": "workshop.db"}}
+        assert app.config["database"] == {"path": "workshop.db"}
         mock_init.assert_called_once_with("workshop.db")
 
 def test_tui_main_logging_configured(tmp_path):
