@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Workshop Scraper — Subscribe Bridge
 // @namespace    https://github.com/MyrddinE/steam-workshop-scraper
-// @version      1
+// @version      2
 // @description  Bridges Steam session to the Workshop Scraper web UI for one-click subscribing.
 // @author       MyrddinE
 // @match        https://steamcommunity.com/*
@@ -18,7 +18,7 @@
   'use strict';
 
   const isSteam = location.hostname === 'steamcommunity.com';
-  const isScraper = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+  const isScraper = !!document.querySelector('meta[name="userscript-version"]');
 
   // ── Capture sessionid from Steam ─────────────────────────────────────
   if (isSteam) {
