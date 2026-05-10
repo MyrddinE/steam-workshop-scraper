@@ -18,10 +18,15 @@ _event_queues: list[queue.Queue] = []
 def _notify_web_clients(event_type: str, data: dict):
     """Thread-safe: pushes an event to all connected SSE clients."""
     payload = json.dumps({"type": event_type, **data})
-    for q in _event_queues[:]:  # iterate a copy since queues can be removed
+    import logging
+    logging.debug(f"[SSE] notify: {payload[:100]} (queues: {len(_event_queues)})")
+    if not _event_queues:
+        logging.debug("[SSE] no connected clients, discarding event")
+    for q in _event_queues[:]:
         try:
             q.put_nowait(payload)
-        except Exception:
+        except Exception as e:
+            logging.warning(f"[SSE] failed to push event: {e}")
             _event_queues.remove(q)
 
 

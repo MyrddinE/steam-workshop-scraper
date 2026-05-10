@@ -86,5 +86,5 @@ class WebScraperThread(threading.Thread):
         try:
             from src.webserver import _notify_web_clients
             _notify_web_clients(event_type, data)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning(f"Web worker failed to notify web: {e}")

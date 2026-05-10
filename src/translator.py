@@ -152,5 +152,5 @@ Return ONLY a JSON array matching this exact format, preserving all 'id' values:
         try:
             from src.webserver import _notify_web_clients
             _notify_web_clients(event_type, data)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning(f"Translator failed to notify web: {e}")
