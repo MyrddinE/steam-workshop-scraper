@@ -91,9 +91,9 @@ Return ONLY a JSON array of objects like:
                 temperature=0.3,
             )
             content = response.choices[0].message.content.strip()
+            logging.debug(f"Raw translation response: {content[:500]}")
             translated = json.loads(content)
             if isinstance(translated, dict):
-                # Unwrap single-key dict into contained list
                 for v in translated.values():
                     if isinstance(v, list):
                         translated = v
@@ -101,7 +101,6 @@ Return ONLY a JSON array of objects like:
             if not isinstance(translated, list):
                 raise ValueError(f"Expected list, got {type(translated)}: {content[:200]}")
 
-            # Build a lookup from id to translated text
             trans_map = {}
             for t in translated:
                 tid = t.get("id", "")
@@ -109,35 +108,35 @@ Return ONLY a JSON array of objects like:
                 if tid and ttext:
                     trans_map[tid] = ttext
 
+            translated_count = 0
+            failed_count = 0
             for row in batch:
                 tid = f"{row['item_type']}_{row['item_id']}_{row['field']}"
                 trans_text = trans_map.get(tid, "")
 
                 if not trans_text:
                     logging.warning(f"No translation returned for {tid}")
+                    failed_count += 1
                     continue
 
-                # Determine target table and column
                 if row["item_type"] == "user":
-                    table = "users"
-                    id_col = "steamid"
+                    table, id_col = "users", "steamid"
                 else:
-                    table = "workshop_items"
-                    id_col = "workshop_id"
+                    table, id_col = "workshop_items", "workshop_id"
 
                 conn.execute(
                     f"UPDATE {table} SET {row['field']} = ?, dt_translated = ? WHERE {id_col} = ?",
                     (trans_text, now_iso, row["item_id"])
                 )
-                conn.execute(
-                    "DELETE FROM translation_queue WHERE id = ?",
-                    (row["id"],)
-                )
-
-                old = row["original_text"][:40]
-                new = trans_text[:40]
-                logging.info(f"[{row['item_id']}] ({row['item_type']}) {row['field']}: \"{old}\" → \"{new}\"")
+                conn.execute("DELETE FROM translation_queue WHERE id = ?", (row["id"],))
+                translated_count += 1
+                logging.debug(f"[{row['item_id']}] {row['field']}: \"{row['original_text'][:40]}\" → \"{trans_text[:40]}\"")
             conn.commit()
+
+            if failed_count:
+                logging.info(f"Batch translation: {translated_count} added, {failed_count} failed.")
+            else:
+                logging.info(f"Batch translation: {translated_count} fields translated.")
 
         except Exception as e:
             logging.error(f"Batch translation failed: {e}")
