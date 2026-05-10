@@ -1505,14 +1505,8 @@ class ScraperApp(App):
             init_webserver(self.db_path, self.config)
 
             def run_server():
-                import werkzeug.serving
-                # Silence Flask/Werkzeug startup log
-                from flask.logging import create_logger
-                import logging
-                app.logger = create_logger(app)
-                app.logger.setLevel(logging.INFO)
-                logging.getLogger('werkzeug').setLevel(logging.WARNING)
-                app.run(host='0.0.0.0', port=self._web_port, debug=False, use_reloader=False)
+                from waitress import serve
+                serve(app, host='0.0.0.0', port=self._web_port, _quiet=True)
 
             self._web_thread = threading.Thread(target=run_server, daemon=True)
             self._web_thread.start()

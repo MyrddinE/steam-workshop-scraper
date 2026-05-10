@@ -36,7 +36,8 @@ def main():
         logging.warning(f"Port {web_config.get('port', 8080)} in use, using {port}")
 
     logging.info(f"Starting web server on http://{host}:{port}")
-    app.run(host=host, port=port, debug=False)
+    from waitress import serve
+    serve(app, host=host, port=port)
 
 
 if __name__ == "__main__":

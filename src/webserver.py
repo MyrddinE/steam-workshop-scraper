@@ -112,8 +112,6 @@ def template_fsize(n):
 @app.route('/api/events')
 def api_events():
     """SSE endpoint: streams real-time notifications to web clients."""
-    # Clear stale queues from previous connections (browser reconnects leave dead queues)
-    _event_queues.clear()
     q = queue.Queue()
     _event_queues.append(q)
     logging.info(f"[SSE] client connected (total: {len(_event_queues)})")
