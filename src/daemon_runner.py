@@ -7,8 +7,10 @@ import sys
 
 def main():
     config_path = "config.yaml"
-    if len(sys.argv) > 1:
-        config_path = sys.argv[1]
+    args = [a for a in sys.argv[1:] if a != "--daemon"]
+    is_daemon = "--daemon" in sys.argv
+    if args:
+        config_path = args[0]
         
     try:
         config = load_config(config_path)
@@ -25,13 +27,13 @@ def main():
     handlers = []
     if log_file:
         handlers.append(logging.FileHandler(log_file))
-    # stdout: everything; stderr: errors only
-    stdout_handler = logging.StreamHandler(sys.stdout)
-    stdout_handler.setLevel(log_level)
-    handlers.append(stdout_handler)
-    stderr_handler = logging.StreamHandler(sys.stderr)
-    stderr_handler.setLevel(logging.ERROR)
-    handlers.append(stderr_handler)
+    if not is_daemon:
+        # stdout: everything except errors; stderr: errors only
+        stdout_handler = logging.StreamHandler(sys.stdout)
+        stdout_handler.setLevel(log_level)
+        handlers.append(stdout_handler)
+    handlers.append(logging.StreamHandler(sys.stderr))
+    handlers[-1].setLevel(logging.ERROR)
 
     logging.basicConfig(
         level=log_level,
