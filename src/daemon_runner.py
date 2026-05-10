@@ -3,7 +3,6 @@ from src.daemon import Daemon
 from src.config import load_config
 from src.database import initialize_database
 import sys
-import os
 
 
 def main():
@@ -24,11 +23,10 @@ def main():
     log_file = log_config.get("file")
 
     handlers = []
-    is_tty = os.isatty(sys.stderr.fileno())
-    if is_tty:
-        handlers.append(logging.StreamHandler())
     if log_file:
         handlers.append(logging.FileHandler(log_file))
+    else:
+        handlers.append(logging.StreamHandler())
 
     logging.basicConfig(
         level=log_level,
