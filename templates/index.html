@@ -291,7 +291,7 @@ function renderDetail(item) {
       <div></div>
       <div><span class="stat-label">Favs:</span> ${fmtCount(favs)} / ${fmtCount(lfavs)}</div>
     </div>
-    <p><a href="${url}" target="_blank">Open on Steam</a></p>
+    <p><a href="${url}" target="_blank">Open on Steam</a> &nbsp; <button onclick="doSubscribe(${item.workshop_id}, ${item.consumer_appid || 0});return false;">Subscribe</button></p>
     ${desc ? '<div style="border-left:3px solid var(--pico-muted-border-color);padding-left:.5rem;margin-top:.5rem">'+desc+'</div>' : ''}
   `;
 }
@@ -352,6 +352,36 @@ async function showDetail(wid) {
   document.querySelectorAll('#results-list .result-item').forEach(el => el.classList.remove('selected'));
   _startDetailPoll(wid, item);
   } catch(e) { pane.innerHTML = '<p>Error loading detail: ' + e.message + '</p>'; }
+}
+
+async function doSubscribe(wid, appid) {
+  if (!appid) { alert('Item has no AppID — cannot subscribe.'); return; }
+
+  let result;
+  if (typeof steamSubscribe !== 'undefined') {
+    result = await steamSubscribe(String(wid), String(appid));
+  } else {
+    try {
+      const resp = await fetch('/api/subscribe/' + wid, {method:'POST'});
+      result = await resp.json();
+    } catch(e) {
+      result = {success: -1, message: 'Network error contacting server.'};
+    }
+  }
+
+  switch (result.success) {
+    case 1:
+      alert('Subscribed!');
+      break;
+    case 15:
+      alert('You do not have permission to subscribe to this item.\n\nYour Steam session may have expired. Visit steamcommunity.com and log in to refresh it.');
+      break;
+    case 25:
+      alert('You have reached the 15,000 subscription limit.');
+      break;
+    default:
+      alert(result.message || 'There was a problem subscribing. Please try again.');
+  }
 }
 
 async function loadState() {

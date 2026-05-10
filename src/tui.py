@@ -882,6 +882,7 @@ class ScraperApp(App):
         ("ctrl+o", "add_or_row", "OR"),
         ("ctrl+x", "delete_bottom_row", "Delete Row"),
         ("ctrl+question_mark", "show_analysis", "Analysis"),
+        ("ctrl+b", "subscribe", "Subscribe"),
     ]
 
     CSS = """
@@ -1518,6 +1519,47 @@ class ScraperApp(App):
     def action_show_daemon(self) -> None:
         """Shows the daemon management screen."""
         self.push_screen(DaemonManagerScreen())
+
+    async def action_subscribe(self) -> None:
+        """Subscribes to the currently displayed workshop item on Steam."""
+        try:
+            detail = self.query_one("#item-details", DetailsPane)
+            wid = getattr(detail, "workshop_id", None)
+        except Exception:
+            wid = None
+        if not wid:
+            self.notify("No item selected to subscribe to.", severity="warning")
+            return
+
+        conn = get_connection(self.db_path)
+        row = conn.execute(
+            "SELECT consumer_appid FROM workshop_items WHERE workshop_id=?",
+            (wid,)
+        ).fetchone()
+        conn.close()
+
+        if not row or not row["consumer_appid"]:
+            self.notify("Item has no AppID — cannot subscribe.", severity="warning")
+            return
+
+        import requests
+        web_port = self.config.get("web", {}).get("port", 8080)
+        try:
+            resp = requests.post(
+                f"http://127.0.0.1:{web_port}/api/subscribe/{wid}",
+                timeout=15,
+            )
+            data = resp.json()
+            if data.get("success") == 1:
+                self.notify("Subscribed!")
+            elif data.get("success") == 15:
+                self.notify("Permission denied. Steam session may have expired.", severity="warning")
+            elif data.get("success") == 25:
+                self.notify("Subscription limit reached (15,000).", severity="warning")
+            else:
+                self.notify(data.get("message", "Subscribe failed."), severity="error")
+        except Exception as e:
+            self.notify(f"Subscribe request failed: {e}", severity="error")
 
     def _start_webserver(self) -> None:
         """Starts the embedded web server in a background thread."""

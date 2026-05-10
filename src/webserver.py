@@ -4,6 +4,7 @@ import json
 import os
 import re
 import logging
+import requests
 from flask import Flask, request, jsonify, render_template, send_from_directory
 from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection
 from src.analysis import view_window_analysis
@@ -12,6 +13,7 @@ app = Flask(__name__, template_folder='../templates')
 _db_path = "workshop.db"
 _config = {}
 _images_dir = "images"
+_sessionid = ""
 
 
 def init_webserver(db_path: str, config: dict):
@@ -239,3 +241,55 @@ def _ensure_image_flagged(workshop_id, priority):
     conn.close()
     if row and row["preview_url"] and not row["image_extension"]:
         flag_for_image(_db_path, workshop_id, max(row["needs_image"] or 1, priority))
+
+
+@app.route('/api/subscribe/<int:workshop_id>', methods=['POST'])
+def api_subscribe(workshop_id):
+    global _sessionid
+    sid = _sessionid or _config.get("session", {}).get("id", "")
+    if not sid:
+        return jsonify({"success": -1, "message": "No Steam session configured."}), 400
+
+    conn = get_connection(_db_path)
+    row = conn.execute(
+        "SELECT consumer_appid FROM workshop_items WHERE workshop_id=?",
+        (workshop_id,)
+    ).fetchone()
+    conn.close()
+
+    if not row:
+        return jsonify({"success": -1, "message": "Item not found."}), 404
+
+    appid = row["consumer_appid"]
+    if not appid:
+        return jsonify({"success": -1, "message": "Item has no AppID."}), 400
+
+    try:
+        resp = requests.post(
+            "https://steamcommunity.com/sharedfiles/subscribe",
+            data={
+                "id": workshop_id,
+                "appid": appid,
+                "include_dependencies": "false",
+                "sessionid": sid,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=15,
+        )
+        data = resp.json()
+        return jsonify(data)
+    except Exception as e:
+        logging.warning(f"Subscribe failed for {workshop_id}: {e}")
+        return jsonify({"success": -1, "message": f"Subscribe request failed: {e}"}), 502
+
+
+@app.route('/api/sessionid', methods=['POST'])
+def api_sessionid():
+    global _sessionid
+    data = request.get_json(silent=True) or {}
+    sid = data.get("sessionid", "").strip()
+    if sid:
+        _sessionid = sid
+        logging.info("SessionID updated from web UI userscript")
+        return jsonify({"ok": True})
+    return jsonify({"ok": False, "message": "No sessionid provided."}), 400
