@@ -117,6 +117,7 @@ def api_events():
     logging.info(f"[SSE] client connected (total: {len(_event_queues)})")
 
     def generator():
+        logging.info(f"[SSE] generator started for client")
         try:
             yield "data: {\"type\":\"connected\"}\n\n"
             while True:
@@ -125,6 +126,11 @@ def api_events():
                     yield f"data: {msg}\n\n"
                 except queue.Empty:
                     yield ":keepalive\n\n"
+        except GeneratorExit:
+            logging.info(f"[SSE] GeneratorExit — client closed connection")
+            raise
+        except Exception as e:
+            logging.warning(f"[SSE] generator exception: {e}")
         finally:
             if q in _event_queues:
                 _event_queues.remove(q)
