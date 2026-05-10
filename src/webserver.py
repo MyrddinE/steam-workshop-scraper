@@ -18,15 +18,14 @@ _event_queues: list[queue.Queue] = []
 def _notify_web_clients(event_type: str, data: dict):
     """Thread-safe: pushes an event to all connected SSE clients."""
     payload = json.dumps({"type": event_type, **data})
-    import logging
-    logging.info(f"[SSE] notify: {event_type} wid={data.get('workshop_id','?')} (queues: {len(_event_queues)})")
+    import sys
+    print(f"[SSE] notify: {event_type} wid={data.get('workshop_id','?')} (queues: {len(_event_queues)})", file=sys.stderr, flush=True)
     if not _event_queues:
-        logging.info("[SSE] no connected clients, discarding event")
+        print("[SSE] no connected clients, discarding event", file=sys.stderr, flush=True)
     for q in _event_queues[:]:
         try:
             q.put_nowait(payload)
-        except Exception as e:
-            logging.warning(f"[SSE] failed to push event: {e}")
+        except Exception:
             _event_queues.remove(q)
 
 
@@ -118,23 +117,22 @@ def api_events():
     print(f"[SSE] client connected (total: {len(_event_queues)})", file=sys.stderr, flush=True)
 
     def generator():
-        yield "data: {\"type\":\"connected\"}\n\n"
-        while True:
-            try:
-                msg = q.get(timeout=30)
-                yield f"data: {msg}\n\n"
-            except queue.Empty:
-                yield ":keepalive\n\n"
-
-    def on_close():
-        if q in _event_queues:
-            _event_queues.remove(q)
-            print(f"[SSE] client disconnected (remaining: {len(_event_queues)})", file=sys.stderr, flush=True)
+        try:
+            yield "data: {\"type\":\"connected\"}\n\n"
+            while True:
+                try:
+                    msg = q.get(timeout=30)
+                    yield f"data: {msg}\n\n"
+                except queue.Empty:
+                    yield ":keepalive\n\n"
+        finally:
+            if q in _event_queues:
+                _event_queues.remove(q)
+                print(f"[SSE] client disconnected (remaining: {len(_event_queues)})", file=sys.stderr, flush=True)
 
     response = Response(generator(), mimetype="text/event-stream")
     response.headers["Cache-Control"] = "no-cache"
     response.headers["X-Accel-Buffering"] = "no"
-    response.call_on_close(on_close)
     return response
 
 
