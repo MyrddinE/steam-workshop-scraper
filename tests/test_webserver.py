@@ -52,10 +52,43 @@ def test_search_builder_not_in_scroll(web_client):
     client, _ = web_client
     resp = client.get('/')
     html = resp.data.decode()
-    # search-builder should appear BEFORE results-scroll in the DOM
     sb_pos = html.index('id="search-builder"')
     rs_pos = html.index('id="results-scroll"')
     assert sb_pos < rs_pos
+
+
+def test_show_detail_has_desc_variable(web_client):
+    """Regression: desc variable must be declared before use in showDetail."""
+    import re
+    client, _ = web_client
+    resp = client.get('/')
+    html = resp.data.decode()
+    js = re.search(r'<script>(.*?)</script>', html, re.DOTALL)
+    assert js, "No <script> block found"
+    code = js.group(1)
+    sd_start = code.index('function showDetail')
+    sd_body = code[sd_start:]
+    desc_decl = re.search(r'\blet desc\b|\bvar desc\b|\bconst desc\b', sd_body)
+    assert desc_decl, "desc variable not declared in showDetail"
+    # desc must be declared before the final pane.innerHTML (the template literal)
+    inners = [m.start() for m in re.finditer(r'pane\.innerHTML', sd_body)]
+    assert len(inners) >= 2, "expected at least 2 pane.innerHTML calls in showDetail"
+    template_pos = inners[-1]  # the last one is the template literal
+    assert desc_decl.start() < template_pos, "desc declared AFTER template literal"
+
+
+def test_show_detail_has_try_catch(web_client):
+    """Regression: showDetail must wrap fetch in try/catch."""
+    client, _ = web_client
+    resp = client.get('/')
+    html = resp.data.decode()
+    import re
+    js = re.search(r'<script>(.*?)</script>', html, re.DOTALL).group(1)
+    # showDetail function should have try/catch around the fetch
+    sd_start = js.index('function showDetail')
+    sd_body = js[sd_start:sd_start + 2000]
+    assert 'try {' in sd_body
+    assert 'catch' in sd_body
 
 
 def test_search_returns_json(web_client):
