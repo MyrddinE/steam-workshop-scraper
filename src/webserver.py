@@ -11,6 +11,7 @@ from src.analysis import view_window_analysis
 app = Flask(__name__, template_folder='../templates')
 _db_path = "workshop.db"
 _config = {}
+_images_dir = "images"
 _event_queues: list[queue.Queue] = []
 
 
@@ -25,9 +26,10 @@ def _notify_web_clients(event_type: str, data: dict):
 
 
 def init_webserver(db_path: str, config: dict):
-    global _db_path, _config
+    global _db_path, _config, _images_dir
     _db_path = db_path
     _config = config
+    _images_dir = os.path.join(os.path.dirname(os.path.abspath(db_path)), "images")
 
 
 def _bbcode_to_html(text):
@@ -121,6 +123,11 @@ def api_events():
     response.headers["Cache-Control"] = "no-cache"
     response.call_on_close(lambda: _event_queues.remove(q) if q in _event_queues else None)
     return response
+
+
+@app.route('/images/<path:filename>')
+def serve_image(filename):
+    return send_from_directory(_images_dir, filename)
 
 
 @app.route('/')
