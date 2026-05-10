@@ -10,7 +10,8 @@
 body { min-height: 100vh; display: flex; flex-direction: column; }
 header { padding: .5rem 1rem; border-bottom: 1px solid var(--pico-muted-border-color); }
 main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
-#results-pane { flex: 0 0 320px; overflow-y: auto; border-right: 1px solid var(--pico-muted-border-color); padding-right: .5rem; }
+#results-pane { flex: 0 0 320px; display: flex; flex-direction: column; border-right: 1px solid var(--pico-muted-border-color); padding-right: .5rem; overflow: hidden; }
+#results-scroll { flex: 1; overflow-y: auto; min-height: 0; }
 #detail-pane { flex: 1; overflow-y: auto; padding-left: .5rem; }
 .stats-row { display: grid; grid-template-columns: 1fr 1fr; gap: .25rem; }
 .stat-label { color: var(--pico-muted-color); }
@@ -76,8 +77,10 @@ header { display: flex; justify-content: space-between; align-items: center; }
         <a href="/api/stats" id="btn-stats" style="flex:0.5">&#x1F4CA;</a>
       </div>
     </div>
-    <div id="results-list"></div>
-    <button id="load-more">Load more...</button>
+    <div id="results-scroll">
+      <div id="results-list"></div>
+      <button id="load-more">Load more...</button>
+    </div>
   </div>
   <div id="detail-pane">
     <p class="stat-label">Select an item to see details.</p>
