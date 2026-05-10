@@ -6,10 +6,10 @@ from textual.command import Provider, Hit, DiscoveryHit
 from textual.system_commands import SystemCommandsProvider
 from typing import Iterable
 from textual.screen import Screen, ModalScreen
-from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button, Markdown, DataTable
+from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button, Markdown, DataTable, RichLog
 from textual.containers import Horizontal, Vertical, VerticalScroll, Center, Grid
 from textual.reactive import reactive
-from src.database import search_items, get_all_authors, initialize_database, flag_for_translation, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, get_db_stats, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail
+from src.database import search_items, get_all_authors, initialize_database, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, get_db_stats, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail
 from src.analysis import view_window_analysis
 from src.config import load_config
 import os
@@ -223,6 +223,139 @@ class AnalysisScreen(Screen):
                        f"{len(result['buckets'])} buckets)")
         self.query_one("#analysis-summary", Static).update(summary)
 
+
+class DaemonManagerScreen(Screen):
+    """Screen to manage the background daemon process."""
+
+    def __init__(self, config_path: str = "config.yaml"):
+        super().__init__()
+        self.config_path = config_path
+        self.pid_file = ".daemon.pid"
+        self._tail_proc = None
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Horizontal(id="dm-main"):
+            with Vertical(id="dm-controls", classes="dm-panel"):
+                yield Label("[b]Daemon Manager[/b]", id="dm-title")
+                yield Static(id="dm-status")
+                yield Button("Start", id="dm-start", variant="success")
+                yield Button("Stop", id="dm-stop", variant="error")
+                yield Button("Restart", id="dm-restart", variant="warning")
+                yield Button("Close", id="dm-close")
+            with Vertical(id="dm-log", classes="dm-panel"):
+                yield Label("[b]Log Output[/b]")
+                yield RichLog(id="dm-log-view", auto_scroll=True, wrap=True, max_lines=200)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#dm-controls").styles.width = 20
+        self._update_status()
+        self._start_tail()
+
+    def on_unmount(self) -> None:
+        if self._tail_proc:
+            self._tail_proc.terminate()
+            self._tail_proc = None
+
+    def _update_status(self) -> None:
+        pid = self._read_pid()
+        if pid and self._is_running(pid):
+            self.query_one("#dm-status", Static).update(f"[green]Running (PID: {pid})[/green]")
+        else:
+            self.query_one("#dm-status", Static).update("[red]Not running[/red]")
+
+    def _read_pid(self) -> int | None:
+        try:
+            with open(self.pid_file) as f:
+                return int(f.read().strip())
+        except Exception:
+            return None
+
+    @staticmethod
+    def _is_running(pid: int) -> bool:
+        try:
+            import os, signal
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    def _start_daemon(self) -> bool:
+        import subprocess, sys
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "src.daemon_runner", self.config_path, "--daemon"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _stop_daemon(self) -> bool:
+        pid = self._read_pid()
+        if pid and self._is_running(pid):
+            import os, signal
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+            import time
+            for _ in range(50):  # wait up to 5 seconds
+                if not self._is_running(pid):
+                    return True
+                time.sleep(0.1)
+        return not self._is_running(pid) if pid else True
+
+    def _start_tail(self):
+        import subprocess
+        from src.config import load_config
+        try:
+            cfg = load_config(self.config_path)
+        except Exception:
+            return
+        log_file = cfg.get("logging", {}).get("file")
+        if not log_file:
+            return
+        try:
+            self._tail_proc = subprocess.Popen(
+                ["tail", "-f", log_file],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, bufsize=1,
+            )
+            self.set_interval(0.5, self._poll_tail)
+        except Exception:
+            pass
+
+    def _poll_tail(self):
+        if not self._tail_proc or self._tail_proc.poll() is not None:
+            return
+        try:
+            line = self._tail_proc.stdout.readline()
+            if line:
+                self.query_one("#dm-log-view", RichLog).write(line.rstrip())
+        except Exception:
+            pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "dm-start":
+            self._start_daemon()
+            self._update_status()
+            if not self._tail_proc:
+                self._start_tail()
+        elif event.button.id == "dm-stop":
+            self._stop_daemon()
+            self._update_status()
+        elif event.button.id == "dm-restart":
+            self._stop_daemon()
+            self._start_daemon()
+            self._update_status()
+            if not self._tail_proc:
+                self._start_tail()
+        elif event.button.id == "dm-close":
+            self.app.pop_screen()
+
+
 class SubscriptionQueueScreen(ModalScreen):
     """A modal screen that displays the subscription queue with clickable links."""
 
@@ -358,7 +491,6 @@ class DetailsPane(VerticalScroll):
             with Horizontal(id="top-left-buttons"):
                 yield Button("Queue", id="btn-queue-sub", classes="details-button")
                 yield Button("Unqueue", id="btn-unqueue-sub", classes="details-button")
-                yield Button("Translate", id="btn-request-translation", classes="details-button")
                 yield Button("Show Original", id="btn-toggle-translation", classes="details-button")
             yield Button("jump", id="btn-jump-author", variant="primary")
 
@@ -418,7 +550,6 @@ class DetailsPane(VerticalScroll):
             self.query_one("#item-title", Label).update("")
             self.query_one("#item-creator", Label).update("")
             self.query_one("#btn-toggle-translation").display = False
-            self.query_one("#btn-request-translation").display = False
             self.query_one("#btn-jump-author").display = False
             self.query_one("#btn-queue-sub").display = False
             self.query_one("#btn-unqueue-sub").display = False
@@ -463,9 +594,6 @@ class DetailsPane(VerticalScroll):
             toggle_btn.label = "Show Original" if self.show_translated else "Show Translation"
         else:
             toggle_btn.display = False
-
-        req_btn = self.query_one("#btn-request-translation")
-        req_btn.display = True
 
         tags_list = parse_tags(item.get("tags", "[]"))
 
@@ -721,11 +849,11 @@ class ScraperApp(App):
 
     BINDINGS = [
         ("ctrl+q", "quit", "Quit"),
-        ("ctrl+d", "show_stats", "Stats"),
+        ("ctrl+d", "show_daemon", "Daemon"),
+        ("ctrl+r", "show_stats", "Stats"),
         ("s", "toggle_queue", "Queue for Sub"),
         ("l", "show_sub_queue", "List Queued Items"),
         ("ctrl+s", "save_filter_for_scraper", "Save Filter"),
-        ("ctrl+t", "request_translation", "Translate"),
         ("ctrl+w", "toggle_translation", "Toggle Translation"),
         ("ctrl+a", "add_and_row", "AND"),
         ("ctrl+o", "add_or_row", "OR"),
@@ -1273,19 +1401,6 @@ class ScraperApp(App):
 
             self.call_after_refresh(setup_author_filter)
 
-        elif event.button.id == "btn-return":
-            self.is_single_creator_mode = False
-            self.query_one("#btn-save-filter", Button).display = True
-            self.query_one("#btn-return", Button).display = False
-
-            # Reload saved state
-            state = load_tui_state(self.state_file)
-            if state and "filters" in state:
-                builder = self.query_one("#search-builder", SearchBuilder)
-                builder.set_filters(state["filters"])
-
-            self.call_after_refresh(self.execute_search)
-
         elif event.button.id == "btn-toggle-translation":
             self.action_toggle_translation()
 
@@ -1343,21 +1458,6 @@ class ScraperApp(App):
         # Scroll to keep highlight visible if needed
         # list_view.scroll_to_widget(item)
 
-    def action_request_translation(self) -> None:
-        detail_pane = self.query_one("#item-details", DetailsPane)
-        if detail_pane.item_data:
-            item = detail_pane.item_data
-            wid = item.get("workshop_id")
-            
-            if item.get("translation_priority", 0) > 0:
-                self.notify(f"Item {wid} is already in the translation queue.", severity="warning")
-                return
-
-            flag_for_translation(self.db_path, wid, priority=10)
-            item["translation_priority"] = 10
-            detail_pane.update_content()
-            self.notify(f"Item {wid} flagged for high-priority translation.")
-
     async def action_add_and_row(self) -> None:
         self.query_one("#search-builder", SearchBuilder).add_row("AND")
         await self.execute_search()
@@ -1391,6 +1491,10 @@ class ScraperApp(App):
     def action_show_analysis(self) -> None:
         """Shows the view window analysis screen."""
         self.push_screen(AnalysisScreen(self.db_path))
+
+    def action_show_daemon(self) -> None:
+        """Shows the daemon management screen."""
+        self.push_screen(DaemonManagerScreen())
 
     def _start_webserver(self) -> None:
         """Starts the embedded web server in a background thread."""

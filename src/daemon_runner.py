@@ -1,4 +1,6 @@
 import logging
+import signal
+import atexit
 from src.daemon import Daemon
 from src.config import load_config
 from src.database import initialize_database
@@ -37,6 +39,11 @@ def main():
     if is_daemon:
         _daemonize()
 
+    # Write PID file for TUI daemon manager
+    pid_file = ".daemon.pid"
+    with open(pid_file, "w") as f:
+        f.write(str(os.getpid()))
+    atexit.register(lambda: os.remove(pid_file) if os.path.exists(pid_file) else None)
         
     log_config = config.get("logging", {})
     level_str = log_config.get("level", "INFO").upper()

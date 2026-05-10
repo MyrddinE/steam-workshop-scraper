@@ -318,13 +318,6 @@ async def test_tui_details_pane_translation_fallback_and_priority(mock_config):
             await pilot.pause(ASYNC_PAUSE)
             
             assert "Original Desc" in str(detail_content._markdown) # Fallback worked
-            
-            # Click Request Translation
-            req_btn = app.query_one("#btn-request-translation")
-            with patch('src.tui.flag_for_translation') as mock_flag:
-                req_btn.press()
-                await pilot.pause(ASYNC_PAUSE)
-                mock_flag.assert_called_once_with(mock_config["database"]["path"], 1, priority=10)
 
 @pytest.mark.asyncio
 async def test_tui_remove_search_row(mock_config):
