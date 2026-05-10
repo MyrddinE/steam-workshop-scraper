@@ -4,7 +4,7 @@ import json
 import os
 import re
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail
+from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection
 from src.analysis import view_window_analysis
 
 app = Flask(__name__, template_folder='../templates')
@@ -215,13 +215,27 @@ def api_bump_translation_detail(workshop_id):
     return jsonify({"ok": True})
 
 
+def _ensure_image_flagged(workshop_id, priority):
+    """If item has preview_url but no image_extension, flag it for download."""
+    conn = get_connection(_db_path)
+    row = conn.execute(
+        "SELECT preview_url, image_extension, needs_image FROM workshop_items WHERE workshop_id=?",
+        (workshop_id,)
+    ).fetchone()
+    conn.close()
+    if row and row["preview_url"] and not row["image_extension"]:
+        flag_for_image(_db_path, workshop_id, max(row["needs_image"] or 1, priority))
+
+
 @app.route('/api/bump_image_list/<int:workshop_id>', methods=['POST'])
 def api_bump_image_list(workshop_id):
+    _ensure_image_flagged(workshop_id, 5)
     bump_image_priority_for_list(_db_path, workshop_id)
     return jsonify({"ok": True})
 
 
 @app.route('/api/bump_image_detail/<int:workshop_id>', methods=['POST'])
 def api_bump_image_detail(workshop_id):
+    _ensure_image_flagged(workshop_id, 10)
     bump_image_priority_for_detail(_db_path, workshop_id)
     return jsonify({"ok": True})
