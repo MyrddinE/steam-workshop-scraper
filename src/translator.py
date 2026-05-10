@@ -72,16 +72,12 @@ class TranslatorThread(threading.Thread):
             })
 
         prompt = f"""
-Translate the following Steam Workshop fields into English.
-Maintain the tone and any formatting (like [b] tags).
-Return the result as a raw JSON array of objects matching this schema:
+Translate these Steam Workshop fields to English. Preserve BBcode tags.
+Return ONLY a JSON array of objects like:
 [{{"id": "item_123_title", "field": "title_en", "translated": "Hello"}}]
-If a field is already in English, return it unchanged.
-Do NOT include any text outside the JSON array.
 
 {json.dumps(items, ensure_ascii=False)}
 """
-
         now_iso = datetime.now(timezone.utc).isoformat()
         conn = get_connection(self.db_path)
 
@@ -89,24 +85,21 @@ Do NOT include any text outside the JSON array.
             response = client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": "You are a helpful translator for Steam Workshop content. Output valid JSON arrays only."},
+                    {"role": "system", "content": "You translate Steam Workshop text to English. Output only a raw JSON array."},
                     {"role": "user", "content": prompt}
                 ],
-                response_format={"type": "json_object"},
                 temperature=0.3,
             )
-            content = response.choices[0].message.content
+            content = response.choices[0].message.content.strip()
             translated = json.loads(content)
-
-            # If the response wraps in {"translations": [...]}, handle it
             if isinstance(translated, dict):
+                # Unwrap single-key dict into contained list
                 for v in translated.values():
                     if isinstance(v, list):
                         translated = v
                         break
-
             if not isinstance(translated, list):
-                raise ValueError(f"Expected JSON array, got {type(translated)}")
+                raise ValueError(f"Expected list, got {type(translated)}: {content[:200]}")
 
             # Build a lookup from id to translated text
             trans_map = {}
