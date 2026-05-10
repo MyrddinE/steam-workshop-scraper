@@ -96,8 +96,8 @@ class ImageScraperThread(threading.Thread):
 
             except Exception as e:
                 logging.warning(f"[I:{wid}] Image download failed: {e}")
-                # Downgrade priority by 1, minimum 1
-                flag_for_image(self.db_path, wid, max(1, (item.get("needs_image") or 1) - 1))
+                # Downgrade priority by 1, minimum 0
+                flag_for_image(self.db_path, wid, max(0, (item.get("needs_image") or 1) - 1))
                 self.image_failures += 1
                 self.image_successes = 0
                 if self.image_failures >= 2 and self.image_had_streak:
