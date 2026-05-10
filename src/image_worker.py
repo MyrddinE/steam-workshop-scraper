@@ -21,6 +21,7 @@ MIME_MAP = {
 MAGIC_EXT_MAP = {
     ".jpeg": "jpg",
     ".jpg": "jpg",
+    ".jfif": "jpg",
     ".png": "png",
     ".gif": "gif",
     ".webp": "webp",
