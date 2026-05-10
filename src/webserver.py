@@ -4,6 +4,7 @@ import json
 import os
 import re
 import logging
+import socket
 import requests
 from flask import Flask, request, jsonify, render_template, send_from_directory
 from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection
@@ -103,6 +104,32 @@ def serve_image(filename):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+
+@app.route('/userscript/<path:filename>')
+def serve_userscript(filename):
+    template_path = os.path.join(os.path.dirname(__file__), '..', 'userscripts', filename)
+    if not os.path.isfile(template_path):
+        return jsonify({"error": "not found"}), 404
+
+    with open(template_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    port = _config.get("web", {}).get("port", 8080)
+    try:
+        host_ip = socket.gethostbyname(socket.gethostname())
+    except Exception:
+        host_ip = None
+
+    includes = []
+    if host_ip and not host_ip.startswith('127.'):
+        includes.append(f'// @include      http://{host_ip}:{port}/*')
+
+    if includes:
+        marker = '// ==/UserScript=='
+        content = content.replace(marker, '\n'.join(includes) + '\n' + marker)
+
+    return content, 200, {'Content-Type': 'application/javascript; charset=utf-8'}
 
 
 @app.route('/api/search', methods=['POST', 'GET'])

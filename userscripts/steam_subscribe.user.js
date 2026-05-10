@@ -5,10 +5,8 @@
 // @description  Bridges Steam session to the Workshop Scraper web UI for one-click subscribing.
 // @author       MyrddinE
 // @match        https://steamcommunity.com/*
-// @match        http://localhost:8080/*
-// @match        http://127.0.0.1:8080/*
-// @match        http://localhost:8081/*
-// @match        http://127.0.0.1:8081/*
+// @include      http://localhost:*/
+// @include      http://127.0.0.1:*/
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue

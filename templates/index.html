@@ -355,7 +355,7 @@ async function showDetail(wid) {
   } catch(e) { pane.innerHTML = '<p>Error loading detail: ' + e.message + '</p>'; }
 }
 
-const US_RAW_URL = 'https://raw.githubusercontent.com/MyrddinE/steam-workshop-scraper/main/userscripts/steam_subscribe.user.js';
+const US_RAW_URL = '/userscript/steam_subscribe.user.js';
 const US_EXPECTED_VER = parseInt(document.querySelector('meta[name="userscript-version"]')?.content || '1', 10);
 
 function _userscriptPresent() {
