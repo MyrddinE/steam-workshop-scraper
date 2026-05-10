@@ -308,9 +308,12 @@ document.getElementById('sort-order').onchange = () => doSearch(true);
 loadState();
 
 const evtSource = new EventSource('/api/events');
+evtSource.onopen = () => console.log('[SSE] connected');
 evtSource.onmessage = function(event) {
   try {
     const data = JSON.parse(event.data);
+    if (data.type === 'connected') return;
+    console.log('[SSE] received:', data.type, data);
     if (data.type === 'translation' || data.type === 'web_scrape') {
       const link = document.querySelector('#detail-pane a[href*="sharedfiles"]');
       if (link && link.href.includes('id=' + data.workshop_id)) {
@@ -319,20 +322,26 @@ evtSource.onmessage = function(event) {
     }
     if (data.type === 'image') {
       const link = document.querySelector('#detail-pane a[href*="sharedfiles"]');
+      console.log('[SSE] image event, detail link:', link ? link.href : 'none', 'target wid:', data.workshop_id);
       if (link && link.href.includes('id=' + data.workshop_id)) {
         let img = document.querySelector('#detail-image');
+        console.log('[SSE] existing img:', img);
         if (!img) {
           img = document.createElement('img');
           img.id = 'detail-image';
           img.alt = 'Preview';
           link.parentElement.insertBefore(img, link);
+          console.log('[SSE] created new img tag');
         }
         img.src = '/images/' + data.workshop_id + '.' + data.ext;
+        console.log('[SSE] set img.src =', img.src);
+      } else {
+        console.log('[SSE] detail pane not showing this item, skipping');
       }
     }
-  } catch(e) {}
+  } catch(e) { console.error('[SSE] error:', e); }
 };
-evtSource.onerror = () => {}; // silently reconnect
+evtSource.onerror = () => { console.log('[SSE] connection error, reconnecting...'); };
 </script>
 </body>
 </html>
