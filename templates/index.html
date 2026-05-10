@@ -354,20 +354,26 @@ async function showDetail(wid) {
   } catch(e) { pane.innerHTML = '<p>Error loading detail: ' + e.message + '</p>'; }
 }
 
+const US_RAW_URL = 'https://raw.githubusercontent.com/MyrddinE/steam-workshop-scraper/main/userscripts/steam_subscribe.user.js';
+
 async function doSubscribe(wid, appid) {
   if (!appid) { alert('Item has no AppID — cannot subscribe.'); return; }
 
-  let result;
-  if (typeof steamSubscribe !== 'undefined') {
-    result = await steamSubscribe(String(wid), String(appid));
-  } else {
-    try {
-      const resp = await fetch('/api/subscribe/' + wid, {method:'POST'});
-      result = await resp.json();
-    } catch(e) {
-      result = {success: -1, message: 'Network error contacting server.'};
+  if (typeof steamSubscribe === 'undefined') {
+    const ok = confirm(
+      'To subscribe directly from this page, install the Subscribe Bridge userscript:\n\n' +
+      '1. Install Tampermonkey from your browser\'s extension store\n' +
+      '2. Click OK to open the userscript — Tampermonkey will offer to install it\n' +
+      '3. Visit steamcommunity.com once to capture your session\n\n' +
+      'The script automates the same POST Steam uses for its own Subscribe button.'
+    );
+    if (ok) {
+      window.open(US_RAW_URL, '_blank');
     }
+    return;
   }
+
+  const result = await steamSubscribe(String(wid), String(appid));
 
   switch (result.success) {
     case 1:
