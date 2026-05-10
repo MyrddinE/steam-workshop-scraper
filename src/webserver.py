@@ -265,7 +265,9 @@ def _ensure_image_flagged(workshop_id, priority):
 def api_subscribe(workshop_id):
     global _sessionid
     sid = _sessionid or _config.get("session", {}).get("id", "")
+    logging.info(f"[Subscribe] request for workshop_id={workshop_id}, sessionid={'set' if sid else 'missing'}")
     if not sid:
+        logging.warning(f"[Subscribe] No sessionid available — userscript may not have pushed one")
         return jsonify({"success": -1, "message": "No Steam session configured."}), 400
 
     conn = get_connection(_db_path)
@@ -282,6 +284,7 @@ def api_subscribe(workshop_id):
     if not appid:
         return jsonify({"success": -1, "message": "Item has no AppID."}), 400
 
+    logging.info(f"[Subscribe] POSTing to Steam: id={workshop_id}, appid={appid}, sessionid={sid[:6]}...")
     try:
         resp = requests.post(
             "https://steamcommunity.com/sharedfiles/subscribe",
@@ -295,9 +298,10 @@ def api_subscribe(workshop_id):
             timeout=15,
         )
         data = resp.json()
+        logging.info(f"[Subscribe] Steam response: status={resp.status_code}, body={data}")
         return jsonify(data)
     except Exception as e:
-        logging.warning(f"Subscribe failed for {workshop_id}: {e}")
+        logging.warning(f"[Subscribe] failed for workshop_id={workshop_id}: {e}")
         return jsonify({"success": -1, "message": f"Subscribe request failed: {e}"}), 502
 
 
