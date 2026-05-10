@@ -73,8 +73,7 @@ class TranslatorThread(threading.Thread):
 
         prompt = f"""
 Translate these Steam Workshop fields to English. Preserve BBcode tags.
-Return ONLY a JSON array of objects like:
-[{{"id": "item_123_title", "field": "title_en", "translated": "Hello"}}]
+Return ONLY a JSON array matching this exact format, preserving all 'id' values:
 
 {json.dumps(items, ensure_ascii=False)}
 """
@@ -104,7 +103,7 @@ Return ONLY a JSON array of objects like:
             trans_map = {}
             for t in translated:
                 tid = t.get("id", "")
-                ttext = t.get("translated", "")
+                ttext = t.get("translated") or t.get("text", "")
                 if tid and ttext:
                     trans_map[tid] = ttext
 
