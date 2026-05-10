@@ -25,6 +25,7 @@ def test_main_config_not_found():
 
 
 def test_main_logging_with_file():
+    """With log file: FileHandler + stderr StreamHandler for errors."""
     import logging
     with patch('sys.argv', ['daemon_runner.py']), \
          patch('src.daemon_runner.load_config') as mock_load, \
@@ -44,14 +45,14 @@ def test_main_logging_with_file():
         main()
 
         mock_file_handler.assert_called_once_with("test_scraper.log")
-        mock_stream_handler.assert_not_called()
         kwargs = mock_basic_config.call_args.kwargs
         assert kwargs["level"] == logging.WARNING
         assert mock_fh_instance in kwargs["handlers"]
-        assert len(kwargs["handlers"]) == 1
+        assert len(kwargs["handlers"]) == 3  # FileHandler + stdout + stderr
 
 
 def test_main_logging_no_file():
+    """No log file: stdout + stderr StreamHandlers."""
     import logging
     with patch('sys.argv', ['daemon_runner.py']), \
          patch('src.daemon_runner.load_config') as mock_load, \
@@ -66,8 +67,7 @@ def test_main_logging_no_file():
 
         main()
 
-        mock_stream_handler.assert_called_once()
         kwargs = mock_basic_config.call_args.kwargs
         assert kwargs["level"] == logging.INFO
         assert mock_sh_instance in kwargs["handlers"]
-        assert len(kwargs["handlers"]) == 1
+        assert len(kwargs["handlers"]) == 2  # stdout + stderr

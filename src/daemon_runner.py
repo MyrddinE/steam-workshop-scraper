@@ -25,8 +25,13 @@ def main():
     handlers = []
     if log_file:
         handlers.append(logging.FileHandler(log_file))
-    else:
-        handlers.append(logging.StreamHandler())
+    # stdout: everything; stderr: errors only
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setLevel(log_level)
+    handlers.append(stdout_handler)
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(logging.ERROR)
+    handlers.append(stderr_handler)
 
     logging.basicConfig(
         level=log_level,
