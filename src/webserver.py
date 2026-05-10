@@ -112,10 +112,10 @@ def template_fsize(n):
 @app.route('/api/events')
 def api_events():
     """SSE endpoint: streams real-time notifications to web clients."""
-    import logging
     q = queue.Queue()
     _event_queues.append(q)
-    logging.info(f"[SSE] client connected (total: {len(_event_queues)})")
+    import sys
+    print(f"[SSE] client connected (total: {len(_event_queues)})", file=sys.stderr, flush=True)
 
     def generator():
         yield "data: {\"type\":\"connected\"}\n\n"
@@ -129,7 +129,7 @@ def api_events():
     def on_close():
         if q in _event_queues:
             _event_queues.remove(q)
-            logging.info(f"[SSE] client disconnected (remaining: {len(_event_queues)})")
+            print(f"[SSE] client disconnected (remaining: {len(_event_queues)})", file=sys.stderr, flush=True)
 
     response = Response(generator(), mimetype="text/event-stream")
     response.headers["Cache-Control"] = "no-cache"
