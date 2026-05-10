@@ -60,46 +60,12 @@
     return;  // Prevent injection of outdated bridge
   }
 
-  function getSessionId() {
-    return GM_getValue('steam_sessionid', '');
-  }
+  // ── Stamp the DOM so the page knows we're here ────────────────────
+  document.body.dataset.userscript = '1';
+  document.body.dataset.userscriptVer = String(CURRENT_VER);
+  console.log(`[SubscribeBridge] v${CURRENT_VER} active, sessionid ${getSessionId() ? '✓' : '✗'}`);
 
-  async function steamSubscribe(id, appid) {
-    const sessionid = getSessionId();
-    if (!sessionid || !sessionid.trim()) {
-      return { success: -1, message: 'No Steam session found. Please visit steamcommunity.com in this browser and log in.' };
-    }
-
-    return new Promise((resolve) => {
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url: 'https://steamcommunity.com/sharedfiles/subscribe',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        data: `id=${encodeURIComponent(id)}&appid=${encodeURIComponent(appid)}&include_dependencies=false&sessionid=${encodeURIComponent(sessionid)}`,
-        onload: function (resp) {
-          try {
-            const data = JSON.parse(resp.responseText);
-            resolve(data);
-          } catch (e) {
-            resolve({ success: -1, message: 'Failed to parse Steam response.' });
-          }
-        },
-        onerror: function () {
-          resolve({ success: -1, message: 'Network error contacting Steam.' });
-        },
-        ontimeout: function () {
-          resolve({ success: -1, message: 'Steam request timed out.' });
-        },
-      });
-    });
-  }
-
-  // Inject the function into the page scope
-  unsafeWindow.steamSubscribe = steamSubscribe;
-  unsafeWindow.steamSubscribeVersion = CURRENT_VER;
-  console.log(`[SubscribeBridge] steamSubscribe() v${CURRENT_VER} injected into page`);
-
-  // Also send sessionid to the backend so the TUI can use it
+  // Push sessionid to the backend so the TUI / server can subscribe
   function pushSessionToBackend() {
     const sid = getSessionId();
     if (!sid) return;
@@ -112,7 +78,6 @@
         console.log('[SubscribeBridge] sessionid pushed to backend');
       },
       onerror: function () {
-        // Backend might not be running yet — retry later
         setTimeout(pushSessionToBackend, 5000);
       },
     });

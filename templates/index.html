@@ -358,36 +358,43 @@ async function showDetail(wid) {
 const US_RAW_URL = 'https://raw.githubusercontent.com/MyrddinE/steam-workshop-scraper/main/userscripts/steam_subscribe.user.js';
 const US_EXPECTED_VER = parseInt(document.querySelector('meta[name="userscript-version"]')?.content || '1', 10);
 
+function _userscriptPresent() {
+  const body = document.body;
+  if (!body || !body.dataset.userscript) return false;
+  const ver = parseInt(body.dataset.userscriptVer || '0', 10);
+  if (ver < US_EXPECTED_VER) {
+    const ok = confirm(
+      `Your Subscribe Bridge userscript is outdated (v${ver}). The page expects v${US_EXPECTED_VER}.\n\n` +
+      'Click OK to open the latest version for installation.'
+    );
+    if (ok) window.open(US_RAW_URL, '_blank');
+    return false;
+  }
+  return true;
+}
+
 async function doSubscribe(wid, appid) {
   if (!appid) { alert('Item has no AppID — cannot subscribe.'); return; }
 
-  if (typeof steamSubscribe === 'undefined') {
+  if (!_userscriptPresent()) {
     const ok = confirm(
       'To subscribe directly from this page, install the Subscribe Bridge userscript:\n\n' +
       '1. Install Tampermonkey from your browser\'s extension store\n' +
       '2. Click OK to open the userscript — Tampermonkey will offer to install it\n' +
       '3. Visit steamcommunity.com once to capture your session\n\n' +
-      'The script automates the same POST Steam uses for its own Subscribe button.'
+      'The script pushes your Steam session to the scraper server, which handles the subscribe.'
     );
-    if (ok) {
-      window.open(US_RAW_URL, '_blank');
-    }
+    if (ok) window.open(US_RAW_URL, '_blank');
     return;
   }
 
-  const usVer = typeof steamSubscribeVersion !== 'undefined' ? steamSubscribeVersion : 0;
-  if (usVer < US_EXPECTED_VER) {
-    const ok = confirm(
-      `Your Subscribe Bridge userscript is outdated (v${usVer}). The page expects v${US_EXPECTED_VER}.\n\n` +
-      'Click OK to open the latest version for installation.'
-    );
-    if (ok) {
-      window.open(US_RAW_URL, '_blank');
-    }
-    return;
+  let result;
+  try {
+    const resp = await fetch('/api/subscribe/' + wid, {method:'POST'});
+    result = await resp.json();
+  } catch(e) {
+    result = {success: -1, message: 'Network error contacting server.'};
   }
-
-  const result = await steamSubscribe(String(wid), String(appid));
 
   switch (result.success) {
     case 1:
