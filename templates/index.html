@@ -318,9 +318,15 @@ evtSource.onmessage = function(event) {
       }
     }
     if (data.type === 'image') {
-      const img = document.querySelector('#detail-image');
       const link = document.querySelector('#detail-pane a[href*="sharedfiles"]');
-      if (img && link && link.href.includes('id=' + data.workshop_id)) {
+      if (link && link.href.includes('id=' + data.workshop_id)) {
+        let img = document.querySelector('#detail-image');
+        if (!img) {
+          img = document.createElement('img');
+          img.id = 'detail-image';
+          img.alt = 'Preview';
+          link.parentElement.insertBefore(img, link);
+        }
         img.src = '/images/' + data.workshop_id + '.' + data.ext;
       }
     }
