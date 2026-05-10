@@ -366,16 +366,11 @@ def test_get_next_items_to_scrape_priority(db_path):
     items = get_next_items_to_scrape(db_path, limit=7)
     item_ids = [item['workshop_id'] for item in items]
     
-    # Priority should be:
-    # Group 1: NULL status -> 5, 6 (order doesn't strictly matter)
-    # Group 2: 206 status, ordered by subscriptions DESC -> 4, 3
-    # Group 3: Old 200 status, ordered by dt_updated ASC -> 7, 1
-    # Item 2 is not older than 7 days, so it should not be in the list.
-    
-    assert len(item_ids) == 6
+    # 206 items are now handled by web thread, not returned here
+    assert len(item_ids) == 4
     assert set(item_ids[0:2]) == {5, 6}
-    assert item_ids[2:4] == [4, 3]
-    assert item_ids[4:6] == [7, 1]
+    assert item_ids[2:4] == [7, 1]
+    assert all(i not in item_ids for i in (2, 3, 4))
 
 def test_get_user_not_found(db_path):
     from src.database import get_user

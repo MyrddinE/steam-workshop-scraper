@@ -119,7 +119,7 @@ def test_schema_version_is_set(db_path):
     conn = get_connection(db_path)
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert version == 2
+    assert version == 3
 
 def test_subscriber_score_uses_retention_formula(db_path):
     """Verify subscriber score uses subscriptions/lifetime_subscriptions ratio."""

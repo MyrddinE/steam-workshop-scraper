@@ -14,7 +14,7 @@ WORKSHOP_ITEM_COLUMNS = frozenset({
     "subscriptions", "favorited", "views", "tags", "extended_description",
     "extended_description_en", "language", "lifetime_subscriptions",
     "lifetime_favorited", "translation_priority", "is_queued_for_subscription",
-    "wilson_favorite_score", "wilson_subscription_score",
+    "wilson_favorite_score", "wilson_subscription_score", "needs_web_scrape",
 })
 
 USER_COLUMNS = frozenset({
@@ -266,7 +266,8 @@ def initialize_database(db_path: str):
         dt_translated TEXT,
         translation_priority INTEGER DEFAULT 0,
         wilson_favorite_score REAL DEFAULT NULL,
-        wilson_subscription_score REAL DEFAULT NULL
+        wilson_subscription_score REAL DEFAULT NULL,
+        needs_web_scrape INTEGER DEFAULT 0
     )
     """)
 
@@ -279,6 +280,19 @@ def initialize_database(db_path: str):
         dt_updated TEXT,
         dt_translated TEXT,
         translation_priority INTEGER DEFAULT 0
+    )
+    """)
+
+    # Create translation queue table for batched per-field translation
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS translation_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        item_type TEXT NOT NULL,
+        item_id INTEGER NOT NULL,
+        field TEXT NOT NULL,
+        original_text TEXT NOT NULL,
+        priority INTEGER DEFAULT 0,
+        dt_queued TEXT
     )
     """)
 
@@ -295,6 +309,7 @@ def initialize_database(db_path: str):
         ("is_queued_for_subscription", "INTEGER DEFAULT 0"),
         ("wilson_favorite_score", "REAL DEFAULT NULL"),
         ("wilson_subscription_score", "REAL DEFAULT NULL"),
+        ("needs_web_scrape", "INTEGER DEFAULT 0"),
     ])
 
     # Create app_tracking table for historical scraping and filter storage
@@ -367,7 +382,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 2
+    EXPECTED_VERSION = 3
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -419,6 +434,35 @@ def initialize_database(db_path: str):
             conn.commit()
         cursor.execute("PRAGMA user_version = 2")
         logging.info(f"Migration 1→2 complete. Fixed {fixed} malformed tag entries.")
+
+    if db_version < 3:
+        logging.info("Running migration 2→3: adding web scrape flag and translation queue...")
+        # Set needs_web_scrape=1 for items missing extended descriptions
+        cursor.execute("""
+            UPDATE workshop_items SET needs_web_scrape = 1
+            WHERE extended_description IS NULL AND status IN (200, 206)
+        """)
+        updated = cursor.rowcount
+        # Backfill existing translation_priority into translation_queue
+        cursor.execute("""
+            SELECT workshop_id, title, short_description, extended_description,
+                   translation_priority
+            FROM workshop_items WHERE translation_priority > 0
+        """)
+        for row in cursor.fetchall():
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for field, text in [("title_en", row["title"]),
+                                 ("short_description_en", row["short_description"]),
+                                 ("extended_description_en", row["extended_description"])]:
+                if text and not text.isascii():
+                    cursor.execute(
+                        "INSERT INTO translation_queue (item_type, item_id, field, original_text, priority, dt_queued) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        ("item", row["workshop_id"], field, text, row["translation_priority"], now_iso)
+                    )
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 3")
+        logging.info(f"Migration 2→3 complete. Set needs_web_scrape=1 on {updated} items.")
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
@@ -514,19 +558,13 @@ def get_next_items_to_scrape(db_path: str, limit: int = 10, staleness_days: int 
         SELECT * FROM workshop_items
         WHERE
             status IS NULL OR
-            status = 206 OR
             (status = 200 AND dt_attempted < datetime('now', ?))
         ORDER BY
             CASE
                 WHEN status IS NULL THEN 0
-                WHEN status = 206 THEN 1
                 WHEN status = 200 AND dt_attempted < datetime('now', ?) THEN 2
                 ELSE 3
             END ASC,
-            CASE
-                WHEN status = 206 THEN subscriptions
-                ELSE NULL
-            END DESC,
             dt_attempted ASC
         LIMIT ?
     """
@@ -931,6 +969,93 @@ def get_app_tracking(db_path: str, appid: int) -> dict | None:
     row = cursor.fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def get_next_web_scrape_item(db_path: str) -> dict | None:
+    """Returns the highest-priority item needing web scraping, or None."""
+    conn = get_connection(db_path)
+    cursor = conn.execute("""
+        SELECT * FROM workshop_items
+        WHERE needs_web_scrape > 0
+        ORDER BY needs_web_scrape DESC, dt_attempted ASC
+        LIMIT 1
+    """)
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def flag_for_web_scrape(db_path: str, workshop_id: int, priority: int):
+    """Sets needs_web_scrape to MAX(current, priority). Never downgrades."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "UPDATE workshop_items SET needs_web_scrape = MAX(needs_web_scrape, ?) WHERE workshop_id = ?",
+        (priority, workshop_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def bump_web_priority_for_list(db_path: str, workshop_id: int):
+    """Bumps web scrape priority to 5 for list items if currently < 5 and > 0."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "UPDATE workshop_items SET needs_web_scrape = 5 "
+        "WHERE workshop_id = ? AND needs_web_scrape > 0 AND needs_web_scrape < 5",
+        (workshop_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def bump_web_priority_for_detail(db_path: str, workshop_id: int):
+    """Bumps web scrape priority to 10 for detail items if currently < 10 and > 0."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "UPDATE workshop_items SET needs_web_scrape = 10 "
+        "WHERE workshop_id = ? AND needs_web_scrape > 0 AND needs_web_scrape < 10",
+        (workshop_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def flag_field_for_translation(db_path: str, item_type: str, item_id: int, field: str, text: str, priority: int):
+    """Inserts a field into translation_queue, or bumps its priority. Never downgrades."""
+    if not text or text.isascii():
+        return
+    conn = get_connection(db_path)
+    # Check if already exists
+    existing = conn.execute(
+        "SELECT id, priority FROM translation_queue WHERE item_type=? AND item_id=? AND field=?",
+        (item_type, item_id, field)
+    ).fetchone()
+    if existing:
+        if existing["priority"] < priority:
+            conn.execute(
+                "UPDATE translation_queue SET priority=? WHERE id=?",
+                (priority, existing["id"])
+            )
+    else:
+        conn.execute(
+            "INSERT INTO translation_queue (item_type, item_id, field, original_text, priority, dt_queued) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (item_type, item_id, field, text, priority, None)
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_next_batch_for_translation(db_path: str, limit: int = 20) -> list[dict]:
+    """Returns up to `limit` highest-priority fields for translation."""
+    conn = get_connection(db_path)
+    cursor = conn.execute(
+        "SELECT * FROM translation_queue ORDER BY priority DESC, dt_queued ASC LIMIT ?",
+        (limit,)
+    )
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return rows
 
 
 def save_app_filter(db_path: str, appid: int, filter_text: str = "", required_tags: list[str] = None,
