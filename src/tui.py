@@ -309,7 +309,7 @@ class DaemonManagerScreen(Screen):
 
     def _start_tail(self):
         import subprocess
-        from src.config import load_config
+from src.config import load_config, save_config
         try:
             cfg = load_config(self.config_path)
         except Exception:
@@ -1543,7 +1543,7 @@ class ScraperApp(App):
             return
 
         import requests
-        web_port = self.config.get("web", {}).get("port", 8080)
+        web_port = self._web_port or self.config.get("web", {}).get("port", 8080)
         try:
             resp = requests.post(
                 f"http://127.0.0.1:{web_port}/api/subscribe/{wid}",
@@ -1565,11 +1565,28 @@ class ScraperApp(App):
         """Starts the embedded web server in a background thread."""
         try:
             from src.webserver import app, init_webserver
-            # Find a free port
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.bind(('0.0.0.0', 0))
-            self._web_port = s.getsockname()[1]
-            s.close()
+
+            configured = self.config.get("web", {}).get("port")
+            if configured:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                try:
+                    s.bind(('0.0.0.0', configured))
+                    self._web_port = configured
+                except OSError:
+                    s.close()
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.bind(('0.0.0.0', 0))
+                    self._web_port = s.getsockname()[1]
+                    logging.warning(f"Configured port {configured} in use, using {self._web_port}")
+                s.close()
+            else:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.bind(('0.0.0.0', 0))
+                self._web_port = s.getsockname()[1]
+                s.close()
+                self.config.setdefault("web", {})["port"] = self._web_port
+                save_config(self.config_path, self.config)
+                logging.info(f"Saved port {self._web_port} to config")
 
             init_webserver(self.db_path, self.config)
 
