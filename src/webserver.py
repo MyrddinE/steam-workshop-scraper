@@ -1,8 +1,10 @@
 """Embedded web server for Steam Workshop Scraper."""
 
 import json
+import os
+import re
 from flask import Flask, request, jsonify, render_template
-from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter
+from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs
 from src.analysis import view_window_analysis
 
 app = Flask(__name__, template_folder='../templates')
@@ -14,6 +16,78 @@ def init_webserver(db_path: str, config: dict):
     global _db_path, _config
     _db_path = db_path
     _config = config
+
+
+def _bbcode_to_html(text):
+    """Converts Steam BBCode to HTML for web display."""
+    if not text:
+        return ""
+    t = re.sub(r'\[h1\](.*?)\[/h1\]', r'<h3>\1</h3>', text, flags=re.IGNORECASE | re.DOTALL)
+    t = re.sub(r'\[h2\](.*?)\[/h2\]', r'<h4>\1</h4>', t, flags=re.IGNORECASE | re.DOTALL)
+    t = re.sub(r'\[h3\](.*?)\[/h3\]', r'<h5>\1</h5>', t, flags=re.IGNORECASE | re.DOTALL)
+    t = re.sub(r'\[b\](.*?)\[/b\]', r'<b>\1</b>', t, flags=re.IGNORECASE)
+    t = re.sub(r'\[i\](.*?)\[/i\]', r'<i>\1</i>', t, flags=re.IGNORECASE)
+    t = re.sub(r'\[u\](.*?)\[/u\]', r'<u>\1</u>', t, flags=re.IGNORECASE)
+    t = re.sub(r'\[list\]', '<ul>', t, flags=re.IGNORECASE)
+    t = re.sub(r'\[/list\]', '</ul>', t, flags=re.IGNORECASE)
+    t = re.sub(r'\[\*\](.*?)\n?', r'<li>\1</li>', t, flags=re.IGNORECASE)
+    t = re.sub(r'\[table\]', '<table>', t, flags=re.IGNORECASE)
+    t = re.sub(r'\[/table\]', '</table>', t, flags=re.IGNORECASE)
+    t = re.sub(r'\[tr\]', '<tr>', t, flags=re.IGNORECASE)
+    t = re.sub(r'\[/tr\]', '</tr>', t, flags=re.IGNORECASE)
+    t = re.sub(r'\[th\](.*?)\[/th\]', r'<th>\1</th>', t, flags=re.IGNORECASE)
+    t = re.sub(r'\[td\](.*?)\[/td\]', r'<td>\1</td>', t, flags=re.IGNORECASE)
+    t = re.sub(r'\[quote\](.*?)\[/quote\]', r'<blockquote>\1</blockquote>', t, flags=re.IGNORECASE | re.DOTALL)
+    t = re.sub(r'\[quote=([^\]]*)\](.*?)\[/quote\]', r'<blockquote><b>\1:</b><br>\2</blockquote>', t, flags=re.IGNORECASE | re.DOTALL)
+    t = re.sub(r'\[code\](.*?)\[/code\]', r'<pre><code>\1</code></pre>', t, flags=re.IGNORECASE | re.DOTALL)
+    t = re.sub(r'\[img\](.*?)\[/img\]', r'<img src="\1" alt="image">', t, flags=re.IGNORECASE)
+    t = re.sub(r'\[url\](.*?)\[/url\]', r'<a href="\1" target="_blank">\1</a>', t, flags=re.IGNORECASE)
+    t = re.sub(r'\[url=([^\]]*)\](.*?)\[/url\]', r'<a href="\1" target="_blank">\2</a>', t, flags=re.IGNORECASE)
+    t = re.sub(r'\n', '<br>', t)
+    return t
+
+
+def _format_count(n):
+    if not n or n == 0:
+        return "0"
+    n = int(n)
+    if n < 1000:
+        return str(n)
+    if n < 1_000_000:
+        if n < 10_000:
+            return f"{n/1000:.2f}K"
+        elif n < 100_000:
+            return f"{n/1000:.1f}K"
+        return f"{n/1000:.0f}K"
+    v = n / 1_000_000
+    if n < 10_000_000:
+        return f"{v:.2f}M"
+    elif n < 100_000_000:
+        return f"{v:.1f}M"
+    return f"{v:.0f}M"
+
+
+def _format_size(size_bytes):
+    if not size_bytes:
+        return "N/A"
+    size = float(size_bytes)
+    kb = size / 1024
+    if kb < 1024:
+        return f"{kb:.1f} KB"
+    mb = kb / 1024
+    if mb < 1024:
+        return f"{mb:.1f} MB"
+    return f"{mb/1024:.1f} GB"
+
+
+@app.template_filter('fcount')
+def template_fcount(n):
+    return _format_count(n)
+
+
+@app.template_filter('fsize')
+def template_fsize(n):
+    return _format_size(n)
 
 
 @app.route('/')
@@ -45,9 +119,39 @@ def api_search():
 @app.route('/api/item/<int:workshop_id>')
 def api_item(workshop_id):
     item = get_item_details(_db_path, workshop_id)
-    if item:
-        return jsonify(item)
-    return jsonify({"error": "not found"}), 404
+    if not item:
+        return jsonify({"error": "not found"}), 404
+
+    desc = item.get("extended_description_en") or item.get("extended_description") or ""
+    item["description_html"] = _bbcode_to_html(desc)
+
+    display_title = item.get("title_en") or item.get("title") or "N/A"
+    item["display_title"] = display_title
+
+    return jsonify(item)
+
+
+@app.route('/api/state')
+def api_state():
+    state_path = os.path.join(os.path.dirname(_db_path), ".tui_state.yaml")
+    try:
+        import yaml
+        with open(state_path, 'r', encoding='utf-8') as f:
+            state = yaml.safe_load(f) or {}
+    except Exception:
+        state = {}
+    return jsonify(state)
+
+
+@app.route('/api/cutoffs', methods=['POST'])
+def api_cutoffs():
+    data = request.get_json(silent=True) or {}
+    filters = data.get('filters', [])
+    cutoffs = compute_wilson_cutoffs(_db_path, filters if filters else None)
+    result = {}
+    for k, v in cutoffs.items():
+        result[k] = v
+    return jsonify(result)
 
 
 @app.route('/api/authors')

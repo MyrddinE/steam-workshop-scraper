@@ -10,16 +10,17 @@
 body { min-height: 100vh; display: flex; flex-direction: column; }
 header { padding: .5rem 1rem; border-bottom: 1px solid var(--pico-muted-border-color); }
 main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
-#results-pane { flex: 0 0 300px; overflow-y: auto; border-right: 1px solid var(--pico-muted-border-color); padding-right: .5rem; }
+#results-pane { flex: 0 0 320px; overflow-y: auto; border-right: 1px solid var(--pico-muted-border-color); padding-right: .5rem; }
 #detail-pane { flex: 1; overflow-y: auto; padding-left: .5rem; }
 .stats-row { display: grid; grid-template-columns: 1fr 1fr; gap: .25rem; }
 .stat-label { color: var(--pico-muted-color); }
 .stat-wilson { font-weight: bold; }
 .wilson-p99 { color: #ffd700; }
+.wilson-p99::before { content: '! '; }
+.wilson-p99::after { content: ' !'; }
 .wilson-p90 { color: #ffd700; }
 .wilson-p50 { color: #e0e0e0; }
 .wilson-low { color: #888; }
-.ignored { color: #ff4444; }
 #search-builder { margin-bottom: .5rem; }
 .filter-row { display: flex; gap: .25rem; align-items: center; margin-bottom: .25rem; }
 .filter-row select, .filter-row input { padding: 2px 4px; }
@@ -34,7 +35,6 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 header { display: flex; justify-content: space-between; align-items: center; }
 #port-display { font-size: .8rem; color: var(--pico-muted-color); }
 #load-more { width: 100%; margin-top: .5rem; display: none; }
-
 @media (max-width: 768px) {
   main { flex-direction: column; }
   #results-pane { flex: 0 0 40%; border-right: none; border-bottom: 1px solid var(--pico-muted-border-color); }
@@ -52,7 +52,7 @@ header { display: flex; justify-content: space-between; align-items: center; }
       <div id="filter-rows"></div>
       <div style="display:flex;gap:.25rem;margin-top:.25rem">
         <button id="btn-search" style="flex:2">Search</button>
-        <button id="btn-save-filter" title="Save for scraper">💾</button>
+        <button id="btn-save-filter" title="Save for scraper">&#x1F4BE;</button>
         <button id="btn-and" style="flex:1">AND</button>
         <button id="btn-or" style="flex:1">OR</button>
       </div>
@@ -73,7 +73,7 @@ header { display: flex; justify-content: space-between; align-items: center; }
           <option value="ASC">ASC</option>
           <option value="DESC">DESC</option>
         </select>
-        <a href="/api/stats" id="btn-stats" style="flex:0.5">📊</a>
+        <a href="/api/stats" id="btn-stats" style="flex:0.5">&#x1F4CA;</a>
       </div>
     </div>
     <div id="results-list"></div>
@@ -94,18 +94,18 @@ const NUMERIC_FIELDS = ['File Size','Subs','Favs','Views','Language ID','Subscri
 const ID_FIELDS = ['Author ID','Workshop ID','AppID'];
 const ALL_FIELDS = ['Title','Description','Filename','Tags','Author ID','File Size','Subs','Favs','Views','Workshop ID','AppID','Language ID','Subscriber Score','Favorite Score'];
 
-let currentOffset = 0;
-let hasMore = true;
-let loading = false;
+let currentOffset = 0, hasMore = true, loading = false, cutoffs = {};
 
 function updateOps(row) {
   const field = row.querySelector('.field-select').value;
   const opSelect = row.querySelector('.op-select');
+  const cur = opSelect.value;
   let ops;
   if (ID_FIELDS.includes(field)) ops = FIELD_OPS.id;
   else if (NUMERIC_FIELDS.includes(field)) ops = FIELD_OPS.numeric;
   else ops = FIELD_OPS.text;
   opSelect.innerHTML = ops.map(o => `<option value="${o}">${o.replace(/_/g,' ')}</option>`).join('');
+  if (ops.includes(cur)) opSelect.value = cur;
 }
 
 function addRow(logic) {
@@ -114,10 +114,10 @@ function addRow(logic) {
   div.className = 'filter-row';
   if (logic) div.dataset.logic = logic;
   div.innerHTML = `
-    <select class="field-select">${ALL_FIELDS.map(f => `<option value="${f}">${f}</option>`).join('')}</select>
+    <select class="field-select" onchange="updateOps(this.parentElement)">${ALL_FIELDS.map(f => `<option value="${f}">${f}</option>`).join('')}</select>
     <select class="op-select"></select>
     <input class="value-input" type="text" placeholder="value">
-    <button onclick="removeRow(this.parentElement)">✕</button>
+    <button onclick="removeRow(this.parentElement)">&#x2715;</button>
   `;
   container.appendChild(div);
   updateOps(div);
@@ -129,45 +129,62 @@ function getFilters() {
   const rows = document.querySelectorAll('#filter-rows .filter-row');
   const filters = [];
   rows.forEach(r => {
-    const f = {
-      field: r.querySelector('.field-select').value,
-      op: r.querySelector('.op-select').value,
-      value: r.querySelector('.value-input').value
-    };
+    const f = {field: r.querySelector('.field-select').value, op: r.querySelector('.op-select').value, value: r.querySelector('.value-input').value};
     if (r.dataset.logic) f.logic = r.dataset.logic;
     filters.push(f);
   });
   return filters;
 }
 
+async function loadCutoffs() {
+  const filters = getFilters();
+  const resp = await fetch('/api/cutoffs', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filters})});
+  cutoffs = await resp.json();
+}
+
+function wClass(score, key) {
+  if (score == null) return 'wilson-low';
+  const p99 = cutoffs[key + '_p99'] || 0;
+  const p90 = cutoffs[key + '_p90'] || 0;
+  const p50 = cutoffs[key + '_p50'] || 0;
+  if (score >= p99) return 'wilson-p99';
+  if (score >= p90) return 'wilson-p90';
+  if (score >= p50) return 'wilson-p50';
+  return 'wilson-low';
+}
+
+function fmtCount(n) {
+  if (!n || n===0) return '0';
+  n = Number(n);
+  if (n < 1000) return String(n);
+  if (n < 1000000) { const v=n/1000; return n<10000?v.toFixed(2)+'K':n<100000?v.toFixed(1)+'K':Math.round(v)+'K'; }
+  const v=n/1000000; return n<10000000?v.toFixed(2)+'M':n<100000000?v.toFixed(1)+'M':Math.round(v)+'M';
+}
+
 async function doSearch(reset = true) {
   if (loading) return;
   loading = true;
-  if (reset) { currentOffset = 0; hasMore = true; document.getElementById('results-list').innerHTML = ''; }
-  
+  if (reset) { currentOffset = 0; hasMore = true; document.getElementById('results-list').innerHTML = ''; loadCutoffs(); }
+
   const filters = getFilters();
-  const sortBy = document.getElementById('sort-by').value;
-  const sortOrder = document.getElementById('sort-order').value;
-  
   const resp = await fetch('/api/search', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({filters, sort_by: sortBy, sort_order: sortOrder, offset: currentOffset, limit: 50})
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({filters, sort_by: document.getElementById('sort-by').value, sort_order: document.getElementById('sort-order').value, offset: currentOffset, limit: 50})
   });
   const items = await resp.json();
-  
+
   const list = document.getElementById('results-list');
   items.forEach(item => {
     const div = document.createElement('div');
     div.className = 'result-item';
     if (item.is_queued_for_subscription) div.classList.add('queued');
     const title = item.title_en || item.title || 'Untitled';
-    const creator = item.personaname_en || item.personaname || item.creator || 'Unknown';
-    div.innerHTML = `${item.is_queued_for_subscription ? '★ ' : ''}<b>${title}</b> <small>by ${creator}</small>`;
+    const creator = item.personaname_en || item.personaname || item.creator || '';
+    div.innerHTML = `${item.is_queued_for_subscription ? '\u2605 ' : ''}<b>${title}</b> <small>by ${creator}</small>`;
     div.onclick = () => showDetail(item.workshop_id);
     list.appendChild(div);
   });
-  
+
   currentOffset += items.length;
   hasMore = items.length >= 50;
   document.getElementById('load-more').style.display = hasMore ? 'block' : 'none';
@@ -180,40 +197,70 @@ async function showDetail(wid) {
   const resp = await fetch('/api/item/' + wid);
   const item = await resp.json();
   if (item.error) { pane.innerHTML = '<p>Item not found.</p>'; return; }
-  
-  const title = item.title_en || item.title || 'N/A';
+
+  const title = item.display_title || 'N/A';
   const creator = item.personaname_en || item.personaname || item.creator || 'N/A';
-  
-  const views = item.views ? item.views.toLocaleString() : 'N/A';
-  const subs = item.subscriptions ? item.subscriptions.toLocaleString() : 'N/A';
-  const lsubs = item.lifetime_subscriptions ? item.lifetime_subscriptions.toLocaleString() : 'N/A';
-  const favs = item.favorited ? item.favorited.toLocaleString() : 'N/A';
-  const lfavs = item.lifetime_favorited ? item.lifetime_favorited.toLocaleString() : 'N/A';
-  
-  const wfs = item.wilson_favorite_score != null ? (item.wilson_favorite_score * 100).toFixed(1) + '%' : 'N/A';
-  const wss = item.wilson_subscription_score != null ? (item.wilson_subscription_score * 100).toFixed(1) + '%' : 'N/A';
-  
-  const tags = Array.isArray(item.tags) ? item.tags.join(', ') : 'None';
-  const size = item.file_size ? (item.file_size / 1024 / 1024).toFixed(1) + ' MB' : 'N/A';
-  const created = item.time_created ? new Date(item.time_created * 1000).toISOString().slice(0, 10) : 'N/A';
-  
-  const steamUrl = `https://steamcommunity.com/sharedfiles/filedetails/?id=${item.workshop_id}`;
-  
+  const url = `https://steamcommunity.com/sharedfiles/filedetails/?id=${item.workshop_id}`;
+
+  const wfs = item.wilson_favorite_score != null ? (item.wilson_favorite_score*100).toFixed(1) : null;
+  const wss = item.wilson_subscription_score != null ? (item.wilson_subscription_score*100).toFixed(1) : null;
+
+  const subs = item.subscriptions||0, lsubs = item.lifetime_subscriptions||0;
+  const favs = item.favorited||0, lfavs = item.lifetime_favorited||0;
+  const created = item.time_created ? new Date(item.time_created*1000).toISOString().slice(0,10) : 'N/A';
+  const tags = (()=>{try{const t=JSON.parse(item.tags||'[]');return Array.isArray(t)?t.join(', '):'None'}catch{return'None'}})();
+  const size = item.file_size ? (item.file_size/1024/1024).toFixed(1)+' MB' : 'N/A';
+
+  let desc = item.description_html || '';
+  if (!desc && (item.short_description_en || item.short_description)) {
+    desc = '<p>' + (item.short_description_en || item.short_description) + '</p>';
+  }
+
   pane.innerHTML = `
-    <h2><a href="${steamUrl}" target="_blank">${title}</a></h2>
-    <p>by <b>${creator}</b> — <small>Workshop ID: ${item.workshop_id}</small></p>
-    <p class="stat-wilson">Subscriber Score: ${wss} &nbsp; Favorite Score: ${wfs}</p>
+    <h2><a href="${url}" target="_blank">${title}</a></h2>
+    <p>by <b>${creator}</b> &mdash; <small>Workshop ID: ${item.workshop_id}</small></p>
+    <p class="stat-wilson"><span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}">Subscriber Score: ${wss!=null?wss+'%':'N/A'}</span> &nbsp; <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}">Favorite Score: ${wfs!=null?wfs+'%':'N/A'}</span></p>
     <div class="stats-row">
-      <div><span class="stat-label">Views:</span> ${views}</div>
+      <div><span class="stat-label">Views:</span> ${(item.views||0).toLocaleString()}</div>
       <div><span class="stat-label">Size:</span> ${size}</div>
-      <div><span class="stat-label">Subs:</span> ${subs} / ${lsubs}</div>
-      <div><span class="stat-label">Favs:</span> ${favs} / ${lfavs}</div>
+      <div><span class="stat-label">Subs:</span> ${fmtCount(subs)} / ${fmtCount(lsubs)}</div>
+      <div><span class="stat-label">Favs:</span> ${fmtCount(favs)} / ${fmtCount(lfavs)}</div>
       <div><span class="stat-label">Created:</span> ${created}</div>
       <div><span class="stat-label">Tags:</span> <small>${tags}</small></div>
     </div>
-    <p><a href="${steamUrl}" target="_blank">Open on Steam</a></p>
+    <p><a href="${url}" target="_blank">Open on Steam</a></p>
+    ${desc ? '<div style="border-left:3px solid var(--pico-muted-border-color);padding-left:.5rem;margin-top:.5rem">'+desc+'</div>' : ''}
   `;
   document.querySelectorAll('#results-list .result-item').forEach(el => el.classList.remove('selected'));
+}
+
+async function loadState() {
+  try {
+    const resp = await fetch('/api/state');
+    const state = await resp.json();
+    if (state.filters && state.filters.length) {
+      document.getElementById('filter-rows').innerHTML = '';
+      state.filters.forEach((f,i) => {
+        const container = document.getElementById('filter-rows');
+        const div = document.createElement('div');
+        div.className = 'filter-row';
+        if (i > 0 && f.logic) div.dataset.logic = f.logic;
+        div.innerHTML = `
+          <select class="field-select" onchange="updateOps(this.parentElement)">${ALL_FIELDS.map(fn => `<option value="${fn}" ${fn===f.field?'selected':''}>${fn}</option>`).join('')}</select>
+          <select class="op-select"></select>
+          <input class="value-input" type="text" value="${f.value||''}" placeholder="value">
+          <button onclick="removeRow(this.parentElement)">&#x2715;</button>
+        `;
+        container.appendChild(div);
+        updateOps(div);
+        if (f.op) div.querySelector('.op-select').value = f.op;
+      });
+    }
+    if (!document.getElementById('filter-rows').children.length) addRow();
+    if (state.sort_by) document.getElementById('sort-by').value = state.sort_by;
+    if (state.sort_order) document.getElementById('sort-order').value = state.sort_order;
+  } catch(e) {}
+  doSearch(true);
 }
 
 document.getElementById('load-more').onclick = () => doSearch(false);
@@ -221,17 +268,12 @@ document.getElementById('btn-search').onclick = () => doSearch(true);
 document.getElementById('btn-and').onclick = () => addRow('AND');
 document.getElementById('btn-or').onclick = () => addRow('OR');
 document.getElementById('btn-save-filter').onclick = async () => {
-  await fetch('/api/save_filter', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({filters: getFilters()})
-  });
+  await fetch('/api/save_filter', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filters: getFilters()})});
   alert('Filter saved for scraper.');
 };
 document.getElementById('sort-by').onchange = () => doSearch(true);
 document.getElementById('sort-order').onchange = () => doSearch(true);
-
-addRow();
-doSearch(true);
+loadState();
 </script>
 </body>
 </html>
