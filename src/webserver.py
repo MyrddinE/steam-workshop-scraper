@@ -3,13 +3,25 @@
 import json
 import os
 import re
-from flask import Flask, request, jsonify, render_template, send_from_directory
+import queue
+from flask import Flask, request, jsonify, render_template, send_from_directory, Response
 from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection
 from src.analysis import view_window_analysis
 
 app = Flask(__name__, template_folder='../templates')
 _db_path = "workshop.db"
 _config = {}
+_event_queues: list[queue.Queue] = []
+
+
+def _notify_web_clients(event_type: str, data: dict):
+    """Thread-safe: pushes an event to all connected SSE clients."""
+    payload = json.dumps({"type": event_type, **data})
+    for q in _event_queues[:]:  # iterate a copy since queues can be removed
+        try:
+            q.put_nowait(payload)
+        except Exception:
+            _event_queues.remove(q)
 
 
 def init_webserver(db_path: str, config: dict):
@@ -90,10 +102,25 @@ def template_fsize(n):
     return _format_size(n)
 
 
-@app.route('/images/<path:filename>')
-def serve_image(filename):
-    images_dir = os.path.join(os.getcwd(), 'images')
-    return send_from_directory(images_dir, filename)
+@app.route('/api/events')
+def api_events():
+    """SSE endpoint: streams real-time notifications to web clients."""
+    q = queue.Queue()
+    _event_queues.append(q)
+
+    def generator():
+        yield "data: {\"type\":\"connected\"}\n\n"
+        while True:
+            try:
+                msg = q.get(timeout=30)
+                yield f"data: {msg}\n\n"
+            except queue.Empty:
+                yield ":keepalive\n\n"
+
+    response = Response(generator(), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.call_on_close(lambda: _event_queues.remove(q) if q in _event_queues else None)
+    return response
 
 
 @app.route('/')

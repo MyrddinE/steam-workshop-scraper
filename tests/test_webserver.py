@@ -253,3 +253,25 @@ def test_detail_pane_has_image_markup(web_client):
     html = resp.data.decode()
     assert 'image_extension' in html
     assert 'detail-image' in html
+
+
+def test_sse_endpoint_returns_stream(web_client):
+    client, _ = web_client
+    resp = client.get('/api/events')
+    assert resp.status_code == 200
+    assert resp.mimetype == 'text/event-stream'
+    assert b'data: ' in next(resp.response)
+
+
+def test_notify_pushes_event(web_client):
+    from src.webserver import _notify_web_clients, _event_queues
+    import queue
+    q = queue.Queue()
+    _event_queues.append(q)
+    try:
+        _notify_web_clients("test", {"id": 1})
+        msg = q.get(timeout=2)
+        assert '"type": "test"' in msg
+        assert '"id": 1' in msg
+    finally:
+        _event_queues.remove(q)

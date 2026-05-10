@@ -306,6 +306,28 @@ document.getElementById('btn-save-filter').onclick = async () => {
 document.getElementById('sort-by').onchange = () => doSearch(true);
 document.getElementById('sort-order').onchange = () => doSearch(true);
 loadState();
+
+const evtSource = new EventSource('/api/events');
+evtSource.onmessage = function(event) {
+  try {
+    const data = JSON.parse(event.data);
+    if (data.type === 'translation' || data.type === 'web_scrape') {
+      // Refresh the currently-selected detail if it matches
+      const detailWid = document.querySelector('#detail-pane a[href*="sharedfiles"]');
+      if (detailWid && detailWid.href.includes('id=' + data.workshop_id)) {
+        showDetail(data.workshop_id);
+      }
+    }
+    if (data.type === 'image') {
+      // Refresh the currently-selected detail to show the new image
+      const detailWid = document.querySelector('#detail-pane a[href*="sharedfiles"]');
+      if (detailWid && detailWid.href.includes('id=' + data.workshop_id)) {
+        showDetail(data.workshop_id);
+      }
+    }
+  } catch(e) {}
+};
+evtSource.onerror = () => {}; // silently reconnect
 </script>
 </body>
 </html>

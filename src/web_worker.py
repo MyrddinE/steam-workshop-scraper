@@ -55,6 +55,7 @@ class WebScraperThread(threading.Thread):
 
                 display = item.get("title_en") or item.get("title") or str(workshop_id)
                 logging.info(f"[W:{workshop_id}] Scraped \"{display}\"")
+                self._notify("web_scrape", {"workshop_id": workshop_id})
                 self.web_successes += 1
                 self.web_failures = 0
                 if self.web_successes >= 5:
@@ -80,3 +81,10 @@ class WebScraperThread(threading.Thread):
 
         self._save_cb("web_delay_seconds", self.web_delay)
         logging.info("Web scraper thread stopped.")
+
+    def _notify(self, event_type, data):
+        try:
+            from src.webserver import _notify_web_clients
+            _notify_web_clients(event_type, data)
+        except Exception:
+            pass

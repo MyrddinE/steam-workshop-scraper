@@ -109,6 +109,7 @@ Return ONLY a JSON array matching this exact format, preserving all 'id' values:
 
             translated_count = 0
             failed_count = 0
+            translated_ids = set()
             for row in batch:
                 tid = f"{row['item_type']}_{row['item_id']}_{row['field']}"
                 trans_text = trans_map.get(tid, "")
@@ -129,8 +130,13 @@ Return ONLY a JSON array matching this exact format, preserving all 'id' values:
                 )
                 conn.execute("DELETE FROM translation_queue WHERE id = ?", (row["id"],))
                 translated_count += 1
+                translated_ids.add(row["item_id"])
                 logging.debug(f"[{row['item_id']}] {row['field']}: \"{row['original_text'][:40]}\" → \"{trans_text[:40]}\"")
             conn.commit()
+
+            # Notify web clients of translated items
+            for wid in translated_ids:
+                self._notify("translation", {"workshop_id": wid})
 
             if failed_count:
                 logging.info(f"Batch translation: {translated_count} added, {failed_count} failed.")
@@ -141,3 +147,10 @@ Return ONLY a JSON array matching this exact format, preserving all 'id' values:
             logging.error(f"Batch translation failed: {e}")
         finally:
             conn.close()
+
+    def _notify(self, event_type, data):
+        try:
+            from src.webserver import _notify_web_clients
+            _notify_web_clients(event_type, data)
+        except Exception:
+            pass
