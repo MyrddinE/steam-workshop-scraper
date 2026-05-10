@@ -20,11 +20,11 @@ MIME_MAP = {
 
 
 class ImageScraperThread(threading.Thread):
-    def __init__(self, db_path: str, pause_lock_file: str, daemon_config: dict = None, config_path: str = "config.yaml"):
+    def __init__(self, db_path: str, pause_lock_file: str, daemon_config: dict = None, save_callback = None):
         super().__init__(daemon=True)
         self.db_path = db_path
         self.pause_lock_file = pause_lock_file
-        self.config_path = config_path
+        self._save_cb = save_callback
         self.running = True
         self.image_delay = float((daemon_config or {}).get("image_delay_seconds") or 2.0)
         self.image_successes = 0
@@ -90,7 +90,7 @@ class ImageScraperThread(threading.Thread):
                     self.image_delay = max(0.5, round(self.image_delay / 1.05, 3))
                     if old != self.image_delay:
                         logging.info(f"100 consecutive image successes! Decreasing delay from {old} to {self.image_delay}s.")
-                        self._save_delay()
+                        self._save_cb("image_delay_seconds", self.image_delay)
                     self.image_successes = 0
 
             except Exception as e:
@@ -103,31 +103,14 @@ class ImageScraperThread(threading.Thread):
                     old = self.image_delay
                     self.image_delay = round(self.image_delay * (1.05 ** 10), 3)
                     logging.info(f"Multiple consecutive image failures! Increasing delay from {old} to {self.image_delay}s.")
-                    self._save_delay()
+                    self._save_cb("image_delay_seconds", self.image_delay)
                     self.image_had_streak = False
 
             time.sleep(self.image_delay)
 
-        self._save_delay()
+        self._save_cb("image_delay_seconds", self.image_delay)
         logging.info("Image download thread stopped.")
 
     def _get_conn(self):
         from src.database import get_connection
         return get_connection(self.db_path)
-
-    def _save_delay(self):
-        """Persists the current image_delay to the config file."""
-        import yaml
-        try:
-            with open(self.config_path, 'r', encoding='utf-8') as f:
-                config = yaml.safe_load(f) or {}
-        except Exception:
-            config = {}
-        if "daemon" not in config:
-            config["daemon"] = {}
-        config["daemon"]["image_delay_seconds"] = self.image_delay
-        try:
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                yaml.dump(config, f, default_flow_style=False)
-        except Exception:
-            pass

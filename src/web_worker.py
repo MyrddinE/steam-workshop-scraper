@@ -11,11 +11,11 @@ from src.translator import is_ascii
 
 
 class WebScraperThread(threading.Thread):
-    def __init__(self, db_path: str, pause_lock_file: str, daemon_config: dict = None, config_path: str = "config.yaml"):
+    def __init__(self, db_path: str, pause_lock_file: str, daemon_config: dict = None, save_callback = None):
         super().__init__(daemon=True)
         self.db_path = db_path
         self.pause_lock_file = pause_lock_file
-        self.config_path = config_path
+        self._save_cb = save_callback
         self.running = True
         self.web_delay = float((daemon_config or {}).get("web_delay_seconds") or 5.0)
         self.web_successes = 0
@@ -64,7 +64,7 @@ class WebScraperThread(threading.Thread):
                     self.web_delay = max(1.0, round(self.web_delay / 1.05, 3))
                     if old != self.web_delay:
                         logging.info(f"100 consecutive web successes! Decreasing web delay from {old} to {self.web_delay}s.")
-                        self._save_delay()
+                        self._save_cb("web_delay_seconds", self.web_delay)
                     self.web_successes = 0
                 time.sleep(self.web_delay)
             else:
@@ -74,26 +74,9 @@ class WebScraperThread(threading.Thread):
                     old = self.web_delay
                     self.web_delay = round(self.web_delay * (1.05 ** 10), 3)
                     logging.info(f"Multiple consecutive web scrape failures! Increasing web delay from {old} to {self.web_delay}s.")
-                    self._save_delay()
+                    self._save_cb("web_delay_seconds", self.web_delay)
                     self.web_had_streak = False
                 time.sleep(self.web_delay)
 
-        self._save_delay()
+        self._save_cb("web_delay_seconds", self.web_delay)
         logging.info("Web scraper thread stopped.")
-
-    def _save_delay(self):
-        """Persists the current web_delay to the config file."""
-        import yaml
-        try:
-            with open(self.config_path, 'r', encoding='utf-8') as f:
-                config = yaml.safe_load(f) or {}
-        except Exception:
-            config = {}
-        if "daemon" not in config:
-            config["daemon"] = {}
-        config["daemon"]["web_delay_seconds"] = self.web_delay
-        try:
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                yaml.dump(config, f, default_flow_style=False)
-        except Exception:
-            pass

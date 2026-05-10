@@ -93,11 +93,11 @@ class Daemon:
         signal.signal(signal.SIGINT, self.handle_shutdown)
         signal.signal(signal.SIGTERM, self.handle_shutdown)
 
-    def _persist_delay(self):
-        """Saves the current delay to config file."""
+    def _save_config_value(self, key: str, value):
+        """Saves a daemon config key=value to the config file. Usable as callback from threads."""
         if "daemon" not in self.config:
             self.config["daemon"] = {}
-        self.config["daemon"]["api_delay_seconds"] = self.api_delay
+        self.config["daemon"][key] = value
         save_config(self.config_path, self.config)
 
     def _build_user_record(self, steamid: int, personaname: str) -> dict:
@@ -303,7 +303,7 @@ class Daemon:
                     self.api_delay = round(self.api_delay * (1.05 ** 10), 3)
                     set_api_delay(self.api_delay)
                     logging.info(f"Multiple consecutive API failures! Increasing API delay from {old_delay} to {self.api_delay}s.")
-                    self._persist_delay()
+                    self._save_config_value("api_delay_seconds", self.api_delay)
                     self.api_had_streak = False
                 continue
             elif api_status == 500:
@@ -316,7 +316,7 @@ class Daemon:
                     self.api_delay = round(self.api_delay * (1.05 ** 10), 3)
                     set_api_delay(self.api_delay)
                     logging.info(f"Multiple consecutive API failures! Increasing API delay from {old_delay} to {self.api_delay}s.")
-                    self._persist_delay()
+                    self._save_config_value("api_delay_seconds", self.api_delay)
                     self.api_had_streak = False
                 continue
 
@@ -392,16 +392,16 @@ class Daemon:
                 if old_delay != self.api_delay:
                     set_api_delay(self.api_delay)
                     logging.info(f"100 consecutive API successes! Decreasing API delay from {old_delay} to {self.api_delay} seconds.")
-                    self._persist_delay()
+                    self._save_config_value("api_delay_seconds", self.api_delay)
                 self.api_successes = 0
 
     def run(self):
         """Main loop that continuously queries and scrapes."""
         logging.info("Starting daemon loop...")
         self.translator.start()
-        web_worker = WebScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), config_path=self.config_path)
+        web_worker = WebScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value)
         web_worker.start()
-        image_worker = ImageScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), config_path=self.config_path)
+        image_worker = ImageScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value)
         image_worker.start()
         while self.running:
             self.process_batch()
