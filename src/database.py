@@ -713,7 +713,7 @@ def search_items(db_path: str, query: str = "", appid: int = None,
     conn = get_connection(db_path)
     
     if summary_only:
-        cols = "w.workshop_id, w.title, w.title_en, w.creator, w.consumer_appid, w.dt_translated, w.is_queued_for_subscription, u.personaname, u.personaname_en"
+        cols = "w.workshop_id, w.title, w.title_en, w.creator, w.consumer_appid, w.dt_translated, w.is_queued_for_subscription, w.needs_web_scrape, u.personaname, u.personaname_en"
     else:
         cols = "w.*, u.personaname, u.personaname_en"
         
@@ -1044,6 +1044,40 @@ def flag_field_for_translation(db_path: str, item_type: str, item_id: int, field
         )
     conn.commit()
     conn.close()
+
+
+def bump_translation_for_list(db_path: str, workshop_id: int):
+    """For enriched items in the list view: flag non-ASCII fields at priority 5."""
+    conn = get_connection(db_path)
+    row = conn.execute(
+        "SELECT title, short_description, extended_description FROM workshop_items WHERE workshop_id=?",
+        (workshop_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return
+    for field, text in [("title_en", row["title"] or ""),
+                         ("short_description_en", row["short_description"] or ""),
+                         ("extended_description_en", row["extended_description"] or "")]:
+        if text and not text.isascii():
+            flag_field_for_translation(db_path, "item", workshop_id, field, text, 5)
+
+
+def bump_translation_for_detail(db_path: str, workshop_id: int):
+    """For detail view: flag ALL non-ASCII fields at priority 10, regardless of enrichment."""
+    conn = get_connection(db_path)
+    row = conn.execute(
+        "SELECT title, short_description, extended_description FROM workshop_items WHERE workshop_id=?",
+        (workshop_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return
+    for field, text in [("title_en", row["title"] or ""),
+                         ("short_description_en", row["short_description"] or ""),
+                         ("extended_description_en", row["extended_description"] or "")]:
+        if text and not text.isascii():
+            flag_field_for_translation(db_path, "item", workshop_id, field, text, 10)
 
 
 def get_next_batch_for_translation(db_path: str, limit: int = 20) -> list[dict]:
