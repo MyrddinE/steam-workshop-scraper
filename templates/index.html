@@ -92,7 +92,7 @@ header { display: flex; justify-content: space-between; align-items: center; }
 <script>
 const FIELD_OPS = {
   text: ['contains','does_not_contain','is','is_not','is_empty','is_not_empty'],
-  numeric: ['is','is_not','gt','lt','gte','lte','is_empty','is_not_empty'],
+  numeric: ['is','is_not','gt','lt','gte','lte','is_empty','is_not_empty','percentile'],
   id: ['is','is_not']
 };
 const NUMERIC_FIELDS = ['File Size','Subs','Favs','Views','Language ID','Subscriber Score','Favorite Score'];
@@ -135,7 +135,15 @@ function getFilters() {
   const rows = document.querySelectorAll('#filter-rows .filter-row');
   const filters = [];
   rows.forEach(r => {
-    const f = {field: r.querySelector('.field-select').value, op: r.querySelector('.op-select').value, value: r.querySelector('.value-input').value};
+    const op = r.querySelector('.op-select').value;
+    let val = r.querySelector('.value-input').value;
+    if (op === 'percentile') {
+      const n = parseInt(val, 10);
+      if (isNaN(n)) val = '0';
+      else val = String(Math.max(0, Math.min(99, n)));
+      r.querySelector('.value-input').value = val;
+    }
+    const f = {field: r.querySelector('.field-select').value, op, value: val};
     if (r.dataset.logic) f.logic = r.dataset.logic;
     filters.push(f);
   });
@@ -385,6 +393,19 @@ document.getElementById('btn-save-filter').onclick = async () => {
 };
 document.getElementById('sort-by').onchange = () => doSearch(true);
 document.getElementById('sort-order').onchange = () => doSearch(true);
+
+document.addEventListener('blur', e => {
+  if (!e.target.classList.contains('value-input')) return;
+  const row = e.target.parentElement;
+  if (!row) return;
+  const opSelect = row.querySelector('.op-select');
+  if (!opSelect || opSelect.value !== 'percentile') return;
+  let v = parseInt(e.target.value, 10);
+  if (isNaN(v)) { e.target.value = '0'; return; }
+  v = Math.max(0, Math.min(99, v));
+  e.target.value = String(v);
+}, true);
+
 loadState();
 </script>
 </body>

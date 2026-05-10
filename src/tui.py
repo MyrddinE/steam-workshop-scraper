@@ -699,7 +699,7 @@ class SearchRow(Horizontal):
         # Determine ops based on field
         if field in ["Author ID", "Workshop ID", "AppID"]:
             op_type = "id"
-        elif field in ["File Size", "Subs", "Favs", "Views", "Language ID"]:
+        elif field in ["File Size", "Subs", "Favs", "Views", "Language ID", "Subscriber Score", "Favorite Score"]:
             op_type = "numeric"
         else:
             op_type = "text"
@@ -753,6 +753,22 @@ class SearchRow(Horizontal):
             except Exception:
                 pass # Overlay might not be ready during initial mount
 
+    def on_input_blurred(self, event: Input.Blurred) -> None:
+        if event.control.id == "value-input":
+            self._clamp_percentile()
+
+    def _clamp_percentile(self) -> None:
+        op_select = self.query_one("#op-select", Select)
+        if op_select.value != "percentile":
+            return
+        try:
+            inp = self.query_one("#value-input", Input)
+            v = int(float(inp.value))
+            v = max(0, min(99, v))
+            inp.value = str(v)
+        except (ValueError, TypeError):
+            pass
+
 class SearchBuilder(VerticalScroll):
     """A container for multiple SearchRows."""
     def compose(self) -> ComposeResult:
@@ -763,7 +779,7 @@ class SearchBuilder(VerticalScroll):
         ]
         self.operators = {
             "text": ["contains", "does_not_contain", "is", "is_not", "is_empty", "is_not_empty"],
-            "numeric": ["is", "is_not", "gt", "lt", "gte", "lte", "is_empty", "is_not_empty"],
+            "numeric": ["is", "is_not", "gt", "lt", "gte", "lte", "is_empty", "is_not_empty", "percentile"],
             "id": ["is", "is_not"]
         }
         yield SearchRow(self.fields, self.operators, is_first=True)
@@ -793,10 +809,21 @@ class SearchBuilder(VerticalScroll):
         filters = []
         rows = self.query(SearchRow)
         for i, row in enumerate(rows):
+            op = row.query_one("#op-select", Select).value
+            val = row.query_one("#value-input", Input).value
+            if op == "percentile":
+                try:
+                    v = int(float(val))
+                    v = max(0, min(99, v))
+                    val = str(v)
+                    row.query_one("#value-input", Input).value = val
+                except (ValueError, TypeError):
+                    val = "0"
+                    row.query_one("#value-input", Input).value = val
             f = {
                 "field": row.query_one("#field-select", Select).value,
-                "op": row.query_one("#op-select", Select).value,
-                "value": row.query_one("#value-input", Input).value,
+                "op": op,
+                "value": val,
             }
             if i > 0:
                 f["logic"] = getattr(row, "logic", "AND")

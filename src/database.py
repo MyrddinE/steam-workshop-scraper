@@ -101,6 +101,60 @@ def _build_filter_clause(db_col: str, op: str, val) -> tuple[str, list]:
     }
     return op_map.get(op, ("", []))
 
+
+def _compute_percentile_threshold(db_path: str, db_col: str, percentile_val, base_filters: list[dict] = None) -> float | None:
+    """Computes the threshold score for items above the given percentile.
+    percentile_val: 0-99 (clamped). 0 returns None (no filter).
+    base_filters: non-percentile filters for the base dataset."""
+    try:
+        p = int(float(percentile_val)) if percentile_val is not None else 0
+    except (ValueError, TypeError):
+        return None
+    p = max(0, min(99, p))
+    if p == 0:
+        return None
+
+    tile = 100 - p
+    conn = get_connection(db_path)
+
+    where_sql = ""
+    params = []
+    if base_filters:
+        clauses = []
+        for f in base_filters:
+            logic = f.get("logic", "AND").upper()
+            field = f.get("field")
+            op = f.get("op")
+            val = f.get("value")
+            if not field or not op:
+                continue
+            f_db_col = FIELD_NAME_MAP.get(field, field)
+            if f_db_col == "tags":
+                if op in ("is", "is_not"):
+                    continue
+                clause, clause_params = _build_json_tag_clause(f_db_col, op, val)
+            else:
+                clause, clause_params = _build_filter_clause(f_db_col, op, val)
+            if clause:
+                params.extend(clause_params)
+                clauses.append((logic, clause))
+        if clauses:
+            where_sql = "WHERE "
+            for idx, (logic, clause) in enumerate(clauses):
+                where_sql += f" {logic} " if idx > 0 else ""
+                where_sql += clause
+
+    sql = f"""
+        SELECT COALESCE(MIN({db_col}), 0) FROM (
+            SELECT {db_col}, NTILE(100) OVER (ORDER BY {db_col} DESC) as tile
+            FROM workshop_items
+            {where_sql}
+        ) WHERE tile = {tile}
+    """
+    threshold = conn.execute(sql, params).fetchone()[0]
+    conn.close()
+    return threshold if threshold else None
+
 def _build_json_tag_clause(db_col: str, op: str, val) -> tuple[str, list]:
     """Uses json_each for JSON array columns (tags).
     Contains/does_not_contain use exact tag value match (not substring),
@@ -155,6 +209,8 @@ def _evaluate_single_filter(item: dict, db_col: str, op: str, val) -> bool:
         return item_val is None or str(item_val).strip() == ""
     if op == "is_not_empty":
         return item_val is not None and str(item_val).strip() != ""
+    if op == "percentile":
+        return True
     return True
 
 def _evaluate_tag_filter(item: dict, op: str, val) -> bool:
@@ -766,8 +822,16 @@ def search_items(db_path: str, query: str = "", appid: int = None,
                 sql, params = _apply_numeric_filter(sql, params, col, f_str)
 
     if filters:
-        filter_clauses = []
+        pct_filters = []
+        regular_filters = []
         for f in filters:
+            if f.get("op") == "percentile":
+                pct_filters.append(f)
+            else:
+                regular_filters.append(f)
+
+        filter_clauses = []
+        for f in regular_filters:
             logic = f.get("logic", "AND").upper()
             field = f.get("field")
             op = f.get("op")
@@ -790,6 +854,18 @@ def search_items(db_path: str, query: str = "", appid: int = None,
                 sql += f" {logic} " if idx > 0 else ""
                 sql += clause
             sql += ")"
+
+        for f in pct_filters:
+            field = f.get("field")
+            val = f.get("value")
+            if not field or not val:
+                continue
+            db_col = FIELD_NAME_MAP.get(field, field)
+            if db_col == "tags":
+                continue
+            threshold = _compute_percentile_threshold(db_path, db_col, val, regular_filters)
+            if threshold is not None:
+                sql += f" AND w.{db_col} >= {threshold}"
 
     sort_sql = _build_sort_clause(sort_by, sort_order) if sort_by else ""
     sql += sort_sql
@@ -919,6 +995,8 @@ def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None) -> dict:
     if filters:
         filter_clauses = []
         for f in filters:
+            if f.get("op") == "percentile":
+                continue
             field = f.get("field")
             op = f.get("op")
             val = f.get("value")
