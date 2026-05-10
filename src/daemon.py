@@ -399,9 +399,9 @@ class Daemon:
         """Main loop that continuously queries and scrapes."""
         logging.info("Starting daemon loop...")
         self.translator.start()
-        web_worker = WebScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}))
+        web_worker = WebScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), config_path=self.config_path)
         web_worker.start()
-        image_worker = ImageScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}))
+        image_worker = ImageScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), config_path=self.config_path)
         image_worker.start()
         while self.running:
             self.process_batch()
