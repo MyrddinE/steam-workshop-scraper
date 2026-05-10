@@ -1552,6 +1552,8 @@ class ScraperApp(App):
             data = resp.json()
             if data.get("success") == 1:
                 self.notify("Subscribed!")
+            elif data.get("success") == 2:
+                self.notify("Steam session expired. Visit steamcommunity.com to refresh.", severity="warning")
             elif data.get("success") == 15:
                 self.notify("Permission denied. Steam session may have expired.", severity="warning")
             elif data.get("success") == 25:
