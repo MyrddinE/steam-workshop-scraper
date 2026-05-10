@@ -59,15 +59,14 @@ def test_daemon_pipeline_mocked(db_path):
 
     with patch("src.daemon.count_unscraped_items", return_value=100), \
          patch("src.daemon.get_workshop_details_api") as mock_api, \
-         patch("src.daemon.scrape_extended_details") as mock_scrape, \
          patch("src.daemon.get_user") as mock_get_user, \
          patch("src.daemon.insert_or_update_user") as mock_ins_user, \
+         patch("src.daemon.flag_for_web_scrape") as mock_flag_web, \
          patch("time.sleep"):
 
         mock_api.return_value = {
             "title": "Pipeline Mod", "creator": 200, "tags": [{"tag": "test"}]
         }
-        mock_scrape.return_value = {"description": "Full description", "tags": ["test"]}
         mock_get_user.return_value = {"steamid": 200, "dt_updated": "2026-01-01T00:00:00"}
 
         daemon = Daemon(config)
@@ -75,7 +74,7 @@ def test_daemon_pipeline_mocked(db_path):
 
     item = get_item_details(db_path, 555)
     assert item["title"] == "Pipeline Mod"
-    assert item["extended_description"] == "Full description"
+    mock_flag_web.assert_called_once_with(db_path, 555, 3)
     assert item["status"] == 200
 
 @pytest.mark.integration

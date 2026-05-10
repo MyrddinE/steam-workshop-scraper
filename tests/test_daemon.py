@@ -23,7 +23,6 @@ def test_daemon_init_defaults():
     assert daemon.api_key == ""
     assert daemon.batch_size == 10
     assert daemon.api_delay == 1.5
-    assert daemon.web_delay == 5.0
     assert daemon.item_staleness_days == 30
     assert daemon.user_staleness_days == 90
     assert daemon.target_appids == [456]
@@ -41,25 +40,24 @@ def test_daemon_init_missing_appids():
 @patch('src.daemon.count_unscraped_items')
 @patch('src.daemon.get_next_items_to_scrape')
 @patch('src.daemon.get_workshop_details_api')
-@patch('src.daemon.scrape_extended_details')
 @patch('src.daemon.get_user')
 @patch('src.daemon.insert_or_update_user')
 @patch('src.daemon.insert_or_update_item')
+@patch('src.daemon.flag_for_web_scrape')
 @patch('time.sleep')
-def test_daemon_process_batch_success(mock_sleep, mock_insert, mock_insert_user, mock_get_user, mock_scrape, mock_api, mock_get_items, mock_count, mock_config):
-    mock_count.return_value = 1000 # Enough to skip seeding
+def test_daemon_process_batch_success(mock_sleep, mock_flag_web, mock_insert, mock_insert_user, mock_get_user, mock_api, mock_get_items, mock_count, mock_config):
+    mock_count.return_value = 1000
     mock_get_items.return_value = [{'workshop_id': 123}]
     mock_api.return_value = {"title": "Test Mod", "creator": "111"}
-    mock_scrape.return_value = {"description": "Cool mod", "tags": ["tag1"]}
-    mock_get_user.return_value = {"steamid": 111, "dt_updated": "2026-01-01T00:00:00"} # Recent enough
+    mock_get_user.return_value = {"steamid": 111, "dt_updated": "2026-01-01T00:00:00"}
 
     daemon = Daemon(mock_config)
     daemon.process_batch()
 
     mock_get_items.assert_called_once_with("test.db", limit=2, staleness_days=30)
     mock_api.assert_called_once_with(123, "TEST_KEY")
-    mock_scrape.assert_called_once_with("https://steamcommunity.com/sharedfiles/filedetails/?id=123")
-    
+    mock_flag_web.assert_called_once_with("test.db", 123, 3)
+
     inserted_data = mock_insert.call_args[0][1]
     assert inserted_data["workshop_id"] == 123
     assert inserted_data["title"] == "Test Mod"
@@ -80,24 +78,6 @@ def test_daemon_process_batch_api_failure(mock_sleep, mock_insert, mock_api, moc
     
     inserted_data = mock_insert.call_args[0][1]
     assert inserted_data["status"] == 500
-
-@patch('src.daemon.count_unscraped_items')
-@patch('src.daemon.get_next_items_to_scrape')
-@patch('src.daemon.get_workshop_details_api')
-@patch('src.daemon.scrape_extended_details')
-@patch('src.daemon.insert_or_update_item')
-@patch('time.sleep')
-def test_daemon_process_batch_scrape_failure(mock_sleep, mock_insert, mock_scrape, mock_api, mock_get_items, mock_count, mock_config):
-    mock_count.return_value = 1000
-    mock_get_items.return_value = [{'workshop_id': 789}]
-    mock_api.return_value = {"title": "Test Mod 2"}
-    mock_scrape.return_value = None
-
-    daemon = Daemon(mock_config)
-    daemon.process_batch()
-    
-    inserted_data = mock_insert.call_args[0][1]
-    assert inserted_data["status"] == 206
 
 def test_daemon_graceful_shutdown(mock_config):
     daemon = Daemon(mock_config)
@@ -145,17 +125,16 @@ def test_daemon_process_batch_exit_early(mock_api, mock_get_items, mock_count, m
 @patch('src.daemon.count_unscraped_items')
 @patch('src.daemon.get_next_items_to_scrape')
 @patch('src.daemon.get_workshop_details_api')
-@patch('src.daemon.scrape_extended_details')
 @patch('src.daemon.get_user')
 @patch('src.daemon.insert_or_update_user')
 @patch('src.daemon.insert_or_update_item')
+@patch('src.daemon.flag_for_web_scrape')
 @patch('time.sleep')
-def test_api_delay_decreases_on_success(mock_sleep, mock_insert, mock_insert_user, mock_get_user, mock_scrape, mock_api, mock_get_items, mock_count, mock_config):
+def test_api_delay_decreases_on_success(mock_sleep, mock_flag_web, mock_insert, mock_insert_user, mock_get_user, mock_api, mock_get_items, mock_count, mock_config):
     items = [{'workshop_id': i} for i in range(100)]
     mock_count.return_value = 1000
     mock_get_items.return_value = items
     mock_api.return_value = {"title": "Mod", "creator": "111"}
-    mock_scrape.return_value = {"description": "Cool"}
     mock_get_user.return_value = {"steamid": 111, "dt_updated": "2026-01-01T00:00:00"}
 
     daemon = Daemon(mock_config)
@@ -182,46 +161,4 @@ def test_api_delay_increases_on_failures(mock_sleep, mock_insert, mock_api, mock
 
     daemon.process_batch()
     assert daemon.api_delay > initial
-
-@patch('src.daemon.count_unscraped_items')
-@patch('src.daemon.get_next_items_to_scrape')
-@patch('src.daemon.get_workshop_details_api')
-@patch('src.daemon.scrape_extended_details')
-@patch('src.daemon.get_user')
-@patch('src.daemon.insert_or_update_user')
-@patch('src.daemon.insert_or_update_item')
-@patch('time.sleep')
-def test_web_delay_floor_is_one(mock_sleep, mock_insert, mock_insert_user, mock_get_user, mock_scrape, mock_api, mock_get_items, mock_count, mock_config):
-    items = [{'workshop_id': i, 'time_updated': 100, 'extended_description': None} for i in range(100)]
-    mock_count.return_value = 1000
-    mock_get_items.return_value = items
-    mock_api.return_value = {"title": "Mod", "creator": "111", "time_updated": 999}
-    mock_scrape.return_value = {"description": "Cool"}
-    mock_get_user.return_value = {"steamid": 111, "dt_updated": "2026-01-01T00:00:00"}
-
-    daemon = Daemon(mock_config)
-    daemon.web_delay = 0.95
-    daemon.web_successes = 99
-    daemon.process_batch()
-    assert daemon.web_delay >= 1.0
-
-@patch('src.daemon.count_unscraped_items')
-@patch('src.daemon.get_next_items_to_scrape')
-@patch('src.daemon.get_workshop_details_api')
-@patch('src.daemon.scrape_extended_details')
-@patch('time.sleep')
-def test_web_delay_increases_on_failures(mock_sleep, mock_scrape, mock_api, mock_get_items, mock_count, mock_config):
-    mock_count.return_value = 1000
-    mock_get_items.return_value = [{'workshop_id': 21}, {'workshop_id': 22}]
-    mock_api.return_value = {"title": "Mod", "creator": "111", "time_updated": 999}
-    mock_scrape.return_value = None
-
-    daemon = Daemon(mock_config)
-    daemon.web_delay = 5.0
-    daemon.web_successes = 5
-    daemon.web_had_streak = True
-    initial = daemon.web_delay
-
-    daemon.process_batch()
-    assert daemon.web_delay > initial
 

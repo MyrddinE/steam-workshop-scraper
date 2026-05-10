@@ -23,9 +23,10 @@ from src.database import (
     _evaluate_filters
 )
 from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries, query_workshop_files, set_api_delay
-from src.web_scraper import scrape_extended_details, set_web_delay
 from src.translator import TranslatorThread, is_ascii
 from src.config import save_config
+from src.database import flag_for_web_scrape, flag_field_for_translation
+from src.web_worker import WebScraperThread
 
 
 def wilson_lower(successes: int, trials: int, z: float = 1.96) -> float:
@@ -53,13 +54,10 @@ class Daemon:
         self.batch_size = config.get("daemon", {}).get("batch_size", 10)
         daemon_config = config.get("daemon", {})
         self.api_delay = daemon_config.get("api_delay_seconds") or daemon_config.get("request_delay_seconds", 1.5)
-        self.web_delay = daemon_config.get("web_delay_seconds") or daemon_config.get("request_delay_seconds", 5.0)
         self.item_staleness_days = int(daemon_config.get("item_staleness_days") or 30)
         self.user_staleness_days = int(daemon_config.get("user_staleness_days") or 90)
         set_api_delay(self.api_delay)
-        set_web_delay(self.web_delay)
-        logging.info(f"Delays: API={self.api_delay}s, Web={self.web_delay}s, "
-                     f"Staleness: item={self.item_staleness_days}d, user={self.user_staleness_days}d")
+        logging.info(f"API delay={self.api_delay}s, Staleness: item={self.item_staleness_days}d, user={self.user_staleness_days}d")
 
         # Write default config keys if absent
         changed = False
@@ -81,9 +79,6 @@ class Daemon:
         self.api_successes = 0
         self.api_failures = 0
         self.api_had_streak = False
-        self.web_successes = 0
-        self.web_failures = 0
-        self.web_had_streak = False
 
         # Enforce required target_appids
         self.target_appids = config.get("daemon", {}).get("target_appids")
@@ -98,11 +93,10 @@ class Daemon:
         signal.signal(signal.SIGTERM, self.handle_shutdown)
 
     def _persist_delay(self):
-        """Saves the current delays to config file."""
+        """Saves the current delay to config file."""
         if "daemon" not in self.config:
             self.config["daemon"] = {}
         self.config["daemon"]["api_delay_seconds"] = self.api_delay
-        self.config["daemon"]["web_delay_seconds"] = self.web_delay
         save_config(self.config_path, self.config)
 
     def _build_user_record(self, steamid: int, personaname: str) -> dict:
@@ -348,45 +342,20 @@ class Daemon:
                     merged_data["extended_description"] = existing_data["extended_description"]
                     enriched = True
                 else:
-                    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={item_id}"
-                    scrape_data = scrape_extended_details(url)
-
-                    if not scrape_data:
-                        merged_data["status"] = 206
-                        insert_or_update_item(self.db_path, merged_data)
-                        logging.warning(
-                            f"[{item_id}] '{display_title}' | Scraper failed, partial data saved. "
-                            f"API data saved, but extended description could not be scraped."
-                        )
-                        self.web_failures += 1
-                        self.web_successes = 0
-                        if self.web_failures >= 2 and self.web_had_streak:
-                            old_delay = self.web_delay
-                            self.web_delay = max(1.0, round(self.web_delay * (1.05 ** 10), 3))
-                            set_web_delay(self.web_delay)
-                            logging.info(f"Multiple consecutive web scrape failures! Increasing web delay from {old_delay} to {self.web_delay} seconds.")
-                            self._persist_delay()
-                            self.web_had_streak = False
-                        continue
-
-                    merged_data["extended_description"] = scrape_data.get("description")
-                    merged_data = self._evaluate_translation_needs(merged_data, existing_data)
+                    flag_for_web_scrape(self.db_path, item_id, 3)
                     enriched = True
-                    self.web_successes += 1
-                    self.web_failures = 0
-                    if self.web_successes >= 5:
-                        self.web_had_streak = True
-                    if self.web_successes >= 100:
-                        old_delay = self.web_delay
-                        self.web_delay = max(1.0, round(self.web_delay / 1.05, 3))
-                        if old_delay != self.web_delay:
-                            set_web_delay(self.web_delay)
-                            logging.info(f"100 consecutive web scrape successes! Decreasing web delay from {old_delay} to {self.web_delay}s.")
-                            self._persist_delay()
-                        self.web_successes = 0
+            else:
+                flag_for_web_scrape(self.db_path, item_id, 1)
 
             merged_data["status"] = 200
             insert_or_update_item(self.db_path, merged_data)
+
+            # Flag translation for title and short description (ASCII check)
+            if enriched:
+                for field in [("title_en", merged_data.get("title")),
+                              ("short_description_en", merged_data.get("short_description"))]:
+                    if field[1]:
+                        flag_field_for_translation(self.db_path, "item", item_id, field[0], field[1], 3)
             
             # Step 3: Fetch User/Creator details (only for enriched items)
             creator_id = merged_data.get("creator")
@@ -425,13 +394,13 @@ class Daemon:
         """Main loop that continuously queries and scrapes."""
         logging.info("Starting daemon loop...")
         self.translator.start()
+        web_worker = WebScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}))
+        web_worker.start()
         while self.running:
-            while os.path.exists(self.pause_lock_file) and self.running:
-                logging.info("Scraping paused by TUI...")
-                time.sleep(1)
-            
             self.process_batch()
         logging.info("Daemon gracefully exited.")
+        web_worker.running = False
+        web_worker.join(timeout=5)
         self.translator.running = False
         self.translator.join(timeout=5)
         logging.info("Translator thread stopped.")
