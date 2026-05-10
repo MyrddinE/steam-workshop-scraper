@@ -239,7 +239,7 @@ async function showDetail(wid) {
 
   let imgHtml = '';
   if (item.image_extension) {
-    imgHtml = `<img id="detail-image" src="/images/${item.workshop_id}.${item.image_extension}" alt="Preview" onerror="this.style.display='none'">`;
+    imgHtml = `<img id="detail-image" src="/images/${item.workshop_id}.${item.image_extension}" alt="Preview">`;
   }
 
   pane.innerHTML = `
@@ -312,17 +312,16 @@ evtSource.onmessage = function(event) {
   try {
     const data = JSON.parse(event.data);
     if (data.type === 'translation' || data.type === 'web_scrape') {
-      // Refresh the currently-selected detail if it matches
-      const detailWid = document.querySelector('#detail-pane a[href*="sharedfiles"]');
-      if (detailWid && detailWid.href.includes('id=' + data.workshop_id)) {
+      const link = document.querySelector('#detail-pane a[href*="sharedfiles"]');
+      if (link && link.href.includes('id=' + data.workshop_id)) {
         showDetail(data.workshop_id);
       }
     }
     if (data.type === 'image') {
-      // Refresh the currently-selected detail to show the new image
-      const detailWid = document.querySelector('#detail-pane a[href*="sharedfiles"]');
-      if (detailWid && detailWid.href.includes('id=' + data.workshop_id)) {
-        showDetail(data.workshop_id);
+      const img = document.querySelector('#detail-image');
+      const link = document.querySelector('#detail-pane a[href*="sharedfiles"]');
+      if (img && link && link.href.includes('id=' + data.workshop_id)) {
+        img.src = '/images/' + data.workshop_id + '.' + data.ext;
       }
     }
   } catch(e) {}
