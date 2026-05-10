@@ -1113,16 +1113,19 @@ def bump_translation_for_list(db_path: str, workshop_id: int):
     """For enriched items in the list view: flag non-ASCII fields at priority 5."""
     conn = get_connection(db_path)
     row = conn.execute(
-        "SELECT title, short_description, extended_description FROM workshop_items WHERE workshop_id=?",
+        "SELECT title, title_en, short_description, short_description_en, extended_description, extended_description_en "
+        "FROM workshop_items WHERE workshop_id=?",
         (workshop_id,)
     ).fetchone()
     conn.close()
     if not row:
         return
-    for field, text in [("title_en", row["title"] or ""),
-                         ("short_description_en", row["short_description"] or ""),
-                         ("extended_description_en", row["extended_description"] or "")]:
-        if text and not text.isascii():
+    for field, text, translated in [
+        ("title_en", row["title"] or "", row["title_en"]),
+        ("short_description_en", row["short_description"] or "", row["short_description_en"]),
+        ("extended_description_en", row["extended_description"] or "", row["extended_description_en"]),
+    ]:
+        if text and not text.isascii() and not translated:
             flag_field_for_translation(db_path, "item", workshop_id, field, text, 5)
 
 
@@ -1130,16 +1133,19 @@ def bump_translation_for_detail(db_path: str, workshop_id: int):
     """For detail view: flag ALL non-ASCII fields at priority 10, regardless of enrichment."""
     conn = get_connection(db_path)
     row = conn.execute(
-        "SELECT title, short_description, extended_description FROM workshop_items WHERE workshop_id=?",
+        "SELECT title, title_en, short_description, short_description_en, extended_description, extended_description_en "
+        "FROM workshop_items WHERE workshop_id=?",
         (workshop_id,)
     ).fetchone()
     conn.close()
     if not row:
         return
-    for field, text in [("title_en", row["title"] or ""),
-                         ("short_description_en", row["short_description"] or ""),
-                         ("extended_description_en", row["extended_description"] or "")]:
-        if text and not text.isascii():
+    for field, text, translated in [
+        ("title_en", row["title"] or "", row["title_en"]),
+        ("short_description_en", row["short_description"] or "", row["short_description_en"]),
+        ("extended_description_en", row["extended_description"] or "", row["extended_description_en"]),
+    ]:
+        if text and not text.isascii() and not translated:
             flag_field_for_translation(db_path, "item", workshop_id, field, text, 10)
 
 

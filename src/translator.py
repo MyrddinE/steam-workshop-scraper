@@ -132,6 +132,18 @@ Return ONLY a JSON array matching this exact format, preserving all 'id' values:
                 translated_count += 1
                 translated_ids.add(row["item_id"])
                 logging.debug(f"[{row['item_id']}] {row['field']}: \"{row['original_text'][:40]}\" → \"{trans_text[:40]}\"")
+
+            for item_id in translated_ids:
+                remaining = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM translation_queue WHERE item_type='item' AND item_id=?",
+                    (item_id,)
+                ).fetchone()["cnt"]
+                if remaining == 0:
+                    conn.execute(
+                        "UPDATE workshop_items SET translation_priority = 0, dt_translated = ? WHERE workshop_id = ?",
+                        (now_iso, item_id)
+                    )
+
             conn.commit()
 
             if failed_count:
