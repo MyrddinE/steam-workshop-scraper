@@ -197,9 +197,14 @@ async function doSearch(reset = true) {
 async function showDetail(wid) {
   const pane = document.getElementById('detail-pane');
   pane.innerHTML = '<p>Loading...</p>';
-  const resp = await fetch('/api/item/' + wid);
-  const item = await resp.json();
-  if (item.error) { pane.innerHTML = '<p>Item not found.</p>'; return; }
+  try {
+    const resp = await fetch('/api/item/' + wid);
+    if (!resp.ok) {
+      pane.innerHTML = `<p>Error loading item ${wid}: ${resp.status} ${resp.statusText}</p>`;
+      return;
+    }
+    const item = await resp.json();
+    if (item.error) { pane.innerHTML = '<p>Item not found.</p>'; return; }
 
   const title = item.display_title || 'N/A';
   const creator = item.personaname_en || item.personaname || item.creator || 'N/A';
@@ -214,6 +219,11 @@ async function showDetail(wid) {
   const updated = item.time_updated && item.time_updated !== item.time_created ? new Date(item.time_updated*1000).toISOString().slice(0,10) : null;
   const tags = (()=>{try{const t=JSON.parse(item.tags||'[]');return Array.isArray(t)?t.join(', '):'None'}catch{return'None'}})();
   const size = item.file_size ? (item.file_size/1024/1024).toFixed(1)+' MB' : 'N/A';
+
+  let desc = item.description_html || '';
+  if (!desc && (item.short_description_en || item.short_description)) {
+    desc = '<p>' + (item.short_description_en || item.short_description) + '</p>';
+  }
 
   pane.innerHTML = `
     <h2><a href="${url}" target="_blank">${title}</a></h2>
@@ -235,6 +245,7 @@ async function showDetail(wid) {
     ${desc ? '<div style="border-left:3px solid var(--pico-muted-border-color);padding-left:.5rem;margin-top:.5rem">'+desc+'</div>' : ''}
   `;
   document.querySelectorAll('#results-list .result-item').forEach(el => el.classList.remove('selected'));
+  } catch(e) { pane.innerHTML = '<p>Error loading detail: ' + e.message + '</p>'; }
 }
 
 async function loadState() {
