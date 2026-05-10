@@ -108,6 +108,7 @@ class ImageScraperThread(threading.Thread):
 
             time.sleep(self.image_delay)
 
+        self._save_delay()
         logging.info("Image download thread stopped.")
 
     def _get_conn(self):

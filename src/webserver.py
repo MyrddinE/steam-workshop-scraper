@@ -3,7 +3,7 @@
 import json
 import os
 import re
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, send_from_directory
 from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail
 from src.analysis import view_window_analysis
 
@@ -88,6 +88,12 @@ def template_fcount(n):
 @app.template_filter('fsize')
 def template_fsize(n):
     return _format_size(n)
+
+
+@app.route('/images/<path:filename>')
+def serve_image(filename):
+    images_dir = os.path.join(os.getcwd(), 'images')
+    return send_from_directory(images_dir, filename)
 
 
 @app.route('/')

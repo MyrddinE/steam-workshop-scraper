@@ -78,6 +78,7 @@ class WebScraperThread(threading.Thread):
                     self.web_had_streak = False
                 time.sleep(self.web_delay)
 
+        self._save_delay()
         logging.info("Web scraper thread stopped.")
 
     def _save_delay(self):

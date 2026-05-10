@@ -227,3 +227,29 @@ def test_save_filter_no_appid(web_client):
     init_webserver(db_path, config)
     resp = client.post('/api/save_filter', json={"filters": [{"field": "Title", "op": "contains", "value": "X"}]})
     assert resp.status_code == 400
+
+
+def test_image_serve_missing(web_client):
+    client, _ = web_client
+    resp = client.get('/images/nonexistent.jpg')
+    assert resp.status_code == 404
+
+
+def test_bump_image_list(web_client):
+    client, _ = web_client
+    resp = client.post('/api/bump_image_list/1')
+    assert resp.status_code == 200
+
+
+def test_bump_image_detail(web_client):
+    client, _ = web_client
+    resp = client.post('/api/bump_image_detail/1')
+    assert resp.status_code == 200
+
+
+def test_detail_pane_has_image_markup(web_client):
+    client, _ = web_client
+    resp = client.get('/')
+    html = resp.data.decode()
+    assert 'image_extension' in html
+    assert 'detail-image' in html

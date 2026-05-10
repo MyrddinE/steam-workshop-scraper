@@ -36,6 +36,8 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 header { display: flex; justify-content: space-between; align-items: center; }
 #port-display { font-size: .8rem; color: var(--pico-muted-color); }
 #load-more { width: 100%; margin-top: .5rem; display: none; }
+#detail-text { overflow: hidden; }
+#detail-image { float: right; margin: 0 0 .5rem .5rem; max-width: 200px; max-height: 200px; border-radius: 4px; }
 @media (max-width: 768px) {
   main { flex-direction: column; }
   #results-pane { flex: 0 0 40%; border-right: none; border-bottom: 1px solid var(--pico-muted-border-color); }
@@ -235,7 +237,13 @@ async function showDetail(wid) {
     desc = '<p>' + (item.short_description_en || item.short_description) + '</p>';
   }
 
+  let imgHtml = '';
+  if (item.image_extension) {
+    imgHtml = `<img id="detail-image" src="/images/${item.workshop_id}.${item.image_extension}" alt="Preview" onerror="this.style.display='none'">`;
+  }
+
   pane.innerHTML = `
+    ${imgHtml}
     <h2><a href="${url}" target="_blank">${title}</a></h2>
     <p>by <b>${creator}</b> &mdash; <small>Workshop ID: ${item.workshop_id}</small></p>
     <p>&nbsp;</p>
