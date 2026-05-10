@@ -3,6 +3,11 @@ import sys
 import logging
 from unittest.mock import patch, MagicMock
 
+def test_tui_module_compiles():
+    """Catch syntax/indent errors in tui.py immediately."""
+    import src.tui
+    assert src.tui.main is not None
+
 def test_tui_main_execution():
     with patch('src.tui.ScraperApp') as mock_app, \
          patch('sys.argv', ['tui.py']), \
