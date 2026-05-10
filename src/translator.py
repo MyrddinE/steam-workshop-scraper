@@ -134,10 +134,6 @@ Return ONLY a JSON array matching this exact format, preserving all 'id' values:
                 logging.debug(f"[{row['item_id']}] {row['field']}: \"{row['original_text'][:40]}\" → \"{trans_text[:40]}\"")
             conn.commit()
 
-            # Notify web clients of translated items
-            for wid in translated_ids:
-                self._notify("translation", {"workshop_id": wid})
-
             if failed_count:
                 logging.info(f"Batch translation: {translated_count} added, {failed_count} failed.")
             else:
@@ -148,9 +144,4 @@ Return ONLY a JSON array matching this exact format, preserving all 'id' values:
         finally:
             conn.close()
 
-    def _notify(self, event_type, data):
-        try:
-            from src.webserver import _notify_web_clients
-            _notify_web_clients(event_type, data)
-        except Exception as e:
-            logging.warning(f"Translator failed to notify web: {e}")
+

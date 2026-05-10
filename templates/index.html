@@ -100,6 +100,7 @@ const ID_FIELDS = ['Author ID','Workshop ID','AppID'];
 const ALL_FIELDS = ['Title','Description','Filename','Tags','Author ID','File Size','Subs','Favs','Views','Workshop ID','AppID','Language ID','Subscriber Score','Favorite Score'];
 
 let currentOffset = 0, hasMore = true, loading = false, cutoffs = {};
+let _listPollTimer = null;
 
 function updateOps(row) {
   const field = row.querySelector('.field-select').value;
@@ -169,7 +170,7 @@ function fmtCount(n) {
 async function doSearch(reset = true) {
   if (loading) return;
   loading = true;
-  if (reset) { currentOffset = 0; hasMore = true; document.getElementById('results-list').innerHTML = ''; loadCutoffs(); }
+  if (reset) { _stopListPoll(); currentOffset = 0; hasMore = true; document.getElementById('results-list').innerHTML = ''; loadCutoffs(); }
 
   const filters = getFilters();
   const resp = await fetch('/api/search', {
@@ -182,42 +183,65 @@ async function doSearch(reset = true) {
   items.forEach(item => {
     const div = document.createElement('div');
     div.className = 'result-item';
+    div.setAttribute('data-wid', item.workshop_id);
     if (item.is_queued_for_subscription) div.classList.add('queued');
     const title = item.title_en || item.title || 'Untitled';
     const creator = item.personaname_en || item.personaname || item.creator || '';
     div.innerHTML = `${item.is_queued_for_subscription ? '\u2605 ' : ''}<b>${title}</b> <small>by ${creator}</small>`;
     div.onclick = () => showDetail(item.workshop_id);
     list.appendChild(div);
-    if (item.needs_web_scrape > 0) {
-      fetch('/api/bump_web_list/' + item.workshop_id, {method:'POST'});
-    }
-    if (item.needs_image > 0) {
-      fetch('/api/bump_image_list/' + item.workshop_id, {method:'POST'});
-    }
   });
 
   currentOffset += items.length;
   hasMore = items.length >= 50;
   document.getElementById('load-more').style.display = hasMore ? 'block' : 'none';
   loading = false;
+
+  if (reset && _listNeedsPoll(items)) {
+    _startListPoll(filters, document.getElementById('sort-by').value, document.getElementById('sort-order').value);
+  }
 }
 
-async function showDetail(wid) {
+function _listNeedsPoll(items) {
+  for (const item of items) {
+    if ((item.translation_priority || 0) > 0) return true;
+  }
+  return false;
+}
+
+let _listPollFilters = null, _listPollSortBy = null, _listPollSortOrder = null;
+
+function _startListPoll(filters, sortBy, sortOrder) {
+  _stopListPoll();
+  _listPollFilters = filters;
+  _listPollSortBy = sortBy;
+  _listPollSortOrder = sortOrder;
+  _listPollTimer = setInterval(async () => {
+    try {
+      const resp = await fetch('/api/search', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({filters: _listPollFilters, sort_by: _listPollSortBy, sort_order: _listPollSortOrder, offset: 0, limit: currentOffset})
+      });
+      const items = await resp.json();
+      if (!_listNeedsPoll(items)) { _stopListPoll(); }
+      const list = document.getElementById('results-list');
+      items.forEach(item => {
+        const el = list.querySelector(`.result-item[data-wid="${item.workshop_id}"]`);
+        if (!el) return;
+        const title = item.title_en || item.title || 'Untitled';
+        const creator = item.personaname_en || item.personaname || item.creator || '';
+        el.innerHTML = `${item.is_queued_for_subscription ? '\u2605 ' : ''}<b>${title}</b> <small>by ${creator}</small>`;
+      });
+    } catch(e) { /* poll error, keep trying */ }
+  }, 10000);
+}
+
+function _stopListPoll() {
+  if (_listPollTimer) { clearInterval(_listPollTimer); _listPollTimer = null; }
+}
+
+function renderDetail(item) {
   const pane = document.getElementById('detail-pane');
-  pane.innerHTML = '<p>Loading...</p>';
-  try {
-    const resp = await fetch('/api/item/' + wid);
-    if (!resp.ok) {
-      pane.innerHTML = `<p>Error loading item ${wid}: ${resp.status} ${resp.statusText}</p>`;
-      return;
-    }
-    const item = await resp.json();
-    if (item.error) { pane.innerHTML = '<p>Item not found.</p>'; return; }
-
-  fetch('/api/bump_web_detail/' + wid, {method:'POST'});
-  fetch('/api/bump_translation_detail/' + wid, {method:'POST'});
-  fetch('/api/bump_image_detail/' + wid, {method:'POST'});
-
   const title = item.display_title || 'N/A';
   const creator = item.personaname_en || item.personaname || item.creator || 'N/A';
   const url = `https://steamcommunity.com/sharedfiles/filedetails/?id=${item.workshop_id}`;
@@ -262,7 +286,63 @@ async function showDetail(wid) {
     <p><a href="${url}" target="_blank">Open on Steam</a></p>
     ${desc ? '<div style="border-left:3px solid var(--pico-muted-border-color);padding-left:.5rem;margin-top:.5rem">'+desc+'</div>' : ''}
   `;
+}
+
+let _detailPollWid = null, _detailPollTimer = null;
+
+function _detailNeedsPoll(item) {
+  return (item.translation_priority || 0) > 0 || (item.preview_url && !item.image_extension);
+}
+
+function _startDetailPoll(wid, item) {
+  _stopDetailPoll();
+  if (!_detailNeedsPoll(item)) return;
+  _detailPollWid = wid;
+  _detailPollTimer = setInterval(async () => {
+    try {
+      const resp = await fetch('/api/item/' + wid);
+      if (!resp.ok || wid !== _detailPollWid) { _stopDetailPoll(); return; }
+      const updated = await resp.json();
+      if (updated.error) { _stopDetailPoll(); return; }
+      if (!_detailNeedsPoll(updated)) {
+        renderDetail(updated);
+        _stopDetailPoll();
+      } else if (updated.image_extension && !item.image_extension) {
+        let img = document.getElementById('detail-image');
+        if (!img) {
+          img = document.createElement('img');
+          img.id = 'detail-image';
+          img.alt = 'Preview';
+          const h2 = document.querySelector('#detail-pane h2');
+          if (h2) h2.parentElement.insertBefore(img, h2);
+        }
+        img.src = '/images/' + wid + '.' + updated.image_extension;
+      }
+    } catch(e) { /* poll error, keep trying */ }
+  }, 3000);
+}
+
+function _stopDetailPoll() {
+  if (_detailPollTimer) { clearInterval(_detailPollTimer); _detailPollTimer = null; }
+  _detailPollWid = null;
+}
+
+async function showDetail(wid) {
+  _stopDetailPoll();
+  const pane = document.getElementById('detail-pane');
+  pane.innerHTML = '<p>Loading...</p>';
+  try {
+    const resp = await fetch('/api/item/' + wid);
+    if (!resp.ok) {
+      pane.innerHTML = `<p>Error loading item ${wid}: ${resp.status} ${resp.statusText}</p>`;
+      return;
+    }
+    const item = await resp.json();
+    if (item.error) { pane.innerHTML = '<p>Item not found.</p>'; return; }
+
+  renderDetail(item);
   document.querySelectorAll('#results-list .result-item').forEach(el => el.classList.remove('selected'));
+  _startDetailPoll(wid, item);
   } catch(e) { pane.innerHTML = '<p>Error loading detail: ' + e.message + '</p>'; }
 }
 
@@ -306,43 +386,6 @@ document.getElementById('btn-save-filter').onclick = async () => {
 document.getElementById('sort-by').onchange = () => doSearch(true);
 document.getElementById('sort-order').onchange = () => doSearch(true);
 loadState();
-
-const evtSource = new EventSource('/api/events');
-evtSource.onopen = () => console.log('[SSE] connected');
-evtSource.onmessage = function(event) {
-  try {
-    const data = JSON.parse(event.data);
-    if (data.type === 'connected') return;
-    console.log('[SSE] received:', data.type, data);
-    if (data.type === 'translation' || data.type === 'web_scrape') {
-      const link = document.querySelector('#detail-pane a[href*="sharedfiles"]');
-      if (link && link.href.includes('id=' + data.workshop_id)) {
-        console.log('[SSE] ' + data.type + ' matched, refreshing detail for', data.workshop_id);
-        showDetail(data.workshop_id);
-      }
-    }
-    if (data.type === 'image') {
-      const link = document.querySelector('#detail-pane a[href*="sharedfiles"]');
-      console.log('[SSE] image event, detail link:', link ? link.href : 'none', 'target wid:', data.workshop_id);
-      if (link && link.href.includes('id=' + data.workshop_id)) {
-        let img = document.querySelector('#detail-image');
-        console.log('[SSE] existing img:', img);
-        if (!img) {
-          img = document.createElement('img');
-          img.id = 'detail-image';
-          img.alt = 'Preview';
-          link.parentElement.insertBefore(img, link);
-          console.log('[SSE] created new img tag');
-        }
-        img.src = '/images/' + data.workshop_id + '.' + data.ext;
-        console.log('[SSE] set img.src =', img.src);
-      } else {
-        console.log('[SSE] detail pane not showing this item, skipping');
-      }
-    }
-  } catch(e) { console.error('[SSE] error:', e); }
-};
-evtSource.onerror = () => { console.log('[SSE] connection error, reconnecting...'); };
 </script>
 </body>
 </html>

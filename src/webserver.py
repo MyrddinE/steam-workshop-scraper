@@ -4,30 +4,14 @@ import json
 import os
 import re
 import logging
-import queue
-from flask import Flask, request, jsonify, render_template, send_from_directory, Response
-from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection
+from flask import Flask, request, jsonify, render_template, send_from_directory
+from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection
 from src.analysis import view_window_analysis
 
 app = Flask(__name__, template_folder='../templates')
 _db_path = "workshop.db"
 _config = {}
 _images_dir = "images"
-_event_queues: list[queue.Queue] = []
-
-
-def _notify_web_clients(event_type: str, data: dict):
-    """Thread-safe: pushes an event to all connected SSE clients."""
-    payload = json.dumps({"type": event_type, **data})
-    logging.info(f"[SSE] notify: {event_type} wid={data.get('workshop_id','?')} (queues: {len(_event_queues)})")
-    if not _event_queues:
-        logging.info("[SSE] no connected clients, discarding event")
-    for q in _event_queues[:]:
-        try:
-            q.put_nowait(payload)
-        except Exception as e:
-            logging.warning(f"[SSE] failed to push event: {e}")
-            _event_queues.remove(q)
 
 
 def init_webserver(db_path: str, config: dict):
@@ -109,39 +93,6 @@ def template_fsize(n):
     return _format_size(n)
 
 
-@app.route('/api/events')
-def api_events():
-    """SSE endpoint: streams real-time notifications to web clients."""
-    q = queue.Queue()
-    _event_queues.append(q)
-    logging.info(f"[SSE] client connected (total: {len(_event_queues)})")
-
-    def generator():
-        logging.info(f"[SSE] generator started for client")
-        try:
-            yield "data: {\"type\":\"connected\"}\n\n"
-            while True:
-                try:
-                    msg = q.get(timeout=30)
-                    yield f"data: {msg}\n\n"
-                except queue.Empty:
-                    yield ":keepalive\n\n"
-        except GeneratorExit:
-            logging.info(f"[SSE] GeneratorExit — client closed connection")
-            raise
-        except Exception as e:
-            logging.warning(f"[SSE] generator exception: {e}")
-        finally:
-            if q in _event_queues:
-                _event_queues.remove(q)
-                logging.info(f"[SSE] client disconnected (remaining: {len(_event_queues)})")
-
-    response = Response(generator(), mimetype="text/event-stream")
-    response.headers["Cache-Control"] = "no-cache"
-    response.headers["X-Accel-Buffering"] = "no"
-    return response
-
-
 @app.route('/images/<path:filename>')
 def serve_image(filename):
     return send_from_directory(_images_dir, filename)
@@ -170,11 +121,41 @@ def api_search():
         limit=limit,
         offset=offset,
     )
+
+    if results:
+        for item in results:
+            wid = item['workshop_id']
+            bump_web_priority_for_list(_db_path, wid)
+            bump_image_priority_for_list(_db_path, wid)
+            _ensure_image_flagged(wid, 5)
+            bump_translation_for_list(_db_path, wid)
+
+        ids = [r['workshop_id'] for r in results]
+        conn = get_connection(_db_path)
+        placeholders = ','.join('?' * len(ids))
+        updated = conn.execute(
+            f"SELECT workshop_id, needs_web_scrape, needs_image, translation_priority FROM workshop_items WHERE workshop_id IN ({placeholders})",
+            ids
+        ).fetchall()
+        conn.close()
+        updated_map = {row['workshop_id']: dict(row) for row in updated}
+        for r in results:
+            if r['workshop_id'] in updated_map:
+                u = updated_map[r['workshop_id']]
+                r['needs_web_scrape'] = u['needs_web_scrape']
+                r['needs_image'] = u['needs_image']
+                r['translation_priority'] = u['translation_priority']
+
     return jsonify(results)
 
 
 @app.route('/api/item/<int:workshop_id>')
 def api_item(workshop_id):
+    bump_web_priority_for_detail(_db_path, workshop_id)
+    bump_image_priority_for_detail(_db_path, workshop_id)
+    _ensure_image_flagged(workshop_id, 10)
+    bump_translation_for_detail(_db_path, workshop_id)
+
     item = get_item_details(_db_path, workshop_id)
     if not item:
         return jsonify({"error": "not found"}), 404
@@ -248,24 +229,6 @@ def api_save_filter():
     return jsonify({"ok": True, "appid": appid})
 
 
-@app.route('/api/bump_web_list/<int:workshop_id>', methods=['POST'])
-def api_bump_web_list(workshop_id):
-    bump_web_priority_for_list(_db_path, workshop_id)
-    return jsonify({"ok": True})
-
-
-@app.route('/api/bump_web_detail/<int:workshop_id>', methods=['POST'])
-def api_bump_web_detail(workshop_id):
-    bump_web_priority_for_detail(_db_path, workshop_id)
-    return jsonify({"ok": True})
-
-
-@app.route('/api/bump_translation_detail/<int:workshop_id>', methods=['POST'])
-def api_bump_translation_detail(workshop_id):
-    bump_translation_for_detail(_db_path, workshop_id)
-    return jsonify({"ok": True})
-
-
 def _ensure_image_flagged(workshop_id, priority):
     """If item has preview_url but no image_extension, flag it for download."""
     conn = get_connection(_db_path)
@@ -276,17 +239,3 @@ def _ensure_image_flagged(workshop_id, priority):
     conn.close()
     if row and row["preview_url"] and not row["image_extension"]:
         flag_for_image(_db_path, workshop_id, max(row["needs_image"] or 1, priority))
-
-
-@app.route('/api/bump_image_list/<int:workshop_id>', methods=['POST'])
-def api_bump_image_list(workshop_id):
-    _ensure_image_flagged(workshop_id, 5)
-    bump_image_priority_for_list(_db_path, workshop_id)
-    return jsonify({"ok": True})
-
-
-@app.route('/api/bump_image_detail/<int:workshop_id>', methods=['POST'])
-def api_bump_image_detail(workshop_id):
-    _ensure_image_flagged(workshop_id, 10)
-    bump_image_priority_for_detail(_db_path, workshop_id)
-    return jsonify({"ok": True})

@@ -104,8 +104,6 @@ class ImageScraperThread(threading.Thread):
 
                 title = item.get("title_en") or item.get("title") or str(wid)
                 logging.info(f"[I:{wid}] Downloaded preview ({ext}) for \"{title}\"")
-                logging.info(f"[I:{wid}] Notifying web clients of image ({ext})")
-                self._notify("image", {"workshop_id": wid, "ext": ext})
                 self.image_successes += 1
                 self.image_failures = 0
                 if self.image_successes >= 5:
@@ -138,13 +136,6 @@ class ImageScraperThread(threading.Thread):
 
         self._save_cb("image_delay_seconds", self.image_delay)
         logging.info("Image download thread stopped.")
-
-    def _notify(self, event_type, data):
-        try:
-            from src.webserver import _notify_web_clients
-            _notify_web_clients(event_type, data)
-        except Exception as e:
-            logging.warning(f"Image worker failed to notify web: {e}")
 
     def _get_conn(self):
         from src.database import get_connection

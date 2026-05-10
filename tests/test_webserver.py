@@ -58,7 +58,7 @@ def test_search_builder_not_in_scroll(web_client):
 
 
 def test_show_detail_has_desc_variable(web_client):
-    """Regression: desc variable must be declared before use in showDetail."""
+    """Regression: desc variable must be declared before use in renderDetail."""
     import re
     client, _ = web_client
     resp = client.get('/')
@@ -66,13 +66,13 @@ def test_show_detail_has_desc_variable(web_client):
     js = re.search(r'<script>(.*?)</script>', html, re.DOTALL)
     assert js, "No <script> block found"
     code = js.group(1)
-    sd_start = code.index('function showDetail')
+    sd_start = code.index('function renderDetail')
     sd_body = code[sd_start:]
     desc_decl = re.search(r'\blet desc\b|\bvar desc\b|\bconst desc\b', sd_body)
-    assert desc_decl, "desc variable not declared in showDetail"
+    assert desc_decl, "desc variable not declared in renderDetail"
     # desc must be declared before the final pane.innerHTML (the template literal)
     inners = [m.start() for m in re.finditer(r'pane\.innerHTML', sd_body)]
-    assert len(inners) >= 2, "expected at least 2 pane.innerHTML calls in showDetail"
+    assert len(inners) >= 1, "expected at least 1 pane.innerHTML call in renderDetail"
     template_pos = inners[-1]  # the last one is the template literal
     assert desc_decl.start() < template_pos, "desc declared AFTER template literal"
 
@@ -235,18 +235,6 @@ def test_image_serve_missing(web_client):
     assert resp.status_code == 404
 
 
-def test_bump_image_list(web_client):
-    client, _ = web_client
-    resp = client.post('/api/bump_image_list/1')
-    assert resp.status_code == 200
-
-
-def test_bump_image_detail(web_client):
-    client, _ = web_client
-    resp = client.post('/api/bump_image_detail/1')
-    assert resp.status_code == 200
-
-
 def test_detail_pane_has_image_markup(web_client):
     client, _ = web_client
     resp = client.get('/')
@@ -254,24 +242,3 @@ def test_detail_pane_has_image_markup(web_client):
     assert 'image_extension' in html
     assert 'detail-image' in html
 
-
-def test_sse_endpoint_returns_stream(web_client):
-    client, _ = web_client
-    resp = client.get('/api/events')
-    assert resp.status_code == 200
-    assert resp.mimetype == 'text/event-stream'
-    assert b'data: ' in next(resp.response)
-
-
-def test_notify_pushes_event(web_client):
-    from src.webserver import _notify_web_clients, _event_queues
-    import queue
-    q = queue.Queue()
-    _event_queues.append(q)
-    try:
-        _notify_web_clients("test", {"id": 1})
-        msg = q.get(timeout=2)
-        assert '"type": "test"' in msg
-        assert '"id": 1' in msg
-    finally:
-        _event_queues.remove(q)
