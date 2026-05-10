@@ -59,7 +59,7 @@ class TranslatorThread(threading.Thread):
                 logging.error(f"Translator thread error: {e}")
                 time.sleep(30)
 
-        logging.info("Translation thread stopped.")
+        # Thread lifecycle logging handled by daemon
 
     def _translate_batch(self, batch: list[dict], client: OpenAI, model: str):
         """Translate a batch of fields using OpenAI and update the database."""

@@ -133,7 +133,7 @@ class Daemon:
             "lifetime_subscriptions", "lifetime_favorited", "translation_priority",
             "wilson_favorite_score", "wilson_subscription_score",
         }
-        known_ignored_keys = {"result", "is_queued_for_subscription"}
+        known_ignored_keys = {"result", "is_queued_for_subscription", "needs_web_scrape"}
         clean = {}
         for k, v in merged.items():
             if k in allowed_keys:
@@ -401,6 +401,7 @@ class Daemon:
         logging.info("Daemon gracefully exited.")
         web_worker.running = False
         web_worker.join(timeout=5)
+        logging.info("Web scraper thread stopped.")
         self.translator.running = False
         self.translator.join(timeout=5)
         logging.info("Translator thread stopped.")
