@@ -189,6 +189,9 @@ async function doSearch(reset = true) {
     if (item.needs_web_scrape > 0) {
       fetch('/api/bump_web_list/' + item.workshop_id, {method:'POST'});
     }
+    if (item.needs_image > 0) {
+      fetch('/api/bump_image_list/' + item.workshop_id, {method:'POST'});
+    }
   });
 
   currentOffset += items.length;
@@ -211,6 +214,7 @@ async function showDetail(wid) {
 
   fetch('/api/bump_web_detail/' + wid, {method:'POST'});
   fetch('/api/bump_translation_detail/' + wid, {method:'POST'});
+  fetch('/api/bump_image_detail/' + wid, {method:'POST'});
 
   const title = item.display_title || 'N/A';
   const creator = item.personaname_en || item.personaname || item.creator || 'N/A';

@@ -9,7 +9,7 @@ from textual.screen import Screen, ModalScreen
 from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button, Markdown, DataTable
 from textual.containers import Horizontal, Vertical, VerticalScroll, Center, Grid
 from textual.reactive import reactive
-from src.database import search_items, get_all_authors, initialize_database, flag_for_translation, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, get_db_stats, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail
+from src.database import search_items, get_all_authors, initialize_database, flag_for_translation, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, get_db_stats, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail
 from src.analysis import view_window_analysis
 from src.config import load_config
 import os
@@ -1164,6 +1164,8 @@ class ScraperApp(App):
             if item.get("needs_web_scrape", 0) > 0:
                 bump_web_priority_for_list(self.db_path, item["workshop_id"])
                 bump_translation_for_list(self.db_path, item["workshop_id"])
+            if item.get("needs_image", 0) > 0:
+                bump_image_priority_for_list(self.db_path, item["workshop_id"])
             
         self.current_offset += len(results)
         
@@ -1207,6 +1209,7 @@ class ScraperApp(App):
                 if wid:
                     bump_web_priority_for_detail(self.db_path, wid)
                     bump_translation_for_detail(self.db_path, wid)
+                    bump_image_priority_for_detail(self.db_path, wid)
                 
                 detail_pane = self.query_one("#item-details", DetailsPane)
                 detail_pane.workshop_id = item_data.get("workshop_id")

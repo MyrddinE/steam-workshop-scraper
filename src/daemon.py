@@ -25,8 +25,9 @@ from src.database import (
 from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries, query_workshop_files, set_api_delay
 from src.translator import TranslatorThread, is_ascii
 from src.config import save_config
-from src.database import flag_for_web_scrape, flag_field_for_translation
+from src.database import flag_for_web_scrape, flag_field_for_translation, flag_for_image
 from src.web_worker import WebScraperThread
+from src.image_worker import ImageScraperThread
 
 
 def wilson_lower(successes: int, trials: int, z: float = 1.96) -> float:
@@ -133,7 +134,7 @@ class Daemon:
             "lifetime_subscriptions", "lifetime_favorited", "translation_priority",
             "wilson_favorite_score", "wilson_subscription_score",
         }
-        known_ignored_keys = {"result", "is_queued_for_subscription", "needs_web_scrape"}
+        known_ignored_keys = {"result", "is_queued_for_subscription", "needs_web_scrape", "image_extension", "needs_image"}
         clean = {}
         for k, v in merged.items():
             if k in allowed_keys:
@@ -347,6 +348,10 @@ class Daemon:
             else:
                 flag_for_web_scrape(self.db_path, item_id, 1)
 
+            # Flag for image download if preview URL is present
+            if merged_data.get("preview_url"):
+                flag_for_image(self.db_path, item_id, 3 if enriched else 1)
+
             merged_data["status"] = 200
             insert_or_update_item(self.db_path, merged_data)
 
@@ -396,12 +401,17 @@ class Daemon:
         self.translator.start()
         web_worker = WebScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}))
         web_worker.start()
+        image_worker = ImageScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}))
+        image_worker.start()
         while self.running:
             self.process_batch()
         logging.info("Daemon gracefully exited.")
         web_worker.running = False
         web_worker.join(timeout=5)
         logging.info("Web scraper thread stopped.")
+        image_worker.running = False
+        image_worker.join(timeout=5)
+        logging.info("Image download thread stopped.")
         self.translator.running = False
         self.translator.join(timeout=5)
         logging.info("Translator thread stopped.")

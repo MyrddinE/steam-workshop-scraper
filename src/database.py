@@ -15,6 +15,7 @@ WORKSHOP_ITEM_COLUMNS = frozenset({
     "extended_description_en", "language", "lifetime_subscriptions",
     "lifetime_favorited", "translation_priority", "is_queued_for_subscription",
     "wilson_favorite_score", "wilson_subscription_score", "needs_web_scrape",
+    "image_extension", "needs_image",
 })
 
 USER_COLUMNS = frozenset({
@@ -267,7 +268,9 @@ def initialize_database(db_path: str):
         translation_priority INTEGER DEFAULT 0,
         wilson_favorite_score REAL DEFAULT NULL,
         wilson_subscription_score REAL DEFAULT NULL,
-        needs_web_scrape INTEGER DEFAULT 0
+        needs_web_scrape INTEGER DEFAULT 0,
+        image_extension TEXT DEFAULT NULL,
+        needs_image INTEGER DEFAULT 0
     )
     """)
 
@@ -310,6 +313,8 @@ def initialize_database(db_path: str):
         ("wilson_favorite_score", "REAL DEFAULT NULL"),
         ("wilson_subscription_score", "REAL DEFAULT NULL"),
         ("needs_web_scrape", "INTEGER DEFAULT 0"),
+        ("image_extension", "TEXT DEFAULT NULL"),
+        ("needs_image", "INTEGER DEFAULT 0"),
     ])
 
     # Create app_tracking table for historical scraping and filter storage
@@ -382,7 +387,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 3
+    EXPECTED_VERSION = 4
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -463,6 +468,17 @@ def initialize_database(db_path: str):
         conn.commit()
         cursor.execute("PRAGMA user_version = 3")
         logging.info(f"Migration 2→3 complete. Set needs_web_scrape=1 on {updated} items.")
+
+    if db_version < 4:
+        logging.info("Running migration 3→4: adding image download flag...")
+        cursor.execute("""
+            UPDATE workshop_items SET needs_image = 1
+            WHERE preview_url IS NOT NULL AND preview_url != ''
+              AND image_extension IS NULL
+        """)
+        updated = cursor.rowcount
+        cursor.execute("PRAGMA user_version = 4")
+        logging.info(f"Migration 3→4 complete. Set needs_image=1 on {updated} items.")
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
@@ -713,7 +729,7 @@ def search_items(db_path: str, query: str = "", appid: int = None,
     conn = get_connection(db_path)
     
     if summary_only:
-        cols = "w.workshop_id, w.title, w.title_en, w.creator, w.consumer_appid, w.dt_translated, w.is_queued_for_subscription, w.needs_web_scrape, u.personaname, u.personaname_en"
+        cols = "w.workshop_id, w.title, w.title_en, w.creator, w.consumer_appid, w.dt_translated, w.is_queued_for_subscription, w.needs_web_scrape, w.needs_image, u.personaname, u.personaname_en"
     else:
         cols = "w.*, u.personaname, u.personaname_en"
         
@@ -1014,6 +1030,53 @@ def bump_web_priority_for_detail(db_path: str, workshop_id: int):
     conn.execute(
         "UPDATE workshop_items SET needs_web_scrape = 10 "
         "WHERE workshop_id = ? AND needs_web_scrape > 0 AND needs_web_scrape < 10",
+        (workshop_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_next_image_item(db_path: str) -> dict | None:
+    """Returns the highest-priority item needing image download, or None."""
+    conn = get_connection(db_path)
+    cursor = conn.execute("""
+        SELECT * FROM workshop_items
+        WHERE needs_image > 0
+        ORDER BY needs_image DESC, dt_attempted ASC
+        LIMIT 1
+    """)
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def flag_for_image(db_path: str, workshop_id: int, priority: int):
+    """Sets needs_image to MAX(current, priority). Never downgrades."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "UPDATE workshop_items SET needs_image = MAX(needs_image, ?) WHERE workshop_id = ?",
+        (priority, workshop_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def bump_image_priority_for_list(db_path: str, workshop_id: int):
+    conn = get_connection(db_path)
+    conn.execute(
+        "UPDATE workshop_items SET needs_image = 5 "
+        "WHERE workshop_id = ? AND needs_image > 0 AND needs_image < 5",
+        (workshop_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def bump_image_priority_for_detail(db_path: str, workshop_id: int):
+    conn = get_connection(db_path)
+    conn.execute(
+        "UPDATE workshop_items SET needs_image = 10 "
+        "WHERE workshop_id = ? AND needs_image > 0 AND needs_image < 10",
         (workshop_id,)
     )
     conn.commit()

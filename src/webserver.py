@@ -4,7 +4,7 @@ import json
 import os
 import re
 from flask import Flask, request, jsonify, render_template
-from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_detail
+from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail
 from src.analysis import view_window_analysis
 
 app = Flask(__name__, template_folder='../templates')
@@ -206,4 +206,16 @@ def api_bump_web_detail(workshop_id):
 @app.route('/api/bump_translation_detail/<int:workshop_id>', methods=['POST'])
 def api_bump_translation_detail(workshop_id):
     bump_translation_for_detail(_db_path, workshop_id)
+    return jsonify({"ok": True})
+
+
+@app.route('/api/bump_image_list/<int:workshop_id>', methods=['POST'])
+def api_bump_image_list(workshop_id):
+    bump_image_priority_for_list(_db_path, workshop_id)
+    return jsonify({"ok": True})
+
+
+@app.route('/api/bump_image_detail/<int:workshop_id>', methods=['POST'])
+def api_bump_image_detail(workshop_id):
+    bump_image_priority_for_detail(_db_path, workshop_id)
     return jsonify({"ok": True})
