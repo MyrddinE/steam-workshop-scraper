@@ -6,7 +6,7 @@ import logging
 import threading
 import requests
 from datetime import datetime, timezone
-from src.database import get_next_image_item, insert_or_update_item, flag_for_image
+from src.database import get_next_image_item, insert_or_update_item
 
 
 MIME_MAP = {
@@ -96,8 +96,11 @@ class ImageScraperThread(threading.Thread):
 
             except Exception as e:
                 logging.warning(f"[I:{wid}] Image download failed: {e}")
-                # Downgrade priority by 1, minimum 0
-                flag_for_image(self.db_path, wid, max(0, (item.get("needs_image") or 1) - 1))
+                new_pri = max(0, (item.get("needs_image") or 1) - 1)
+                conn = self._get_conn()
+                conn.execute("UPDATE workshop_items SET needs_image=? WHERE workshop_id=?", (new_pri, wid))
+                conn.commit()
+                conn.close()
                 self.image_failures += 1
                 self.image_successes = 0
                 if self.image_failures >= 2 and self.image_had_streak:
