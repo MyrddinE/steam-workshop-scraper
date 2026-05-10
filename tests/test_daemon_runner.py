@@ -32,7 +32,8 @@ def test_main_logging_configured():
          patch('src.daemon_runner.Daemon'), \
          patch('logging.basicConfig') as mock_basic_config, \
          patch('logging.FileHandler') as mock_file_handler, \
-         patch('logging.StreamHandler') as mock_stream_handler:
+         patch('logging.StreamHandler') as mock_stream_handler, \
+         patch('os.isatty', return_value=True):
         
         mock_load.return_value = {
             "database": {"path": "test.db"},
@@ -65,7 +66,8 @@ def test_main_logging_fallback():
          patch('src.daemon_runner.initialize_database'), \
          patch('src.daemon_runner.Daemon'), \
          patch('logging.basicConfig') as mock_basic_config, \
-         patch('logging.StreamHandler') as mock_stream_handler:
+         patch('logging.StreamHandler') as mock_stream_handler, \
+         patch('os.isatty', return_value=True):
         
         # No logging section in config
         mock_load.return_value = {

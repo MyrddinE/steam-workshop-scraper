@@ -3,11 +3,10 @@ from src.daemon import Daemon
 from src.config import load_config
 from src.database import initialize_database
 import sys
+import os
+
 
 def main():
-    # Initial basic configuration for startup errors
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    
     config_path = "config.yaml"
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
@@ -15,19 +14,22 @@ def main():
     try:
         config = load_config(config_path)
     except FileNotFoundError:
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
         logging.error(f"Configuration file not found: {config_path}")
         sys.exit(1)
         
-    # Reconfigure logging based on config file
     log_config = config.get("logging", {})
     level_str = log_config.get("level", "INFO").upper()
     log_level = getattr(logging, level_str, logging.INFO)
     log_file = log_config.get("file")
-    
-    handlers = [logging.StreamHandler()]
+
+    handlers = []
+    is_tty = os.isatty(sys.stderr.fileno())
+    if is_tty:
+        handlers.append(logging.StreamHandler())
     if log_file:
         handlers.append(logging.FileHandler(log_file))
-        
+
     logging.basicConfig(
         level=log_level,
         format='%(asctime)s - %(levelname)s - %(message)s',
