@@ -317,6 +317,7 @@ evtSource.onmessage = function(event) {
     if (data.type === 'translation' || data.type === 'web_scrape') {
       const link = document.querySelector('#detail-pane a[href*="sharedfiles"]');
       if (link && link.href.includes('id=' + data.workshop_id)) {
+        console.log('[SSE] ' + data.type + ' matched, refreshing detail for', data.workshop_id);
         showDetail(data.workshop_id);
       }
     }
