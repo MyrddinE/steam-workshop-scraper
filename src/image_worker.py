@@ -74,6 +74,7 @@ class ImageScraperThread(threading.Thread):
                 magic_header = b""
 
                 if not ext:
+                    magic_ext = ""
                     try:
                         import puremagic
                         magic_header = next(resp.iter_content(8192), b"")
@@ -85,7 +86,13 @@ class ImageScraperThread(threading.Thread):
                         pass
 
                 if not ext:
-                    raise Exception(f"Unknown MIME type: {mime}")
+                    logging.warning(f"[I:{wid}] Unknown MIME: {mime}, puremagic guess: {magic_ext or 'none'}")
+                    conn = self._get_conn()
+                    conn.execute("UPDATE workshop_items SET needs_image=0 WHERE workshop_id=?", (wid,))
+                    conn.commit()
+                    conn.close()
+                    time.sleep(self.image_delay)
+                    continue
 
                 img_path = os.path.join("images", f"{wid}.{ext}")
                 with open(img_path, "wb") as f:
