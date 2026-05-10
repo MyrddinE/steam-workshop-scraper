@@ -51,8 +51,12 @@ class TranslatorThread(threading.Thread):
             try:
                 batch = get_next_batch_for_translation(self.db_path, limit=20)
                 if batch:
-                    self._translate_batch(batch, client, model)
-                    time.sleep(1 if len(batch) >= 20 else 10)
+                    urgent = any(row.get("priority", 0) >= 5 for row in batch)
+                    if len(batch) >= 20 or urgent:
+                        self._translate_batch(batch, client, model)
+                        time.sleep(1)
+                    else:
+                        time.sleep(10)
                 else:
                     time.sleep(10)
             except Exception as e:
