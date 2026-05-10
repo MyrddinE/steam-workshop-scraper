@@ -4,7 +4,6 @@ import json
 import os
 import re
 import logging
-import socket
 import requests
 from flask import Flask, request, jsonify, render_template, send_from_directory
 from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection
@@ -115,17 +114,9 @@ def serve_userscript(filename):
     with open(template_path, 'r', encoding='utf-8') as f:
         content = f.read()
 
-    port = _config.get("web", {}).get("port", 8080)
-    try:
-        host_ip = socket.gethostbyname(socket.gethostname())
-    except Exception:
-        host_ip = None
-
-    includes = []
-    if host_ip and not host_ip.startswith('127.'):
-        includes.append(f'// @include      http://{host_ip}:{port}/*')
-
-    if includes:
+    host = request.host
+    if host and not host.startswith('127.') and not host.startswith('localhost'):
+        includes = [f'// @include      http://{host}/*']
         marker = '// ==/UserScript=='
         content = content.replace(marker, '\n'.join(includes) + '\n' + marker)
 
