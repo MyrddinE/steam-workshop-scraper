@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Workshop Scraper — Subscribe Bridge
 // @namespace    https://github.com/MyrddinE/steam-workshop-scraper
-// @version      2
+// @version      3
 // @description  Bridges Steam session to the Workshop Scraper web UI for one-click subscribing.
 // @author       MyrddinE
 // @match        https://steamcommunity.com/*
@@ -22,6 +22,15 @@
 
   // ── Capture sessionid from Steam ─────────────────────────────────────
   if (isSteam) {
+    function showToast(msg) {
+      const t = document.createElement('div');
+      t.style.cssText = 'position:fixed;top:8px;right:8px;z-index:999999;' +
+        'background:#1a6d1a;color:#fff;padding:8px 16px;border-radius:4px;' +
+        'font:13px Arial;box-shadow:0 2px 8px rgba(0,0,0,.4);pointer-events:none;';
+      t.textContent = '[SubscribeBridge] ' + msg;
+      document.body.appendChild(t);
+      setTimeout(function(){ t.remove(); }, 6000);
+    }
     function captureSession() {
       const match = document.cookie.match(/(?:^|;\s*)sessionid=([0-9a-f]+)/);
       if (match && match[1]) {
@@ -29,7 +38,9 @@
         const prev = GM_getValue('steam_sessionid', '');
         if (sid !== prev) {
           GM_setValue('steam_sessionid', sid);
-          console.log('[SubscribeBridge] sessionid captured:', sid.slice(0, 6) + '...');
+          const short = sid.slice(0, 6) + '...';
+          console.log('[SubscribeBridge] sessionid captured:', short);
+          showToast('New session captured: ' + short + ' — reload the Scraper web UI');
         }
       }
     }
@@ -61,7 +72,13 @@
   // ── Stamp the DOM so the page knows we're here ────────────────────
   document.body.dataset.userscript = '1';
   document.body.dataset.userscriptVer = String(CURRENT_VER);
-  console.log(`[SubscribeBridge] v${CURRENT_VER} active, sessionid ${getSessionId() ? '✓' : '✗'}`);
+
+  function getSessionId() {
+    return GM_getValue('steam_sessionid', '');
+  }
+
+  const sid = getSessionId();
+  console.log(`[SubscribeBridge] v${CURRENT_VER} active, sessionid ${sid ? sid.slice(0,6)+'...' : '✗'}`);
 
   // Push sessionid to the backend so the TUI / server can subscribe
   function pushSessionToBackend() {
@@ -81,5 +98,7 @@
     });
   }
   pushSessionToBackend();
+  // Re-push every 30s in case the page loaded before the server was ready
+  setInterval(pushSessionToBackend, 30000);
 
 })();
