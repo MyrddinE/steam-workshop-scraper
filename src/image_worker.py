@@ -81,6 +81,7 @@ class ImageScraperThread(threading.Thread):
 
                 title = item.get("title_en") or item.get("title") or str(wid)
                 logging.info(f"[I:{wid}] Downloaded preview ({ext}) for \"{title}\"")
+                logging.info(f"[I:{wid}] Notifying web clients of image ({ext})")
                 self._notify("image", {"workshop_id": wid, "ext": ext})
                 self.image_successes += 1
                 self.image_failures = 0
