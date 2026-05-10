@@ -211,25 +211,25 @@ async function showDetail(wid) {
   const subs = item.subscriptions||0, lsubs = item.lifetime_subscriptions||0;
   const favs = item.favorited||0, lfavs = item.lifetime_favorited||0;
   const created = item.time_created ? new Date(item.time_created*1000).toISOString().slice(0,10) : 'N/A';
+  const updated = item.time_updated && item.time_updated !== item.time_created ? new Date(item.time_updated*1000).toISOString().slice(0,10) : null;
   const tags = (()=>{try{const t=JSON.parse(item.tags||'[]');return Array.isArray(t)?t.join(', '):'None'}catch{return'None'}})();
   const size = item.file_size ? (item.file_size/1024/1024).toFixed(1)+' MB' : 'N/A';
-
-  let desc = item.description_html || '';
-  if (!desc && (item.short_description_en || item.short_description)) {
-    desc = '<p>' + (item.short_description_en || item.short_description) + '</p>';
-  }
 
   pane.innerHTML = `
     <h2><a href="${url}" target="_blank">${title}</a></h2>
     <p>by <b>${creator}</b> &mdash; <small>Workshop ID: ${item.workshop_id}</small></p>
+    <p>&nbsp;</p>
     <p class="stat-wilson"><span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}">Subscriber Score: ${wss!=null?wss+'%':'N/A'}</span> &nbsp; <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}">Favorite Score: ${wfs!=null?wfs+'%':'N/A'}</span></p>
+    <p>&nbsp;</p>
     <div class="stats-row">
-      <div><span class="stat-label">Views:</span> ${(item.views||0).toLocaleString()}</div>
-      <div><span class="stat-label">Size:</span> ${size}</div>
-      <div><span class="stat-label">Subs:</span> ${fmtCount(subs)} / ${fmtCount(lsubs)}</div>
-      <div><span class="stat-label">Favs:</span> ${fmtCount(favs)} / ${fmtCount(lfavs)}</div>
       <div><span class="stat-label">Created:</span> ${created}</div>
+      <div><span class="stat-label">Size:</span> ${size}</div>
+      ${updated ? `<div><span class="stat-label">Updated:</span> ${updated}</div>` : '<div></div>'}
+      <div><span class="stat-label">Views:</span> ${(item.views||0).toLocaleString()}</div>
       <div><span class="stat-label">Tags:</span> <small>${tags}</small></div>
+      <div><span class="stat-label">Subs:</span> ${fmtCount(subs)} / ${fmtCount(lsubs)}</div>
+      <div></div>
+      <div><span class="stat-label">Favs:</span> ${fmtCount(favs)} / ${fmtCount(lfavs)}</div>
     </div>
     <p><a href="${url}" target="_blank">Open on Steam</a></p>
     ${desc ? '<div style="border-left:3px solid var(--pico-muted-border-color);padding-left:.5rem;margin-top:.5rem">'+desc+'</div>' : ''}
