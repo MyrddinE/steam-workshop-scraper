@@ -132,41 +132,45 @@ def api_search():
     offset = data.get('offset', 0)
     limit = data.get('limit', 50)
 
-    results = search_items(
-        _db_path,
-        filters=filters,
-        sort_by=sort_by,
-        sort_order=sort_order,
-        summary_only=True,
-        limit=limit,
-        offset=offset,
-    )
+    try:
+        results = search_items(
+            _db_path,
+            filters=filters,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            summary_only=True,
+            limit=limit,
+            offset=offset,
+        )
 
-    if results:
-        for item in results:
-            wid = item['workshop_id']
-            bump_web_priority_for_list(_db_path, wid)
-            bump_image_priority_for_list(_db_path, wid)
-            _ensure_image_flagged(wid, 5)
-            bump_translation_for_list(_db_path, wid)
+        if results:
+            for item in results:
+                wid = item['workshop_id']
+                bump_web_priority_for_list(_db_path, wid)
+                bump_image_priority_for_list(_db_path, wid)
+                _ensure_image_flagged(wid, 5)
+                bump_translation_for_list(_db_path, wid)
 
-        ids = [r['workshop_id'] for r in results]
-        conn = get_connection(_db_path)
-        placeholders = ','.join('?' * len(ids))
-        updated = conn.execute(
-            f"SELECT workshop_id, needs_web_scrape, needs_image, translation_priority FROM workshop_items WHERE workshop_id IN ({placeholders})",
-            ids
-        ).fetchall()
-        conn.close()
-        updated_map = {row['workshop_id']: dict(row) for row in updated}
-        for r in results:
-            if r['workshop_id'] in updated_map:
-                u = updated_map[r['workshop_id']]
-                r['needs_web_scrape'] = u['needs_web_scrape']
-                r['needs_image'] = u['needs_image']
-                r['translation_priority'] = u['translation_priority']
+            ids = [r['workshop_id'] for r in results]
+            conn = get_connection(_db_path)
+            placeholders = ','.join('?' * len(ids))
+            updated = conn.execute(
+                f"SELECT workshop_id, needs_web_scrape, needs_image, translation_priority FROM workshop_items WHERE workshop_id IN ({placeholders})",
+                ids
+            ).fetchall()
+            conn.close()
+            updated_map = {row['workshop_id']: dict(row) for row in updated}
+            for r in results:
+                if r['workshop_id'] in updated_map:
+                    u = updated_map[r['workshop_id']]
+                    r['needs_web_scrape'] = u['needs_web_scrape']
+                    r['needs_image'] = u['needs_image']
+                    r['translation_priority'] = u['translation_priority']
 
-    return jsonify(results)
+        return jsonify(results)
+    except Exception as e:
+        logging.exception(f"[Search] Error processing search request")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/item/<int:workshop_id>')
