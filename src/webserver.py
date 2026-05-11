@@ -286,6 +286,9 @@ def api_subscribe(workshop_id):
 
     logging.info(f"[Subscribe] POSTing to Steam: id={workshop_id}, appid={appid}, sessionid={sid[:6]}...")
     try:
+        login = _config.get("session", {}).get("login_secure", "")
+        if isinstance(login, list):
+            login = '%7C%7C'.join(str(v) for v in login)
         resp = requests.post(
             "https://steamcommunity.com/sharedfiles/subscribe",
             data={
@@ -296,7 +299,7 @@ def api_subscribe(workshop_id):
             },
             cookies={
                 "sessionid": sid,
-                "steamLoginSecure": _config.get("session", {}).get("login_secure", ""),
+                "steamLoginSecure": login,
             },
             headers={
                 "Origin": "https://steamcommunity.com",
