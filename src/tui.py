@@ -1512,6 +1512,13 @@ class ScraperApp(App):
         """Shows the subscription queue modal screen."""
         self.push_screen(SubscriptionQueueScreen(self.db_path, self.pause_lock_file))
 
+    async def action_quit(self) -> None:
+        """Quit the application, gracefully shutting down the web server."""
+        if hasattr(self, '_web_server') and self._web_server:
+            self._web_server.close()
+            logging.info("Web server shut down")
+        self.exit()
+
     def action_show_analysis(self) -> None:
         """Shows the view window analysis screen."""
         self.push_screen(AnalysisScreen(self.db_path))
@@ -1569,6 +1576,7 @@ class ScraperApp(App):
             from src.webserver import app, init_webserver
 
             configured = self.config.get("web", {}).get("port")
+            port_changed = False
             if configured:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 try:
@@ -1579,6 +1587,7 @@ class ScraperApp(App):
                     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     s.bind(('0.0.0.0', 0))
                     self._web_port = s.getsockname()[1]
+                    port_changed = True
                     logging.warning(f"Configured port {configured} in use, using {self._web_port}")
                 s.close()
             else:
@@ -1586,17 +1595,23 @@ class ScraperApp(App):
                 s.bind(('0.0.0.0', 0))
                 self._web_port = s.getsockname()[1]
                 s.close()
+                port_changed = True
+
+            if port_changed:
                 self.config.setdefault("web", {})["port"] = self._web_port
                 save_config(self.config_path, self.config)
                 logging.info(f"Saved port {self._web_port} to config")
 
             init_webserver(self.db_path, self.config)
 
-            def run_server():
-                from waitress import serve
-                serve(app, host='0.0.0.0', port=self._web_port, _quiet=True)
+            self._web_server = None
 
-            self._web_thread = threading.Thread(target=run_server, daemon=True)
+            def run_server():
+                from waitress import create_server
+                self._web_server = create_server(app, host='0.0.0.0', port=self._web_port, _quiet=True)
+                self._web_server.run()
+
+            self._web_thread = threading.Thread(target=run_server, daemon=False)
             self._web_thread.start()
             logging.info(f"Web server started on port {self._web_port}")
         except Exception as e:
