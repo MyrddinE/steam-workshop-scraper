@@ -358,6 +358,16 @@ async function showDetail(wid) {
 const US_RAW_URL = '/userscript/steam_subscribe.user.js';
 const US_EXPECTED_VER = parseInt(document.querySelector('meta[name="userscript-version"]')?.content || '1', 10);
 
+// postMessage bridge — the userscript handles the actual GM_xmlhttpRequest
+let _ssSeq = 0;
+const _ssPending = {};
+window.addEventListener('message', function (e) {
+  if (e.data && e.data._ss === 'res') {
+    const p = _ssPending[e.data.seq];
+    if (p) { p(e.data.result); delete _ssPending[e.data.seq]; }
+  }
+});
+
 function _userscriptPresent() {
   const body = document.body;
   if (!body || !body.dataset.userscript) return false;
@@ -373,6 +383,14 @@ function _userscriptPresent() {
   return true;
 }
 
+function _steamSubscribe(id, appid) {
+  return new Promise(function (resolve) {
+    var seq = ++_ssSeq;
+    _ssPending[seq] = resolve;
+    window.postMessage({ _ss: 'sub', id: String(id), appid: String(appid), seq: seq }, '*');
+  });
+}
+
 async function doSubscribe(wid, appid) {
   if (!appid) { alert('Item has no AppID — cannot subscribe.'); return; }
 
@@ -382,19 +400,13 @@ async function doSubscribe(wid, appid) {
       '1. Install Tampermonkey from your browser\'s extension store\n' +
       '2. Click OK to open the userscript — Tampermonkey will offer to install it\n' +
       '3. Visit steamcommunity.com once to capture your session\n\n' +
-      'The script pushes your Steam session to the scraper server, which handles the subscribe.'
+      'The script automates the same POST Steam uses for its own Subscribe button.'
     );
     if (ok) window.open(US_RAW_URL, '_blank');
     return;
   }
 
-  let result;
-  try {
-    const resp = await fetch('/api/subscribe/' + wid, {method:'POST'});
-    result = await resp.json();
-  } catch(e) {
-    result = {success: -1, message: 'Network error contacting server.'};
-  }
+  const result = await _steamSubscribe(wid, appid);
 
   switch (result.success) {
     case 1:

@@ -81,6 +81,10 @@
     return GM_getValue('steam_sessionid', '');
   }
 
+  function getLoginSecure() {
+    return GM_getValue('steam_login_secure', '');
+  }
+
   const sid = getSessionId();
   console.log(`[SubscribeBridge] v${CURRENT_VER} active, sessionid ${sid ? sid.slice(0,6)+'...' : '✗'}`);
 
@@ -88,12 +92,11 @@
   function pushSessionToBackend() {
     const sid = getSessionId();
     if (!sid) return;
-    const login = GM_getValue('steam_login_secure', '');
     GM_xmlhttpRequest({
       method: 'POST',
       url: API_BASE + '/api/sessionid',
       headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ sessionid: sid, login_secure: login }),
+      data: JSON.stringify({ sessionid: sid }),
       onload: function () {
         console.log('[SubscribeBridge] sessionid pushed to backend');
       },
@@ -103,7 +106,32 @@
     });
   }
   pushSessionToBackend();
-  // Re-push every 30s in case the page loaded before the server was ready
   setInterval(pushSessionToBackend, 30000);
+
+  // Listen for subscribe requests from the page and proxy via GM_xmlhttpRequest
+  window.addEventListener('message', function (e) {
+    if (e.source !== window || !e.data || e.data._ss !== 'sub') return;
+    const { id, appid, seq } = e.data;
+    const csrf = getSessionId();
+    GM_xmlhttpRequest({
+      method: 'POST',
+      url: 'https://steamcommunity.com/sharedfiles/subscribe',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      data: `id=${encodeURIComponent(id)}&appid=${encodeURIComponent(appid)}&include_dependencies=false&sessionid=${encodeURIComponent(csrf)}`,
+      onload: function (resp) {
+        try {
+          window.postMessage({ _ss: 'res', seq, result: JSON.parse(resp.responseText) }, '*');
+        } catch (e) {
+          window.postMessage({ _ss: 'res', seq, result: { success: -1, message: 'Parse error' } }, '*');
+        }
+      },
+      onerror: function () {
+        window.postMessage({ _ss: 'res', seq, result: { success: -1, message: 'Network error' } }, '*');
+      },
+      ontimeout: function () {
+        window.postMessage({ _ss: 'res', seq, result: { success: -1, message: 'Steam request timed out' } }, '*');
+      },
+    });
+  });
 
 })();
