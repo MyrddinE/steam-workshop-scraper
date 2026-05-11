@@ -284,11 +284,11 @@ def api_subscribe(workshop_id):
     if not appid:
         return jsonify({"success": -1, "message": "Item has no AppID."}), 400
 
-    logging.info(f"[Subscribe] POSTing to Steam: id={workshop_id}, appid={appid}, sessionid={sid[:6]}...")
+    login = _config.get("session", {}).get("login_secure", "")
+    if isinstance(login, list):
+        login = '%7C%7C'.join(str(v) for v in login)
+    logging.info(f"[Subscribe] POSTing to Steam: id={workshop_id}, appid={appid}, sessionid={sid[:6]}..., login={'set' if login else 'missing'}")
     try:
-        login = _config.get("session", {}).get("login_secure", "")
-        if isinstance(login, list):
-            login = '%7C%7C'.join(str(v) for v in login)
         resp = requests.post(
             "https://steamcommunity.com/sharedfiles/subscribe",
             data={
@@ -302,8 +302,10 @@ def api_subscribe(workshop_id):
                 "steamLoginSecure": login,
             },
             headers={
+                "Content-Type": "application/x-www-form-urlencoded",
                 "Origin": "https://steamcommunity.com",
                 "Referer": f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
             },
             timeout=15,
         )
