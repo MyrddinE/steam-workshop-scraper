@@ -110,7 +110,7 @@
 
   // Listen for subscribe requests from the page and proxy via GM_xmlhttpRequest
   window.addEventListener('message', function (e) {
-    if (e.source !== window || !e.data || e.data._ss !== 'sub') return;
+    if (!e.data || e.data._ss !== 'sub') return;
     const { id, appid, seq } = e.data;
     const csrf = getSessionId();
     GM_xmlhttpRequest({
