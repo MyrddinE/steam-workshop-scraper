@@ -289,12 +289,19 @@ def api_subscribe(workshop_id):
         resp = requests.post(
             "https://steamcommunity.com/sharedfiles/subscribe",
             data={
-                "id": workshop_id,
-                "appid": appid,
+                "id": str(workshop_id),
+                "appid": str(appid),
                 "include_dependencies": "false",
                 "sessionid": sid,
             },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            cookies={
+                "sessionid": sid,
+                "steamLoginSecure": _config.get("session", {}).get("login_secure", ""),
+            },
+            headers={
+                "Origin": "https://steamcommunity.com",
+                "Referer": f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}",
+            },
             timeout=15,
         )
         data = resp.json()
@@ -310,8 +317,11 @@ def api_sessionid():
     global _sessionid
     data = request.get_json(silent=True) or {}
     sid = data.get("sessionid", "").strip()
+    login_secure = data.get("login_secure", "").strip()
     if sid:
         _sessionid = sid
-        logging.info("SessionID updated from web UI userscript")
+        if login_secure:
+            _config.setdefault("session", {})["login_secure"] = login_secure
+        logging.info(f"SessionID updated from userscript (login_secure: {'set' if login_secure else 'missing'})")
         return jsonify({"ok": True})
     return jsonify({"ok": False, "message": "No sessionid provided."}), 400

@@ -32,14 +32,18 @@
       setTimeout(function(){ t.remove(); }, 6000);
     }
     function captureSession() {
-      const match = document.cookie.match(/(?:^|;\s*)sessionid=([0-9a-f]+)/);
-      if (match && match[1]) {
-        const sid = match[1];
-        const prev = GM_getValue('steam_sessionid', '');
-        if (sid !== prev) {
+      const sidMatch = document.cookie.match(/(?:^|;\s*)sessionid=([0-9a-f]+)/);
+      const loginMatch = document.cookie.match(/(?:^|;\s*)steamLoginSecure=([0-9a-f]+%7C%7C[0-9a-f]+)/);
+      if (sidMatch && sidMatch[1]) {
+        const sid = sidMatch[1];
+        const login = loginMatch ? loginMatch[1] : '';
+        const prevSid = GM_getValue('steam_sessionid', '');
+        const prevLogin = GM_getValue('steam_login_secure', '');
+        if (sid !== prevSid || login !== prevLogin) {
           GM_setValue('steam_sessionid', sid);
+          if (login) GM_setValue('steam_login_secure', login);
           const short = sid.slice(0, 6) + '...';
-          console.log('[SubscribeBridge] sessionid captured:', short);
+          console.log('[SubscribeBridge] sessionid captured:', short, login ? '(+ login)' : '');
           showToast('New session captured: ' + short + ' — reload the Scraper web UI');
         }
       }
@@ -84,11 +88,12 @@
   function pushSessionToBackend() {
     const sid = getSessionId();
     if (!sid) return;
+    const login = GM_getValue('steam_login_secure', '');
     GM_xmlhttpRequest({
       method: 'POST',
       url: API_BASE + '/api/sessionid',
       headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ sessionid: sid }),
+      data: JSON.stringify({ sessionid: sid, login_secure: login }),
       onload: function () {
         console.log('[SubscribeBridge] sessionid pushed to backend');
       },
