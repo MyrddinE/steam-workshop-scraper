@@ -1513,10 +1513,7 @@ class ScraperApp(App):
         self.push_screen(SubscriptionQueueScreen(self.db_path, self.pause_lock_file))
 
     async def action_quit(self) -> None:
-        """Quit the application, gracefully shutting down the web server."""
-        if hasattr(self, '_web_server') and self._web_server:
-            self._web_server.close()
-            logging.info("Web server shut down")
+        """Quit the application."""
         self.exit()
 
     def action_show_analysis(self) -> None:
@@ -1604,14 +1601,11 @@ class ScraperApp(App):
 
             init_webserver(self.db_path, self.config)
 
-            self._web_server = None
-
             def run_server():
-                from waitress import create_server
-                self._web_server = create_server(app, host='0.0.0.0', port=self._web_port, _quiet=True)
-                self._web_server.run()
+                from waitress import serve
+                serve(app, host='0.0.0.0', port=self._web_port, _quiet=True)
 
-            self._web_thread = threading.Thread(target=run_server, daemon=False)
+            self._web_thread = threading.Thread(target=run_server, daemon=True)
             self._web_thread.start()
             logging.info(f"Web server started on port {self._web_port}")
         except Exception as e:

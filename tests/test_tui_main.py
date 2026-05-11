@@ -1,6 +1,8 @@
 import pytest
 import sys
 import logging
+import threading
+import time
 from unittest.mock import patch, MagicMock
 
 def test_tui_module_compiles():
@@ -68,3 +70,43 @@ def test_tui_main_no_logging(tmp_path):
         mock_get_logger.return_value.addHandler.assert_called_once()
         added_handler = mock_get_logger.return_value.addHandler.call_args[0][0]
         assert isinstance(added_handler, logging.NullHandler)
+
+
+def test_waitress_serve_starts_and_responds():
+    import socket
+    from flask import Flask
+    from waitress import serve
+
+    app = Flask(__name__)
+
+    @app.route('/ping')
+    def ping():
+        return 'pong'
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(('127.0.0.1', 0))
+    port = s.getsockname()[1]
+    s.close()
+
+    server_started = threading.Event()
+    server_error = []
+
+    def run():
+        try:
+            server_started.set()
+            serve(app, host='127.0.0.1', port=port, _quiet=True)
+        except Exception as e:
+            server_error.append(e)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    server_started.wait(timeout=2)
+    time.sleep(0.5)
+
+    try:
+        import requests
+        resp = requests.get(f'http://127.0.0.1:{port}/ping', timeout=3)
+        assert resp.status_code == 200
+        assert b'pong' in resp.content
+    finally:
+        pass
