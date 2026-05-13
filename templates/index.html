@@ -243,6 +243,7 @@ async function doSearch(reset = true) {
 function _listNeedsPoll(items) {
   for (const item of items) {
     if ((item.translation_priority || 0) > 0) return true;
+    if ((item.needs_image || 0) > 0 && !item.image_extension) return true;
   }
   return false;
 }
