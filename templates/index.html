@@ -489,6 +489,7 @@ document.getElementById('sort-by').onchange = () => doSearch(true);
 document.getElementById('sort-order').onchange = () => doSearch(true);
 
 document.addEventListener('blur', e => {
+  if (!e.target || !e.target.classList) return;
   if (!e.target.classList.contains('value-input')) return;
   const row = e.target.parentElement;
   if (!row) return;
