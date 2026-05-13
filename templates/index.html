@@ -42,7 +42,6 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .wilson-low { color: #888; }
 #port-display { font-size: .8rem; color: var(--pico-muted-color); }
 #load-more { width: 100%; margin-top: .5rem; display: none; }
-#detail-image { float: left; margin: 0 .5rem .5rem 0; max-width: 200px; max-height: 200px; border-radius: 4px; }
 @media (max-width: 768px) {
   main { flex-direction: column; }
   #right-pane { flex: 0 0 auto; border-left: none; border-top: 1px solid var(--pico-muted-border-color); padding-left: 0; padding-top: .5rem; }
@@ -310,13 +309,7 @@ function renderDetail(item) {
     desc = '<p>' + (item.short_description_en || item.short_description) + '</p>';
   }
 
-  let imgHtml = '';
-  if (item.image_extension) {
-    imgHtml = `<img id="detail-image" src="/images/${item.workshop_id}.${item.image_extension}" alt="Preview">`;
-  }
-
   pane.innerHTML = `
-    ${imgHtml}
     <h2><a href="${url}" target="_blank">${title}</a></h2>
     <p>by <b>${creator}</b> &mdash; <small>Workshop ID: ${item.workshop_id}</small></p>
     <p class="stat-wilson"><span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}">Subscriber Score: ${wss!=null?wss+'%':'N/A'}</span> &nbsp; <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}">Favorite Score: ${wfs!=null?wfs+'%':'N/A'}</span></p>
@@ -335,7 +328,7 @@ function renderDetail(item) {
 let _detailPollWid = null, _detailPollTimer = null;
 
 function _detailNeedsPoll(item) {
-  return (item.translation_priority || 0) > 0 || (item.preview_url && !item.image_extension);
+  return (item.translation_priority || 0) > 0;
 }
 
 function _startDetailPoll(wid, item) {
@@ -351,16 +344,6 @@ function _startDetailPoll(wid, item) {
       if (!_detailNeedsPoll(updated)) {
         renderDetail(updated);
         _stopDetailPoll();
-      } else if (updated.image_extension && !item.image_extension) {
-        let img = document.getElementById('detail-image');
-        if (!img) {
-          img = document.createElement('img');
-          img.id = 'detail-image';
-          img.alt = 'Preview';
-          const h2 = document.querySelector('#detail-pane h2');
-          if (h2) h2.parentElement.insertBefore(img, h2);
-        }
-        img.src = '/images/' + wid + '.' + updated.image_extension;
       }
     } catch(e) { /* poll error, keep trying */ }
   }, 3000);

@@ -241,5 +241,5 @@ def test_detail_pane_has_image_markup(web_client):
     resp = client.get('/')
     html = resp.data.decode()
     assert 'image_extension' in html
-    assert 'detail-image' in html
+    assert 'grid-img' in html
 
