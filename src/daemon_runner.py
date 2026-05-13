@@ -9,10 +9,30 @@ from src.config import load_config
 from src.database import initialize_database
 
 
+class _SafeStreamHandler(logging.StreamHandler):
+    """A StreamHandler that catches UnicodeEncodeError.  On Windows, the
+    console code page (typically cp1252) cannot render CJK characters, so
+    a logging.info() with a Japanese or Chinese title raises and kills the
+    daemon.  This handler falls back to UTF-8 encoding with 'replace' so
+    the daemon survives and the log line is at least partially visible."""
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            stream = self.stream
+            stream.write(msg + self.terminator)
+            self.flush()
+        except UnicodeEncodeError:
+            stream.write(
+                msg.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+                + self.terminator
+            )
+            self.flush()
+        except Exception:
+            self.handleError(record)
+
+
 def _fix_windows_encoding():
-    """On Windows, sys.stdout defaults to cp1252 which can't encode CJK
-    characters, causing UnicodeEncodeError in logging. The TUI avoids this
-    by logging to file only; the daemon logs to stdout."""
     if sys.platform != 'win32':
         return
     try:
@@ -74,11 +94,10 @@ def main():
     if log_file:
         handlers.append(logging.FileHandler(log_file))
     if not is_daemon:
-        # stdout: everything except errors; stderr: errors only
-        stdout_handler = logging.StreamHandler(sys.stdout)
+        stdout_handler = _SafeStreamHandler(sys.stdout)
         stdout_handler.setLevel(log_level)
         handlers.append(stdout_handler)
-    handlers.append(logging.StreamHandler(sys.stderr))
+    handlers.append(_SafeStreamHandler(sys.stderr))
     handlers[-1].setLevel(logging.ERROR)
 
     logging.basicConfig(
@@ -87,6 +106,7 @@ def main():
         handlers=handlers,
         force=True
     )
+    logging.info("Daemon starting (daemon_runner.py SafeStreamHandler active)")
     
     db_path = config.get("database", {}).get("path", "workshop.db")
     initialize_database(db_path)
