@@ -144,11 +144,13 @@ def api_search():
         )
 
         if results:
+            image_flagged_count = 0
             for item in results:
                 wid = item['workshop_id']
                 bump_web_priority_for_list(_db_path, wid)
                 bump_image_priority_for_list(_db_path, wid)
-                _ensure_image_flagged(wid, 5)
+                if _ensure_image_flagged(wid, 5):
+                    image_flagged_count += 1
                 bump_translation_for_list(_db_path, wid)
 
             ids = [r['workshop_id'] for r in results]
@@ -166,6 +168,9 @@ def api_search():
                     r['needs_web_scrape'] = u['needs_web_scrape']
                     r['needs_image'] = u['needs_image']
                     r['translation_priority'] = u['translation_priority']
+
+            sample = results[0] if results else {}
+            logging.info(f"[Search] returned {len(results)} items, flagged {image_flagged_count} for image, sample needs_image={sample.get('needs_image')} image_extension={sample.get('image_extension')!r}")
 
         return jsonify(results)
     except Exception as e:
@@ -263,6 +268,8 @@ def _ensure_image_flagged(workshop_id, priority):
     conn.close()
     if row and row["preview_url"] and not row["image_extension"]:
         flag_for_image(_db_path, workshop_id, max(row["needs_image"] or 1, priority))
+        return True
+    return False
 
 
 @app.route('/api/subscribe/<int:workshop_id>', methods=['POST'])
