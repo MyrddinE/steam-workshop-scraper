@@ -10,6 +10,7 @@ from src.database import search_items, get_item_details, get_db_stats, get_all_a
 from src.analysis import view_window_analysis
 
 app = Flask(__name__, template_folder='../templates')
+app.config['TEMPLATES_AUTO_RELOAD'] = True
 _db_path = "workshop.db"
 _config = {}
 _images_dir = "images"

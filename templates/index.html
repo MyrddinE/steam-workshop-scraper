@@ -489,16 +489,18 @@ document.getElementById('sort-by').onchange = () => doSearch(true);
 document.getElementById('sort-order').onchange = () => doSearch(true);
 
 document.addEventListener('blur', e => {
-  if (!e.target || !e.target.classList) return;
-  if (!e.target.classList.contains('value-input')) return;
-  const row = e.target.parentElement;
-  if (!row) return;
-  const opSelect = row.querySelector('.op-select');
-  if (!opSelect || opSelect.value !== 'percentile') return;
-  let v = parseInt(e.target.value, 10);
-  if (isNaN(v)) { e.target.value = '0'; return; }
-  v = Math.max(0, Math.min(99, v));
-  e.target.value = String(v);
+  try {
+    if (!e.target || typeof e.target.classList === 'undefined') return;
+    if (!e.target.classList.contains('value-input')) return;
+    const row = e.target.parentElement;
+    if (!row) return;
+    const opSelect = row.querySelector('.op-select');
+    if (!opSelect || opSelect.value !== 'percentile') return;
+    let v = parseInt(e.target.value, 10);
+    if (isNaN(v)) { e.target.value = '0'; return; }
+    v = Math.max(0, Math.min(99, v));
+    e.target.value = String(v);
+  } catch (err) { /* blur handler must never break the page */ }
 }, true);
 
 loadState();
