@@ -11,10 +11,11 @@ WORKSHOP_ITEM_COLUMNS = frozenset({
     "filename", "file_size", "preview_url", "hcontent_file", "hcontent_preview",
     "short_description", "short_description_en", "time_created", "time_updated",
     "visibility", "banned", "ban_reason", "app_name", "file_type",
-    "subscriptions", "favorited", "views", "tags", "extended_description",
-    "extended_description_en", "language", "lifetime_subscriptions",
-    "lifetime_favorited", "translation_priority", "is_queued_for_subscription",
-    "wilson_favorite_score", "wilson_subscription_score", "needs_web_scrape",
+    "subscriptions", "favorited", "views", "tags", "tags_text",
+    "extended_description", "extended_description_en", "language",
+    "lifetime_subscriptions", "lifetime_favorited", "translation_priority",
+    "is_queued_for_subscription", "wilson_favorite_score",
+    "wilson_subscription_score", "needs_web_scrape",
     "image_extension", "needs_image",
 })
 
@@ -484,7 +485,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 5
+    EXPECTED_VERSION = 6
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -607,6 +608,42 @@ def initialize_database(db_path: str):
         cursor.execute("PRAGMA user_version = 5")
         logging.info("Migration 4→5 complete.")
 
+    if db_version < 6:
+        logging.info("Running migration 5→6: tags_text column + FTS5 rebuild...")
+
+        _safe_add_columns(cursor, "workshop_items", [("tags_text", "TEXT DEFAULT ''")])
+        conn.commit()
+
+        cursor.execute("""
+            UPDATE workshop_items SET tags_text = (
+                SELECT COALESCE(GROUP_CONCAT(value, ' '), '')
+                FROM json_each(workshop_items.tags)
+            )
+            WHERE tags_text IS NULL OR tags_text = ''
+        """)
+        conn.commit()
+        updated = cursor.rowcount
+        logging.info(f"Populated tags_text for {updated} items")
+
+        cursor.execute("DROP TABLE IF EXISTS workshop_fts")
+        cursor.execute("""
+            CREATE VIRTUAL TABLE workshop_fts USING fts5(
+                title, title_en,
+                short_description, short_description_en,
+                extended_description, extended_description_en,
+                tags_text,
+                content='workshop_items', content_rowid='workshop_id'
+            )
+        """)
+        cursor.execute("INSERT INTO workshop_fts(workshop_fts) VALUES ('rebuild')")
+        logging.info("FTS5 rebuilt with tags_text column")
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_text ON workshop_items (tags_text)")
+
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 6")
+        logging.info("Migration 5→6 complete.")
+
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON workshop_items (status)")
@@ -654,9 +691,17 @@ def insert_or_update_item(db_path: str, item_data: dict) -> bool:
     Returns True if a new item was discovered (inserted), False if it was updated.
     """
     conn = get_connection(db_path)
-    
+
     columns = [col for col in item_data.keys() if col in WORKSHOP_ITEM_COLUMNS]
-    
+
+    if "tags" in item_data and "tags_text" not in item_data:
+        try:
+            tags_list = json.loads(item_data["tags"]) if isinstance(item_data["tags"], str) else item_data["tags"]
+            if isinstance(tags_list, list):
+                item_data["tags_text"] = " ".join(str(t) for t in tags_list)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     cursor = conn.execute("SELECT 1 FROM workshop_items WHERE workshop_id = ?", (item_data["workshop_id"],))
     is_new = cursor.fetchone() is None
 
