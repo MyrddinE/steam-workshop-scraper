@@ -100,7 +100,12 @@ def main():
         handlers=handlers,
         force=True
     )
-    logging.info("Daemon starting (daemon_runner.py SafeStreamHandler active)")
+    logging.raiseExceptions = False
+
+    # Verify handler types at startup
+    root = logging.getLogger()
+    handler_types = [type(h).__name__ for h in root.handlers]
+    logging.info(f"Daemon starting — handlers: {handler_types}")
     
     db_path = config.get("database", {}).get("path", "workshop.db")
     initialize_database(db_path)
