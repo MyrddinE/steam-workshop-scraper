@@ -1,11 +1,22 @@
 import logging
 import signal
 import atexit
+import io
+import sys
+import os
 from src.daemon import Daemon
 from src.config import load_config
 from src.database import initialize_database
-import sys
-import os
+
+
+def _fix_windows_encoding():
+    """On Windows, sys.stdout defaults to a code page that can't encode
+    CJK/Unicode characters, causing UnicodeEncodeError in logging.
+    Re-wrap with UTF-8 so titles like 千厮门大桥 display correctly.
+    The TUI avoids this by logging to file only; the daemon logs to stdout."""
+    if sys.platform == 'win32' and hasattr(sys.stdout, 'buffer'):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 
 def _daemonize():
@@ -23,6 +34,7 @@ def _daemonize():
 
 
 def main():
+    _fix_windows_encoding()
     config_path = "config.yaml"
     args = [a for a in sys.argv[1:] if a != "--daemon"]
     is_daemon = "--daemon" in sys.argv
