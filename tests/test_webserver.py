@@ -33,28 +33,29 @@ def test_layout_constrains_viewport(web_client):
 
 
 def test_results_scroll_container_exists(web_client):
-    """Verify the results list wraps in a dedicated scroll container."""
+    """Verify the results grid is in the results pane."""
     client, _ = web_client
     resp = client.get('/')
     html = resp.data.decode()
-    assert 'id="results-scroll"' in html
+    assert 'id="results-grid"' in html
     assert 'id="results-pane"' in html
-    assert 'id="results-list"' in html
-    # results-list must be INSIDE results-scroll, not inside results-pane directly
+    # results-grid must be INSIDE results-pane
     import re
-    # Check order: results-scroll contains results-list
-    match = re.search(r'id="results-scroll".*?id="results-list"', html, re.DOTALL)
+    match = re.search(r'id="results-pane".*?id="results-grid"', html, re.DOTALL)
     assert match is not None
 
 
 def test_search_builder_not_in_scroll(web_client):
-    """Verify search builder is outside the scroll container (pinned)."""
+    """Verify search builder is in the right pane, separate from results."""
     client, _ = web_client
     resp = client.get('/')
     html = resp.data.decode()
     sb_pos = html.index('id="search-builder"')
-    rs_pos = html.index('id="results-scroll"')
-    assert sb_pos < rs_pos
+    rp_pos = html.index('id="right-pane"')
+    grid_pos = html.index('id="results-grid"')
+    # search builder must be in right-pane, results-grid in results-pane
+    assert rp_pos < sb_pos
+    assert grid_pos < rp_pos
 
 
 def test_show_detail_has_desc_variable(web_client):

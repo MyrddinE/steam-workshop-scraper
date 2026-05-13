@@ -785,7 +785,7 @@ def search_items(db_path: str, query: str = "", appid: int = None,
     conn = get_connection(db_path)
     
     if summary_only:
-        cols = "w.workshop_id, w.title, w.title_en, w.creator, w.consumer_appid, w.dt_translated, w.is_queued_for_subscription, w.needs_web_scrape, w.needs_image, w.translation_priority, u.personaname, u.personaname_en"
+        cols = "w.workshop_id, w.title, w.title_en, w.creator, w.consumer_appid, w.dt_translated, w.is_queued_for_subscription, w.needs_web_scrape, w.needs_image, w.translation_priority, w.file_size, w.image_extension, w.wilson_subscription_score, w.wilson_favorite_score, u.personaname, u.personaname_en"
     else:
         cols = "w.*, u.personaname, u.personaname_en"
         
