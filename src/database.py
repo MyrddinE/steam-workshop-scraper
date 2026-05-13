@@ -64,7 +64,29 @@ FIELD_NAME_MAP = {
     "Subs": "subscriptions", "Favs": "favorited", "Views": "views",
     "Workshop ID": "workshop_id", "AppID": "consumer_appid", "Language ID": "language",
     "Subscriber Score": "wilson_subscription_score", "Favorite Score": "wilson_favorite_score",
+    "Full Text": "full_text",
 }
+
+# Fields that have a translated _en counterpart; these are dual-searched
+# when the operator is a text-matching one (contains, is, etc.)
+_EN_FIELDS = {
+    "title": "title_en",
+    "short_description": "short_description_en",
+    "extended_description": "extended_description_en",
+}
+
+# Full Text search spans all these columns
+_FULL_TEXT_COLS = [
+    "title", "title_en",
+    "short_description", "short_description_en",
+    "extended_description", "extended_description_en",
+]
+
+# Operators that trigger dual-field (original + translated) search
+_TEXT_OPS = {"contains", "does_not_contain", "is", "is_not"}
+# Positive operators join with OR (match if either column matches);
+# negative operators join with AND (match only if neither column matches).
+_TEXT_NEG_OPS = {"does_not_contain", "is_not"}
 
 VALID_SORT_COLS = {
     "title", "file_size", "subscriptions", "favorited", "views",
@@ -843,6 +865,31 @@ def search_items(db_path: str, query: str = "", appid: int = None,
                 if op in ("is", "is_not"):
                     continue
                 clause, clause_params = _build_json_tag_clause(db_col, op, val)
+            elif db_col == "full_text":
+                clauses_parts = []
+                all_params = []
+                for col in _FULL_TEXT_COLS:
+                    c, cp = _build_filter_clause(col, op, val)
+                    if c:
+                        clauses_parts.append(c)
+                        all_params.extend(cp)
+                if clauses_parts:
+                    clause = "(" + " OR ".join(clauses_parts) + ")"
+                    clause_params = all_params
+                else:
+                    clause, clause_params = "", []
+            elif db_col in _EN_FIELDS and op in _TEXT_OPS:
+                en_col = _EN_FIELDS[db_col]
+                c1, p1 = _build_filter_clause(db_col, op, val)
+                c2, p2 = _build_filter_clause(en_col, op, val)
+                joiner = " AND " if op in _TEXT_NEG_OPS else " OR "
+                if c1 and c2:
+                    clause = f"({c1}{joiner}{c2})"
+                    clause_params = p1 + p2
+                elif c1:
+                    clause, clause_params = c1, p1
+                else:
+                    clause, clause_params = c2, p2
             else:
                 clause, clause_params = _build_filter_clause(db_col, op, val)
             if clause:

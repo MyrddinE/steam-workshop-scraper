@@ -774,7 +774,7 @@ class SearchBuilder(VerticalScroll):
         self.fields = [
             "Title", "Description", "Filename", "Tags", "Author ID",
             "File Size", "Subs", "Favs", "Views", "Workshop ID", "AppID", "Language ID",
-            "Subscriber Score", "Favorite Score",
+            "Subscriber Score", "Favorite Score", "Full Text",
         ]
         self.operators = {
             "text": ["contains", "does_not_contain", "is", "is_not", "is_empty", "is_not_empty"],
