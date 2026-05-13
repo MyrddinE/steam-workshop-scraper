@@ -124,6 +124,25 @@ def _build_filter_clause(db_col: str, op: str, val) -> tuple[str, list]:
     return op_map.get(op, ("", []))
 
 
+def _build_fts_clause(op: str, val) -> tuple[str, list]:
+    """Builds a WHERE clause using FTS5 MATCH for the workshop_fts table.
+    Returns a clause suitable for:  w.rowid IN (SELECT rowid FROM workshop_fts WHERE <clause>)
+    or:  w.rowid NOT IN (SELECT rowid FROM workshop_fts WHERE <clause>)"""
+    if op == "contains":
+        return ("workshop_fts MATCH ?", [str(val)])
+    if op == "does_not_contain":
+        return ("workshop_fts MATCH ?", [str(val)])
+    if op == "is":
+        return ('workshop_fts MATCH ?', [f'"{val}"'])
+    if op == "is_not":
+        return ('workshop_fts MATCH ?', [f'"{val}"'])
+    if op == "is_empty":
+        return ("1 = 1", [])  # all rows — handled differently in search_items
+    if op == "is_not_empty":
+        return ("1 = 1", [])  # all rows — handled differently in search_items
+    return ("", [])
+
+
 def _compute_percentile_threshold(db_path: str, db_col: str, percentile_val, base_filters: list[dict] = None) -> float | None:
     """Computes the threshold score for items above the given percentile.
     percentile_val: 0-99 (clamped). 0 returns None (no filter).
@@ -465,7 +484,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 4
+    EXPECTED_VERSION = 5
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -557,6 +576,36 @@ def initialize_database(db_path: str):
         updated = cursor.rowcount
         cursor.execute("PRAGMA user_version = 4")
         logging.info(f"Migration 3→4 complete. Set needs_image=1 on {updated} items.")
+
+    if db_version < 5:
+        logging.info("Running migration 4→5: FTS5 full-text search + missing indexes...")
+
+        cursor.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS workshop_fts USING fts5(
+                title, title_en,
+                short_description, short_description_en,
+                extended_description, extended_description_en,
+                content='workshop_items', content_rowid='workshop_id'
+            )
+        """)
+
+        # Populate FTS5 from existing data (content-sync needs initial rebuild)
+        cursor.execute("""
+            INSERT INTO workshop_fts(workshop_fts) VALUES ('rebuild')
+        """)
+        logging.info("FTS5 table created and populated (content-sync with workshop_items)")
+
+        # New indexes for translated fields and other searchable columns
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_title_en ON workshop_items (title_en)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_short_description_en ON workshop_items (short_description_en)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_extended_description_en ON workshop_items (extended_description_en)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_filename ON workshop_items (filename)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_language ON workshop_items (language)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_file_size ON workshop_items (file_size)")
+
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 5")
+        logging.info("Migration 4→5 complete.")
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
@@ -866,18 +915,17 @@ def search_items(db_path: str, query: str = "", appid: int = None,
                     continue
                 clause, clause_params = _build_json_tag_clause(db_col, op, val)
             elif db_col == "full_text":
-                clauses_parts = []
-                all_params = []
-                for col in _FULL_TEXT_COLS:
-                    c, cp = _build_filter_clause(col, op, val)
-                    if c:
-                        clauses_parts.append(c)
-                        all_params.extend(cp)
-                if clauses_parts:
-                    clause = "(" + " OR ".join(clauses_parts) + ")"
-                    clause_params = all_params
+                if op in ("is_empty", "is_not_empty"):
+                    clause = f"w.rowid {'IN' if op == 'is_not_empty' else 'NOT IN'} (SELECT rowid FROM workshop_fts)"
+                    clause_params = []
                 else:
-                    clause, clause_params = "", []
+                    fts_clause, fts_params = _build_fts_clause(op, val)
+                    if fts_clause:
+                        negate = op in ("does_not_contain", "is_not")
+                        clause = f"w.rowid {'NOT IN' if negate else 'IN'} (SELECT rowid FROM workshop_fts WHERE {fts_clause})"
+                        clause_params = fts_params
+                    else:
+                        clause, clause_params = "", []
             elif db_col in _EN_FIELDS and op in _TEXT_OPS:
                 en_col = _EN_FIELDS[db_col]
                 c1, p1 = _build_filter_clause(db_col, op, val)
