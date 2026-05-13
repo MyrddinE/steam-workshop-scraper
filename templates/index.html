@@ -212,7 +212,8 @@ async function doSearch(reset = true) {
     if (item.image_extension) {
       imgHtml = `<img class="grid-img" src="/images/${item.workshop_id}.${item.image_extension}" loading="lazy" alt="">`;
     } else {
-      imgHtml = '<div class="grid-img-placeholder">no image</div>';
+      const label = (item.needs_image > 0) ? 'pending' : 'no image';
+      imgHtml = `<div class="grid-img-placeholder">${label}</div>`;
     }
 
     const div = document.createElement('div');
@@ -272,7 +273,15 @@ function _startListPoll(filters, sortBy, sortOrder) {
         if (titleEl) titleEl.textContent = title;
         if (item.image_extension && !el.querySelector('.grid-img')) {
           const ph = el.querySelector('.grid-img-placeholder');
-          if (ph) ph.outerHTML = `<img class="grid-img" src="/images/${item.workshop_id}.${item.image_extension}" loading="lazy" alt="">`;
+          if (ph) {
+            console.log('[poll] image arrived for', item.workshop_id, item.image_extension);
+            ph.outerHTML = `<img class="grid-img" src="/images/${item.workshop_id}.${item.image_extension}" loading="lazy" alt="">`;
+          }
+        } else if (!item.image_extension) {
+          const ph = el.querySelector('.grid-img-placeholder');
+          if (ph && (item.needs_image > 0)) {
+            ph.textContent = 'pending';
+          }
         }
         const wfs = item.wilson_favorite_score != null ? (item.wilson_favorite_score*100).toFixed(1) : null;
         const wss = item.wilson_subscription_score != null ? (item.wilson_subscription_score*100).toFixed(1) : null;
@@ -286,7 +295,13 @@ function _startListPoll(filters, sortBy, sortOrder) {
 }
 
 function _stopListPoll() {
-  if (_listPollTimer) { clearInterval(_listPollTimer); _listPollTimer = null; }
+  if (_listPollTimer) {
+    clearInterval(_listPollTimer);
+    _listPollTimer = null;
+    document.querySelectorAll('.grid-img-placeholder').forEach(ph => {
+      if (ph.textContent === 'pending') ph.textContent = 'no image';
+    });
+  }
 }
 
 function renderDetail(item) {
