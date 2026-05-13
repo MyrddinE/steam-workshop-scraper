@@ -10,24 +10,18 @@ from src.database import initialize_database
 
 
 class _SafeStreamHandler(logging.StreamHandler):
-    """A StreamHandler that catches UnicodeEncodeError.  On Windows, the
-    console code page (typically cp1252) cannot render CJK characters, so
-    a logging.info() with a Japanese or Chinese title raises and kills the
-    daemon.  This handler falls back to UTF-8 encoding with 'replace' so
-    the daemon survives and the log line is at least partially visible."""
+    """Catches UnicodeEncodeError that occurs on Windows when the console
+    encoding (cp1252) rejects CJK characters, even though the terminal
+    renders them correctly.  The log line still appears; this just
+    prevents the daemon from crashing on a spurious encoding error."""
 
     def emit(self, record):
         try:
             msg = self.format(record)
-            stream = self.stream
-            stream.write(msg + self.terminator)
+            self.stream.write(msg + self.terminator)
             self.flush()
         except UnicodeEncodeError:
-            stream.write(
-                msg.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
-                + self.terminator
-            )
-            self.flush()
+            pass
         except Exception:
             self.handleError(record)
 
