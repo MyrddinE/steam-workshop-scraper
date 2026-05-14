@@ -40,6 +40,10 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .wilson-p90 { color: #ffd700; }
 .wilson-p50 { color: #e0e0e0; }
 .wilson-low { color: #888; }
+.size-small { color: var(--pico-muted-color); }
+.size-medium { color: inherit; }
+.size-large { color: #ffd700; }
+.size-huge { color: #ff6347; }
 #port-display { font-size: .8rem; color: var(--pico-muted-color); }
 #load-more { width: 100%; margin-top: .5rem; display: none; }
 @media (max-width: 768px) {
@@ -185,8 +189,22 @@ function fmtSize(bytes) {
   const kb = bytes / 1024;
   if (kb < 1024) return kb.toFixed(1) + ' KB';
   const mb = kb / 1024;
-  if (mb < 1024) return mb.toFixed(1) + ' MB';
-  return (mb/1024).toFixed(1) + ' GB';
+  if (mb < 10) return mb.toFixed(2) + ' MB';
+  if (mb < 100) return mb.toFixed(1) + ' MB';
+  if (mb < 1000) return mb.toFixed(0) + ' MB';
+  const gb = mb / 1024;
+  if (gb < 10) return gb.toFixed(2) + ' GB';
+  if (gb < 100) return gb.toFixed(1) + ' GB';
+  return gb.toFixed(0) + ' GB';
+}
+
+function sizeClass(bytes) {
+  if (!bytes) return '';
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 10000) return 'size-huge';
+  if (mb >= 1000) return 'size-large';
+  if (mb >= 100) return 'size-medium';
+  return 'size-small';
 }
 
 async function doSearch(reset = true) {
@@ -222,7 +240,7 @@ async function doSearch(reset = true) {
     if (item.is_queued_for_subscription) div.classList.add('queued');
     div.innerHTML = `${imgHtml}
       <div class="grid-title">${title}</div>
-      <div class="grid-meta">${size}</div>
+      <div class="grid-meta"><span class="${sizeClass(item.file_size)}">${size}</span></div>
       <div class="grid-scores">
         <span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}">S ${wss!=null?wss+'%':'—'}</span>
         <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}">F ${wfs!=null?wfs+'%':'—'}</span>
@@ -318,7 +336,8 @@ function renderDetail(item) {
   const created = item.time_created ? new Date(item.time_created*1000).toISOString().slice(0,10) : 'N/A';
   const updated = item.time_updated && item.time_updated !== item.time_created ? new Date(item.time_updated*1000).toISOString().slice(0,10) : null;
   const tags = (()=>{try{const t=JSON.parse(item.tags||'[]');return Array.isArray(t)?t.join(', '):'None'}catch{return'None'}})();
-  const size = item.file_size ? (item.file_size/1024/1024).toFixed(1)+' MB' : 'N/A';
+  const size = fmtSize(item.file_size);
+  const sc = sizeClass(item.file_size);
 
   let desc = item.description_html || '';
   if (!desc && (item.short_description_en || item.short_description)) {
@@ -330,9 +349,9 @@ function renderDetail(item) {
     <p>by <b>${creator}</b> &mdash; <small>Workshop ID: ${item.workshop_id}</small></p>
     <p class="stat-wilson"><span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}">Subscriber Score: ${wss!=null?wss+'%':'N/A'}</span> &nbsp; <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}">Favorite Score: ${wfs!=null?wfs+'%':'N/A'}</span></p>
     <div class="stat-row"><span class="stat-label">Created:</span> ${created}</div>
-    <div class="stat-row"><span class="stat-label">Size:</span> ${size}</div>
+    <div class="stat-row"><span class="stat-label">Size:</span> <span class="${sc}">${size || 'N/A'}</span></div>
     ${updated ? `<div class="stat-row"><span class="stat-label">Updated:</span> ${updated}</div>` : ''}
-    <div class="stat-row"><span class="stat-label">Views:</span> ${(item.views||0).toLocaleString()}</div>
+    <div class="stat-row"><span class="stat-label">Views:</span> ${fmtCount(item.views || 0)}</div>
     <div class="stat-row"><span class="stat-label">Subs:</span> ${fmtCount(subs)} / ${fmtCount(lsubs)}</div>
     <div class="stat-row"><span class="stat-label">Favs:</span> ${fmtCount(favs)} / ${fmtCount(lfavs)}</div>
     <div class="stat-row"><span class="stat-label">Tags:</span> <small>${tags}</small></div>

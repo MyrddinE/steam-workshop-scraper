@@ -28,15 +28,27 @@ def format_ts(ts):
         return "N/A"
 
 def format_size(size_bytes):
-    """Converts bytes to human-readable KB/MB/GB with Rich markup."""
+    """Converts bytes to human-readable KB/MB/GB with Rich markup and
+    3-significant-digit precision.  Color thresholds: >=10GB red, >=1GB
+    yellow, >=100MB white, below that gray."""
     if not size_bytes: return "N/A"
     try:
-        kb = float(size_bytes) / 1024
-        if kb < 1024: return f"[gray]{kb:.1f} KB[/gray]"
-        mb = kb / 1024
-        if mb < 1024: return f"[white]{mb:.1f} MB[/white]"
+        b = float(size_bytes)
+        mb = b / (1024 * 1024)
+        if mb < 0.1:
+            return f"[gray]{b/1024:.1f} KB[/gray]"
+        if mb < 10:
+            return f"[gray]{mb:.2f} MB[/gray]"
+        if mb < 100:
+            return f"[gray]{mb:.1f} MB[/gray]"
+        if mb < 1000:
+            return f"[white]{mb:.0f} MB[/white]"
         gb = mb / 1024
-        return f"[yellow]{gb:.1f} GB[/yellow]"
+        if gb < 10:
+            return f"[yellow]{gb:.2f} GB[/yellow]"
+        if gb < 100:
+            return f"[red]{gb:.1f} GB[/red]"
+        return f"[red]{gb:.0f} GB[/red]"
     except: return "N/A"
 
 def format_count(n):
