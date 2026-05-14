@@ -92,6 +92,8 @@ class StatsScreen(Screen):
     def __init__(self, db_path: str):
         super().__init__()
         self.db_path = db_path
+        self._last_duration = 1.0
+        self._last_update = 0.0
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -101,6 +103,8 @@ class StatsScreen(Screen):
                 yield Static(id="general-stats-content")
                 yield Label("\n[b]Translation Status[/b]", classes="stats-header")
                 yield Static(id="translation-stats-content")
+                yield Label("\n[b]Priority Breakdowns[/b]", classes="stats-header")
+                yield Static(id="priority-stats-content")
                 yield Label("\n[b]App Tracking[/b]", classes="stats-header")
                 yield DataTable(id="app-stats-table")
             with Vertical(id="stats-right-col"):
@@ -117,17 +121,24 @@ class StatsScreen(Screen):
 
     def on_mount(self) -> None:
         self.update_stats()
-        self.set_interval(10.0, self.update_stats)
+        self.set_interval(2.0, self.update_stats)
 
     def update_stats(self) -> None:
+        import time
+        now = time.monotonic()
+        if now - self._last_update < 50 * self._last_duration:
+            return
+        t0 = now
         stats = get_db_stats(self.db_path)
-        
+        self._last_duration = max(0.1, time.monotonic() - t0)
+        self._last_update = time.monotonic()
+
         # General Stats
         highest_dt = stats.get("highest_dt_updated") or "N/A"
         status_text = ""
         for row in stats["status_counts"]:
             status_text += f"  Status {row['status']}: {row['count']}\n"
-        
+
         dt_text = ""
         for category, count in stats["dt_attempted_counts"].items():
             dt_text += f"  {category}: {count}\n"
@@ -144,6 +155,23 @@ class StatsScreen(Screen):
         for status, count in stats["translation_status"].items():
             trans_text += f"  {status}: {count}\n"
         self.query_one("#translation-stats-content", Static).update(trans_text)
+
+        # Priority Breakdowns
+        labels = {
+            "translation_priority": "Translation",
+            "needs_image": "Image",
+            "needs_web_scrape": "Web Scrape",
+        }
+        breakdowns = stats.get("priority_breakdowns", {})
+        prio_text = f"(updated in {elapsed*1000:.0f}ms)\n\n"
+        for key, label in labels.items():
+            rows = breakdowns.get(key, [])
+            total = sum(r["cnt"] for r in rows)
+            prio_text += f"[b]{label}:[/b] {total} total\n"
+            for r in rows:
+                prio_text += f"  prio {r['prio']}: {r['cnt']}\n"
+            prio_text += "\n"
+        self.query_one("#priority-stats-content", Static).update(prio_text)
 
         # App Stats Table
         app_table = self.query_one("#app-stats-table", DataTable)

@@ -1070,6 +1070,17 @@ def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
     app_stats = [dict(row) for row in cursor.fetchall()]
 
     tag_counts = _compute_tag_frequencies(cursor)
+
+    priority_queries = {
+        "translation_priority": "SELECT translation_priority as prio, COUNT(*) as cnt FROM workshop_items WHERE translation_priority > 0 GROUP BY translation_priority ORDER BY prio DESC",
+        "needs_image": "SELECT needs_image as prio, COUNT(*) as cnt FROM workshop_items WHERE needs_image > 0 GROUP BY needs_image ORDER BY prio DESC",
+        "needs_web_scrape": "SELECT needs_web_scrape as prio, COUNT(*) as cnt FROM workshop_items WHERE needs_web_scrape > 0 GROUP BY needs_web_scrape ORDER BY prio DESC",
+    }
+    priority_breakdowns = {}
+    for key, sql in priority_queries.items():
+        cursor.execute(sql)
+        priority_breakdowns[key] = [dict(r) for r in cursor.fetchall()]
+
     conn.close()
     return {
         "status_counts": status_counts,
@@ -1077,7 +1088,8 @@ def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
         "tag_counts": tag_counts,
         "dt_attempted_counts": dt_attempted_counts,
         "highest_dt_updated": highest_dt_updated,
-        "app_stats": app_stats
+        "app_stats": app_stats,
+        "priority_breakdowns": priority_breakdowns,
     }
 
 def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None) -> dict:
