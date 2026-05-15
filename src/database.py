@@ -371,7 +371,7 @@ def _build_sort_clause(sort_by: str, sort_order: str) -> str:
     if sort_by not in VALID_SORT_COLS:
         return ""
     order = "DESC" if sort_order.upper() == "DESC" else "ASC"
-    return f" ORDER BY {sort_by} {order}"
+    return f" ORDER BY w.{sort_by} {order}"
 
 def _build_limit_offset(limit: int, offset: int) -> tuple[str, list]:
     """Returns (LIMIT...OFFSET clause, params list)."""
