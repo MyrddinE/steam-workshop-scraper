@@ -264,8 +264,6 @@ function _listNeedsPoll(items) {
   return false;
 }
 
-let _listPollTimer = null;
-
 function _startListPoll(filters, sortBy, sortOrder) {
   _stopListPoll();
   _listPollTimer = setInterval(async () => {
