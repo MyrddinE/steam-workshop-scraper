@@ -1302,7 +1302,7 @@ class ScraperApp(App):
         if event.value is not None:
             if self._has_restored_state:
                 self.save_state()
-            await self.execute_search()
+                await self.execute_search()
 
     async def execute_search(self) -> None:
         """Executes a new search, resetting pagination."""
