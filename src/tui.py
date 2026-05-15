@@ -141,7 +141,7 @@ class StatsScreen(Screen):
 
         # General Stats
         highest_val = stats.get("highest_dt_updated")
-        highest_dt = datetime.fromtimestamp(highest_val).strftime('%Y-%m-%d %H:%M') if highest_val else "N/A"
+        highest_dt = datetime.datetime.fromtimestamp(highest_val).strftime('%Y-%m-%d %H:%M') if highest_val else "N/A"
         status_text = ""
         for row in stats["status_counts"]:
             status_text += f"  Status {row['status']}: {row['count']}\n"
