@@ -169,7 +169,7 @@ class StatsScreen(Screen):
             "needs_web_scrape": "Web Scrape",
         }
         breakdowns = stats.get("priority_breakdowns", {})
-        prio_text = f"(updated in {elapsed*1000:.0f}ms)\n\n"
+        prio_text = f"(updated in {self._last_duration*1000:.0f}ms)\n\n"
         for key, label in labels.items():
             rows = breakdowns.get(key, [])
             total = sum(r["cnt"] for r in rows)
