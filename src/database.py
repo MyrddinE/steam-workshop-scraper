@@ -670,23 +670,42 @@ def initialize_database(db_path: str):
         # partial run, skip population (tables exist but no JSON to convert).
         cols = [c[1] for c in cursor.execute("PRAGMA table_info(workshop_items)").fetchall()]
         if "tags" in cols:
+            import json as _json
             cursor.execute("SELECT workshop_id, tags FROM workshop_items WHERE tags IS NOT NULL AND tags != '' AND tags != '[]'")
             rows = cursor.fetchall()
-            logging.info(f"Migrating tags for {len(rows)} items via _ensure_tag_ids...")
+            logging.info(f"Migrating tags for {len(rows)} items...")
+
+            # Phase 1: collect all unique tag names and bulk-create IDs
+            all_tag_names = set()
+            for row in rows:
+                try:
+                    tag_names = _json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
+                    if isinstance(tag_names, list):
+                        for t in tag_names:
+                            all_tag_names.add(t.get("tag") if isinstance(t, dict) else str(t))
+                except Exception:
+                    pass
+            logging.info(f"  Phase 1: creating IDs for {len(all_tag_names)} unique tag names...")
+            _ensure_tag_ids(db_path, list(all_tag_names))
+            logging.info("  Tag IDs created.")
+
+            # Phase 2: insert workshop_tags associations in batches using in-memory lookup
+            tag_lookup = {r["tag_name"]: r["tag_id"] for r in cursor.execute("SELECT tag_id, tag_name FROM tags").fetchall()}
+            logging.info(f"  Phase 2: inserting associations ({len(rows)} items)...")
             batch_size = 10000
             for i, row in enumerate(rows):
                 try:
-                    import json as _json
                     tag_names = _json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
                     if not isinstance(tag_names, list):
                         continue
-                    tag_names = [t.get("tag") if isinstance(t, dict) else str(t) for t in tag_names]
-                    tag_ids = _ensure_tag_ids(db_path, tag_names)
-                    for tid in tag_ids:
-                        cursor.execute(
-                            "INSERT OR IGNORE INTO workshop_tags (workshop_id, tag_id) VALUES (?, ?)",
-                            (row["workshop_id"], tid)
-                        )
+                    for t in tag_names:
+                        name = t.get("tag") if isinstance(t, dict) else str(t)
+                        tid = tag_lookup.get(name)
+                        if tid is not None:
+                            cursor.execute(
+                                "INSERT OR IGNORE INTO workshop_tags (workshop_id, tag_id) VALUES (?, ?)",
+                                (row["workshop_id"], tid)
+                            )
                 except Exception:
                     pass
                 if (i + 1) % batch_size == 0:
