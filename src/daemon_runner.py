@@ -42,7 +42,10 @@ def _fix_windows_encoding():
 
 
 def _daemonize():
-    """Double-fork to detach from terminal and become a background process."""
+    """Double-fork to detach from terminal and become a background process.
+    On Windows, os.fork() is not available — skip daemonization."""
+    if sys.platform == 'win32':
+        return
     if os.fork():
         sys.exit(0)  # parent exits
     os.setsid()

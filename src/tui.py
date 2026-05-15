@@ -334,12 +334,19 @@ class DaemonManagerScreen(Screen):
     def _start_daemon(self) -> bool:
         import subprocess, sys
         try:
+            kwargs = {}
+            if sys.platform == 'win32':
+                kwargs["creationflags"] = subprocess.DETACHED_PROCESS
+            else:
+                kwargs["stdout"] = subprocess.DEVNULL
+                kwargs["stderr"] = subprocess.DEVNULL
             subprocess.Popen(
                 [sys.executable, "-m", "src.daemon_runner", self.config_path, "--daemon"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                **kwargs,
             )
             return True
-        except Exception:
+        except Exception as e:
+            logging.warning(f"Failed to start daemon: {e}")
             return False
 
     def _stop_daemon(self) -> bool:
