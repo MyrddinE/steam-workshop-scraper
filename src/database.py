@@ -787,8 +787,20 @@ def initialize_database(db_path: str):
         }
         for table, cols in tables_cols.items():
             for col in cols:
-                logging.debug(f"  converting {table}.{col}")
+                col_info = {r[1]: r[2] for r in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
                 new_col = col + "_new"
+
+                if col in col_info and col_info[col].upper() == "INTEGER":
+                    logging.debug(f"  {table}.{col} already INTEGER, skipping")
+                    continue
+
+                if new_col in col_info:
+                    logging.debug(f"  {table}.{col}: {new_col} exists from partial run, finishing rename")
+                    cursor.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
+                    cursor.execute(f"ALTER TABLE {table} RENAME COLUMN {new_col} TO {col}")
+                    continue
+
+                logging.debug(f"  converting {table}.{col}")
                 cursor.execute(f"ALTER TABLE {table} ADD COLUMN {new_col} INTEGER")
                 cursor.execute(f"UPDATE {table} SET {new_col} = CAST(strftime('%s', {col}) AS INTEGER) WHERE {col} IS NOT NULL")
                 cursor.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
