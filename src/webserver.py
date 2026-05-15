@@ -199,6 +199,29 @@ def api_item(workshop_id):
     return jsonify(item)
 
 
+@app.route('/api/items', methods=['POST'])
+def api_items():
+    data = request.get_json(silent=True) or {}
+    ids = data.get('ids', [])
+    if not ids or not isinstance(ids, list):
+        return jsonify({"error": "ids list required"}), 400
+
+    conn = get_connection(_db_path)
+    placeholders = ','.join('?' * len(ids))
+    sql = f"""
+        SELECT w.workshop_id, w.title, w.title_en, w.creator, w.consumer_appid,
+               w.dt_translated, w.is_queued_for_subscription, w.needs_web_scrape,
+               w.needs_image, w.translation_priority, w.file_size, w.image_extension,
+               w.wilson_subscription_score, w.wilson_favorite_score,
+               u.personaname, u.personaname_en
+        FROM workshop_items w LEFT JOIN users u ON w.creator = u.steamid
+        WHERE w.workshop_id IN ({placeholders})
+    """
+    results = [dict(r) for r in conn.execute(sql, ids).fetchall()]
+    conn.close()
+    return jsonify(results)
+
+
 @app.route('/api/state')
 def api_state():
     state_path = os.path.join(os.path.dirname(_db_path), ".tui_state.yaml")

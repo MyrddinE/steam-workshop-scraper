@@ -264,22 +264,28 @@ function _listNeedsPoll(items) {
   return false;
 }
 
-let _listPollFilters = null, _listPollSortBy = null, _listPollSortOrder = null;
+let _listPollTimer = null;
 
 function _startListPoll(filters, sortBy, sortOrder) {
   _stopListPoll();
-  _listPollFilters = filters;
-  _listPollSortBy = sortBy;
-  _listPollSortOrder = sortOrder;
   _listPollTimer = setInterval(async () => {
     try {
-      const resp = await fetch('/api/search', {
+      const grid = document.getElementById('results-grid');
+      const pending = [];
+      grid.querySelectorAll('.grid-cell[data-wid]').forEach(el => {
+        const wid = parseInt(el.getAttribute('data-wid'), 10);
+        if (el.querySelector('.grid-img-placeholder')) {
+          pending.push(wid);
+        }
+      });
+      if (!pending.length) { _stopListPoll(); return; }
+
+      const resp = await fetch('/api/items', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({filters: _listPollFilters, sort_by: _listPollSortBy, sort_order: _listPollSortOrder, offset: 0, limit: currentOffset})
+        body: JSON.stringify({ids: pending})
       });
       const items = await resp.json();
-      if (!_listNeedsPoll(items)) { _stopListPoll(); }
-      const grid = document.getElementById('results-grid');
+
       items.forEach(item => {
         const el = grid.querySelector(`.grid-cell[data-wid="${item.workshop_id}"]`);
         if (!el) return;
@@ -289,7 +295,6 @@ function _startListPoll(filters, sortBy, sortOrder) {
         if (item.image_extension && !el.querySelector('.grid-img')) {
           const ph = el.querySelector('.grid-img-placeholder');
           if (ph) {
-            console.log('[poll] image arrived for', item.workshop_id, item.image_extension);
             ph.outerHTML = `<img class="grid-img" src="/images/${item.workshop_id}.${item.image_extension}" loading="lazy" alt="">`;
           }
         } else if (!item.image_extension) {
