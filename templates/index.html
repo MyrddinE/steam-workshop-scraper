@@ -45,7 +45,6 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .size-large { color: #ffd700; }
 .size-huge { color: #ff6347; }
 #port-display { font-size: .8rem; color: var(--pico-muted-color); }
-#load-more { width: 100%; margin-top: .5rem; display: none; }
 @media (max-width: 768px) {
   main { flex-direction: column; }
   #right-pane { flex: 0 0 auto; border-left: none; border-top: 1px solid var(--pico-muted-border-color); padding-left: 0; padding-top: .5rem; }
@@ -61,7 +60,6 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 <main>
   <div id="results-pane">
     <div id="results-grid"></div>
-    <button id="load-more">Load more...</button>
   </div>
   <div id="right-pane">
     <div id="search-builder">
@@ -251,7 +249,6 @@ async function doSearch(reset = true) {
 
   currentOffset += items.length;
   hasMore = items.length >= 50;
-  document.getElementById('load-more').style.display = hasMore ? 'block' : 'none';
   loading = false;
 
   if (_listNeedsPoll(items)) {
@@ -505,16 +502,16 @@ async function loadState() {
   doSearch(true);
 }
 
-document.getElementById('load-more').onclick = () => doSearch(false);
-document.getElementById('btn-search').onclick = () => doSearch(true);
-document.getElementById('btn-and').onclick = () => addRow('AND');
-document.getElementById('btn-or').onclick = () => addRow('OR');
-document.getElementById('btn-save-filter').onclick = async () => {
-  await fetch('/api/save_filter', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filters: getFilters()})});
-  alert('Filter saved for scraper.');
-};
 document.getElementById('sort-by').onchange = () => doSearch(true);
 document.getElementById('sort-order').onchange = () => doSearch(true);
+
+document.getElementById('results-grid').addEventListener('scroll', () => {
+  if (loading || !hasMore) return;
+  const grid = document.getElementById('results-grid');
+  if (grid.scrollTop + grid.clientHeight >= grid.scrollHeight - 300) {
+    doSearch(false);
+  }
+});
 
 document.addEventListener('blur', e => {
   try {
