@@ -199,6 +199,9 @@ class StatsScreen(Screen):
         for tag, count in sorted_tags:
             tag_table.add_row(tag, str(count))
 
+        from src.database import compact_tag_ids
+        compact_tag_ids(self.db_path, stats["tag_counts"])
+
 class AnalysisScreen(Screen):
     """Screen that analyzes the view window for Steam Workshop items."""
 

@@ -249,6 +249,43 @@ def swap_tag_ids(db_path: str, id_a: int, id_b: int):
     finally:
         conn.close()
 
+
+def compact_tag_ids(db_path: str, tag_counts: dict = None):
+    """Reorders tag IDs so the 127 most frequently used tags occupy IDs
+    1-127 (the 1-byte SQLite varint range).  Uses the same frequency data
+    as the stats screen.  If tag_counts is None, fetches frequencies from
+    the database.  Logs each swap."""
+    PIVOT = 127
+    conn = get_connection(db_path)
+    if tag_counts is None:
+        tag_counts = _compute_tag_frequencies(conn.cursor())
+    if len(tag_counts) <= PIVOT:
+        conn.close()
+        return
+
+    current_map = {r["tag_name"]: r["tag_id"] for r in conn.execute("SELECT tag_name, tag_id FROM tags").fetchall()}
+
+    # The PIVOT most common tags (by frequency) should be in the low-ID range.
+    sorted_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)
+    top_names = {name for name, _ in sorted_tags[:PIVOT]}
+
+    # Tags that SHOULD be in the low range but currently aren't
+    misplaced = [(n, current_map[n]) for n in top_names if current_map.get(n, 9999) > PIVOT]
+    # Tags currently in the low range that DON'T belong there (available slots)
+    available = [(n, current_map[n]) for n, cid in current_map.items()
+                 if cid <= PIVOT and n not in top_names]
+
+    swaps = 0
+    for (hi_name, hi_id), (lo_name, lo_id) in zip(misplaced, available):
+        swap_tag_ids(db_path, hi_id, lo_id)
+        current_map[hi_name] = lo_id
+        current_map[lo_name] = hi_id
+        swaps += 1
+        logging.debug(f"  compact_tags: swapped '{hi_name}' (id {hi_id}) ↔ '{lo_name}' (id {lo_id})")
+    conn.close()
+    if swaps:
+        logging.info(f"compact_tags: {swaps} tag IDs reordered for space efficiency")
+
 def _evaluate_single_filter(item: dict, db_col: str, op: str, val) -> bool:
     """Checks whether an in-memory item dict matches a single filter criterion."""
     is_tags = db_col == "tags"
@@ -731,6 +768,8 @@ def initialize_database(db_path: str):
             cursor.execute("PRAGMA user_version = 6")
             conn.commit()
             logging.info("Migration 5→6 complete (tags column already dropped, skipping population).")
+
+        compact_tag_ids(db_path)
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
