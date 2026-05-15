@@ -284,6 +284,7 @@ function _startListPoll(filters, sortBy, sortOrder) {
         body: JSON.stringify({ids: pending})
       });
       const items = await resp.json();
+      if (!Array.isArray(items)) return;
 
       items.forEach(item => {
         const el = grid.querySelector(`.grid-cell[data-wid="${item.workshop_id}"]`);
