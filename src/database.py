@@ -677,7 +677,7 @@ def initialize_database(db_path: str):
 
             # Phase 1: collect all unique tag names and bulk-create IDs
             all_tag_names = set()
-            for row in rows:
+            for i, row in enumerate(rows):
                 try:
                     tag_names = _json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
                     if isinstance(tag_names, list):
@@ -685,6 +685,8 @@ def initialize_database(db_path: str):
                             all_tag_names.add(t.get("tag") if isinstance(t, dict) else str(t))
                 except Exception:
                     pass
+                if (i + 1) % 50000 == 0:
+                    logging.debug(f"  tag collection progress: {i + 1}/{len(rows)}")
             logging.info(f"  Phase 1: creating IDs for {len(all_tag_names)} unique tag names...")
             _ensure_tag_ids(db_path, list(all_tag_names))
             logging.info("  Tag IDs created.")
@@ -693,6 +695,7 @@ def initialize_database(db_path: str):
             tag_lookup = {r["tag_name"]: r["tag_id"] for r in cursor.execute("SELECT tag_id, tag_name FROM tags").fetchall()}
             logging.info(f"  Phase 2: inserting associations ({len(rows)} items)...")
             batch_size = 10000
+            sub_batch = 1000
             for i, row in enumerate(rows):
                 try:
                     tag_names = _json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
@@ -708,6 +711,8 @@ def initialize_database(db_path: str):
                             )
                 except Exception:
                     pass
+                if (i + 1) % sub_batch == 0:
+                    logging.debug(f"  tag progress: {i + 1}/{len(rows)}")
                 if (i + 1) % batch_size == 0:
                     conn.commit()
                     logging.info(f"  migrated {i + 1}/{len(rows)} items")
