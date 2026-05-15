@@ -78,13 +78,19 @@ def format_count(n):
         return f"[yellow]{v:.0f}M[/yellow]"
 
 def parse_tags(tags) -> list[str]:
-    """Parses the tags JSON field (string or list) into a list of tag-name strings."""
-    tags_list = []
+    """Parses a comma-separated tag string (junction-table format) or legacy
+    JSON into a list of tag-name strings."""
+    if not tags:
+        return []
+    # Junction-table format: comma-separated via GROUP_CONCAT(t.tag_name, ', ')
+    if isinstance(tags, str) and not tags.startswith('['):
+        return [t.strip() for t in tags.split(',') if t.strip()]
+    # Legacy JSON format
     try:
         parsed = json.loads(tags) if isinstance(tags, str) else tags
-        tags_list = [str(t.get("tag") if isinstance(t, dict) else t) for t in (parsed if isinstance(parsed, list) else [])]
-    except: pass
-    return tags_list
+        return [str(t.get("tag") if isinstance(t, dict) else t) for t in (parsed if isinstance(parsed, list) else [])]
+    except:
+        return []
 
 class StatsScreen(Screen):
     """A screen that displays database statistics."""

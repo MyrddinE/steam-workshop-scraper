@@ -335,7 +335,15 @@ function renderDetail(item) {
   const favs = item.favorited||0, lfavs = item.lifetime_favorited||0;
   const created = item.time_created ? new Date(item.time_created*1000).toISOString().slice(0,10) : 'N/A';
   const updated = item.time_updated && item.time_updated !== item.time_created ? new Date(item.time_updated*1000).toISOString().slice(0,10) : null;
-  const tags = (()=>{try{const t=JSON.parse(item.tags||'[]');return Array.isArray(t)?t.join(', '):'None'}catch{return'None'}})();
+  const tags = (()=>{
+    const raw = item.tags || '';
+    if (!raw) return 'None';
+    if (raw.startsWith('[')) {
+      try { const t = JSON.parse(raw); return Array.isArray(t) ? t.join(', ') : 'None'; }
+      catch(e) { return 'None'; }
+    }
+    return raw;
+  })();
   const size = fmtSize(item.file_size);
   const sc = sizeClass(item.file_size);
 

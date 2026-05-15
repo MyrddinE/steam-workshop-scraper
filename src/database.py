@@ -11,10 +11,11 @@ WORKSHOP_ITEM_COLUMNS = frozenset({
     "filename", "file_size", "preview_url", "hcontent_file", "hcontent_preview",
     "short_description", "short_description_en", "time_created", "time_updated",
     "visibility", "banned", "ban_reason", "app_name", "file_type",
-    "subscriptions", "favorited", "views", "tags", "extended_description",
-    "extended_description_en", "language", "lifetime_subscriptions",
-    "lifetime_favorited", "translation_priority", "is_queued_for_subscription",
-    "wilson_favorite_score", "wilson_subscription_score", "needs_web_scrape",
+    "subscriptions", "favorited", "views",
+    "extended_description", "extended_description_en", "language",
+    "lifetime_subscriptions", "lifetime_favorited", "translation_priority",
+    "is_queued_for_subscription", "wilson_favorite_score",
+    "wilson_subscription_score", "needs_web_scrape",
     "image_extension", "needs_image",
 })
 
@@ -197,18 +198,56 @@ def _compute_percentile_threshold(db_path: str, db_col: str, percentile_val, bas
     return threshold if threshold else None
 
 def _build_json_tag_clause(db_col: str, op: str, val) -> tuple[str, list]:
-    """Uses json_each for JSON array columns (tags).
-    Contains/does_not_contain use exact tag value match (not substring),
-    since tag names are discrete identifiers, not free text."""
+    """Tag queries now use the junction table (workshop_tags + tags) instead of
+    json_each on a JSON column.  Contains/does_not_contain match exact tag names."""
     if op == "contains":
-        return (f"EXISTS (SELECT 1 FROM json_each({db_col}) WHERE value = ?)", [val])
+        return ("EXISTS (SELECT 1 FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id = w.workshop_id AND t.tag_name = ?)", [val])
     if op == "does_not_contain":
-        return (f"NOT EXISTS (SELECT 1 FROM json_each({db_col}) WHERE value = ?)", [val])
+        return ("NOT EXISTS (SELECT 1 FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id = w.workshop_id AND t.tag_name = ?)", [val])
     if op == "is_empty":
-        return (f"({db_col} IS NULL OR {db_col} = '' OR {db_col} = '[]')", [])
+        return ("NOT EXISTS (SELECT 1 FROM workshop_tags WHERE workshop_id = w.workshop_id)", [])
     if op == "is_not_empty":
-        return (f"({db_col} IS NOT NULL AND {db_col} != '' AND {db_col} != '[]')", [])
+        return ("EXISTS (SELECT 1 FROM workshop_tags WHERE workshop_id = w.workshop_id)", [])
     return ("", [])
+
+
+def _ensure_tag_ids(db_path: str, tag_names: list[str]) -> list[int]:
+    """Given a list of unique tag name strings, returns their tag_ids.
+    Inserts any new tags into the tags table.  This is the single canonical
+    path for tag creation — the migration exercises it at scale."""
+    if not tag_names:
+        return []
+    conn = get_connection(db_path)
+    conn.executemany("INSERT OR IGNORE INTO tags (tag_name) VALUES (?)", [(t,) for t in tag_names])
+    conn.commit()
+    placeholders = ",".join(["?"] * len(tag_names))
+    rows = conn.execute(
+        f"SELECT tag_id FROM tags WHERE tag_name IN ({placeholders}) ORDER BY tag_id",
+        tag_names
+    ).fetchall()
+    conn.close()
+    return [r["tag_id"] for r in rows]
+
+
+def swap_tag_ids(db_path: str, id_a: int, id_b: int):
+    """Atomically swaps two tag IDs in both the tags table and all
+    workshop_tags associations.  Uses a temporary negative ID to avoid
+    conflicts during the swap."""
+    TEMP = -99999
+    conn = get_connection(db_path)
+    try:
+        conn.execute("UPDATE workshop_tags SET tag_id = ? WHERE tag_id = ?", (TEMP, id_a))
+        conn.execute("UPDATE tags SET tag_id = ? WHERE tag_id = ?", (TEMP, id_a))
+        conn.execute("UPDATE workshop_tags SET tag_id = ? WHERE tag_id = ?", (id_a, id_b))
+        conn.execute("UPDATE tags SET tag_id = ? WHERE tag_id = ?", (id_a, id_b))
+        conn.execute("UPDATE workshop_tags SET tag_id = ? WHERE tag_id = ?", (id_b, TEMP))
+        conn.execute("UPDATE tags SET tag_id = ? WHERE tag_id = ?", (id_b, TEMP))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 def _evaluate_single_filter(item: dict, db_col: str, op: str, val) -> bool:
     """Checks whether an in-memory item dict matches a single filter criterion."""
@@ -484,7 +523,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 5
+    EXPECTED_VERSION = 6
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -607,13 +646,62 @@ def initialize_database(db_path: str):
         cursor.execute("PRAGMA user_version = 5")
         logging.info("Migration 4→5 complete.")
 
+    if db_version < 6:
+        logging.info("Running migration 5→6: normalized tag schema (tags + workshop_tags tables)...")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tags (
+                tag_id   INTEGER PRIMARY KEY,
+                tag_name TEXT UNIQUE NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS workshop_tags (
+                workshop_id INTEGER NOT NULL,
+                tag_id      INTEGER NOT NULL,
+                PRIMARY KEY (workshop_id, tag_id)
+            ) WITHOUT ROWID
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_workshop_tags_tag_id ON workshop_tags (tag_id)")
+
+        # Populate via _ensure_tag_ids — stress-test the runtime code path
+        cursor.execute("SELECT workshop_id, tags FROM workshop_items WHERE tags IS NOT NULL AND tags != '' AND tags != '[]'")
+        rows = cursor.fetchall()
+        logging.info(f"Migrating tags for {len(rows)} items via _ensure_tag_ids...")
+        for i, row in enumerate(rows):
+            try:
+                tag_names = json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
+                if not isinstance(tag_names, list):
+                    continue
+                tag_names = [str(t) for t in tag_names]
+                tag_ids = _ensure_tag_ids(db_path, tag_names)
+                for tid in tag_ids:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO workshop_tags (workshop_id, tag_id) VALUES (?, ?)",
+                        (row["workshop_id"], tid)
+                    )
+            except Exception:
+                pass
+            if (i + 1) % 50000 == 0:
+                logging.info(f"  migrated {i + 1}/{len(rows)} items")
+
+        conn.commit()
+        logging.info(f"Tags: {cursor.execute('SELECT COUNT(*) FROM tags').fetchone()[0]} unique tags, "
+                     f"{cursor.execute('SELECT COUNT(*) FROM workshop_tags').fetchone()[0]} associations")
+
+        # Drop the now-redundant JSON column
+        _safe_add_columns(cursor, "workshop_items", [])  # no-op; just need the ALTER TABLE pattern
+        cursor.execute("ALTER TABLE workshop_items DROP COLUMN tags")
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 6")
+        logging.info("Migration 5→6 complete.")
+
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON workshop_items (status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_dt_updated ON workshop_items (dt_updated)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_dt_attempted ON workshop_items (dt_attempted)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_title ON workshop_items (title)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags ON workshop_items (tags)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator ON workshop_items (creator)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_short_description ON workshop_items (short_description)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_extended_description ON workshop_items (extended_description)")
@@ -652,20 +740,55 @@ def insert_or_update_item(db_path: str, item_data: dict) -> bool:
     """
     Inserts a new item or updates an existing item.
     Returns True if a new item was discovered (inserted), False if it was updated.
+    Tags are processed into the workshop_tags junction table and removed from
+    the workshop_items column list (the JSON column no longer exists).
     """
     conn = get_connection(db_path)
+
+    # Process tags into junction table before the main write
+    if "tags" in item_data:
+        try:
+            tags_raw = item_data["tags"]
+            tag_names = []
+            if isinstance(tags_raw, list):
+                tag_names = [t.get("tag") if isinstance(t, dict) else str(t) for t in tags_raw]
+            elif isinstance(tags_raw, str):
+                try:
+                    parsed = json.loads(tags_raw)
+                    if isinstance(parsed, list):
+                        tag_names = [t.get("tag") if isinstance(t, dict) else str(t) for t in parsed]
+                except (json.JSONDecodeError, TypeError):
+                    # Handle Python-repr strings like "['fruit', 'sweet']"
+                    import ast
+                    try:
+                        parsed = ast.literal_eval(tags_raw)
+                        if isinstance(parsed, list):
+                            tag_names = [t.get("tag") if isinstance(t, dict) else str(t) for t in parsed]
+                    except (ValueError, SyntaxError):
+                        pass
+            if tag_names:
+                tag_ids = _ensure_tag_ids(db_path, tag_names)
+                conn.execute("DELETE FROM workshop_tags WHERE workshop_id = ?", (item_data["workshop_id"],))
+                for tid in tag_ids:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO workshop_tags (workshop_id, tag_id) VALUES (?, ?)",
+                        (item_data["workshop_id"], tid)
+                    )
+        except Exception:
+            pass
     
     columns = [col for col in item_data.keys() if col in WORKSHOP_ITEM_COLUMNS]
-    
+
     cursor = conn.execute("SELECT 1 FROM workshop_items WHERE workshop_id = ?", (item_data["workshop_id"],))
     is_new = cursor.fetchone() is None
 
-    columns = list(item_data.keys())
     placeholders = ",".join(["?"] * len(columns))
-    
+    # Build the values list using the FILTERED column order
+    vals = [item_data[col] for col in columns]
+
     # We update all columns EXCEPT the primary key if there's a conflict
     update_cols = [col for col in columns if col != "workshop_id"]
-    
+
     if not update_cols:
         sql = f"""
             INSERT INTO workshop_items ({",".join(columns)})
@@ -679,8 +802,8 @@ def insert_or_update_item(db_path: str, item_data: dict) -> bool:
             VALUES ({placeholders})
             ON CONFLICT(workshop_id) DO UPDATE SET {updates}
         """
-    
-    conn.execute(sql, list(item_data.values()))
+
+    conn.execute(sql, vals)
     conn.commit()
     conn.close()
     return is_new
@@ -830,7 +953,8 @@ def get_item_details(db_path: str, workshop_id: int) -> dict | None:
     """Fetches all columns for a single workshop item, joined with user info."""
     conn = get_connection(db_path)
     sql = """
-        SELECT w.*, u.personaname, u.personaname_en, u.dt_translated as user_dt_translated
+        SELECT w.*, u.personaname, u.personaname_en, u.dt_translated as user_dt_translated,
+               (SELECT GROUP_CONCAT(t.tag_name, ', ') FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id = w.workshop_id) as tags
         FROM workshop_items w
         LEFT JOIN users u ON w.creator = u.steamid
         WHERE w.workshop_id = ?
@@ -856,9 +980,14 @@ def search_items(db_path: str, query: str = "", appid: int = None,
     conn = get_connection(db_path)
     
     if summary_only:
-        cols = "w.workshop_id, w.title, w.title_en, w.creator, w.consumer_appid, w.dt_translated, w.is_queued_for_subscription, w.needs_web_scrape, w.needs_image, w.translation_priority, w.file_size, w.image_extension, w.wilson_subscription_score, w.wilson_favorite_score, u.personaname, u.personaname_en"
+        cols = ("w.workshop_id, w.title, w.title_en, w.creator, w.consumer_appid, "
+                "w.dt_translated, w.is_queued_for_subscription, w.needs_web_scrape, "
+                "w.needs_image, w.translation_priority, w.file_size, w.image_extension, "
+                "w.wilson_subscription_score, w.wilson_favorite_score, u.personaname, u.personaname_en,"
+                "(SELECT GROUP_CONCAT(t.tag_name, ', ') FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id = w.workshop_id) as tags")
     else:
-        cols = "w.*, u.personaname, u.personaname_en"
+        cols = ("w.*, u.personaname, u.personaname_en,"
+                "(SELECT GROUP_CONCAT(t.tag_name, ', ') FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id = w.workshop_id) as tags")
         
     sql = f"SELECT {cols} FROM workshop_items w LEFT JOIN users u ON w.creator = u.steamid WHERE 1=1"
     params = []
@@ -1011,30 +1140,13 @@ def _classify_attempted_recency(dt_attempted: str, staleness_days: int = 30) -> 
         return "blank"
 
 def _compute_tag_frequencies(cursor) -> dict:
-    """Queries all tag values and returns a frequency dictionary.
-    Tries json_each first, falls back to Python parsing for legacy malformed JSON."""
-    try:
-        cursor.execute("""
-            SELECT COALESCE(json_extract(value, '$.tag'), value) as tag_value, COUNT(*) as cnt
-            FROM workshop_items, json_each(workshop_items.tags)
-            WHERE tags IS NOT NULL AND tags != ''
-            GROUP BY tag_value
-            ORDER BY cnt DESC
-        """)
-        return {row["tag_value"]: row["cnt"] for row in cursor.fetchall()}
-    except sqlite3.OperationalError:
-        cursor.execute("SELECT tags FROM workshop_items WHERE tags IS NOT NULL AND tags != ''")
-        tag_counts = {}
-        for row in cursor.fetchall():
-            try:
-                tags_list = json.loads(row["tags"])
-                if isinstance(tags_list, list):
-                    for tag_item in tags_list:
-                        tag_value = tag_item.get('tag') if isinstance(tag_item, dict) else tag_item
-                        if tag_value:
-                            tag_counts[str(tag_value)] = tag_counts.get(str(tag_value), 0) + 1
-            except: continue
-        return tag_counts
+    """Returns a {tag_name: count} frequency dictionary from the junction table."""
+    cursor.execute("""
+        SELECT t.tag_name, COUNT(*) as cnt
+        FROM workshop_tags wt JOIN tags t USING(tag_id)
+        GROUP BY t.tag_name ORDER BY cnt DESC
+    """)
+    return {row["tag_name"]: row["cnt"] for row in cursor.fetchall()}
 
 def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
     """Returns comprehensive statistics about the database."""
