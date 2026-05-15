@@ -140,7 +140,8 @@ class StatsScreen(Screen):
         self._last_update = time.monotonic()
 
         # General Stats
-        highest_dt = stats.get("highest_dt_updated") or "N/A"
+        highest_val = stats.get("highest_dt_updated")
+        highest_dt = datetime.fromtimestamp(highest_val).strftime('%Y-%m-%d %H:%M') if highest_val else "N/A"
         status_text = ""
         for row in stats["status_counts"]:
             status_text += f"  Status {row['status']}: {row['count']}\n"

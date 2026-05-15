@@ -2,6 +2,7 @@ import sqlite3
 import shlex
 import re
 import json
+import time
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -402,11 +403,11 @@ def initialize_database(db_path: str):
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS workshop_items (
         workshop_id INTEGER PRIMARY KEY,
-        -- dt_* columns: daemon-managed timestamps (ISO 8601 TEXT)
+        -- dt_* columns: daemon-managed timestamps (Unix epoch INTEGER)
         -- time_* columns: Steam-side timestamps (Unix INTEGER)
-        dt_found TEXT,
-        dt_updated TEXT,
-        dt_attempted TEXT,
+        dt_found INTEGER,
+        dt_updated INTEGER,
+        dt_attempted INTEGER,
         status INTEGER,
         title TEXT,
         creator INTEGER, -- FK to users.steamid (LEFT JOIN used; FK omitted
@@ -437,7 +438,7 @@ def initialize_database(db_path: str):
         title_en TEXT,
         short_description_en TEXT,
         extended_description_en TEXT,
-        dt_translated TEXT,
+        dt_translated INTEGER,
         translation_priority INTEGER DEFAULT 0,
         wilson_favorite_score REAL DEFAULT NULL,
         wilson_subscription_score REAL DEFAULT NULL,
@@ -453,8 +454,8 @@ def initialize_database(db_path: str):
         steamid INTEGER PRIMARY KEY,
         personaname TEXT,
         personaname_en TEXT,
-        dt_updated TEXT,
-        dt_translated TEXT,
+        dt_updated INTEGER,
+        dt_translated INTEGER,
         translation_priority INTEGER DEFAULT 0
     )
     """)
@@ -468,7 +469,7 @@ def initialize_database(db_path: str):
         field TEXT NOT NULL,
         original_text TEXT NOT NULL,
         priority INTEGER DEFAULT 0,
-        dt_queued TEXT
+        dt_queued INTEGER
     )
     """)
 
@@ -560,7 +561,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 6
+    EXPECTED_VERSION = 7
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -772,6 +773,33 @@ def initialize_database(db_path: str):
 
         compact_tag_ids(db_path)
 
+    if db_version < 7:
+        logging.info("Running migration 6→7: converting dt_* columns from TEXT (ISO) to INTEGER (Unix epoch)...")
+
+        tables_cols = {
+            "workshop_items": ["dt_found", "dt_updated", "dt_attempted", "dt_translated"],
+            "users": ["dt_updated", "dt_translated"],
+            "translation_queue": ["dt_queued"],
+        }
+        for table, cols in tables_cols.items():
+            for col in cols:
+                logging.debug(f"  converting {table}.{col}")
+                new_col = col + "_new"
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {new_col} INTEGER")
+                cursor.execute(f"UPDATE {table} SET {new_col} = CAST(strftime('%s', {col}) AS INTEGER) WHERE {col} IS NOT NULL")
+                cursor.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
+                cursor.execute(f"ALTER TABLE {table} RENAME COLUMN {new_col} TO {col}")
+
+        # Rebuild indexes dropped with their TEXT columns
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_dt_updated ON workshop_items (dt_updated)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_dt_attempted ON workshop_items (dt_attempted)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_status_dt_attempted ON workshop_items (status, dt_attempted)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_dt_updated ON workshop_items (creator, dt_updated)")
+
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 7")
+        logging.info("Migration 6→7 complete.")
+
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON workshop_items (status)")
@@ -894,23 +922,23 @@ def get_next_items_to_scrape(db_path: str, limit: int = 10, staleness_days: int 
     """
     conn = get_connection(db_path)
     cursor = conn.cursor()
-    stale_param = f'-{staleness_days} days'
+    threshold = int(time.time()) - staleness_days * 86400
 
     sql = """
         SELECT * FROM workshop_items
         WHERE
             status IS NULL OR
-            (status = 200 AND dt_attempted < datetime('now', ?))
+            (status = 200 AND dt_attempted < ?)
         ORDER BY
             CASE
                 WHEN status IS NULL THEN 0
-                WHEN status = 200 AND dt_attempted < datetime('now', ?) THEN 2
+                WHEN status = 200 AND dt_attempted < ? THEN 2
                 ELSE 3
             END ASC,
             dt_attempted ASC
         LIMIT ?
     """
-    cursor.execute(sql, (stale_param, stale_param, limit))
+    cursor.execute(sql, (threshold, threshold, limit))
     
     # Return full dictionaries
     items = [dict(row) for row in cursor.fetchall()]
@@ -1200,16 +1228,13 @@ def _classify_translation_status(item) -> str:
         return "No data (never scraped)"
     return "Needs Translation (Unicode)"
 
-def _classify_attempted_recency(dt_attempted: str, staleness_days: int = 30) -> str:
-    """Classifies a dt_attempted timestamp as 'fresh', 'stale', or 'blank'."""
+def _classify_attempted_recency(dt_attempted, staleness_days: int = 30) -> str:
+    """Classifies a dt_attempted timestamp (Unix epoch integer) as 'fresh', 'stale', or 'blank'."""
     if not dt_attempted:
         return "blank"
     try:
-        attempted_dt = datetime.fromisoformat(dt_attempted.replace("Z", "+00:00"))
-        threshold = datetime.now(timezone.utc) - timedelta(days=staleness_days)
-        if attempted_dt.tzinfo is None:
-            attempted_dt = attempted_dt.replace(tzinfo=timezone.utc)
-        return "fresh" if attempted_dt >= threshold else "stale"
+        threshold = int(time.time()) - staleness_days * 86400
+        return "fresh" if int(dt_attempted) >= threshold else "stale"
     except (ValueError, TypeError):
         return "blank"
 

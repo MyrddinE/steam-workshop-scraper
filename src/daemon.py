@@ -105,13 +105,13 @@ class Daemon:
         record = {
             "steamid": steamid,
             "personaname": personaname,
-            "dt_updated": datetime.now(timezone.utc).isoformat()
+            "dt_updated": int(time.time())
         }
         if not is_ascii(personaname):
             record["translation_priority"] = 1
         return record
 
-    def _merge_and_clean_api_data(self, api_data: dict, existing_data: dict, item_id: int, now_iso: str) -> dict:
+    def _merge_and_clean_api_data(self, api_data: dict, existing_data: dict, item_id: int, now_ts: int) -> dict:
         """Merges API response into existing data, remaps column names, and filters to allowed keys."""
         merged = existing_data.copy()
         api_data.pop("publishedfileid", None)
@@ -144,7 +144,7 @@ class Daemon:
                 logger = logging.info if v is not None and str(v).strip() != "" else logging.debug
                 logger(f"Discarding unknown API column: '{k}' with value '{val_preview}' for item {item_id}")
 
-        clean["dt_attempted"] = now_iso
+        clean["dt_attempted"] = now_ts
         if "tags" in clean:
             clean["tags"] = normalize_tags(clean["tags"])
         return clean
@@ -276,7 +276,7 @@ class Daemon:
             if not self.running:
                 break # Exit early if shutting down
 
-            now_iso = datetime.now(timezone.utc).isoformat()
+            now_ts = int(time.time())
             item_id = existing_data['workshop_id']
             if existing_data.get('title') is None or existing_data.get('creator') is None:
                 log_action = 'Add'
@@ -290,7 +290,7 @@ class Daemon:
             api_status = api_data.get("status", 0)
 
             merged_data = existing_data.copy()
-            merged_data["dt_attempted"] = now_iso
+            merged_data["dt_attempted"] = now_ts
             merged_data["status"] = api_status
             
             if api_status == 404:
@@ -320,7 +320,7 @@ class Daemon:
                     self.api_had_streak = False
                 continue
 
-            merged_data = self._merge_and_clean_api_data(api_data, merged_data, item_id, now_iso)
+            merged_data = self._merge_and_clean_api_data(api_data, merged_data, item_id, now_ts)
             display_title = merged_data.get('title_en') or merged_data.get('title', 'Unknown Title')
 
             views = merged_data.get("views", 0) or 0
@@ -370,8 +370,8 @@ class Daemon:
                     existing_user = get_user(self.db_path, creator_id)
                     should_update_user = True
                     if existing_user and existing_user.get("dt_updated"):
-                        last_upd = datetime.fromisoformat(existing_user["dt_updated"])
-                        if (datetime.now(timezone.utc) - last_upd).days < self.user_staleness_days:
+                        staleness = int(time.time()) - existing_user["dt_updated"]
+                        if staleness < self.user_staleness_days * 86400:
                             should_update_user = False
                     if should_update_user:
                         summaries = get_player_summaries([creator_id], self.api_key)

@@ -20,7 +20,7 @@ def test_count_unscraped_items(db_path):
     
     insert_or_update_item(db_path, {"workshop_id": 1}) # Unscraped
     insert_or_update_item(db_path, {"workshop_id": 2}) # Unscraped
-    insert_or_update_item(db_path, {"workshop_id": 3, "dt_attempted": "2023-01-01"}) # Scraped
+    insert_or_update_item(db_path, {"workshop_id": 3, "dt_attempted": 1672531200}) # Scraped
     
     assert count_unscraped_items(db_path) == 2
 
@@ -43,7 +43,7 @@ def test_insert_or_update_item(db_path):
     item = {
         "workshop_id": 123,
         "title": "Test Item",
-        "dt_attempted": "2023-10-01T12:00:00"
+        "dt_attempted": 1696104000
     }
     # First insert should return True
     assert insert_or_update_item(db_path, item) is True
@@ -62,9 +62,9 @@ def test_insert_or_update_item(db_path):
 
 def test_get_next_items_to_scrape(db_path):
     """Tests that items are fetched in order of oldest dt_attempted (NULLs first)."""
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "dt_updated": "2023-10-02", "dt_attempted": "2023-10-01T00:00:00"})
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "dt_updated": 1696204800, "dt_attempted": 1696118400})
     insert_or_update_item(db_path, {"workshop_id": 2, "status": None}) # NULL status, should come first
-    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "dt_updated": "2023-10-01", "dt_attempted": "2023-10-02T00:00:00"})
+    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "dt_updated": 1696204800, "dt_attempted": 1696204800})
     
     items = get_next_items_to_scrape(db_path, limit=3)
     assert len(items) == 3
@@ -107,9 +107,9 @@ def test_clear_pending_items(db_path):
     # 3. Not Pending (status 200) - Should NOT be removed
     insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "dt_updated": None})
     # 4. Not Pending (has dt_updated) - Should NOT be removed
-    insert_or_update_item(db_path, {"workshop_id": 4, "status": None, "dt_updated": "2023-01-01"})
-    # 5. Not Pending (both) - Should NOT be removed
-    insert_or_update_item(db_path, {"workshop_id": 5, "status": 200, "dt_updated": "2023-01-01"})
+    insert_or_update_item(db_path, {"workshop_id": 4, "status": None, "dt_updated": 1672531200})
+
+    insert_or_update_item(db_path, {"workshop_id": 5, "status": 200, "dt_updated": 1672531200})
 
     deleted_count = clear_pending_items(db_path)
     assert deleted_count == 2
@@ -344,24 +344,24 @@ def test_app_tracking(db_path):
 
 def test_get_next_items_to_scrape_priority(db_path):
     from src.database import get_next_items_to_scrape, insert_or_update_item
+    import time
     
     # 1. Successfully scraped items, stalest first (status = 200)
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "dt_updated": "2023-01-01", "dt_attempted": "2023-01-01T00:00:00"})
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "dt_updated": 1672531200, "dt_attempted": 1672531200})
     # Item 2 is recent, so it should be excluded from re-scraping
-    recent_date = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "dt_updated": recent_date, "dt_attempted": recent_date})
+    recent_epoch = int(time.time()) - 86400
+    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "dt_updated": recent_epoch, "dt_attempted": recent_epoch})
     
     # 2. Partially failed items (status = 206) - with different subscription counts
-    insert_or_update_item(db_path, {"workshop_id": 3, "status": 206, "dt_updated": "2025-01-01", "subscriptions": 100})
-    insert_or_update_item(db_path, {"workshop_id": 4, "status": 206, "dt_updated": "2025-02-01", "subscriptions": 500})
+    insert_or_update_item(db_path, {"workshop_id": 3, "status": 206, "dt_updated": 1735689600, "subscriptions": 100})
+    insert_or_update_item(db_path, {"workshop_id": 4, "status": 206, "dt_updated": 1738368000, "subscriptions": 500})
     
     # 3. Unscraped new items (status IS NULL)
     insert_or_update_item(db_path, {"workshop_id": 5})
     insert_or_update_item(db_path, {"workshop_id": 6})
     
     # 4. Old items (older than 7 days)
-    # This item is older than #2, but should be lower priority than the NULL and 206 statuses
-    insert_or_update_item(db_path, {"workshop_id": 7, "status": 200, "dt_updated": "2022-01-01", "dt_attempted": "2022-01-01T00:00:00"})
+    insert_or_update_item(db_path, {"workshop_id": 7, "status": 200, "dt_updated": 1640995200, "dt_attempted": 1640995200})
 
     items = get_next_items_to_scrape(db_path, limit=7)
     item_ids = [item['workshop_id'] for item in items]

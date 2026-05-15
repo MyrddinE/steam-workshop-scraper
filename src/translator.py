@@ -81,7 +81,7 @@ Return ONLY a JSON array matching this exact format, preserving all 'id' values:
 
 {json.dumps(items, ensure_ascii=False)}
 """
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_ts = int(time.time())
         conn = get_connection(self.db_path)
 
         try:
@@ -130,7 +130,7 @@ Return ONLY a JSON array matching this exact format, preserving all 'id' values:
 
                 conn.execute(
                     f"UPDATE {table} SET {row['field']} = ?, dt_translated = ? WHERE {id_col} = ?",
-                    (trans_text, now_iso, row["item_id"])
+                    (trans_text, now_ts, row["item_id"])
                 )
                 conn.execute("DELETE FROM translation_queue WHERE id = ?", (row["id"],))
                 translated_count += 1
@@ -145,7 +145,7 @@ Return ONLY a JSON array matching this exact format, preserving all 'id' values:
                 if remaining == 0:
                     conn.execute(
                         "UPDATE workshop_items SET translation_priority = 0, dt_translated = ? WHERE workshop_id = ?",
-                        (now_iso, item_id)
+                        (now_ts, item_id)
                     )
 
             conn.commit()
