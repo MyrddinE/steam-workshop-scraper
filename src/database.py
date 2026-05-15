@@ -663,38 +663,50 @@ def initialize_database(db_path: str):
             ) WITHOUT ROWID
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_workshop_tags_tag_id ON workshop_tags (tag_id)")
-
-        # Populate via _ensure_tag_ids — stress-test the runtime code path
-        cursor.execute("SELECT workshop_id, tags FROM workshop_items WHERE tags IS NOT NULL AND tags != '' AND tags != '[]'")
-        rows = cursor.fetchall()
-        logging.info(f"Migrating tags for {len(rows)} items via _ensure_tag_ids...")
-        for i, row in enumerate(rows):
-            try:
-                tag_names = json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
-                if not isinstance(tag_names, list):
-                    continue
-                tag_names = [str(t) for t in tag_names]
-                tag_ids = _ensure_tag_ids(db_path, tag_names)
-                for tid in tag_ids:
-                    cursor.execute(
-                        "INSERT OR IGNORE INTO workshop_tags (workshop_id, tag_id) VALUES (?, ?)",
-                        (row["workshop_id"], tid)
-                    )
-            except Exception:
-                pass
-            if (i + 1) % 50000 == 0:
-                logging.info(f"  migrated {i + 1}/{len(rows)} items")
-
         conn.commit()
-        logging.info(f"Tags: {cursor.execute('SELECT COUNT(*) FROM tags').fetchone()[0]} unique tags, "
-                     f"{cursor.execute('SELECT COUNT(*) FROM workshop_tags').fetchone()[0]} associations")
 
-        # Drop the now-redundant JSON column
-        _safe_add_columns(cursor, "workshop_items", [])  # no-op; just need the ALTER TABLE pattern
-        cursor.execute("ALTER TABLE workshop_items DROP COLUMN tags")
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 6")
-        logging.info("Migration 5→6 complete.")
+        # Populate via _ensure_tag_ids — stress-test the runtime code path.
+        # Defensive: if the tags column was already dropped by a previous
+        # partial run, skip population (tables exist but no JSON to convert).
+        cols = [c[1] for c in cursor.execute("PRAGMA table_info(workshop_items)").fetchall()]
+        if "tags" in cols:
+            cursor.execute("SELECT workshop_id, tags FROM workshop_items WHERE tags IS NOT NULL AND tags != '' AND tags != '[]'")
+            rows = cursor.fetchall()
+            logging.info(f"Migrating tags for {len(rows)} items via _ensure_tag_ids...")
+            batch_size = 10000
+            for i, row in enumerate(rows):
+                try:
+                    import json as _json
+                    tag_names = _json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
+                    if not isinstance(tag_names, list):
+                        continue
+                    tag_names = [t.get("tag") if isinstance(t, dict) else str(t) for t in tag_names]
+                    tag_ids = _ensure_tag_ids(db_path, tag_names)
+                    for tid in tag_ids:
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO workshop_tags (workshop_id, tag_id) VALUES (?, ?)",
+                            (row["workshop_id"], tid)
+                        )
+                except Exception:
+                    pass
+                if (i + 1) % batch_size == 0:
+                    conn.commit()
+                    logging.info(f"  migrated {i + 1}/{len(rows)} items")
+
+            conn.commit()
+            logging.info(f"Tags: {cursor.execute('SELECT COUNT(*) FROM tags').fetchone()[0]} unique tags, "
+                         f"{cursor.execute('SELECT COUNT(*) FROM workshop_tags').fetchone()[0]} associations")
+
+            # Drop the legacy JSON column in a tight transaction
+            conn.execute("BEGIN")
+            cursor.execute("ALTER TABLE workshop_items DROP COLUMN tags")
+            cursor.execute("PRAGMA user_version = 6")
+            conn.commit()
+            logging.info("Dropped legacy tags column — migration 5→6 complete.")
+        else:
+            cursor.execute("PRAGMA user_version = 6")
+            conn.commit()
+            logging.info("Migration 5→6 complete (tags column already dropped, skipping population).")
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
