@@ -1076,8 +1076,6 @@ def search_items(db_path: str, query: str = "", appid: int = None,
         sql, params = _build_text_search_clauses(sql, params, desc_query, ["short_description", "extended_description"])
     if filename_query:
         sql, params = _build_text_search_clauses(sql, params, filename_query, ["filename"])
-    if tags_query:
-        sql, params = _build_text_search_clauses(sql, params, tags_query, ["tags"])
     if tags:
         clause, clause_params = _build_json_tag_clause("tags", "contains", tags)
         sql += f" AND {clause}"
@@ -1298,7 +1296,12 @@ def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None) -> dict:
             if not field or not op:
                 continue
             db_col = FIELD_NAME_MAP.get(field, field)
-            clause, clause_params = _build_filter_clause(db_col, op, val)
+            if db_col == "tags":
+                if op in ("is", "is_not"):
+                    continue
+                clause, clause_params = _build_json_tag_clause(db_col, op, val)
+            else:
+                clause, clause_params = _build_filter_clause(db_col, op, val)
             if clause:
                 params.extend(clause_params)
                 filter_clauses.append((f.get("logic", "AND").upper(), clause))
