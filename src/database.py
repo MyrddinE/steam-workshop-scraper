@@ -91,7 +91,7 @@ _TEXT_NEG_OPS = {"does_not_contain", "is_not"}
 
 VALID_SORT_COLS = {
     "title", "file_size", "subscriptions", "favorited", "views",
-    "workshop_id", "time_created", "time_updated",
+    "workshop_id", "time_created", "time_updated", "dt_updated",
     "wilson_favorite_score", "wilson_subscription_score",
 }
 

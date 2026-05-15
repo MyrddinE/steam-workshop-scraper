@@ -1262,6 +1262,7 @@ class ScraperApp(App):
             ("Workshop ID", "workshop_id"),
             ("Created Time", "time_created"),
             ("Updated Time", "time_updated"),
+            ("Fetched Time", "dt_updated"),
             ("Subscriber Score", "wilson_subscription_score"),
             ("Favorite Score", "wilson_favorite_score"),
         ]
