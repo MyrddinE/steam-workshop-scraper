@@ -561,7 +561,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 7
+    EXPECTED_VERSION = 8
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -816,6 +816,19 @@ def initialize_database(db_path: str):
         cursor.execute("PRAGMA user_version = 7")
         logging.info("Migration 6→7 complete.")
 
+    if db_version < 8:
+        logging.info("Running migration 7→8: adding indexes on all sortable columns...")
+        sort_indexes = [
+            "time_created", "time_updated",
+            "file_size", "subscriptions", "favorited", "views",
+            "wilson_subscription_score", "wilson_favorite_score",
+        ]
+        for col in sort_indexes:
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{col} ON workshop_items ({col})")
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 8")
+        logging.info("Migration 7→8 complete.")
+
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON workshop_items (status)")
@@ -829,6 +842,15 @@ def initialize_database(db_path: str):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_appid_status ON workshop_items (consumer_appid, status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_dt_updated ON workshop_items (creator, dt_updated)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_translation_priority ON workshop_items (translation_priority)")
+    # Sort-column indexes — avoid expensive full-table sorts
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_time_created ON workshop_items (time_created)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_time_updated ON workshop_items (time_updated)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_file_size ON workshop_items (file_size)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions ON workshop_items (subscriptions)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_favorited ON workshop_items (favorited)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_views ON workshop_items (views)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_wilson_subscription_score ON workshop_items (wilson_subscription_score)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_wilson_favorite_score ON workshop_items (wilson_favorite_score)")
 
     conn.commit()
     conn.close()
