@@ -776,6 +776,10 @@ def initialize_database(db_path: str):
     if db_version < 7:
         logging.info("Running migration 6→7: converting dt_* columns from TEXT (ISO) to INTEGER (Unix epoch)...")
 
+        # Drop indexes that reference dt_* columns — required before DROP COLUMN
+        for idx in ["idx_dt_updated", "idx_dt_attempted", "idx_status_dt_attempted", "idx_creator_dt_updated"]:
+            cursor.execute(f"DROP INDEX IF EXISTS {idx}")
+
         tables_cols = {
             "workshop_items": ["dt_found", "dt_updated", "dt_attempted", "dt_translated"],
             "users": ["dt_updated", "dt_translated"],
