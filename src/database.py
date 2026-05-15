@@ -760,6 +760,7 @@ def initialize_database(db_path: str):
 
             # Drop the legacy JSON column in a tight transaction
             conn.execute("BEGIN")
+            cursor.execute("DROP INDEX IF EXISTS idx_tags")
             cursor.execute("ALTER TABLE workshop_items DROP COLUMN tags")
             cursor.execute("PRAGMA user_version = 6")
             conn.commit()
