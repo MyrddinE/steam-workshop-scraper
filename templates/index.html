@@ -267,7 +267,9 @@ function _listNeedsPoll(items) {
 
 function _startListPoll(filters, sortBy, sortOrder) {
   _stopListPoll();
-  _listPollTimer = setInterval(async () => {
+
+  async function tick() {
+    if (!_listPollTimer) return;  // stopped during fetch
     try {
       const grid = document.getElementById('results-grid');
       const pending = [];
@@ -311,16 +313,21 @@ function _startListPoll(filters, sortBy, sortOrder) {
           <span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}">S ${wss!=null?wss+'%':'—'}</span>
           <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}">F ${wfs!=null?wfs+'%':'—'}</span>`;
       });
+
+      const delay = Math.max(1, Math.log2(pending.length)) * 1000;
+      _listPollTimer = setTimeout(tick, delay);
     } catch(e) { /* poll error, keep trying */ }
-  }, 10000);
+  }
+
+  _listPollTimer = setTimeout(tick, 0);
 }
 
 function _stopListPoll() {
   if (_listPollTimer) {
-    clearInterval(_listPollTimer);
+    clearTimeout(_listPollTimer);
     _listPollTimer = null;
     document.querySelectorAll('.grid-img-placeholder').forEach(ph => {
-      if (ph.textContent === 'pending') ph.textContent = 'no image';
+      if (ph.textContent.startsWith('pending')) ph.textContent = 'no image';
     });
   }
 }
