@@ -302,8 +302,7 @@ function _startListPoll(filters, sortBy, sortOrder) {
         } else if (!item.image_extension) {
           const ph = el.querySelector('.grid-img-placeholder');
           if (ph && (item.needs_image > 0)) {
-            const dots = (ph.textContent.match(/\.+$/) || [''])[0];
-            ph.textContent = 'pending' + (dots.length < 3 ? dots + ' .' : '');
+            ph.textContent += '.';
           }
         }
         const wfs = item.wilson_favorite_score != null ? (item.wilson_favorite_score*100).toFixed(1) : null;
