@@ -16,7 +16,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .grid-cell { cursor: pointer; padding: .5em; border: 1px solid var(--pico-muted-border-color); border-radius: 4px; display: flex; flex-direction: column; gap: .25em; outline: none; }
 .grid-cell:hover { border-color: var(--pico-primary-hover-background); }
 .grid-cell:focus-visible { outline: 2px solid #44aa44; outline-offset: 2px; }
-.grid-cell.selected { border-color: var(--pico-primary-background); background: color-mix(in srgb, var(--pico-primary-background) 20%, transparent); }
+.grid-cell.selected { outline: 2px solid #44aa44; outline-offset: 2px; }
 .grid-img { width: 100%; aspect-ratio: 16/10; object-fit: cover; border-radius: 3px; background: var(--pico-muted-border-color); }
 .grid-img-placeholder { width: 100%; aspect-ratio: 16/10; border-radius: 3px; background: var(--pico-muted-border-color); display: flex; align-items: center; justify-content: center; color: var(--pico-muted-color); font-size: .8rem; }
 .grid-title { font-size: .82rem; font-weight: bold; line-height: 1.2; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
@@ -468,6 +468,8 @@ async function showDetail(wid) {
 
   renderDetail(item);
   document.querySelectorAll('#results-grid .grid-cell').forEach(el => el.classList.remove('selected'));
+  const cell = document.querySelector(`#results-grid .grid-cell[data-wid="${wid}"]`);
+  if (cell) { cell.classList.add('selected'); cell.focus(); }
   _startDetailPoll(wid, item);
   } catch(e) { pane.innerHTML = '<p>Error loading detail: ' + e.message + '</p>'; }
 }
@@ -608,8 +610,10 @@ document.addEventListener('keydown', e => {
 
   e.preventDefault();
   if (nextIdx >= 0 && nextIdx < cells.length) {
-    cells[nextIdx].focus();
-    cells[nextIdx].scrollIntoView({block:'nearest'});
+    const cell = cells[nextIdx];
+    cell.focus();
+    cell.scrollIntoView({block:'nearest'});
+    showDetail(parseInt(cell.getAttribute('data-wid'), 10));
   }
 });
 
