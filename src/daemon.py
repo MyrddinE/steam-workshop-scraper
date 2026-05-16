@@ -405,6 +405,10 @@ class Daemon:
         image_worker.start()
         while self.running:
             self.process_batch()
+            # Check if the PID file has been deleted (graceful shutdown signal)
+            if self.running and not os.path.exists(".daemon.pid"):
+                logging.info("PID file removed — initiating graceful shutdown")
+                self.running = False
         logging.info("Daemon gracefully exited.")
         web_worker.running = False
         web_worker.join(timeout=5)

@@ -343,20 +343,41 @@ class DaemonManagerScreen(Screen):
             return False
 
     def _stop_daemon(self) -> bool:
-        if self._daemon_proc and self._daemon_proc.poll() is None:
-            import platform
-            self._daemon_proc.terminate()
+        if not self._daemon_proc or self._daemon_proc.poll() is not None:
+            self._daemon_proc = None
+            return True
+
+        import platform, signal
+        if platform.system() == 'Windows':
+            # Delete PID file — daemon checks it, initiates graceful shutdown
+            try:
+                os.remove(self.pid_file)
+            except OSError:
+                pass
             try:
                 self._daemon_proc.wait(timeout=5)
             except Exception:
-                pass
-            if platform.system() == 'Windows':
+                self._daemon_proc.terminate()
+                try:
+                    self._daemon_proc.wait(timeout=2)
+                except Exception:
+                    self._daemon_proc.kill()
+        else:
+            self._daemon_proc.send_signal(signal.SIGTERM)
+            try:
+                self._daemon_proc.wait(timeout=5)
+            except Exception:
+                # Graceful shutdown failed — remove PID anyway so daemon
+                # notices next time through its loop and initiates shutdown
                 try:
                     os.remove(self.pid_file)
                 except OSError:
                     pass
-            self._daemon_proc = None
-            return True
+                try:
+                    self._daemon_proc.wait(timeout=5)
+                except Exception:
+                    self._daemon_proc.terminate()
+        self._daemon_proc = None
         return True
 
     def _start_tail(self):
