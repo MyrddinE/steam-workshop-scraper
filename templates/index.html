@@ -60,7 +60,6 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 <main>
   <div id="results-pane">
     <div id="results-grid"></div>
-    <div id="scroll-sentinel"></div>
   </div>
   <div id="right-pane">
     <div id="search-builder">
@@ -220,7 +219,7 @@ async function doSearch(reset = true) {
   const items = await resp.json();
 
   const grid = document.getElementById('results-grid');
-  items.forEach(item => {
+  items.forEach((item, idx) => {
     const title = item.title_en || item.title || 'Untitled';
     const wfs = item.wilson_favorite_score != null ? (item.wilson_favorite_score*100).toFixed(1) : null;
     const wss = item.wilson_subscription_score != null ? (item.wilson_subscription_score*100).toFixed(1) : null;
@@ -237,6 +236,7 @@ async function doSearch(reset = true) {
     const div = document.createElement('div');
     div.className = 'grid-cell';
     div.setAttribute('data-wid', item.workshop_id);
+    if (idx === 0) div.setAttribute('data-batch-first', '1');
     if (item.is_queued_for_subscription) div.classList.add('queued');
     div.innerHTML = `${imgHtml}
       <div class="grid-title">${title}</div>
@@ -256,18 +256,31 @@ async function doSearch(reset = true) {
   if (_listNeedsPoll(items)) {
     _startListPoll(filters, document.getElementById('sort-by').value, document.getElementById('sort-order').value);
   }
-  _ensureScrollObserver();
-  _checkScrollSentinel();
+  _placeSentinel();
 }
 
-function _checkScrollSentinel() {
+function _placeSentinel() {
   if (loading || !hasMore) return;
-  const sentinel = document.getElementById('scroll-sentinel');
-  if (!sentinel) return;
-  const rect = sentinel.getBoundingClientRect();
-  if (rect.top < window.innerHeight + 300) {
-    setTimeout(() => doSearch(false), 0);
+  let sentinel = document.getElementById('scroll-sentinel');
+  if (!sentinel) {
+    sentinel = document.createElement('div');
+    sentinel.id = 'scroll-sentinel';
+  } else {
+    sentinel.remove();
   }
+
+  const first = document.querySelector('.grid-cell[data-batch-first]');
+  if (!first) return;
+  first.removeAttribute('data-batch-first');
+
+  const rect = first.getBoundingClientRect();
+  if (rect.top < window.innerHeight) {
+    setTimeout(() => doSearch(false), 0);
+    return;
+  }
+
+  first.parentNode.insertBefore(sentinel, first);
+  _scrollObserver.observe(sentinel);
 }
 
 function _listNeedsPoll(items) {
@@ -536,16 +549,10 @@ document.getElementById('btn-save-filter').onclick = async () => {
   alert('Filter saved for scraper.');
 };
 
-let _scrollObserver = null;
-
-function _ensureScrollObserver() {
-  if (_scrollObserver) return;
-  _scrollObserver = new IntersectionObserver((entries) => {
-    if (loading || !hasMore || !currentOffset) return;
-    if (entries[0].isIntersecting) doSearch(false);
-  }, { rootMargin: '300px' });
-  _scrollObserver.observe(document.getElementById('scroll-sentinel'));
-}
+const _scrollObserver = new IntersectionObserver((entries) => {
+  if (loading || !hasMore || !currentOffset) return;
+  if (entries[0].isIntersecting) doSearch(false);
+});
 
 document.addEventListener('blur', e => {
   try {
