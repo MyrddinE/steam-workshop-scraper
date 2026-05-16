@@ -163,18 +163,19 @@ def query_workshop_files(appid: int, cursor: str, api_key: str) -> dict:
         return {"total": 0, "items": [], "next_cursor": "", "error": True}
 
 
-def query_workshop_page_updated(appid: int, page: int, api_key: str, numperpage: int = 100) -> dict:
+def query_workshop_page_updated(appid: int, cursor: str, api_key: str, numperpage: int = 100) -> dict:
     """
     Queries Steam Workshop via IPublishedFileService/QueryFiles with
-    query_type=2 (rank by last updated), page-based pagination.
+    query_type=2 (rank by last updated), cursor-based pagination.
+    Pass '*' for the first page.
     Returns a dict with 'total', 'items' (list of publishedfileid dicts),
-    and 'next_cursor' (empty — page mode doesn't use cursors).
+    and 'next_cursor'.
     """
     url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
     params = {
         "key": api_key,
         "query_type": 2,  # rank by last updated
-        "page": page,
+        "cursor": cursor,
         "numperpage": numperpage,
         "appid": appid,
         "return_short_description": True,

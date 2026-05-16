@@ -493,17 +493,16 @@ class Daemon:
         for appid in self.target_appids:
             if not self.running:
                 break
-            last_total = -1
-            for page in range(1, 501):
-                if not self.running:
-                    break
-                result = query_workshop_page_updated(appid, page, self.api_key)
+            cursor = "*"
+            page = 0
+            while cursor and self.running and page < 500:
+                result = query_workshop_page_updated(appid, cursor, self.api_key)
                 if result.get("error"):
-                    logging.error(f"Page discovery error for AppID {appid} page {page}.")
+                    logging.error(f"Page discovery error for AppID {appid}.")
                     break
 
                 items = result.get("items", [])
-                if page == 1:
+                if page == 0:
                     logging.info(f"Page mode for AppID {appid}: ~{result.get('total', '?')} total items by update time.")
 
                 page_new = 0
@@ -512,11 +511,14 @@ class Daemon:
                     if wid and insert_or_update_item(self.db_path, {"workshop_id": wid}):
                         page_new += 1
 
+                page += 1
+
                 if page_new == 0:
                     logging.info(f"Page mode: no new items on page {page}, stopping for AppID {appid}.")
                     break
 
                 logging.info(f"Page mode: page {page} added {page_new} new items for AppID {appid}.")
+                cursor = result.get("next_cursor") or ""
                 time.sleep(self.api_delay)
 
         logging.info("Page-based discovery complete.")
