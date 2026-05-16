@@ -867,6 +867,17 @@ def toggle_subscription_queue_status(db_path: str, workshop_id: int):
     conn.commit()
     conn.close()
 
+def clear_subscription_queue_status(db_path: str, workshop_id: int):
+    """Explicitly clears the subscription queue flag for a workshop item."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "UPDATE workshop_items SET is_queued_for_subscription = 0 WHERE workshop_id = ?",
+        (workshop_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
 def get_queued_items(db_path: str) -> list[dict]:
     """Retrieves all items currently queued for subscription."""
     conn = get_connection(db_path)

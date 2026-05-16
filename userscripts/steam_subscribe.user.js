@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Workshop Scraper — Subscribe Bridge
 // @namespace    https://github.com/MyrddinE/steam-workshop-scraper
-// @version      4
+// @version      5
 // @description  Bridges Steam session to the Workshop Scraper web UI for one-click subscribing.
 // @author       MyrddinE
 // @match        https://steamcommunity.com/*
@@ -54,18 +54,57 @@
 
     // ── Auto-subscribe triggered by the scraper web UI ──────────────
     if (location.search.includes('autosubscribe=true')) {
+      var apiBase = GM_getValue('api_base', '');
+      var wid = new URLSearchParams(location.search).get('id');
+
+      function reportAndClose(apiBase, wid) {
+        if (apiBase && wid) {
+          GM_xmlhttpRequest({
+            method: 'POST',
+            url: apiBase + '/api/subscribed/' + wid,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        setTimeout(function () { window.close(); }, 500);
+      }
+
+      function isVerified() {
+        var btn = document.getElementById('SubscribeItemBtn');
+        if (btn && btn.classList.contains('toggled')) return true;
+        var tips = document.querySelectorAll('.subscribeResult, .general_tip, .infoText');
+        for (var i = 0; i < tips.length; i++) {
+          if (tips[i].textContent.indexOf('This item has been added to your Subscription') !== -1) return true;
+        }
+        return false;
+      }
+
       setTimeout(function () {
         var btn = document.getElementById('SubscribeItemBtn');
         if (btn) {
           if (btn.classList.contains('toggled')) {
-            showToast('Already subscribed — closing tab');
+            showToast('Already subscribed');
+            reportAndClose(apiBase, wid);
           } else {
             btn.click();
-            showToast('Subscribing — closing tab');
+            showToast('Subscribing...');
+
+            var startTime = Date.now();
+            var maxWait = 12000;
+            var poll = setInterval(function () {
+              if (isVerified()) {
+                clearInterval(poll);
+                showToast('Subscribed!');
+                reportAndClose(apiBase, wid);
+              } else if (Date.now() - startTime > maxWait) {
+                clearInterval(poll);
+                reportAndClose(apiBase, wid);
+              }
+            }, 500);
           }
+        } else {
+          reportAndClose(apiBase, wid);
         }
-        setTimeout(function () { window.close(); }, 1500);
-      }, 2000); // wait for page JS to initialize
+      }, 2000);
     }
     return;
   }
@@ -74,6 +113,9 @@
   if (!isScraper) return;
 
   const API_BASE = location.origin;
+
+  // Store for autosubscribe tabs (they run on Steam, not the scraper page)
+  GM_setValue('api_base', API_BASE);
 
   // ── Version check ─────────────────────────────────────────────────
   const EXPECTED_VER = parseInt(

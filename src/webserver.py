@@ -6,7 +6,7 @@ import re
 import logging
 import requests
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, get_queued_items
+from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, get_queued_items
 from src.analysis import view_window_analysis
 
 app = Flask(__name__, template_folder='../templates')
@@ -370,6 +370,12 @@ def api_sessionid():
 @app.route('/api/toggle_sub/<int:workshop_id>', methods=['POST'])
 def api_toggle_sub(workshop_id):
     toggle_subscription_queue_status(_db_path, workshop_id)
+    return jsonify({"ok": True})
+
+
+@app.route('/api/subscribed/<int:workshop_id>', methods=['POST'])
+def api_subscribed(workshop_id):
+    clear_subscription_queue_status(_db_path, workshop_id)
     return jsonify({"ok": True})
 
 

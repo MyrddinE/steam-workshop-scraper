@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="userscript-version" content="4">
+<meta name="userscript-version" content="5">
 <title>Steam Workshop Scraper</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
 <style>
@@ -110,10 +110,11 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 <style>
 .sub-queue-item { display:flex;align-items:center;gap:.5em;padding:.5em;border-bottom:1px solid var(--pico-muted-border-color); }
 .sub-queue-item .spinner { width:1em;height:1em;border:2px solid var(--pico-muted-border-color);border-top-color:#44aa44;border-radius:50%;animation:spin .6s linear infinite;flex-shrink:0; }
-.sub-queue-item .countdown { font-size:.85em;color:var(--pico-muted-color);min-width:3em; }
 .sub-queue-item.done { opacity:.5; }
+.sub-queue-item .countdown { font-size:.85em;color:var(--pico-muted-color);min-width:3em; }
 .sub-queue-item.done .spinner { display:none; }
-.sub-queue-item.done .countdown::before { content:'\2713 ';color:#44aa44; }
+.sub-queue-item.done .countdown { display:none; }
+.sub-queue-item.done::before { content:'\2713 '; color:#44aa44; flex-shrink:0; }
 @keyframes spin { to { transform:rotate(360deg); } }
 </style>
 
@@ -637,42 +638,68 @@ async function _startAutoSubscribe() {
 
   await fetch('/api/pause', {method:'POST'});
 
-  const delay = 2.0; // web_delay default
-  const preDelay = delay * 4 * 1000;
-  const stepDelay = delay * 2 * 1000;
-  let done = 0;
+  const stepDelay = 3000; // seconds between tab opens
+  const startTime = Date.now();
+  const verified = new Set();
+  const opened = new Set();
 
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    const row = list.querySelector(`[data-wid="${item.workshop_id}"]`);
-    if (!row) continue;
+  // Poll for verification — marks items done when userscript reports back
+  const pollIv = setInterval(async () => {
+    try {
+      const qresp = await fetch('/api/queued');
+      const queued = await qresp.json();
+      const queuedIds = new Set(queued.map(q => q.workshop_id));
 
-    const countdown = row.querySelector('.countdown');
-    const stepWait = i === 0 ? preDelay : stepDelay;
-    const start = Date.now();
-
-    await new Promise(resolve => {
-      const timer = setInterval(() => {
-        const remaining = Math.ceil((start + stepWait - Date.now()) / 1000);
-        countdown.textContent = remaining > 0 ? remaining + 's' : '';
-        if (remaining <= 0) {
-          clearInterval(timer);
-          resolve();
+      items.forEach(item => {
+        if (!queuedIds.has(item.workshop_id) && !verified.has(item.workshop_id)) {
+          verified.add(item.workshop_id);
+          const row = list.querySelector(`[data-wid="${item.workshop_id}"]`);
+          if (row) row.classList.add('done');
         }
-      }, 250);
+      });
+
+      progress.textContent = verified.size + ' / ' + items.length;
+
+      if (verified.size >= items.length) {
+        clearInterval(pollIv);
+        await fetch('/api/resume', {method:'POST'});
+        setTimeout(() => { overlay.style.display = 'none'; }, 2000);
+      }
+    } catch(e) { /* polling error — continue */ }
+  }, 1000);
+
+  // Countdown + tab-open loop
+  const scheduleIv = setInterval(() => {
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+
+    items.forEach((item, i) => {
+      const row = list.querySelector(`[data-wid="${item.workshop_id}"]`);
+      if (!row) return;
+      const countdown = row.querySelector('.countdown');
+      if (!countdown) return;
+
+      const openAt = i * Math.ceil(stepDelay / 1000);
+      if (opened.has(item.workshop_id)) {
+        countdown.textContent = '';
+        return;
+      }
+
+      if (elapsed >= openAt) {
+        opened.add(item.workshop_id);
+        window.open(
+          'https://steamcommunity.com/sharedfiles/filedetails/?id=' + item.workshop_id + '&autosubscribe=true',
+          '_blank'
+        );
+        countdown.textContent = '';
+      } else {
+        countdown.textContent = (openAt - elapsed) + 's';
+      }
     });
 
-    window.open(
-      'https://steamcommunity.com/sharedfiles/filedetails/?id=' + item.workshop_id + '&autosubscribe=true',
-      '_blank'
-    );
-    row.classList.add('done');
-    done++;
-    progress.textContent = done + ' / ' + items.length;
-  }
-
-  await fetch('/api/resume', {method:'POST'});
-  setTimeout(() => { overlay.style.display = 'none'; }, 2000);
+    if (opened.size >= items.length) {
+      clearInterval(scheduleIv);
+    }
+  }, 250);
 }
 
 document.getElementById('sub-cancel').onclick = () => {
