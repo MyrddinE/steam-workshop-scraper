@@ -13,8 +13,9 @@ header { padding: .5rem 1rem; border-bottom: 1px solid var(--pico-muted-border-c
 main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 #results-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 #results-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: .5rem; overflow-y: auto; align-content: start; flex: 1; min-height: 0; }
-.grid-cell { cursor: pointer; padding: .5em; border: 1px solid var(--pico-muted-border-color); border-radius: 4px; display: flex; flex-direction: column; gap: .25em; }
+.grid-cell { cursor: pointer; padding: .5em; border: 1px solid var(--pico-muted-border-color); border-radius: 4px; display: flex; flex-direction: column; gap: .25em; outline: none; }
 .grid-cell:hover { border-color: var(--pico-primary-hover-background); }
+.grid-cell:focus-visible { outline: 2px solid #44aa44; outline-offset: 2px; }
 .grid-cell.selected { border-color: var(--pico-primary-background); background: color-mix(in srgb, var(--pico-primary-background) 20%, transparent); }
 .grid-img { width: 100%; aspect-ratio: 16/10; object-fit: cover; border-radius: 3px; background: var(--pico-muted-border-color); }
 .grid-img-placeholder { width: 100%; aspect-ratio: 16/10; border-radius: 3px; background: var(--pico-muted-border-color); display: flex; align-items: center; justify-content: center; color: var(--pico-muted-color); font-size: .8rem; }
