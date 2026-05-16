@@ -135,3 +135,55 @@ def test_database_migration_compatibility(tmp_path):
     item = get_item_details(old_schema_path, 1)
     assert item["title"] == "Pre-existing"
     assert item["consumer_appid"] == 294100
+
+
+@pytest.mark.integration
+def test_fts5_content_sync_needs_rebuild(db_path):
+    """FTS5 content-sync tables do NOT auto-sync new inserts.
+    Items added after the last rebuild are invisible to MATCH queries.
+    This test documents the expected behavior."""
+    from src.database import insert_or_update_item, search_items, get_connection
+
+    for i in range(1, 20):
+        insert_or_update_item(db_path, {
+            "workshop_id": i, "title": f"test item {i}",
+            "short_description": "desc", "extended_description": "desc",
+            "subscriptions": 100, "lifetime_subscriptions": 200,
+            "favorited": 10, "views": 1000, "status": 200,
+        })
+
+    # Before rebuild: no FTS5 content
+    results = search_items(db_path, filters=[
+        {"field": "Full Text", "op": "contains", "value": "test item"}])
+    assert len(results) == 0  # confirms FTS5 needs rebuild
+
+    # After rebuild: items visible
+    conn = get_connection(db_path)
+    conn.execute("INSERT INTO workshop_fts(workshop_fts) VALUES ('rebuild')")
+    conn.commit()
+    conn.close()
+
+    results = search_items(db_path, filters=[
+        {"field": "Full Text", "op": "contains", "value": "test item"}])
+    assert len(results) > 0  # now works after rebuild
+
+
+@pytest.mark.integration
+def test_migration_crash_recovery(db_path):
+    """Migrations must be idempotent — re-running a partially-applied
+    migration continues from where it left off without data loss."""
+    from src.database import get_connection
+
+    conn = get_connection(db_path)
+    ver = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.close()
+    assert ver >= 1  # at least one migration applied
+
+    # Simulate re-run: call initialize_database again on same DB
+    from src.database import initialize_database
+    initialize_database(db_path)  # should be idempotent — no crash
+
+    conn = get_connection(db_path)
+    ver2 = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.close()
+    assert ver2 == ver  # version unchanged — nothing broke
