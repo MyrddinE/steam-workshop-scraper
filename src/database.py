@@ -1353,6 +1353,8 @@ def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None) -> dict:
         for f in filters:
             if f.get("op") == "percentile":
                 continue
+            if FIELD_NAME_MAP.get(f.get("field", "")) == "full_text":
+                continue  # FTS5 MATCH can't be applied to Wilson score computation
             field = f.get("field")
             op = f.get("op")
             val = f.get("value")
@@ -1523,7 +1525,8 @@ def bump_image_priority_for_detail(db_path: str, workshop_id: int):
 
 
 def flag_field_for_translation(db_path: str, item_type: str, item_id: int, field: str, text: str, priority: int):
-    """Inserts a field into translation_queue, or bumps its priority. Never downgrades."""
+    """Inserts a field into translation_queue, or bumps its priority. Never downgrades.
+    Also bumps translation_priority on the parent item/user table."""
     if not text or text.isascii():
         return
     conn = get_connection(db_path)
@@ -1544,6 +1547,17 @@ def flag_field_for_translation(db_path: str, item_type: str, item_id: int, field
             "VALUES (?, ?, ?, ?, ?, ?)",
             (item_type, item_id, field, text, priority, None)
         )
+    conn.commit()
+    conn.close()
+    # Sync translation_priority on the parent — use MAX so multiple fields
+    # each set their priority without downgrading
+    table = "users" if item_type == "user" else "workshop_items"
+    id_col = "workshop_id" if table == "workshop_items" else "steamid"
+    conn = get_connection(db_path)
+    conn.execute(
+        f"UPDATE {table} SET translation_priority = MAX(translation_priority, ?) WHERE {id_col} = ?",
+        (priority, item_id)
+    )
     conn.commit()
     conn.close()
 

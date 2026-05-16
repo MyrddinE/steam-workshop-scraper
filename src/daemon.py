@@ -153,23 +153,6 @@ class Daemon:
             clean["tags"] = normalize_tags(clean["tags"])
         return clean
 
-    def _evaluate_translation_needs(self, merged_data: dict, existing_data: dict) -> dict:
-        """Sets translation_priority on merged_data if fields contain non-ASCII and are new/changed."""
-        is_unicode = (
-            not is_ascii(merged_data.get("title", ""))
-            or not is_ascii(merged_data.get("short_description", ""))
-            or not is_ascii(merged_data.get("extended_description", ""))
-        )
-        is_translated = merged_data.get("dt_translated") is not None
-        is_changed = (
-            merged_data.get("title") != existing_data.get("title")
-            or merged_data.get("short_description") != existing_data.get("short_description")
-            or merged_data.get("extended_description") != existing_data.get("extended_description")
-        )
-        if is_unicode and (not is_translated or is_changed):
-            merged_data["translation_priority"] = 1
-        return merged_data
-
     def _should_enrich(self, appid: int, item: dict) -> bool:
         """Returns True if the item matches enrichment filters for its AppID.
         Evaluates the stored filter list using the same logic as the TUI search builder."""

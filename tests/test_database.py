@@ -422,6 +422,60 @@ def test_get_app_tracking_missing(db_path):
     from src.database import get_app_tracking
     assert get_app_tracking(db_path, 999) is None
 
+
+def test_translation_priority_set_on_flag(db_path):
+    """Bug #1 regression: flag_field_for_translation must set translation_priority
+    on the parent item so the web UI detail poll detects queued work."""
+    from src.database import insert_or_update_item, flag_field_for_translation, get_connection
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト", "status": 200})
+
+    flag_field_for_translation(db_path, "item", 1, "title_en", "テスト", 10)
+
+    conn = get_connection(db_path)
+    prio = conn.execute(
+        "SELECT translation_priority FROM workshop_items WHERE workshop_id = 1"
+    ).fetchone()[0]
+    conn.close()
+    assert prio == 10, f"Expected translation_priority=10, got {prio}"
+
+
+def test_classify_translation_queued(db_path):
+    """Bug #3: _classify_translation_status must show 'Queued' for items with
+    non-ASCII text that have been flagged for translation."""
+    from src.database import insert_or_update_item, flag_field_for_translation, get_db_stats
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト", "status": 200})
+    flag_field_for_translation(db_path, "item", 1, "title_en", "テスト", 5)
+
+    stats = get_db_stats(db_path)
+    assert stats["translation_status"]["Queued"] >= 1
+
+
+def test_wilson_cutoffs_with_full_text(db_path):
+    """Issue #5: compute_wilson_cutoffs must handle Full Text filters.
+    A Full Text filter should not crash or return empty cutoffs."""
+    from src.database import compute_wilson_cutoffs, insert_or_update_item, get_connection
+
+    for i in range(1, 101):
+        insert_or_update_item(db_path, {
+            "workshop_id": i, "title": f"item {i}",
+            "subscriptions": i * 100, "lifetime_subscriptions": 500,
+            "favorited": i * 10, "views": 1000, "status": 200,
+            "wilson_subscription_score": min(1.0, i / 100), "wilson_favorite_score": min(1.0, i / 200),
+        })
+
+    conn = get_connection(db_path)
+    conn.execute("INSERT INTO workshop_fts(workshop_fts) VALUES ('rebuild')")
+    conn.commit()
+    conn.close()
+
+    cutoffs = compute_wilson_cutoffs(db_path, [
+        {"field": "Full Text", "op": "contains", "value": "item"}
+    ])
+    assert "wilson_subscription_p50" in cutoffs
+    assert cutoffs["wilson_subscription_p50"] > 0
+
 def test_save_app_filter_defaults(db_path):
     from src.database import save_app_filter, get_app_tracking
     save_app_filter(db_path, 5000)
