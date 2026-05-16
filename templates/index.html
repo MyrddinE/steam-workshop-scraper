@@ -97,6 +97,25 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
   </div>
 </main>
 
+<div id="sub-queue-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;overflow-y:auto;padding:2rem">
+  <div style="max-width:600px;margin:0 auto">
+    <h2>Auto-Subscribing...</h2>
+    <p id="sub-progress" style="color:var(--pico-muted-color)"></p>
+    <div id="sub-queue-list"></div>
+    <button id="sub-cancel" style="margin-top:1rem">Cancel</button>
+  </div>
+</div>
+
+<style>
+.sub-queue-item { display:flex;align-items:center;gap:.5em;padding:.5em;border-bottom:1px solid var(--pico-muted-border-color); }
+.sub-queue-item .spinner { width:1em;height:1em;border:2px solid var(--pico-muted-border-color);border-top-color:#44aa44;border-radius:50%;animation:spin .6s linear infinite;flex-shrink:0; }
+.sub-queue-item .countdown { font-size:.85em;color:var(--pico-muted-color);min-width:3em; }
+.sub-queue-item.done { opacity:.5; }
+.sub-queue-item.done .spinner { display:none; }
+.sub-queue-item.done .countdown::before { content:'\2713 ';color:#44aa44; }
+@keyframes spin { to { transform:rotate(360deg); } }
+</style>
+
 <script>
 const FIELD_OPS = {
   text: ['contains','does_not_contain','is','is_not','is_empty','is_not_empty'],
@@ -236,6 +255,7 @@ async function doSearch(reset = true) {
     const div = document.createElement('div');
     div.className = 'grid-cell';
     div.setAttribute('data-wid', item.workshop_id);
+    div.setAttribute('tabindex', '0');
     if (idx === 0) div.setAttribute('data-batch-first', '1');
     if (item.is_queued_for_subscription) div.classList.add('queued');
     div.innerHTML = `${imgHtml}
@@ -548,6 +568,112 @@ document.addEventListener('blur', e => {
     e.target.value = String(v);
   } catch (err) { /* blur handler must never break the page */ }
 }, true);
+
+document.addEventListener('keydown', e => {
+  const grid = document.getElementById('results-grid');
+  if (!grid.contains(document.activeElement)) return;
+  if (!document.activeElement.classList.contains('grid-cell')) return;
+
+  const wid = parseInt(document.activeElement.getAttribute('data-wid'), 10);
+  const cells = [...grid.querySelectorAll('.grid-cell')];
+  const idx = cells.indexOf(document.activeElement);
+
+  if (e.key === 's' || e.key === 'S') {
+    e.preventDefault();
+    fetch('/api/toggle_sub/' + wid, {method:'POST'}).then(() => {
+      document.activeElement.classList.toggle('queued');
+    });
+    return;
+  }
+
+  if (e.key === 'l' || e.key === 'L') {
+    e.preventDefault();
+    _startAutoSubscribe();
+    return;
+  }
+
+  let nextIdx = idx;
+  if (e.key === 'ArrowRight') nextIdx = idx + 1;
+  else if (e.key === 'ArrowLeft') nextIdx = idx - 1;
+  else if (e.key === 'ArrowDown') {
+    const cols = getComputedStyle(grid).gridTemplateColumns.split(' ').length;
+    nextIdx = Math.min(idx + cols, cells.length - 1);
+  }
+  else if (e.key === 'ArrowUp') {
+    const cols = getComputedStyle(grid).gridTemplateColumns.split(' ').length;
+    nextIdx = Math.max(idx - cols, 0);
+  }
+  else return;
+
+  e.preventDefault();
+  if (nextIdx >= 0 && nextIdx < cells.length) {
+    cells[nextIdx].focus();
+    cells[nextIdx].scrollIntoView({block:'nearest'});
+  }
+});
+
+async function _startAutoSubscribe() {
+  const resp = await fetch('/api/queued');
+  const items = await resp.json();
+  if (!items.length) { alert('No items queued for subscription.'); return; }
+
+  const overlay = document.getElementById('sub-queue-overlay');
+  const list = document.getElementById('sub-queue-list');
+  const progress = document.getElementById('sub-progress');
+  overlay.style.display = 'block';
+  progress.textContent = `0 / ${items.length}`;
+  list.innerHTML = items.map(it => `
+    <div class="sub-queue-item" data-wid="${it.workshop_id}">
+      <span class="spinner"></span>
+      <span class="countdown"></span>
+      <span>${it.title || 'Untitled'}</span>
+    </div>
+  `).join('');
+
+  await fetch('/api/pause', {method:'POST'});
+
+  const delay = 2.0; // web_delay default
+  const preDelay = delay * 4 * 1000;
+  const stepDelay = delay * 2 * 1000;
+  let done = 0;
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const row = list.querySelector(`[data-wid="${item.workshop_id}"]`);
+    if (!row) continue;
+
+    const countdown = row.querySelector('.countdown');
+    const stepWait = i === 0 ? preDelay : stepDelay;
+    const start = Date.now();
+
+    await new Promise(resolve => {
+      const timer = setInterval(() => {
+        const remaining = Math.ceil((start + stepWait - Date.now()) / 1000);
+        countdown.textContent = remaining > 0 ? remaining + 's' : '';
+        if (remaining <= 0) {
+          clearInterval(timer);
+          resolve();
+        }
+      }, 250);
+    });
+
+    window.open(
+      'https://steamcommunity.com/sharedfiles/filedetails/?id=' + item.workshop_id + '&autosubscribe=true',
+      '_blank'
+    );
+    row.classList.add('done');
+    done++;
+    progress.textContent = done + ' / ' + items.length;
+  }
+
+  await fetch('/api/resume', {method:'POST'});
+  setTimeout(() => { overlay.style.display = 'none'; }, 2000);
+}
+
+document.getElementById('sub-cancel').onclick = () => {
+  fetch('/api/resume', {method:'POST'});  // resume daemon on cancel too
+  document.getElementById('sub-queue-overlay').style.display = 'none';
+};
 
 loadState();
 </script>
