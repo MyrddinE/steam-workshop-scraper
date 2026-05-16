@@ -84,7 +84,7 @@ def test_search_by_author(db_path):
     for r in results:
         assert r["creator"] == "auth1"
 
-def test_get_all_authors(db_path):
+def test_get_all_authors_advanced(db_path):
     """Test retrieving a list of unique authors for the TUI combo box."""
     authors = get_all_authors(db_path)
     assert len(authors) == 3

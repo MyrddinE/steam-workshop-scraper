@@ -24,7 +24,7 @@ def test_is_ascii():
 def test_translator_thread_no_config():
     thread = TranslatorThread({"database": {"path": "test.db"}})
     thread.run()
-
+    assert thread.running is True  # exits early without changing running
 @patch("src.translator.get_next_batch_for_translation")
 @patch("time.sleep")
 def test_translator_thread_loop(mock_sleep, mock_get_batch, mock_config):
