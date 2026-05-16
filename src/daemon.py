@@ -198,6 +198,10 @@ class Daemon:
         logging.warning(f"Received signal {signum}, initiating shutdown...")
         self.running = False
         self.translator.running = False
+        if hasattr(self, '_web_worker'):
+            self._web_worker.running = False
+        if hasattr(self, '_image_worker'):
+            self._image_worker.running = False
 
     def expand_user_discovery(self):
         """
@@ -389,10 +393,10 @@ class Daemon:
         """Main loop that continuously queries and scrapes."""
         logging.info("Starting daemon loop...")
         self.translator.start()
-        web_worker = WebScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value)
-        web_worker.start()
-        image_worker = ImageScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value)
-        image_worker.start()
+        self._web_worker = WebScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value)
+        self._web_worker.start()
+        self._image_worker = ImageScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value)
+        self._image_worker.start()
         while self.running:
             self.process_batch()
             # Check if the PID file has been deleted (graceful shutdown signal)
@@ -400,11 +404,11 @@ class Daemon:
                 logging.info("PID file removed — initiating graceful shutdown")
                 self.running = False
         logging.info("Daemon gracefully exited.")
-        web_worker.running = False
-        web_worker.join(timeout=5)
+        self._web_worker.running = False
+        self._web_worker.join(timeout=5)
         logging.info("Web scraper thread stopped.")
-        image_worker.running = False
-        image_worker.join(timeout=5)
+        self._image_worker.running = False
+        self._image_worker.join(timeout=5)
         logging.info("Image download thread stopped.")
         self.translator.running = False
         self.translator.join(timeout=5)
