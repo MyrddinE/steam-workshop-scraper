@@ -322,11 +322,15 @@ class DaemonManagerScreen(Screen):
         pid = self._read_pid()
         if pid is None:
             return False
-        import signal, os as _os
+        import signal, os as _os, sys
         try:
             _os.kill(pid, 0)
             return True
-        except (OSError, ProcessLookupError):
+        except OSError:
+            if sys.platform == 'win32':
+                return True  # os.kill(0) unreliable on detached Windows processes
+            return False
+        except ProcessLookupError:
             return False
 
     def _update_status(self) -> None:

@@ -84,6 +84,7 @@ class Daemon:
         # Page-based discovery (sort by update time) — runs once a day when eligible
         self._last_page_discovery = 0
         self._cursor_exhausted = False
+        self._saw_pid_file = False  # set True once PID file is seen; prevents false trigger in tests
 
         # Enforce required target_appids
         self.target_appids = config.get("daemon", {}).get("target_appids")
@@ -265,12 +266,16 @@ class Daemon:
             for _ in range(600):
                 if not self.running:
                     return
+                if self._pid_file_removed():
+                    return
                 time.sleep(1)
             return
 
         for existing_data in items_to_scrape:
             if not self.running:
-                break # Exit early if shutting down
+                break
+            if self._pid_file_removed():
+                break
 
             now_ts = int(time.time())
             item_id = existing_data['workshop_id']
@@ -391,6 +396,18 @@ class Daemon:
                     self._save_config_value("api_delay_seconds", self.api_delay)
                 self.api_successes = 0
 
+    def _pid_file_removed(self) -> bool:
+        if not self.running:
+            return False
+        exists = os.path.exists(".daemon.pid")
+        if exists and not self._saw_pid_file:
+            self._saw_pid_file = True
+        if self._saw_pid_file and not exists:
+            logging.info("PID file removed — initiating graceful shutdown")
+            self.running = False
+            return True
+        return False
+
     def run(self):
         """Main loop that continuously queries and scrapes."""
         logging.info("Starting daemon loop...")
@@ -401,10 +418,7 @@ class Daemon:
         self._image_worker.start()
         while self.running:
             self.process_batch()
-            # Check if the PID file has been deleted (graceful shutdown signal)
-            if self.running and not os.path.exists(".daemon.pid"):
-                logging.info("PID file removed — initiating graceful shutdown")
-                self.running = False
+            self._pid_file_removed()
         logging.info("Daemon gracefully exited.")
         self._web_worker.running = False
         self._web_worker.join(timeout=5)
@@ -438,6 +452,8 @@ class Daemon:
 
             logging.info(f"Discovering items for AppID {appid}, resuming from cursor...")
             while cursor and self.running:
+                if self._pid_file_removed():
+                    break
                 result = query_workshop_files(appid, cursor=cursor, api_key=self.api_key)
                 if result.get("error"):
                     logging.error(f"API error for AppID {appid}. Halting discovery.")
