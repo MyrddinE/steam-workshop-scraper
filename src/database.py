@@ -561,7 +561,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 8
+    EXPECTED_VERSION = 9
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -828,6 +828,34 @@ def initialize_database(db_path: str):
         conn.commit()
         cursor.execute("PRAGMA user_version = 8")
         logging.info("Migration 7→8 complete.")
+
+    if db_version < 9:
+        logging.info("Running migration 8→9: recalculating favorite scores with lifetime_subscriptions denominator...")
+        import math
+        def wl(s, v):
+            if v == 0:
+                return 0.0
+            p = min(float(s) / v, 1.0)
+            z2 = 1.96 * 1.96
+            d = 1 + z2 / v
+            n = p + z2 / (2*v) - 1.96 * math.sqrt(max(0.0, p*(1-p)/v) + z2/(4*v*v))
+            return max(0.0, min(1.0, n / d))
+
+        cursor.execute("""
+            SELECT workshop_id, favorited, lifetime_subscriptions
+            FROM workshop_items WHERE favorited IS NOT NULL
+        """)
+        updated = 0
+        for row in cursor.fetchall():
+            fav_score = wl(row["favorited"] or 0, row["lifetime_subscriptions"] or 0)
+            cursor.execute(
+                "UPDATE workshop_items SET wilson_favorite_score = ? WHERE workshop_id = ?",
+                (fav_score, row["workshop_id"])
+            )
+            updated += 1
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 9")
+        logging.info(f"Migration 8→9 complete. Recalculated {updated} favorite scores.")
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")

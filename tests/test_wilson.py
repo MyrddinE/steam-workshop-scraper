@@ -119,7 +119,7 @@ def test_schema_version_is_set(db_path):
     conn = get_connection(db_path)
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert version == 8
+    assert version == 9
 
 def test_subscriber_score_uses_retention_formula(db_path):
     """Verify subscriber score uses subscriptions/lifetime_subscriptions ratio."""
@@ -136,6 +136,19 @@ def test_subscriber_score_uses_retention_formula(db_path):
         "SELECT wilson_subscription_score FROM workshop_items WHERE workshop_id=991").fetchone()
     conn.close()
     assert row["wilson_subscription_score"] == 0.99
+
+
+def test_favorite_score_uses_lifetime_subs_denominator():
+    """wilson_favorite_score uses lifetime_subscriptions, not views, as denominator."""
+    from src.daemon import wilson_lower
+    # High views = very low score with old formula
+    old = wilson_lower(80, 10000)
+    # Same favorites relative to lifetime_subscriptions = much higher score
+    new = wilson_lower(80, 200)
+    assert old < new
+    assert abs(new - wilson_lower(80, 200)) < 0.0001
+    # Verify Wilson monotonicity: more favorites = higher score
+    assert wilson_lower(40, 200) < wilson_lower(80, 200) < wilson_lower(160, 200)
 
 def test_tag_migration_normalizes_malformed_json(db_path):
     """Verify tags are stored in the junction table and retrievable."""
