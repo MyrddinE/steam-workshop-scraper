@@ -398,7 +398,7 @@ function renderDetail(item) {
     <div class="stat-row"><span class="stat-label">Subs:</span> ${fmtCount(subs)} / ${fmtCount(lsubs)}</div>
     <div class="stat-row"><span class="stat-label">Favs:</span> ${fmtCount(favs)} / ${fmtCount(lfavs)}</div>
     <div class="stat-row"><span class="stat-label">Tags:</span> <small>${tags}</small></div>
-    <p><a href="${url}" target="_blank">Open on Steam</a> &nbsp; <button onclick="doSubscribe(${item.workshop_id}, ${item.consumer_appid || 0});return false;">Subscribe</button></p>
+    <p><button onclick="doSubscribe(${item.workshop_id}, ${item.consumer_appid || 0});return false;">Subscribe</button></p>
     ${desc ? '<div style="border-left:3px solid var(--pico-muted-border-color);padding-left:.5rem;margin-top:.5rem">'+desc+'</div>' : ''}
   `;
 }
@@ -478,36 +478,16 @@ async function doSubscribe(wid, appid) {
       '1. Install Tampermonkey from your browser\'s extension store\n' +
       '2. Click OK to open the userscript — Tampermonkey will offer to install it\n' +
       '3. Visit steamcommunity.com once to capture your session\n\n' +
-      'The script automates the same POST Steam uses for its own Subscribe button.'
+      'The userscript auto-clicks the Subscribe button on the Steam page.'
     );
     if (ok) window.open(US_RAW_URL, '_blank');
     return;
   }
 
-  let result;
-  try {
-    const resp = await fetch('/api/subscribe/' + wid, {method:'POST'});
-    result = await resp.json();
-  } catch(e) {
-    result = {success: -1, message: 'Network error contacting server.'};
-  }
-
-  switch (result.success) {
-    case 1:
-      alert('Subscribed!');
-      break;
-    case 2:
-      alert('Your Steam session has expired. Visit steamcommunity.com in this browser to refresh it, then reload this page.');
-      break;
-    case 15:
-      alert('You do not have permission to subscribe to this item.\n\nYour Steam session may have expired. Visit steamcommunity.com and log in to refresh it.');
-      break;
-    case 25:
-      alert('You have reached the 15,000 subscription limit.');
-      break;
-    default:
-      alert(result.message || 'There was a problem subscribing. Please try again.');
-  }
+  window.open(
+    'https://steamcommunity.com/sharedfiles/filedetails/?id=' + wid + '&autosubscribe=true',
+    '_blank'
+  );
 }
 
 async function loadState() {

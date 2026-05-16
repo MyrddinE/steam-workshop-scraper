@@ -51,6 +51,22 @@
     captureSession();
     // Re-capture after a few seconds in case the cookie loads late
     setTimeout(captureSession, 3000);
+
+    // ── Auto-subscribe triggered by the scraper web UI ──────────────
+    if (location.search.includes('autosubscribe=true')) {
+      setTimeout(function () {
+        var btn = document.getElementById('SubscribeItemBtn');
+        if (btn) {
+          if (btn.classList.contains('toggled')) {
+            showToast('Already subscribed — closing tab');
+          } else {
+            btn.click();
+            showToast('Subscribing — closing tab');
+          }
+        }
+        setTimeout(function () { window.close(); }, 1500);
+      }, 2000); // wait for page JS to initialize
+    }
     return;
   }
 
