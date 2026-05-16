@@ -60,6 +60,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 <main>
   <div id="results-pane">
     <div id="results-grid"></div>
+    <div id="scroll-sentinel"></div>
   </div>
   <div id="right-pane">
     <div id="search-builder">
@@ -523,13 +524,11 @@ document.getElementById('btn-save-filter').onclick = async () => {
   alert('Filter saved for scraper.');
 };
 
-document.getElementById('results-grid').addEventListener('scroll', () => {
+const _scrollObserver = new IntersectionObserver((entries) => {
   if (loading || !hasMore) return;
-  const grid = document.getElementById('results-grid');
-  if (grid.scrollTop + grid.clientHeight >= grid.scrollHeight - 300) {
-    doSearch(false);
-  }
-});
+  if (entries[0].isIntersecting) doSearch(false);
+}, { rootMargin: '300px' });
+_scrollObserver.observe(document.getElementById('scroll-sentinel'));
 
 document.addEventListener('blur', e => {
   try {
