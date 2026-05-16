@@ -282,6 +282,7 @@ class DaemonManagerScreen(Screen):
         self.config_path = config_path
         self.pid_file = ".daemon.pid"
         self._tail_proc = None
+        self._daemon_proc = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -309,10 +310,11 @@ class DaemonManagerScreen(Screen):
             self._tail_proc = None
 
     def _update_status(self) -> None:
-        pid = self._read_pid()
-        if pid and self._is_running(pid):
+        if self._daemon_proc and self._daemon_proc.poll() is None:
+            pid = self._read_pid() or self._daemon_proc.pid
             self.query_one("#dm-status", Static).update(f"[green]Running (PID: {pid})[/green]")
         else:
+            self._daemon_proc = None
             self.query_one("#dm-status", Static).update("[red]Not running[/red]")
 
     def _read_pid(self) -> int | None:
@@ -321,15 +323,6 @@ class DaemonManagerScreen(Screen):
                 return int(f.read().strip())
         except Exception:
             return None
-
-    @staticmethod
-    def _is_running(pid: int) -> bool:
-        try:
-            import os, signal
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
 
     def _start_daemon(self) -> bool:
         import subprocess, sys
@@ -340,7 +333,7 @@ class DaemonManagerScreen(Screen):
             else:
                 kwargs["stdout"] = subprocess.DEVNULL
                 kwargs["stderr"] = subprocess.DEVNULL
-            subprocess.Popen(
+            self._daemon_proc = subprocess.Popen(
                 [sys.executable, "-m", "src.daemon_runner", self.config_path, "--daemon"],
                 **kwargs,
             )
@@ -350,19 +343,21 @@ class DaemonManagerScreen(Screen):
             return False
 
     def _stop_daemon(self) -> bool:
-        pid = self._read_pid()
-        if pid and self._is_running(pid):
-            import os, signal
+        if self._daemon_proc and self._daemon_proc.poll() is None:
+            import platform
+            self._daemon_proc.terminate()
             try:
-                os.kill(pid, signal.SIGTERM)
-            except OSError:
+                self._daemon_proc.wait(timeout=5)
+            except Exception:
                 pass
-            import time
-            for _ in range(50):  # wait up to 5 seconds
-                if not self._is_running(pid):
-                    return True
-                time.sleep(0.1)
-        return not self._is_running(pid) if pid else True
+            if platform.system() == 'Windows':
+                try:
+                    os.remove(self.pid_file)
+                except OSError:
+                    pass
+            self._daemon_proc = None
+            return True
+        return True
 
     def _start_tail(self):
         import subprocess
