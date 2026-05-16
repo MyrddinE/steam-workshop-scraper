@@ -249,8 +249,10 @@ class Daemon:
             logging.debug("No items to scrape. Expanding discovery...")
             if self._page_discovery_eligible():
                 self._run_page_discovery()
-            else:
-                self.seed_database()
+                # Fall through to cursor mode if page mode didn't fill the queue
+                if not self.running:
+                    return
+            self.seed_database()
             try:
                 items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size,
                                                            staleness_days=self.item_staleness_days)
