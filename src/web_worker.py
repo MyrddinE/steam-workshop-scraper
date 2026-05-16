@@ -64,7 +64,8 @@ class WebScraperThread(threading.Thread):
                     self.web_delay = max(1.0, round(self.web_delay / 1.05, 3))
                     if old != self.web_delay:
                         logging.info(f"100 consecutive web successes! Decreasing web delay from {old} to {self.web_delay}s.")
-                        self._save_cb("web_delay_seconds", self.web_delay)
+                        if self._save_cb:
+                            self._save_cb("web_delay_seconds", self.web_delay)
                     self.web_successes = 0
                 time.sleep(self.web_delay)
             else:
@@ -74,11 +75,13 @@ class WebScraperThread(threading.Thread):
                     old = self.web_delay
                     self.web_delay = round(self.web_delay * (1.05 ** 10), 3)
                     logging.info(f"Multiple consecutive web scrape failures! Increasing web delay from {old} to {self.web_delay}s.")
-                    self._save_cb("web_delay_seconds", self.web_delay)
+                    if self._save_cb:
+                        self._save_cb("web_delay_seconds", self.web_delay)
                     self.web_had_streak = False
                 time.sleep(self.web_delay)
 
-        self._save_cb("web_delay_seconds", self.web_delay)
+        if self._save_cb:
+            self._save_cb("web_delay_seconds", self.web_delay)
         logging.info("Web scraper thread stopped.")
 
 

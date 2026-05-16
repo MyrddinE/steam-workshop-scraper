@@ -123,6 +123,43 @@ def test_search_sorting(db_path):
 def test_search_does_not_contain(db_path):
     filters = [{"field": "title", "op": "does_not_contain", "value": "Alpha"}]
     results = search_items(db_path, filters=filters)
-    # Alpha Item is 1, so 2, 3, 4, 5 should remain (4 is None, 5 is "")
     assert len(results) == 4
     assert 1 not in {r["workshop_id"] for r in results}
+
+
+def test_search_malformed_filters_graceful(db_path):
+    filters = [
+        {"field": "Title", "value": "Alpha"},           # missing op
+        {"op": "contains", "value": "Alpha"},            # missing field
+        {"field": "NoSuchField", "op": "contains", "value": "Alpha"},  # unknown field
+    ]
+    results = search_items(db_path, filters=filters)
+    assert len(results) > 0  # doesn't crash, returns something
+
+
+def test_search_invalid_sort_col(db_path):
+    results = search_items(db_path, sort_by="nonexistent_column", sort_order="DESC")
+    assert isinstance(results, list)  # doesn't crash
+
+
+def test_concurrent_search_access(db_path):
+    import threading, random
+    from src.database import get_connection
+    errors = []
+
+    def do_search():
+        try:
+            for _ in range(10):
+                fid = random.choice([1, 2, 3, 4, 5])
+                r = search_items(db_path, filters=[
+                    {"field": "Workshop ID", "op": "is", "value": str(fid)}])
+                if len(r) > 1:
+                    errors.append(f"Expected 0-1 results, got {len(r)}")
+        except Exception as e:
+            errors.append(str(e))
+
+    threads = [threading.Thread(target=do_search) for _ in range(5)]
+    for t in threads: t.start()
+    for t in threads: t.join(timeout=10)
+
+    assert not errors, f"Concurrent search errors: {errors}"

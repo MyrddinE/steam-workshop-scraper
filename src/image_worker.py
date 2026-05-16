@@ -121,7 +121,8 @@ class ImageScraperThread(threading.Thread):
                     self.image_delay = max(0.5, round(self.image_delay / 1.05, 3))
                     if old != self.image_delay:
                         logging.info(f"100 consecutive image successes! Decreasing delay from {old} to {self.image_delay}s.")
-                        self._save_cb("image_delay_seconds", self.image_delay)
+                        if self._save_cb:
+                            self._save_cb("image_delay_seconds", self.image_delay)
                     self.image_successes = 0
 
             except Exception as e:
@@ -137,12 +138,14 @@ class ImageScraperThread(threading.Thread):
                     old = self.image_delay
                     self.image_delay = round(self.image_delay * (1.05 ** 10), 3)
                     logging.info(f"Multiple consecutive image failures! Increasing delay from {old} to {self.image_delay}s.")
-                    self._save_cb("image_delay_seconds", self.image_delay)
+                    if self._save_cb:
+                        self._save_cb("image_delay_seconds", self.image_delay)
                     self.image_had_streak = False
 
             time.sleep(self.image_delay)
 
-        self._save_cb("image_delay_seconds", self.image_delay)
+        if self._save_cb:
+            self._save_cb("image_delay_seconds", self.image_delay)
         logging.info("Image download thread stopped.")
 
     def _get_conn(self):

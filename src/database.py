@@ -1179,6 +1179,8 @@ def search_items(db_path: str, query: str = "", appid: int = None,
             if not field or not op:
                 continue
             db_col = FIELD_NAME_MAP.get(field, field)
+            if db_col not in FIELD_NAME_MAP.values() and db_col not in ("tags", "full_text"):
+                continue
             if db_col == "tags":
                 if op in ("is", "is_not"):
                     continue

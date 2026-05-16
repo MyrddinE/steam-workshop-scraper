@@ -162,3 +162,57 @@ def test_discover_items_by_date_html_exception():
         assert result == []
 
 
+def test_scrape_missing_dom_returns_none():
+    from src.web_scraper import scrape_extended_details
+    from unittest.mock import patch
+    mock_html = '<html><body></body></html>'
+    with patch('requests.get') as mock_get:
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.text = mock_html
+        mock_get.return_value.html.find.return_value = None
+        assert scrape_extended_details(123) is None
+
+
+def test_image_worker_runs_without_crash(tmp_path):
+    """Smoke test: ImageScraperThread initializes and exits immediately."""
+    import os
+    from src.database import initialize_database
+    from src.image_worker import ImageScraperThread
+
+    db_path = str(tmp_path / "img.db")
+    initialize_database(db_path)
+    os.makedirs("images", exist_ok=True)
+
+    worker = ImageScraperThread(db_path, ".pauselock")
+    worker.running = False
+    worker.run()
+
+
+def test_get_db_stats_empty_defaults(db_path):
+    from src.database import get_db_stats
+    stats = get_db_stats(db_path)
+    assert stats["status_counts"] == []
+    for key, val in stats["translation_status"].items():
+        assert val == 0
+
+
+def test_build_filter_clause_unknown_operator():
+    from src.database import _build_filter_clause
+    clause, params = _build_filter_clause("title", "bogus_op", "val")
+    assert clause == ""
+    assert params == []
+
+
+def test_evaluate_single_filter_unknown_operator():
+    from src.database import _evaluate_single_filter
+    assert _evaluate_single_filter({"t": "x"}, "t", "bogus", "x") is True
+
+
+def test_wilson_lower_edge_cases():
+    from src.daemon import wilson_lower
+    assert wilson_lower(0, 0) == 0.0
+    assert wilson_lower(0, 10) == 0.0
+    assert 0.0 <= wilson_lower(5, 10) <= 1.0
+    assert 0.0 <= wilson_lower(100, 100) <= 1.0
+
+

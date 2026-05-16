@@ -180,3 +180,11 @@ def test_page_discovery_eligible_by_cursor(mock_config):
         daemon._cursor_exhausted = True
         assert daemon._page_discovery_eligible() is True
 
+
+def test_wilson_lower_edge_cases():
+    from src.daemon import wilson_lower
+    assert wilson_lower(0, 0) == 0.0
+    assert wilson_lower(0, 10) == 0.0
+    assert 0.0 <= wilson_lower(5, 10) <= 1.0
+    assert 0.0 <= wilson_lower(100, 100) <= 1.0
+
