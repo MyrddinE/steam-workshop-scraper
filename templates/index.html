@@ -256,6 +256,17 @@ async function doSearch(reset = true) {
   if (_listNeedsPoll(items)) {
     _startListPoll(filters, document.getElementById('sort-by').value, document.getElementById('sort-order').value);
   }
+  _checkScrollSentinel();
+}
+
+function _checkScrollSentinel() {
+  if (loading || !hasMore) return;
+  const sentinel = document.getElementById('scroll-sentinel');
+  if (!sentinel) return;
+  const rect = sentinel.getBoundingClientRect();
+  if (rect.top < window.innerHeight + 300) {
+    setTimeout(() => doSearch(false), 0);
+  }
 }
 
 function _listNeedsPoll(items) {
