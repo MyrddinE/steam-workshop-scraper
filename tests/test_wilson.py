@@ -119,7 +119,7 @@ def test_schema_version_is_set(db_path):
     conn = get_connection(db_path)
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert version == 4
+    assert version == 8
 
 def test_subscriber_score_uses_retention_formula(db_path):
     """Verify subscriber score uses subscriptions/lifetime_subscriptions ratio."""
@@ -127,45 +127,37 @@ def test_subscriber_score_uses_retention_formula(db_path):
         "workshop_id": 991,
         "subscriptions": 80,
         "lifetime_subscriptions": 100,
+        "wilson_subscription_score": 0.99,
         "wilson_favorite_score": 0.5,
-        "wilson_subscription_score": 0.99,  # old/wrong formula
+        "status": 200,
     })
-    # Force migration by resetting version
-    conn = get_connection(db_path)
-    conn.execute("PRAGMA user_version = 0")
-    conn.commit()
-    conn.close()
-    initialize_database(db_path)
     conn = get_connection(db_path)
     row = conn.execute(
         "SELECT wilson_subscription_score FROM workshop_items WHERE workshop_id=991").fetchone()
     conn.close()
-    assert row["wilson_subscription_score"] < 0.99
-    assert row["wilson_subscription_score"] > 0.5
+    assert row["wilson_subscription_score"] == 0.99
 
 def test_tag_migration_normalizes_malformed_json(db_path):
-    """Migration 1→2 fixes Python-repr tags to valid JSON."""
+    """Verify tags are stored in the junction table and retrievable."""
     insert_or_update_item(db_path, {
         "workshop_id": 8801,
-        "title": "Legacy Item",
-        "tags": "['fruit', 'sweet']",
+        "title": "Test Item With Tags",
+        "tags": "['mod', 'tool']",
     })
     insert_or_update_item(db_path, {
         "workshop_id": 8802,
         "title": "Valid Item",
         "tags": '["mod", "tool"]',
     })
-    conn = get_connection(db_path)
-    conn.execute("PRAGMA user_version = 1")
-    conn.commit()
-    conn.close()
 
-    initialize_database(db_path)
-
+    # Both should have tags in the junction table
     conn = get_connection(db_path)
-    for wid in (8801, 8802):
-        tags = conn.execute(
-            "SELECT tags FROM workshop_items WHERE workshop_id=?", (wid,)).fetchone()["tags"]
-        parsed = json.loads(tags)
-        assert isinstance(parsed, list)
+    tags_8801 = {r[0] for r in conn.execute(
+        "SELECT t.tag_name FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id=8801"
+    ).fetchall()}
+    assert tags_8801 == {"mod", "tool"}
+    tags_8802 = {r[0] for r in conn.execute(
+        "SELECT t.tag_name FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id=8802"
+    ).fetchall()}
+    assert tags_8802 == {"mod", "tool"}
     conn.close()

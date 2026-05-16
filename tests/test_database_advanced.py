@@ -49,8 +49,8 @@ def test_search_combined_descriptions(db_path):
     assert results[0]["workshop_id"] == 6
 
 def test_search_filename_and_tags(db_path):
-    # File name has .zip, tags have Fruit
-    results = search_items(db_path, filename_query=".zip", tags_query="Fruit")
+    results = search_items(db_path, filename_query=".zip", filters=[
+        {"field": "Tags", "op": "contains", "value": "Fruit"}])
     assert len(results) == 2
     ids = [r["workshop_id"] for r in results]
     assert 1 in ids

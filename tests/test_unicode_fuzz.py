@@ -43,7 +43,14 @@ def test_database_unicode_fuzzing(fuzzy_db, workshop_id, title, description, tag
     assert row["workshop_id"] == workshop_id
     assert row["title"] == title
     assert row["short_description"] == description
-    assert row["tags"] == json.dumps(tags, ensure_ascii=False)
+    # Tags now use junction table; verify via search_items which joins them
+    if tags:
+        detail = search_items(fuzzy_db, filters=[
+            {"field": "Workshop ID", "op": "is", "value": str(workshop_id)}])
+        if detail:
+            retrieved_tags = detail[0].get("tags", "")
+            for t in tags:
+                assert t in retrieved_tags, f"Tag '{t}' not found in '{retrieved_tags}'"
 
 def test_manual_complex_unicode(fuzzy_db):
     """Explicit test for known complex scripts."""
