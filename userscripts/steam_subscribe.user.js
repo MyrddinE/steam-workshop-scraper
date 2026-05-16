@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Workshop Scraper — Subscribe Bridge
 // @namespace    https://github.com/MyrddinE/steam-workshop-scraper
-// @version      3
+// @version      4
 // @description  Bridges Steam session to the Workshop Scraper web UI for one-click subscribing.
 // @author       MyrddinE
 // @match        https://steamcommunity.com/*
