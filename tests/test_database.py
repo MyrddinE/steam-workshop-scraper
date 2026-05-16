@@ -476,6 +476,114 @@ def test_wilson_cutoffs_with_full_text(db_path):
     assert "wilson_subscription_p50" in cutoffs
     assert cutoffs["wilson_subscription_p50"] > 0
 
+
+def test_ensure_tag_ids_new_and_existing(db_path):
+    from src.database import _ensure_tag_ids, get_connection
+
+    ids1 = _ensure_tag_ids(db_path, ["Anime", "Wallpaper", "4K"])
+    assert len(ids1) == 3
+    assert sorted(ids1) == [1, 2, 3]
+
+    # Re-call with mix of new and existing; IDs must be consistent
+    ids2 = _ensure_tag_ids(db_path, ["Anime", "NewTag"])
+    assert len(ids2) == 2
+    assert sorted(ids2) == [1, 4]
+
+    # Verify tags table
+    conn = get_connection(db_path)
+    names = {r[0] for r in conn.execute("SELECT tag_name FROM tags").fetchall()}
+    conn.close()
+    assert names == {"Anime", "Wallpaper", "4K", "NewTag"}
+
+
+def test_swap_tag_ids_preserves_associations(db_path):
+    from src.database import insert_or_update_item, _ensure_tag_ids, swap_tag_ids, get_connection
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Mod A", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": "Mod B", "status": 200})
+
+    ids = _ensure_tag_ids(db_path, ["Common", "Rare"])
+    assert len(ids) == 2
+    common_id, rare_id = sorted(ids)
+
+    conn = get_connection(db_path)
+    conn.executemany(
+        "INSERT INTO workshop_tags (workshop_id, tag_id) VALUES (?, ?)",
+        [(1, common_id), (1, rare_id), (2, common_id)]
+    )
+    conn.commit()
+    conn.close()
+
+    swap_tag_ids(db_path, common_id, rare_id)
+
+    conn = get_connection(db_path)
+    tags_for_1 = {r[0] for r in conn.execute(
+        "SELECT t.tag_name FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id = 1").fetchall()}
+    tags_for_2 = {r[0] for r in conn.execute(
+        "SELECT t.tag_name FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id = 2").fetchall()}
+    # Mod A should still have both tags
+    assert tags_for_1 == {"Common", "Rare"}
+    # Mod B should still have Common only
+    assert tags_for_2 == {"Common"}
+    conn.close()
+
+
+def test_compact_tag_ids_moves_common_to_low_ids(db_path):
+    from src.database import _ensure_tag_ids, compact_tag_ids, get_connection
+
+    ids = _ensure_tag_ids(db_path, ["RareA", "RareB", "Common", "RareC"])
+    conn = get_connection(db_path)
+    # Common has ID 3, give it higher frequency
+    for wid in range(1, 101):
+        conn.execute(
+            "INSERT INTO workshop_tags (workshop_id, tag_id) VALUES (?, ?)",
+            (wid, ids[2])
+        )
+    conn.commit()
+    conn.close()
+
+    compact_tag_ids(db_path)
+
+    conn = get_connection(db_path)
+    # Common tag should now have a lower ID (<= 3 since there are 4 tags)
+    common_id = conn.execute("SELECT tag_id FROM tags WHERE tag_name = 'Common'").fetchone()[0]
+    assert common_id <= 3
+    conn.close()
+
+
+def test_build_fts_clause_operators(db_path):
+    """All FTS5 operators must produce valid MATCH clauses."""
+    from src.database import _build_fts_clause, insert_or_update_item, get_connection, search_items
+
+    for i in range(1, 20):
+        insert_or_update_item(db_path, {
+            "workshop_id": i, "title": f"sword mod {i}",
+            "short_description": "test", "extended_description": "test",
+            "subscriptions": 100, "lifetime_subscriptions": 200,
+            "favorited": 10, "views": 1000, "status": 200,
+            "wilson_subscription_score": 0.5, "wilson_favorite_score": 0.1,
+        })
+
+    conn = get_connection(db_path)
+    conn.execute("INSERT INTO workshop_fts(workshop_fts) VALUES ('rebuild')")
+    conn.commit()
+    conn.close()
+
+    # contains should find items
+    results = search_items(db_path, filters=[
+        {"field": "Full Text", "op": "contains", "value": "sword"}])
+    assert len(results) > 0
+
+    # does_not_contain should exclude
+    results = search_items(db_path, filters=[
+        {"field": "Full Text", "op": "does_not_contain", "value": "sword"}])
+    assert len(results) == 0
+
+    # is_empty / is_not_empty
+    results = search_items(db_path, filters=[
+        {"field": "Full Text", "op": "is_not_empty", "value": ""}])
+    assert len(results) > 0
+
 def test_save_app_filter_defaults(db_path):
     from src.database import save_app_filter, get_app_tracking
     save_app_filter(db_path, 5000)

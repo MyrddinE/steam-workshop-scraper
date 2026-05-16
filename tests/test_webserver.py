@@ -243,3 +243,30 @@ def test_detail_pane_has_image_markup(web_client):
     assert 'image_extension' in html
     assert 'grid-img' in html
 
+
+def test_api_items_bulk_lookup(web_client):
+    from src.database import insert_or_update_item
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "A", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 3, "title": "C", "status": 200})
+
+    resp = client.post('/api/items', json={"ids": [1, 3, 999]})
+    assert resp.status_code == 200
+    items = resp.get_json()
+    assert len(items) == 2
+    titles = {it["title"] for it in items}
+    assert titles == {"A", "C"}
+
+
+def test_api_items_empty_list(web_client):
+    client, _ = web_client
+    resp = client.post('/api/items', json={"ids": []})
+    assert resp.status_code == 400
+
+
+def test_api_subscribe_no_session(web_client):
+    client, _ = web_client
+    resp = client.post('/api/subscribe/1')
+    assert resp.status_code == 400
+    assert resp.get_json()["success"] == -1
+

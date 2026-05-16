@@ -162,3 +162,21 @@ def test_api_delay_increases_on_failures(mock_sleep, mock_insert, mock_api, mock
     daemon.process_batch()
     assert daemon.api_delay > initial
 
+
+def test_page_discovery_not_eligible_initially(mock_config):
+    from src.daemon import Daemon
+    with patch('src.database.initialize_database'), \
+         patch('src.daemon.save_config'):
+        daemon = Daemon(mock_config)
+        daemon._cursor_exhausted = False
+        assert daemon._page_discovery_eligible() is False
+
+
+def test_page_discovery_eligible_by_cursor(mock_config):
+    from src.daemon import Daemon
+    with patch('src.database.initialize_database'), \
+         patch('src.daemon.save_config'):
+        daemon = Daemon(mock_config)
+        daemon._cursor_exhausted = True
+        assert daemon._page_discovery_eligible() is True
+
