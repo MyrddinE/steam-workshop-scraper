@@ -309,9 +309,22 @@ class DaemonManagerScreen(Screen):
             self._tail_proc.terminate()
             self._tail_proc = None
 
-    def _update_status(self) -> None:
+    def _daemon_is_running(self) -> bool:
         if self._daemon_proc and self._daemon_proc.poll() is None:
-            pid = self._read_pid() or self._daemon_proc.pid
+            return True
+        pid = self._read_pid()
+        if pid is None:
+            return False
+        import signal, os as _os
+        try:
+            _os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
+
+    def _update_status(self) -> None:
+        if self._daemon_is_running():
+            pid = self._read_pid() or (self._daemon_proc.pid if self._daemon_proc else None)
             self.query_one("#dm-status", Static).update(f"[green]Running (PID: {pid})[/green]")
         else:
             self._daemon_proc = None
@@ -325,6 +338,10 @@ class DaemonManagerScreen(Screen):
             return None
 
     def _start_daemon(self) -> bool:
+        if self._daemon_is_running():
+            pid = self._read_pid()
+            self.query_one("#dm-status", Static).update(f"[green]Already running (PID: {pid})[/green]")
+            return False
         import subprocess, sys
         try:
             kwargs = {}
@@ -343,40 +360,81 @@ class DaemonManagerScreen(Screen):
             return False
 
     def _stop_daemon(self) -> bool:
-        if not self._daemon_proc or self._daemon_proc.poll() is not None:
+        pid = self._read_pid()
+
+        if not self._daemon_is_running():
             self._daemon_proc = None
             return True
 
-        import platform, signal
+        import platform, signal, os as _os
+
+        if self._daemon_proc:
+            pid = pid or self._daemon_proc.pid
+
         if platform.system() == 'Windows':
-            # Delete PID file — daemon checks it, initiates graceful shutdown
+            # Delete PID file — daemon checks it each loop iteration
             try:
-                os.remove(self.pid_file)
+                _os.remove(self.pid_file)
             except OSError:
                 pass
-            try:
-                self._daemon_proc.wait(timeout=5)
-            except Exception:
-                self._daemon_proc.terminate()
+            if pid:
                 try:
-                    self._daemon_proc.wait(timeout=2)
+                    import ctypes
+                    handle = ctypes.windll.kernel32.OpenProcess(1, False, pid)
+                    if handle:
+                        ctypes.windll.kernel32.TerminateProcess(handle, 0)
+                        ctypes.windll.kernel32.CloseHandle(handle)
                 except Exception:
-                    self._daemon_proc.kill()
-        else:
-            self._daemon_proc.send_signal(signal.SIGTERM)
-            try:
-                self._daemon_proc.wait(timeout=5)
-            except Exception:
-                # Graceful shutdown failed — remove PID anyway so daemon
-                # notices next time through its loop and initiates shutdown
-                try:
-                    os.remove(self.pid_file)
-                except OSError:
                     pass
+            if self._daemon_proc:
                 try:
                     self._daemon_proc.wait(timeout=5)
                 except Exception:
                     self._daemon_proc.terminate()
+                    try:
+                        self._daemon_proc.wait(timeout=2)
+                    except Exception:
+                        self._daemon_proc.kill()
+            else:
+                import time
+                deadline = time.time() + 10
+                while time.time() < deadline:
+                    if not os.path.exists(self.pid_file):
+                        break
+                    time.sleep(0.5)
+        else:
+            if pid:
+                try:
+                    _os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    pass
+            try:
+                _os.remove(self.pid_file)
+            except OSError:
+                pass
+            if self._daemon_proc:
+                try:
+                    self._daemon_proc.wait(timeout=5)
+                except Exception:
+                    try:
+                        _os.remove(self.pid_file)
+                    except OSError:
+                        pass
+                    try:
+                        self._daemon_proc.wait(timeout=5)
+                    except Exception:
+                        self._daemon_proc.terminate()
+                        try:
+                            self._daemon_proc.wait(timeout=2)
+                        except Exception:
+                            self._daemon_proc.kill()
+            else:
+                import time
+                deadline = time.time() + 10
+                while time.time() < deadline:
+                    if not os.path.exists(self.pid_file):
+                        break
+                    time.sleep(0.5)
         self._daemon_proc = None
         return True
 
