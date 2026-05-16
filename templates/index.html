@@ -256,6 +256,7 @@ async function doSearch(reset = true) {
   if (_listNeedsPoll(items)) {
     _startListPoll(filters, document.getElementById('sort-by').value, document.getElementById('sort-order').value);
   }
+  _ensureScrollObserver();
   _checkScrollSentinel();
 }
 
@@ -535,11 +536,16 @@ document.getElementById('btn-save-filter').onclick = async () => {
   alert('Filter saved for scraper.');
 };
 
-const _scrollObserver = new IntersectionObserver((entries) => {
-  if (loading || !hasMore) return;
-  if (entries[0].isIntersecting) doSearch(false);
-}, { rootMargin: '300px' });
-_scrollObserver.observe(document.getElementById('scroll-sentinel'));
+let _scrollObserver = null;
+
+function _ensureScrollObserver() {
+  if (_scrollObserver) return;
+  _scrollObserver = new IntersectionObserver((entries) => {
+    if (loading || !hasMore || !currentOffset) return;
+    if (entries[0].isIntersecting) doSearch(false);
+  }, { rootMargin: '300px' });
+  _scrollObserver.observe(document.getElementById('scroll-sentinel'));
+}
 
 document.addEventListener('blur', e => {
   try {
