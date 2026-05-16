@@ -319,9 +319,9 @@ class Daemon:
             merged_data = self._merge_and_clean_api_data(api_data, merged_data, item_id, now_ts)
             display_title = merged_data.get('title_en') or merged_data.get('title', 'Unknown Title')
 
-            views = merged_data.get("views", 0) or 0
             merged_data["wilson_favorite_score"] = wilson_lower(
-                merged_data.get("favorited", 0) or 0, views)
+                merged_data.get("favorited", 0) or 0,
+                merged_data.get("lifetime_subscriptions", 0) or 0)
             merged_data["wilson_subscription_score"] = wilson_lower(
                 merged_data.get("subscriptions", 0) or 0,
                 merged_data.get("lifetime_subscriptions", 0) or 0)

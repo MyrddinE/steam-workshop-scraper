@@ -14,7 +14,7 @@ The main loop entry point called repeatedly by `run()`. Each invocation:
 2. If no items are available, triggers discovery: first tries `_run_page_discovery` if eligible, otherwise falls back to `seed_database` (cursor-based). After discovery, retries `get_next_items_to_scrape`.
 3. For each retrieved item, calls the Steam Web API via `get_workshop_details_api` to fetch metadata (title, description, tags, file_size, preview_url, creator, subscriptions, etc.).
 4. Merges API data with existing DB row via `_merge_and_clean_api_data`, which filters to `allowed_keys` (a hardcoded set of known-safe column names), remaps `creator_app_id`/`consumer_app_id` to `creator_appid`/`consumer_appid`, and remaps `description` to `short_description`. Unknown API keys are discarded with a log message.
-5. Computes Wilson scores via `wilson_lower` (a binomial-proportion confidence interval using a 95% z-score of 1.96). Sets `wilson_favorite_score` from `(favorited, views)` and `wilson_subscription_score` from `(subscriptions, lifetime_subscriptions)`.
+5. Computes Wilson scores via `wilson_lower` (a binomial-proportion confidence interval using a 95% z-score of 1.96). Sets `wilson_favorite_score` from `(favorited, lifetime_subscriptions)` and `wilson_subscription_score` from `(subscriptions, lifetime_subscriptions)`.
 6. Evaluates enrichment filters via `_should_enrich`. Checks the stored `enrichment_filters` for each AppID against the item using `_evaluate_filters` (an in-memory filter evaluator that mirrors the SQL builder's semantics). If no filters are configured, all items are enriched.
 7. If enrichment is approved, calls `flag_for_web_scrape` at priority 3 (new item). Also calls `flag_for_image` at priority 3 if `preview_url` is present. Sets `status = 200`. Calls `insert_or_update_item` to persist.
 8. For enriched items, flags individual fields for translation via `flag_field_for_translation` at priority 3 (inserts into `translation_queue`). The `translation_priority` column on `workshop_items` is vestigial — the daemon no longer sets it (the translator operates from `translation_queue` directly and resets `translation_priority` to 0 when done). Users with non-ASCII names get `translation_priority = 1` set via `_build_user_record`.
@@ -205,7 +205,7 @@ numerator = p + z²/(2*trials) - z * sqrt(p*(1-p)/trials + z²/(4*trials²))
 return max(0, min(1, numerator / denominator))
 ```
 
-Used to compute `wilson_favorite_score` (using `favorited / views`) and `wilson_subscription_score` (using `subscriptions / lifetime_subscriptions`). The subscriber metric measures retention — what fraction of lifetime subscribers remain subscribed. Both scores are REAL values between 0 and 1, stored with `NULL` default.
+Used to compute `wilson_favorite_score` (using `favorited / lifetime_subscriptions`) and `wilson_subscription_score` (using `subscriptions / lifetime_subscriptions`). The favorite metric measures engagement intensity — how many current favorites exist per all-time subscription. The subscriber metric measures retention — what fraction of lifetime subscribers remain subscribed. Both scores are REAL values between 0 and 1, stored with `NULL` default.
 
 ### `compute_wilson_cutoffs` (database)
 
