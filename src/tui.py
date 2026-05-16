@@ -282,7 +282,14 @@ class DaemonManagerScreen(Screen):
         self.config_path = config_path
         self.pid_file = ".daemon.pid"
         self._tail_proc = None
-        self._daemon_proc = None
+
+    @property
+    def _daemon_proc(self):
+        return self.app._daemon_proc
+
+    @_daemon_proc.setter
+    def _daemon_proc(self, value):
+        self.app._daemon_proc = value
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -327,7 +334,8 @@ class DaemonManagerScreen(Screen):
             pid = self._read_pid() or (self._daemon_proc.pid if self._daemon_proc else None)
             self.query_one("#dm-status", Static).update(f"[green]Running (PID: {pid})[/green]")
         else:
-            self._daemon_proc = None
+            if self._daemon_proc is not None:
+                self._daemon_proc = None
             self.query_one("#dm-status", Static).update("[red]Not running[/red]")
 
     def _read_pid(self) -> int | None:
@@ -363,46 +371,21 @@ class DaemonManagerScreen(Screen):
         pid = self._read_pid()
 
         if not self._daemon_is_running():
-            self._daemon_proc = None
+            if self._daemon_proc is not None:
+                self._daemon_proc = None
             return True
 
-        import platform, signal, os as _os
+        import platform, signal, os as _os, time
 
-        if self._daemon_proc:
-            pid = pid or self._daemon_proc.pid
-
+        # ── Graceful shutdown: signal the daemon, wait for clean exit ──
         if platform.system() == 'Windows':
-            # Delete PID file — daemon checks it each loop iteration
+            # Windows: delete PID file — daemon checks it each loop iteration
             try:
                 _os.remove(self.pid_file)
             except OSError:
                 pass
-            if pid:
-                try:
-                    import ctypes
-                    handle = ctypes.windll.kernel32.OpenProcess(1, False, pid)
-                    if handle:
-                        ctypes.windll.kernel32.TerminateProcess(handle, 0)
-                        ctypes.windll.kernel32.CloseHandle(handle)
-                except Exception:
-                    pass
-            if self._daemon_proc:
-                try:
-                    self._daemon_proc.wait(timeout=5)
-                except Exception:
-                    self._daemon_proc.terminate()
-                    try:
-                        self._daemon_proc.wait(timeout=2)
-                    except Exception:
-                        self._daemon_proc.kill()
-            else:
-                import time
-                deadline = time.time() + 10
-                while time.time() < deadline:
-                    if not os.path.exists(self.pid_file):
-                        break
-                    time.sleep(0.5)
         else:
+            # Unix: send SIGTERM first, then delete PID file as fallback
             if pid:
                 try:
                     _os.kill(pid, signal.SIGTERM)
@@ -412,29 +395,46 @@ class DaemonManagerScreen(Screen):
                 _os.remove(self.pid_file)
             except OSError:
                 pass
-            if self._daemon_proc:
+
+        # Wait for graceful exit
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if self._daemon_proc and self._daemon_proc.poll() is not None:
+                self._daemon_proc = None
+                return True
+            if pid:
                 try:
-                    self._daemon_proc.wait(timeout=5)
+                    _os.kill(pid, 0)
+                except (OSError, ProcessLookupError):
+                    self._daemon_proc = None
+                    return True
+            time.sleep(0.5)
+
+        # ── Timeout: force-kill as last resort ──
+        if self._daemon_proc:
+            try:
+                self._daemon_proc.terminate()
+                self._daemon_proc.wait(timeout=3)
+            except Exception:
+                try:
+                    self._daemon_proc.kill()
                 except Exception:
-                    try:
-                        _os.remove(self.pid_file)
-                    except OSError:
-                        pass
-                    try:
-                        self._daemon_proc.wait(timeout=5)
-                    except Exception:
-                        self._daemon_proc.terminate()
-                        try:
-                            self._daemon_proc.wait(timeout=2)
-                        except Exception:
-                            self._daemon_proc.kill()
-            else:
-                import time
-                deadline = time.time() + 10
-                while time.time() < deadline:
-                    if not os.path.exists(self.pid_file):
-                        break
-                    time.sleep(0.5)
+                    pass
+        elif pid and platform.system() == 'Windows':
+            try:
+                import ctypes
+                handle = ctypes.windll.kernel32.OpenProcess(1, False, pid)
+                if handle:
+                    ctypes.windll.kernel32.TerminateProcess(handle, 0)
+                    ctypes.windll.kernel32.CloseHandle(handle)
+            except Exception:
+                pass
+        elif pid:
+            try:
+                _os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+
         self._daemon_proc = None
         return True
 
@@ -1240,6 +1240,7 @@ class ScraperApp(App):
         self._start_webserver()
         self.current_item_creator = None
         self.pause_lock_file = ".pauselock"
+        self._daemon_proc = None  # persists across screen pushes; re-discovered from PID file on restart
         
         # Pagination state
         self.current_offset = 0
@@ -1654,7 +1655,7 @@ class ScraperApp(App):
 
     def action_show_daemon(self) -> None:
         """Shows the daemon management screen."""
-        self.push_screen(DaemonManagerScreen())
+        self.push_screen(DaemonManagerScreen(self.config_path))
 
     async def action_subscribe(self) -> None:
         """Subscribes to the currently displayed workshop item on Steam."""
