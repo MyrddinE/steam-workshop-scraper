@@ -22,7 +22,7 @@ from src.database import (
     normalize_tags,
     _evaluate_filters
 )
-from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries, query_workshop_files, set_api_delay
+from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries, query_workshop_files, set_api_delay, query_workshop_page_updated
 from src.translator import TranslatorThread, is_ascii
 from src.config import save_config
 from src.database import flag_for_web_scrape, flag_field_for_translation, flag_for_image
@@ -80,6 +80,10 @@ class Daemon:
         self.api_successes = 0
         self.api_failures = 0
         self.api_had_streak = False
+
+        # Page-based discovery (sort by update time) — runs once a day when eligible
+        self._last_page_discovery = 0
+        self._cursor_exhausted = False
 
         # Enforce required target_appids
         self.target_appids = config.get("daemon", {}).get("target_appids")
@@ -256,7 +260,10 @@ class Daemon:
         
         if not items_to_scrape:
             logging.debug("No items to scrape. Expanding discovery...")
-            self.seed_database()
+            if self._page_discovery_eligible():
+                self._run_page_discovery()
+            else:
+                self.seed_database()
             try:
                 items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size,
                                                            staleness_days=self.item_staleness_days)
@@ -471,3 +478,56 @@ class Daemon:
 
             if pages:
                 logging.info(f"Finished scanning {pages} pages for AppID {appid}. Discovered {new_discovered_count} new items.")
+                if not cursor:
+                    self._cursor_exhausted = True
+                    logging.info("Cursor exhausted — page-based discovery now eligible.")
+
+    def _page_discovery_eligible(self) -> bool:
+        if self._cursor_exhausted:
+            return True
+        conn = get_connection(self.db_path)
+        scraped = conn.execute(
+            "SELECT COUNT(*) FROM workshop_items WHERE dt_attempted IS NOT NULL"
+        ).fetchone()[0]
+        conn.close()
+        return scraped >= 500
+
+    def _run_page_discovery(self):
+        if not self.api_key:
+            return
+        if int(time.time()) - self._last_page_discovery < 86400:
+            return
+
+        logging.info("Running page-based discovery (sort-by-update-time)...")
+        self._last_page_discovery = int(time.time())
+
+        for appid in self.target_appids:
+            if not self.running:
+                break
+            last_total = -1
+            for page in range(1, 501):
+                if not self.running:
+                    break
+                result = query_workshop_page_updated(appid, page, self.api_key)
+                if result.get("error"):
+                    logging.error(f"Page discovery error for AppID {appid} page {page}.")
+                    break
+
+                items = result.get("items", [])
+                if page == 1:
+                    logging.info(f"Page mode for AppID {appid}: ~{result.get('total', '?')} total items by update time.")
+
+                page_new = 0
+                for item in items:
+                    wid = int(item.get("publishedfileid", 0))
+                    if wid and insert_or_update_item(self.db_path, {"workshop_id": wid}):
+                        page_new += 1
+
+                if page_new == 0:
+                    logging.info(f"Page mode: no new items on page {page}, stopping for AppID {appid}.")
+                    break
+
+                logging.info(f"Page mode: page {page} added {page_new} new items for AppID {appid}.")
+                time.sleep(self.api_delay)
+
+        logging.info("Page-based discovery complete.")

@@ -161,3 +161,45 @@ def query_workshop_files(appid: int, cursor: str, api_key: str) -> dict:
         return {"total": 0, "items": [], "next_cursor": "", "error": True}
     except (requests.exceptions.RequestException, ValueError, KeyError):
         return {"total": 0, "items": [], "next_cursor": "", "error": True}
+
+
+def query_workshop_page_updated(appid: int, page: int, api_key: str, numperpage: int = 100) -> dict:
+    """
+    Queries Steam Workshop via IPublishedFileService/QueryFiles with
+    query_type=2 (rank by last updated), page-based pagination.
+    Returns a dict with 'total', 'items' (list of publishedfileid dicts),
+    and 'next_cursor' (empty — page mode doesn't use cursors).
+    """
+    url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
+    params = {
+        "key": api_key,
+        "query_type": 2,  # rank by last updated
+        "page": page,
+        "numperpage": numperpage,
+        "appid": appid,
+        "return_short_description": True,
+        "return_tags": True,
+        "return_previews": False,
+        "return_children": False,
+        "return_for_sale_data": False,
+        "return_metadata": False,
+    }
+
+    _rate_limit()
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        data = response.json().get("response", {})
+        items = data.get("publishedfiledetails", [])
+        return {
+            "total": data.get("total", 0),
+            "items": items,
+            "next_cursor": data.get("next_cursor", ""),  # page mode may still return a cursor
+            "error": False,
+        }
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 403:
+            logging.error("Steam API returned 403 Forbidden for page-mode QueryFiles.")
+        return {"total": 0, "items": [], "next_cursor": "", "error": True}
+    except (requests.exceptions.RequestException, ValueError, KeyError):
+        return {"total": 0, "items": [], "next_cursor": "", "error": True}
