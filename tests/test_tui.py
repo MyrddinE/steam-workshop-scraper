@@ -174,10 +174,11 @@ async def test_tui_operator_selection_by_field_type(mock_config, mock_results):
             field_select = first_row.query_one("#field-select", Select)
             op_select = first_row.query_one("#op-select", Select)
             
-            # Switch to numeric field
+            # Switch to numeric field — should include percentile
             field_select.value = "File Size"
             await pilot.pause(ASYNC_PAUSE)
             assert "gt" in [val for label, val in op_select._options]
+            assert "percentile" in [val for label, val in op_select._options]
             assert "does_not_contain" not in [val for label, val in op_select._options]
             
             # Switch to ID field
