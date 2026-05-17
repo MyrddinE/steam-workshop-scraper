@@ -77,7 +77,7 @@ def test_compute_wilson_cutoffs_small_set(db_path):
     for i in range(1, 6):
         insert_or_update_item(db_path, {"workshop_id": i, "wilson_favorite_score": 0.1 * i})
     result = compute_wilson_cutoffs(db_path)
-    assert len(result) >= 6
+    assert len(result) >= 10
 
 def test_compute_wilson_cutoffs_large_set(db_path):
     for i in range(10001):

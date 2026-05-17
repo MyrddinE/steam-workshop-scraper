@@ -412,7 +412,7 @@ function renderDetail(item) {
   pane.innerHTML = `
     <h2><a href="${url}" target="_blank">${title}</a></h2>
     <p>by <b>${creator}</b> &mdash; <small>Workshop ID: ${item.workshop_id}</small></p>
-    <p class="stat-wilson"><span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}">Subscriber Score: ${wss!=null?wss+'%':'N/A'}</span> &nbsp; <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}">Favorite Score: ${wfs!=null?wfs+'%':'N/A'}</span></p>
+    <p class="stat-wilson"><span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}" title="${(cutoffs.wilson_subscription_p50!=null)?'p50='+(cutoffs.wilson_subscription_p50*100).toFixed(1)+'% p90='+(cutoffs.wilson_subscription_p90*100).toFixed(1)+'% p99='+(cutoffs.wilson_subscription_p99*100).toFixed(1)+'% ['+(cutoffs.wilson_subscription_min*100).toFixed(1)+'%..'+(cutoffs.wilson_subscription_max*100).toFixed(1)+'%]':'No cutoff data'}">Subscriber Score: ${wss!=null?wss+'%':'N/A'}</span> &nbsp; <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}" title="${(cutoffs.wilson_favorite_p50!=null)?'p50='+(cutoffs.wilson_favorite_p50*100).toFixed(1)+'% p90='+(cutoffs.wilson_favorite_p90*100).toFixed(1)+'% p99='+(cutoffs.wilson_favorite_p99*100).toFixed(1)+'% ['+(cutoffs.wilson_favorite_min*100).toFixed(1)+'%..'+(cutoffs.wilson_favorite_max*100).toFixed(1)+'%]':'No cutoff data'}">Favorite Score: ${wfs!=null?wfs+'%':'N/A'}</span></p>
     <div class="stat-row"><span class="stat-label">Created:</span> ${created}</div>
     <div class="stat-row"><span class="stat-label">Size:</span> <span class="${sc}">${size || 'N/A'}</span></div>
     ${updated ? `<div class="stat-row"><span class="stat-label">Updated:</span> ${updated}</div>` : ''}

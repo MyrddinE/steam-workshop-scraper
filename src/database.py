@@ -1447,6 +1447,14 @@ def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None) -> dict:
         FROM sub_ntile WHERE bucket = 10
         UNION ALL SELECT 'wilson_subscription_p50', COALESCE(MIN(wilson_subscription_score), 0)
         FROM sub_ntile WHERE bucket = 50
+        UNION ALL SELECT 'wilson_favorite_min', COALESCE(MIN(wilson_favorite_score), 0)
+        FROM fav_ntile WHERE bucket = 100
+        UNION ALL SELECT 'wilson_favorite_max', COALESCE(MAX(wilson_favorite_score), 0)
+        FROM fav_ntile WHERE bucket = 1
+        UNION ALL SELECT 'wilson_subscription_min', COALESCE(MIN(wilson_subscription_score), 0)
+        FROM sub_ntile WHERE bucket = 100
+        UNION ALL SELECT 'wilson_subscription_max', COALESCE(MAX(wilson_subscription_score), 0)
+        FROM sub_ntile WHERE bucket = 1
     """
     try:
         cursor = conn.execute(cutoff_sql, params)
