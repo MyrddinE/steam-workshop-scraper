@@ -188,8 +188,12 @@ async function loadCutoffs() {
   if (key === _cutoffsFilterKey && _cutoffsCache !== null) return;
   const resp = await fetch('/api/cutoffs', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filters})});
   cutoffs = await resp.json();
-  _cutoffsCache = cutoffs;
-  _cutoffsFilterKey = key;
+  if (cutoffs && typeof cutoffs === 'object' && Object.keys(cutoffs).length) {
+    _cutoffsCache = cutoffs;
+    _cutoffsFilterKey = key;
+  } else {
+    cutoffs = _cutoffsCache || {};
+  }
 
   const sf = (k) => (cutoffs[k] != null) ? (cutoffs[k]*100).toFixed(1) + '%' : '?%';
   _subTitleText = 'p50=' + sf('wilson_subscription_p50') + ' p90=' + sf('wilson_subscription_p90') + ' p99=' + sf('wilson_subscription_p99') + ' [' + sf('wilson_subscription_min') + '..' + sf('wilson_subscription_max') + ']';

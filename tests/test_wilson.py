@@ -73,6 +73,46 @@ def test_compute_wilson_cutoffs_empty(db_path):
     result = compute_wilson_cutoffs(db_path)
     assert result.get("wilson_favorite_p99") == 0
 
+
+def test_cutoff_keys_exist_and_are_numeric(db_path):
+    for i in range(1, 50):
+        insert_or_update_item(db_path, {
+            "workshop_id": i,
+            "wilson_favorite_score": 0.1 + 0.8 * (i / 49.0),
+            "wilson_subscription_score": 0.2 + 0.6 * (i / 49.0),
+        })
+    result = compute_wilson_cutoffs(db_path)
+    expected_keys = [
+        "wilson_favorite_p99", "wilson_favorite_p90", "wilson_favorite_p50",
+        "wilson_favorite_min", "wilson_favorite_max",
+        "wilson_subscription_p99", "wilson_subscription_p90", "wilson_subscription_p50",
+        "wilson_subscription_min", "wilson_subscription_max",
+    ]
+    for k in expected_keys:
+        assert k in result, f"Missing key: {k}"
+        assert isinstance(result[k], (int, float)), f"Key {k} is {type(result[k])}, not numeric"
+        assert result[k] is not None, f"Key {k} is None"
+    # min <= p50 <= p90 <= p99 <= max for favorites
+    assert result["wilson_favorite_min"] <= result["wilson_favorite_p50"]
+    assert result["wilson_favorite_p50"] <= result["wilson_favorite_p90"]
+    assert result["wilson_favorite_p90"] <= result["wilson_favorite_p99"]
+    assert result["wilson_favorite_p99"] <= result["wilson_favorite_max"]
+
+
+def test_cutoffs_http_endpoint(db_path):
+    from src.webserver import app
+    app.config['TESTING'] = True
+    import src.webserver as ws
+    ws._db_path = db_path
+    with app.test_client() as client:
+        resp = client.post('/api/cutoffs', json={"filters": []})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, dict)
+        assert "wilson_subscription_p50" in data
+        assert data["wilson_subscription_p50"] is not None
+        assert isinstance(data["wilson_subscription_p50"], (int, float))
+
 def test_compute_wilson_cutoffs_small_set(db_path):
     for i in range(1, 6):
         insert_or_update_item(db_path, {"workshop_id": i, "wilson_favorite_score": 0.1 * i})

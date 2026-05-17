@@ -1472,6 +1472,7 @@ def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None) -> dict:
         conn.close()
         return result
     except Exception:
+        logging.exception("compute_wilson_cutoffs failed")
         conn.close()
         return {}
 
