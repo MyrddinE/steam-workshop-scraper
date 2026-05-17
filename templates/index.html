@@ -129,6 +129,7 @@ const ID_FIELDS = ['Author ID','Workshop ID','AppID'];
 const ALL_FIELDS = ['Title','Description','Filename','Tags','Author ID','File Size','Subs','Favs','Views','Workshop ID','AppID','Language ID','Subscriber Score','Favorite Score','Full Text'];
 
 let currentOffset = 0, hasMore = true, loading = false, cutoffs = {};
+let _cutoffsCache = null, _cutoffsFilterKey = '';
 let _listPollTimer = null;
 
 function updateOps(row) {
@@ -179,10 +180,17 @@ function getFilters() {
   return filters;
 }
 
+let _cutoffsCache = null;
+let _cutoffsFilterKey = '';
+
 async function loadCutoffs() {
   const filters = getFilters();
+  const key = JSON.stringify(filters);
+  if (key === _cutoffsFilterKey && _cutoffsCache !== null) return;
   const resp = await fetch('/api/cutoffs', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filters})});
   cutoffs = await resp.json();
+  _cutoffsCache = cutoffs;
+  _cutoffsFilterKey = key;
 }
 
 function wClass(score, key) {
@@ -230,7 +238,7 @@ function sizeClass(bytes) {
 async function doSearch(reset = true) {
   if (loading) return;
   loading = true;
-  if (reset) { _stopListPoll(); currentOffset = 0; hasMore = true; document.getElementById('results-grid').innerHTML = ''; loadCutoffs(); }
+  if (reset) { _stopListPoll(); currentOffset = 0; hasMore = true; document.getElementById('results-grid').innerHTML = ''; await loadCutoffs(); }
 
   const filters = getFilters();
   const resp = await fetch('/api/search', {
