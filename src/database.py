@@ -561,7 +561,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 9
+    EXPECTED_VERSION = 10
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -857,6 +857,15 @@ def initialize_database(db_path: str):
         cursor.execute("PRAGMA user_version = 9")
         logging.info(f"Migration 8→9 complete. Recalculated {updated} favorite scores.")
 
+    if db_version < 10:
+        logging.info("Running migration 9→10: adding index on is_queued_for_subscription...")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_is_queued ON workshop_items (is_queued_for_subscription)"
+        )
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 10")
+        logging.info("Migration 9→10 complete.")
+
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON workshop_items (status)")
@@ -870,6 +879,7 @@ def initialize_database(db_path: str):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_appid_status ON workshop_items (consumer_appid, status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_dt_updated ON workshop_items (creator, dt_updated)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_translation_priority ON workshop_items (translation_priority)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_is_queued ON workshop_items (is_queued_for_subscription)")
     # Sort-column indexes — avoid expensive full-table sorts
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_time_created ON workshop_items (time_created)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_time_updated ON workshop_items (time_updated)")
