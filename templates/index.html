@@ -119,6 +119,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 </style>
 
 <script>
+const WEB_DELAY = {{ web_delay }};
 const FIELD_OPS = {
   text: ['contains','does_not_contain','is','is_not','is_empty','is_not_empty'],
   numeric: ['is','is_not','gt','lt','gte','lte','is_empty','is_not_empty','percentile'],
@@ -516,10 +517,11 @@ async function doSubscribe(wid, appid) {
     return;
   }
 
-  window.open(
-    'https://steamcommunity.com/sharedfiles/filedetails/?id=' + wid + '&autosubscribe=true',
-    '_blank'
+  const w = window.open(
+    'https://steamcommunity.com/sharedfiles/filedetails/?id=' + wid + '&autosubscribe=true&callback_origin=' + encodeURIComponent(location.origin),
+    'subtab_' + wid
   );
+  if (w) w.blur();
 }
 
 async function loadState() {
@@ -646,10 +648,11 @@ async function _startAutoSubscribe() {
 
   await fetch('/api/pause', {method:'POST'});
 
-  const stepDelay = 3000; // seconds between tab opens
+  const stepDelay = WEB_DELAY * 1000;
   const startTime = Date.now();
   const verified = new Set();
   const opened = new Set();
+  const callbackOrigin = encodeURIComponent(location.origin);
 
   // Poll for verification — marks items done when userscript reports back
   const pollIv = setInterval(async () => {
@@ -694,10 +697,11 @@ async function _startAutoSubscribe() {
 
       if (elapsed >= openAt) {
         opened.add(item.workshop_id);
-        window.open(
-          'https://steamcommunity.com/sharedfiles/filedetails/?id=' + item.workshop_id + '&autosubscribe=true',
-          '_blank'
+        const w = window.open(
+          'https://steamcommunity.com/sharedfiles/filedetails/?id=' + item.workshop_id + '&autosubscribe=true&callback_origin=' + callbackOrigin,
+          'subtab_' + item.workshop_id
         );
+        if (w) w.blur();
         countdown.textContent = '';
       } else {
         countdown.textContent = (openAt - elapsed) + 's';

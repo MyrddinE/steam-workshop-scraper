@@ -54,7 +54,7 @@
 
     // ── Auto-subscribe triggered by the scraper web UI ──────────────
     if (location.search.includes('autosubscribe=true')) {
-      var apiBase = GM_getValue('api_base', '');
+      var apiBase = GM_getValue('api_base', '') || new URLSearchParams(location.search).get('callback_origin') || '';
       var wid = new URLSearchParams(location.search).get('id');
 
       function reportAndClose(apiBase, wid) {

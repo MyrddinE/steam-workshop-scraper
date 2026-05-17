@@ -103,7 +103,8 @@ def serve_image(filename):
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    web_delay = float((_config.get("daemon", {}) or {}).get("web_delay_seconds", 5.0))
+    return render_template('index.html', web_delay=web_delay)
 
 
 @app.route('/userscript/<path:filename>')
