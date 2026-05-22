@@ -341,3 +341,26 @@ def test_waitress_monkeypatch_graceful_when_add_task_missing(monkeypatch):
     # Server would still start — no crash
     # Restore is unnecessary since we used monkeypatch in a test fixture
 
+
+def test_api_subscribe_failed(web_client):
+    """POST /api/subscribe_failed dequeues item and tracks failure."""
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 999, "is_queued_for_subscription": 1})
+    resp = client.post('/api/subscribe_failed/999')
+    assert resp.status_code == 200
+    # Item should be dequeued
+    queued = client.get('/api/queued').get_json()
+    assert not any(q["workshop_id"] == 999 for q in queued)
+    # Failure should be tracked
+    failures = client.get('/api/sub_failures').get_json()
+    assert 999 in failures
+
+
+def test_api_sub_failures_empty(web_client):
+    """GET /api/sub_failures returns empty list when no failures."""
+    client, _ = web_client
+    import src.webserver as ws
+    ws._sub_failures.clear()
+    failures = client.get('/api/sub_failures').get_json()
+    assert failures == []
+

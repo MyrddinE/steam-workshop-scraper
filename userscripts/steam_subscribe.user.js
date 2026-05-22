@@ -97,6 +97,26 @@
         return false;
       }
 
+      function reportFailureAndClose(apiBase, wid) {
+        if (apiBase && wid) {
+          var url = apiBase + '/api/subscribe_failed/' + wid;
+          GM_xmlhttpRequest({
+            method: 'POST',
+            url: url,
+            headers: { 'Content-Type': 'application/json' },
+            onload: function () {
+              console.log('[SubscribeBridge] Reported subscription failure for', wid);
+              setTimeout(function () { window.close(); }, 500);
+            },
+            onerror: function () {
+              setTimeout(function () { window.close(); }, 500);
+            },
+          });
+        } else {
+          setTimeout(function () { window.close(); }, 500);
+        }
+      }
+
       setTimeout(function () {
         var btn = document.getElementById('SubscribeItemBtn');
         if (btn) {
@@ -121,7 +141,7 @@
             }, 500);
           }
         } else {
-          reportAndClose(apiBase, wid);
+          reportFailureAndClose(apiBase, wid);
         }
       }, 2000);
     }

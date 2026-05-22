@@ -116,6 +116,9 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .sub-queue-item.done .spinner { display:none; }
 .sub-queue-item.done .countdown { display:none; }
 .sub-queue-item.done::before { content:'\2713 '; color:#44aa44; flex-shrink:0; }
+.sub-queue-item.failed .spinner { display:none; }
+.sub-queue-item.failed .countdown { display:none; }
+.sub-queue-item.failed::before { content:'\2717 '; color:#ff4444; flex-shrink:0; }
 @keyframes spin { to { transform:rotate(360deg); } }
 </style>
 
@@ -698,18 +701,23 @@ async function _startAutoSubscribe() {
   const opened = new Set();
   const callbackOrigin = encodeURIComponent(location.origin);
 
-  // Poll for verification — marks items done when userscript reports back
+  // Poll for verification — marks items done/failed when userscript reports back
   _subPollIv = setInterval(async () => {
     try {
-      const qresp = await fetch('/api/queued');
+      const [qresp, fresp] = await Promise.all([
+        fetch('/api/queued'),
+        fetch('/api/sub_failures')
+      ]);
       const queued = await qresp.json();
+      const failures = await fresp.json();
       const queuedIds = new Set(queued.map(q => q.workshop_id));
+      const failedIds = new Set(failures);
       let changed = false;
       items.forEach(item => {
         if (!queuedIds.has(item.workshop_id) && !verified.has(item.workshop_id)) {
           verified.add(item.workshop_id);
           const row = list.querySelector(`[data-wid="${item.workshop_id}"]`);
-          if (row) row.classList.add('done');
+          if (row) row.classList.add(failedIds.has(item.workshop_id) ? 'failed' : 'done');
           changed = true;
         }
       });

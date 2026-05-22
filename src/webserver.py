@@ -386,6 +386,21 @@ def api_subscribed(workshop_id):
     return jsonify({"ok": True})
 
 
+_sub_failures = set()  # in-memory set of workshop_ids that failed subscription
+
+
+@app.route('/api/subscribe_failed/<int:workshop_id>', methods=['POST'])
+def api_subscribe_failed(workshop_id):
+    clear_subscription_queue_status(_db_path, workshop_id)
+    _sub_failures.add(workshop_id)
+    return jsonify({"ok": True})
+
+
+@app.route('/api/sub_failures')
+def api_sub_failures():
+    return jsonify(sorted(_sub_failures))
+
+
 @app.route('/api/queued')
 def api_queued():
     items = get_queued_items(_db_path)
