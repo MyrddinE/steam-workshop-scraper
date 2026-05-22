@@ -103,6 +103,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
     <h2>Auto-Subscribing...</h2>
     <p id="sub-progress" style="color:var(--pico-muted-color)"></p>
     <div id="sub-queue-list"></div>
+    <button id="sub-clear-failed" style="margin-top:1rem;display:none">Clear Failed</button>
     <button id="sub-cancel" style="margin-top:1rem">Cancel</button>
   </div>
 </div>
@@ -532,7 +533,7 @@ async function doSubscribe(wid, appid) {
     'https://steamcommunity.com/sharedfiles/filedetails/?id=' + wid + '&autosubscribe=true&callback_origin=' + encodeURIComponent(location.origin),
     'subtab_' + wid
   );
-  if (w) w.blur();
+  if (w) { w.blur(); window.focus(); }
 }
 
 async function loadState() {
@@ -639,6 +640,10 @@ document.addEventListener('keydown', e => {
   }
 });
 
+let _subPollIv = null;
+let _subScheduleIv = null;
+let _subCanceled = false;
+
 async function _startAutoSubscribe() {
   const resp = await fetch('/api/queued');
   const items = await resp.json();
@@ -657,8 +662,14 @@ async function _startAutoSubscribe() {
     </div>
   `).join('');
 
+  // Ensure clear-failed button is hidden on fresh start
+  const clearBtn = document.getElementById('sub-clear-failed');
+  if (clearBtn) clearBtn.style.display = 'none';
+  document.getElementById('sub-cancel').textContent = 'Cancel';
+
   await fetch('/api/pause', {method:'POST'});
 
+  _subCanceled = false;
   const stepDelay = WEB_DELAY * 1000;
   const startTime = Date.now();
   const verified = new Set();
@@ -666,32 +677,52 @@ async function _startAutoSubscribe() {
   const callbackOrigin = encodeURIComponent(location.origin);
 
   // Poll for verification — marks items done when userscript reports back
-  const pollIv = setInterval(async () => {
+  _subPollIv = setInterval(async () => {
     try {
       const qresp = await fetch('/api/queued');
       const queued = await qresp.json();
       const queuedIds = new Set(queued.map(q => q.workshop_id));
-
+      let changed = false;
       items.forEach(item => {
         if (!queuedIds.has(item.workshop_id) && !verified.has(item.workshop_id)) {
           verified.add(item.workshop_id);
           const row = list.querySelector(`[data-wid="${item.workshop_id}"]`);
           if (row) row.classList.add('done');
+          changed = true;
         }
       });
 
       progress.textContent = verified.size + ' / ' + items.length;
 
-      if (verified.size >= items.length) {
-        clearInterval(pollIv);
+      const scheduleDone = opened.size >= items.length;
+      const allDone = verified.size >= items.length;
+
+      if (allDone) {
+        clearInterval(_subPollIv);
+        _subPollIv = null;
         await fetch('/api/resume', {method:'POST'});
         setTimeout(() => { overlay.style.display = 'none'; }, 2000);
+        return;
+      }
+
+      // Show "Clear Failed" if schedule finished + grace period passed + stuck items remain
+      if (scheduleDone && !_subCanceled) {
+        var grace = Date.now() - startTime > (items.length * stepDelay) + 15000;
+        var stuck = items.length - verified.size;
+        if (grace && stuck > 0) {
+          var cb = document.getElementById('sub-clear-failed');
+          if (cb) {
+            cb.textContent = 'Clear Failed (' + stuck + ')';
+            cb.style.display = '';
+          }
+        }
       }
     } catch(e) { console.debug('Autosubscribe poll error', e); /* continue */ }
   }, 1000);
 
   // Countdown + tab-open loop
-  const scheduleIv = setInterval(() => {
+  _subScheduleIv = setInterval(() => {
+    if (_subCanceled) return;  // stop launching new tabs on cancel
     const elapsed = Math.floor((Date.now() - startTime) / 1000);
 
     items.forEach((item, i) => {
@@ -712,7 +743,7 @@ async function _startAutoSubscribe() {
           'https://steamcommunity.com/sharedfiles/filedetails/?id=' + item.workshop_id + '&autosubscribe=true&callback_origin=' + callbackOrigin,
           'subtab_' + item.workshop_id
         );
-        if (w) w.blur();
+        if (w) { w.blur(); window.focus(); }
         countdown.textContent = '';
       } else {
         countdown.textContent = (openAt - elapsed) + 's';
@@ -720,14 +751,40 @@ async function _startAutoSubscribe() {
     });
 
     if (opened.size >= items.length) {
-      clearInterval(scheduleIv);
+      clearInterval(_subScheduleIv);
+      _subScheduleIv = null;
     }
   }, 250);
 }
 
 document.getElementById('sub-cancel').onclick = () => {
-  fetch('/api/resume', {method:'POST'});  // resume daemon on cancel too
-  document.getElementById('sub-queue-overlay').style.display = 'none';
+  if (_subScheduleIv) {
+    _subCanceled = true;
+    clearInterval(_subScheduleIv);
+    _subScheduleIv = null;
+    document.getElementById('sub-cancel').textContent = 'Close';
+  } else {
+    // Second click (Close): dismiss overlay
+    if (_subPollIv) { clearInterval(_subPollIv); _subPollIv = null; }
+    // Dequeue any remaining unverified items so they don't stick
+    var rows = document.querySelectorAll('.sub-queue-item:not(.done)');
+    rows.forEach(function(row) {
+      var wid = row.getAttribute('data-wid');
+      if (wid) fetch('/api/subscribed/' + wid, {method:'POST'});
+      row.classList.add('done');
+    });
+    fetch('/api/resume', {method:'POST'});
+    document.getElementById('sub-queue-overlay').style.display = 'none';
+  }
+};
+
+document.getElementById('sub-clear-failed').onclick = () => {
+  var rows = document.querySelectorAll('.sub-queue-item:not(.done)');
+  rows.forEach(function(row) {
+    var wid = row.getAttribute('data-wid');
+    if (wid) fetch('/api/subscribed/' + wid, {method:'POST'});
+    row.classList.add('done');
+  });
 };
 
 loadState();

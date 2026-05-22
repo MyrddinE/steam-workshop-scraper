@@ -59,13 +59,30 @@
 
       function reportAndClose(apiBase, wid) {
         if (apiBase && wid) {
+          var url = apiBase + '/api/subscribed/' + wid;
           GM_xmlhttpRequest({
             method: 'POST',
-            url: apiBase + '/api/subscribed/' + wid,
+            url: url,
             headers: { 'Content-Type': 'application/json' },
+            onload: function () {
+              console.log('[SubscribeBridge] Verified subscription reported for', wid);
+              setTimeout(function () { window.close(); }, 500);
+            },
+            onerror: function () {
+              console.error('[SubscribeBridge] Failed to report for', wid, '- retrying once');
+              setTimeout(function () {
+                GM_xmlhttpRequest({
+                  method: 'POST',
+                  url: url,
+                  headers: { 'Content-Type': 'application/json' },
+                });
+                setTimeout(function () { window.close(); }, 500);
+              }, 2000);
+            },
           });
+        } else {
+          setTimeout(function () { window.close(); }, 500);
         }
-        setTimeout(function () { window.close(); }, 500);
       }
 
       function isVerified() {
