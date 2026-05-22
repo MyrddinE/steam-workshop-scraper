@@ -38,24 +38,33 @@ def main():
     logging.info(f"Starting web server on http://{host}:{port}")
     from waitress import serve
 
-    # Suppress Waitress's unconditional WARNING; replace with tiered logging
-    logging.getLogger('waitress.task').setLevel(logging.ERROR)
-    import waitress.task
-    _orig_add_task = waitress.task.ThreadedTaskDispatcher.add_task
+    # Replace Waitress's single WARNING queue-depth log with tiered logging.
+    # Wrapped in try/except so a future Waitress API change does not crash the server.
+    try:
+        import waitress.task
+    except ImportError:
+        pass
+    else:
+        _orig_add_task = getattr(waitress.task.ThreadedTaskDispatcher, 'add_task', None)
+        if _orig_add_task is not None:
+            logging.getLogger('waitress.task').setLevel(logging.ERROR)
 
-    def _add_task_with_tiered_logging(self, task):
-        _orig_add_task(self, task)
-        queue_size = len(self.queue)
-        idle_threads = len(self.threads) - self.stop_count - self.active_count
-        depth = queue_size - idle_threads
-        if depth >= 10:
-            logging.warning("Task queue depth is %d", depth)
-        elif depth >= 5:
-            logging.info("Task queue depth is %d", depth)
-        elif depth > 0:
-            logging.debug("Task queue depth is %d", depth)
+            def _add_task_with_tiered_logging(self, task):
+                _orig_add_task(self, task)
+                try:
+                    queue_size = len(self.queue)
+                    idle = len(self.threads) - self.stop_count - self.active_count
+                    depth = queue_size - idle
+                    if depth >= 10:
+                        logging.warning("Task queue depth is %d", depth)
+                    elif depth >= 5:
+                        logging.info("Task queue depth is %d", depth)
+                    elif depth > 0:
+                        logging.debug("Task queue depth is %d", depth)
+                except Exception:
+                    pass  # robust to attribute changes in future Waitress
 
-    waitress.task.ThreadedTaskDispatcher.add_task = _add_task_with_tiered_logging
+            waitress.task.ThreadedTaskDispatcher.add_task = _add_task_with_tiered_logging
 
     serve(app, host=host, port=port)
 

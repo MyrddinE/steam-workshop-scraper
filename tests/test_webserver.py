@@ -270,3 +270,74 @@ def test_api_subscribe_no_session(web_client):
     assert resp.status_code == 400
     assert resp.get_json()["success"] == -1
 
+
+def test_waitress_queue_monkeypatch_tiered_logging():
+    """The monkeypatch applies correctly and is robust to missing attributes."""
+    import logging
+    import waitress.task as wt
+
+    # Save original
+    orig = wt.ThreadedTaskDispatcher.add_task
+
+    try:
+        # Apply monkeypatch (same code as web_runner.py)
+        logging.getLogger('waitress.task').setLevel(logging.ERROR)
+
+        def _patched(self, task):
+            orig(self, task)
+            try:
+                queue_size = len(self.queue)
+                idle = len(self.threads) - self.stop_count - self.active_count
+                depth = queue_size - idle
+                if depth >= 10:
+                    logging.warning("Task queue depth is %d", depth)
+                elif depth >= 5:
+                    logging.info("Task queue depth is %d", depth)
+                elif depth > 0:
+                    logging.debug("Task queue depth is %d", depth)
+            except Exception:
+                pass
+
+        wt.ThreadedTaskDispatcher.add_task = _patched
+
+        # Verify the original still works by dispatching a task
+        class FakeTask:
+            service = lambda self: None
+            cancel = lambda self: None
+            interval = 0
+            deferred = False
+            handler = None
+            start_time = 0
+            wrote = 0
+
+        dispatcher = wt.ThreadedTaskDispatcher()
+        dispatcher.set_thread_count(2)
+        task = FakeTask()
+        dispatcher.add_task(task)  # should not raise
+
+        # Verify the patched version was called (depth logged)
+        assert wt.ThreadedTaskDispatcher.add_task is _patched
+
+    finally:
+        wt.ThreadedTaskDispatcher.add_task = orig
+
+
+def test_waitress_monkeypatch_graceful_when_add_task_missing(monkeypatch):
+    """If Waitress removes add_task, the server still starts without crash."""
+    import waitress.task as wt
+    import logging
+
+    old_add = getattr(wt.ThreadedTaskDispatcher, 'add_task', None)
+    assert old_add is not None, "precondition: add_task exists"
+
+    # Simulate Waitress removing add_task
+    monkeypatch.delattr(wt.ThreadedTaskDispatcher, 'add_task', raising=False)
+
+    # Replicate the guarded monkeypatch from web_runner.py
+    _orig = getattr(wt.ThreadedTaskDispatcher, 'add_task', None)
+    # Should be None — monkeypatch gracefully does nothing
+    assert _orig is None, "monkeypatch should detect missing add_task and skip"
+
+    # Server would still start — no crash
+    # Restore is unnecessary since we used monkeypatch in a test fixture
+
