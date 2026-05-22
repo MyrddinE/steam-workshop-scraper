@@ -427,16 +427,14 @@ function renderDetail(item) {
 
   const fmtTs = (ts) => ts ? new Date(ts*1000).toISOString().slice(0,19).replace('T',' ') : 'N/A';
   const tooltip = [
-    `Workshop ID: ${item.workshop_id}`,
     `Filename: ${item.filename || 'N/A'}`,
     `App Name: ${item.app_name || 'N/A'}`,
-    `Creator AppID: ${item.consumer_appid || item.creator_appid || 'N/A'}`,
+    `Creator AppID: ${item.creator_appid || 'N/A'}`,
+    `Consumer AppID: ${item.consumer_appid || 'N/A'}`,
     `File Type: ${item.file_type ?? 'N/A'}`,
     `Language: ${item.language ?? 'N/A'}`,
     `Visibility: ${item.visibility ?? 'N/A'}`,
     `Banned: ${item.banned ? 'Yes' + (item.ban_reason ? ' — ' + item.ban_reason : '') : 'No'}`,
-    `Image Ext: ${item.image_extension || 'none'}`,
-    `Queued for Sub: ${item.is_queued_for_subscription ? 'Yes' : 'No'}`,
     `Status: ${item.status ?? 'N/A'}`,
     `Translation Priority: ${item.translation_priority || 0}`,
     `Needs Web Scrape: ${item.needs_web_scrape || 0}`,
@@ -447,7 +445,6 @@ function renderDetail(item) {
     `dt_translated: ${fmtTs(item.dt_translated)}`,
     `hcontent_file: ${item.hcontent_file || 'N/A'}`,
     `hcontent_preview: ${item.hcontent_preview || 'N/A'}`,
-    `preview_url: ${(item.preview_url || 'N/A').slice(0, 80)}`,
   ].join('&#10;');
 
   let desc = item.description_html || '';
