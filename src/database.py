@@ -1400,7 +1400,7 @@ def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None) -> dict:
     Uses NTILE(100) — returns p99, p90, p50 thresholds for both scores.
     Returns empty dict if fewer than 10 items in the filtered set."""
     conn = get_connection(db_path)
-    sql = "SELECT workshop_id, wilson_favorite_score, wilson_subscription_score FROM workshop_items"
+    sql = "SELECT w.workshop_id, w.wilson_favorite_score, w.wilson_subscription_score FROM workshop_items w"
     params = []
     if filters:
         filter_clauses = []

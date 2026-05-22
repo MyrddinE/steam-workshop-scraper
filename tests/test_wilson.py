@@ -113,6 +113,24 @@ def test_cutoffs_http_endpoint(db_path):
         assert data["wilson_subscription_p50"] is not None
         assert isinstance(data["wilson_subscription_p50"], (int, float))
 
+
+def test_compute_wilson_cutoffs_with_tag_filter(db_path):
+    """Checks that tag filters do not crash compute_wilson_cutoffs
+    when the tag clause builder uses table-alias w.workshop_id."""
+    for i in range(1, 20):
+        insert_or_update_item(db_path, {
+            "workshop_id": i,
+            "wilson_favorite_score": 0.05 * i,
+            "wilson_subscription_score": 0.04 * i,
+            "tags": '"mod"' if i <= 10 else '"map"',
+        })
+    result = compute_wilson_cutoffs(db_path, filters=[
+        {"field": "Tags", "op": "contains", "value": "mod"}
+    ])
+    assert len(result) >= 10
+    assert result["wilson_favorite_p99"] >= 0
+
+
 def test_compute_wilson_cutoffs_small_set(db_path):
     for i in range(1, 6):
         insert_or_update_item(db_path, {"workshop_id": i, "wilson_favorite_score": 0.1 * i})
