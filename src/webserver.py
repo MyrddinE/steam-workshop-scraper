@@ -401,6 +401,13 @@ def api_sub_failures():
     return jsonify(sorted(_sub_failures))
 
 
+@app.route('/api/fetch_new', methods=['POST'])
+def api_fetch_new():
+    with open('.fetch_new', 'w') as f:
+        f.write('1')
+    return jsonify({"ok": True})
+
+
 @app.route('/api/queued')
 def api_queued():
     items = get_queued_items(_db_path)

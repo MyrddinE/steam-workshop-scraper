@@ -488,6 +488,8 @@ class Daemon:
                     logging.info("Cursor exhausted — page-based discovery now eligible.")
 
     def _page_discovery_eligible(self) -> bool:
+        if os.path.exists('.fetch_new'):
+            return True
         if self._cursor_exhausted:
             return True
         conn = get_connection(self.db_path)
@@ -501,7 +503,13 @@ class Daemon:
         if not self.api_key:
             return
         if int(time.time()) - self._last_page_discovery < 86400:
-            return
+            if not os.path.exists('.fetch_new'):
+                return
+            logging.info("Fetch-new trigger file detected — bypassing 24h cooldown")
+            try:
+                os.remove('.fetch_new')
+            except OSError:
+                pass
 
         logging.info("Running page-based discovery (sort-by-update-time)...")
         self._last_page_discovery = int(time.time())

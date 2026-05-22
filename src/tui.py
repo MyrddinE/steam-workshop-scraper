@@ -1122,6 +1122,15 @@ class ScraperApp(App):
         border: solid $success;
         margin: 0;
     }
+    #compact-buttons {
+        height: auto;
+        margin: 0;
+    }
+    .compact-btn {
+        height: 1;
+        border: none;
+        min-width: 12;
+    }
     #sort-container {
         height: auto;
         layout: horizontal;
@@ -1372,6 +1381,11 @@ class ScraperApp(App):
         results_list = ListView(id="results-list")
         results_list.border_title = "Items"
 
+        compact_buttons = Horizontal(
+            Button("Fetch New", id="btn-fetch-new", classes="compact-btn"),
+            id="compact-buttons"
+        )
+
         details_container = Vertical(
             DetailsPane(id="item-details"),
             id="details-container"
@@ -1383,6 +1397,7 @@ class ScraperApp(App):
             Vertical(
                 sort_container,
                 results_list,
+                compact_buttons,
                 id="results-column"
             ),
             details_container,
@@ -1529,7 +1544,11 @@ class ScraperApp(App):
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses (e.g., Jump to Author, Translation, Search Builder buttons)."""
-        if event.button.id in ("btn-queue-sub", "btn-unqueue-sub"):
+        if event.button.id == "btn-fetch-new":
+            with open('.fetch_new', 'w') as f:
+                f.write('1')
+            self.notify("Fetch-new triggered! The daemon will scan recently-updated items on its next cycle.")
+        elif event.button.id in ("btn-queue-sub", "btn-unqueue-sub"):
             await self.action_toggle_queue()
         elif event.button.id == "btn-execute-search":
             await self.execute_search()

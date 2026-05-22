@@ -468,6 +468,9 @@ function renderDetail(item) {
     <div class="stat-row"><span class="stat-label">Tags:</span> <small>${tags}</small></div>
     <p><button onclick="doSubscribe(${item.workshop_id}, ${item.consumer_appid || 0});return false;">Subscribe</button></p>
     ${desc ? '<div style="border-left:3px solid var(--pico-muted-border-color);padding-left:.5rem;margin-top:.5rem">'+desc+'</div>' : ''}
+    <div style="margin-top:.5rem">
+      <button onclick="fetch('/api/fetch_new',{method:'POST'}).then(()=>alert('Fetch-new triggered! The daemon will scan recently-updated items on its next cycle.'))">Fetch New</button>
+    </div>
   `;
 }
 
