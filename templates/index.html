@@ -378,7 +378,7 @@ function _startListPoll(filters, sortBy, sortOrder) {
 
       const delay = Math.max(1, Math.log2(pending.length)) * 1000;
       _listPollTimer = setTimeout(tick, delay);
-    } catch(e) { /* poll error, keep trying */ }
+    } catch(e) { console.debug('List poll error', e); /* keep trying */ }
   }
 
   _listPollTimer = setTimeout(tick, 0);
@@ -412,7 +412,7 @@ function renderDetail(item) {
     if (!raw) return 'None';
     if (raw.startsWith('[')) {
       try { const t = JSON.parse(raw); return Array.isArray(t) ? t.join(', ') : 'None'; }
-      catch(e) { return 'None'; }
+      catch(e) { console.debug('Tag JSON parse failed', e); return 'None'; }
     }
     return raw;
   })();
@@ -460,7 +460,7 @@ function _startDetailPoll(wid, item) {
         renderDetail(updated);
         _stopDetailPoll();
       }
-    } catch(e) { /* poll error, keep trying */ }
+    } catch(e) { console.debug('Detail poll error', e); /* keep trying */ }
   }, 3000);
 }
 
@@ -555,7 +555,7 @@ async function loadState() {
     if (!document.getElementById('filter-rows').children.length) addRow();
     if (state.sort_by) document.getElementById('sort-by').value = state.sort_by;
     if (state.sort_order) document.getElementById('sort-order').value = state.sort_order;
-  } catch(e) {}
+  } catch(e) { console.warn('loadState fetch failed', e); }
   doSearch(true);
 }
 
@@ -586,7 +586,7 @@ document.addEventListener('blur', e => {
     if (isNaN(v)) { e.target.value = '0'; return; }
     v = Math.max(0, Math.min(99, v));
     e.target.value = String(v);
-  } catch (err) { /* blur handler must never break the page */ }
+  } catch (err) { console.debug('Blur handler error', err); /* must never break the page */ }
 }, true);
 
 document.addEventListener('keydown', e => {
@@ -682,7 +682,7 @@ async function _startAutoSubscribe() {
         await fetch('/api/resume', {method:'POST'});
         setTimeout(() => { overlay.style.display = 'none'; }, 2000);
       }
-    } catch(e) { /* polling error — continue */ }
+    } catch(e) { console.debug('Autosubscribe poll error', e); /* continue */ }
   }, 1000);
 
   // Countdown + tab-open loop

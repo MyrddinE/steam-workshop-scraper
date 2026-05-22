@@ -339,7 +339,9 @@ def _evaluate_tag_filter(item: dict, op: str, val) -> bool:
         tags_list = json.loads(tags_raw) if isinstance(tags_raw, str) else tags_raw
         if isinstance(tags_list, list):
             tag_set = {str(t) for t in tags_list}
-    except: pass
+    except Exception:
+        logging.debug("Failed to parse tags in filter evaluation")
+        pass
 
     if op == "contains":
         return val in tag_set
@@ -541,10 +543,10 @@ def initialize_database(db_path: str):
         filter_text = (row["filter_text"] or "").strip()
         try:
             required_tags = json.loads(row["required_tags"] or "[]")
-        except: required_tags = []
+        except Exception: required_tags = []
         try:
             excluded_tags = json.loads(row["excluded_tags"] or "[]")
-        except: excluded_tags = []
+        except Exception: excluded_tags = []
         if not filter_text and not required_tags and not excluded_tags:
             continue
         filters = []
@@ -966,6 +968,7 @@ def insert_or_update_item(db_path: str, item_data: dict) -> bool:
                         (item_data["workshop_id"], tid)
                     )
         except Exception:
+            logging.warning("Failed to sync tags for item %s", item_data.get("workshop_id"))
             pass
     
     columns = [col for col in item_data.keys() if col in WORKSHOP_ITEM_COLUMNS]

@@ -84,6 +84,7 @@ class ImageScraperThread(threading.Thread):
                         if ext:
                             logging.info(f"[I:{wid}] Puremagic detected {magic_ext} → .{ext}")
                     except Exception:
+                        logging.debug("[I:%s] Puremagic detection failed, falling back to URL extension", wid)
                         pass
 
                 if not ext:

@@ -231,6 +231,7 @@ def api_state():
         with open(state_path, 'r', encoding='utf-8') as f:
             state = yaml.safe_load(f) or {}
     except Exception:
+        logging.info("No saved filter state found or failed to read")
         state = {}
     return jsonify(state)
 

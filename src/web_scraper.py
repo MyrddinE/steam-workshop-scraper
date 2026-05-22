@@ -130,5 +130,6 @@ def discover_items_by_date_html(appid: int, start_date: int, end_date: int, page
         ids = _extract_item_ids_from_page(response)
         total_pages = _extract_total_pages(response)
         return ids, total_pages
-    except (requests.exceptions.RequestException, Exception):
+    except Exception:
+        logging.warning("Page discovery for appid %s failed", appid)
         return [], -1

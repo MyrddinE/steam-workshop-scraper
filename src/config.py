@@ -1,3 +1,4 @@
+import logging
 import os
 import yaml
 from pathlib import Path
@@ -40,6 +41,7 @@ def save_config(path: str, config: dict):
         with open(path, "r", encoding="utf-8") as f:
             disk_config = yaml.safe_load(f) or {}
     except Exception:
+        logging.debug("Config file not found or failed to parse: %s", path)
         disk_config = {}
 
     # Deep update disk_config with new config

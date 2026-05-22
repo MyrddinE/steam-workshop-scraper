@@ -24,7 +24,8 @@ def format_ts(ts):
     if not ts: return "N/A"
     try:
         return datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d')
-    except:
+    except Exception:
+        logging.debug("format_count failed for value %r", n)
         return "N/A"
 
 def format_size(size_bytes):
@@ -49,7 +50,9 @@ def format_size(size_bytes):
         if gb < 100:
             return f"[red]{gb:.1f} GB[/red]"
         return f"[red]{gb:.0f} GB[/red]"
-    except: return "N/A"
+    except Exception:
+        logging.debug("format_size failed for value %r", bytes)
+        return "N/A"
 
 def format_count(n):
     """Humanizes a number to 3 significant digits with K/M suffix and color markup."""
@@ -89,7 +92,8 @@ def parse_tags(tags) -> list[str]:
     try:
         parsed = json.loads(tags) if isinstance(tags, str) else tags
         return [str(t.get("tag") if isinstance(t, dict) else t) for t in (parsed if isinstance(parsed, list) else [])]
-    except:
+    except Exception:
+        logging.debug("parse_tags: failed to parse %r", tags)
         return []
 
 class StatsScreen(Screen):
@@ -548,6 +552,7 @@ def save_tui_state(path: str, state: dict) -> None:
         with open(path, 'w', encoding='utf-8') as f:
             yaml.dump(state, f, default_flow_style=False)
     except Exception:
+        logging.debug("Failed to save TUI state")
         pass
 
 import re
@@ -885,6 +890,7 @@ class SearchRow(Horizontal):
                 else:
                     op_select.value = ops[0]
             except Exception:
+                logging.debug("Widget not ready during mount")
                 pass # Overlay might not be ready during initial mount
 
     def on_input_blurred(self, event: Input.Blurred) -> None:
@@ -1303,6 +1309,7 @@ class ScraperApp(App):
                     builder = self.query_one("#search-builder", SearchBuilder)
                     builder.set_filters(self._initial_state["filters"])
             except Exception:
+                logging.debug("Failed to restore filter state from initial load")
                 pass
                 
         self.call_after_refresh(self.execute_search)
@@ -1320,6 +1327,7 @@ class ScraperApp(App):
             if scroll_y >= list_view.max_scroll_y - 5:
                 self.run_worker(self.load_more_items())
         except Exception:
+            logging.debug("Scroll-triggered load-more check failed")
             pass
 
     def compose(self) -> ComposeResult:
@@ -1403,6 +1411,7 @@ class ScraperApp(App):
         try:
             list_view = self.query_one("#results-list", ListView)
         except Exception:
+            logging.debug("Results list not accessible during search execution")
             return
         await list_view.clear()
         self._compute_percentiles()
@@ -1414,6 +1423,7 @@ class ScraperApp(App):
             builder = self.query_one("#search-builder", SearchBuilder)
             filters = builder.get_filters()
         except Exception:
+            logging.debug("Search builder not accessible during percentile computation")
             return
         self._wilson_cutoffs = compute_wilson_cutoffs(self.db_path, filters)
 
@@ -1477,6 +1487,7 @@ class ScraperApp(App):
                     if self._restored_scroll_y > 0:
                         list_view.scroll_y = self._restored_scroll_y
                 except Exception:
+                    logging.debug("Failed to restore scroll position")
                     pass
 
             self.call_after_refresh(restore_state)
@@ -1667,6 +1678,7 @@ class ScraperApp(App):
             detail = self.query_one("#item-details", DetailsPane)
             wid = getattr(detail, "workshop_id", None)
         except Exception:
+            logging.warning("Failed to get workshop_id from detail pane for subscribe")
             wid = None
         if not wid:
             self.notify("No item selected to subscribe to.", severity="warning")
