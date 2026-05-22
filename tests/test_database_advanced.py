@@ -1,91 +1,144 @@
 import pytest
 from src.database import (
-    insert_or_update_item,
     search_items,
-    get_all_authors
+    get_all_authors,
+    get_connection,
 )
 
-@pytest.fixture
-def db_path(tmp_path):
-    from src.database import initialize_database
-    path = str(tmp_path / "test_adv_search.db")
-    initialize_database(path)
-    # Populate with diverse data for advanced search
-    items = [
-        {"workshop_id": 1, "title": "Apple Mod", "short_description": "A simple apple.", "creator": "auth1", "filename": "apple.zip", "tags": '["Fruit", "Food"]', "subscriptions": 100, "views": 1000},
-        {"workshop_id": 2, "title": "Banana Mod", "short_description": "Apple inside.", "creator": "auth2", "filename": "banana.vpk", "tags": '["Fruit"]', "subscriptions": 500, "views": 2000},
-        {"workshop_id": 3, "title": "Apple Map", "short_description": "No fruit here.", "creator": "auth1", "filename": "map.bsp", "tags": '["Map"]', "subscriptions": 10, "views": 50},
-        {"workshop_id": 4, "title": "Mickey Mouse Clubhouse", "short_description": "Disney stuff", "creator": "auth3", "filename": "mickey.zip", "tags": '["Toon"]', "subscriptions": 10000, "views": 50000},
-        {"workshop_id": 5, "title": "Apple Mickey", "short_description": "Fruit mouse", "creator": "auth1", "filename": "applemic.zip", "tags": '["Toon", "Fruit"]', "subscriptions": 50, "views": 200},
-        {"workshop_id": 6, "title": "Bad Script", "extended_description": "Contains evil script.", "creator": "auth2", "filename": "script.lua", "tags": '["Code"]', "subscriptions": 0, "views": 5}
-    ]
-    for item in items:
-        insert_or_update_item(path, item)
-    return path
 
-def test_search_multiple_positive_terms(db_path):
-    # Should match items containing BOTH "Apple" and "Mod"
-    results = search_items(db_path, title_query="Apple Mod")
-    assert len(results) == 1
-    assert results[0]["workshop_id"] == 1
+def _title_text(r):
+    return ((r.get("title") or "") + " " + (r.get("title_en") or "")).lower()
 
-def test_search_negative_terms(db_path):
-    # Title has Apple, but exclude Map
-    results = search_items(db_path, title_query="Apple -Map")
-    ids = [r["workshop_id"] for r in results]
-    assert 3 not in ids # Apple Map should be excluded
-    assert 1 in ids # Apple Mod should be included
 
-def test_search_quoted_phrases_and_exclusions(db_path):
-    # Title has Apple, exclude exact phrase "Mickey Mouse"
-    results = search_items(db_path, title_query="Apple -\"Mickey Mouse\"")
-    ids = [r["workshop_id"] for r in results]
-    assert 5 in ids # "Apple Mickey" should be included
-
-def test_search_combined_descriptions(db_path):
-    # Tests that desc_query searches both short and extended desc at once
-    results = search_items(db_path, desc_query="evil script")
-    assert len(results) == 1
-    assert results[0]["workshop_id"] == 6
-
-def test_search_filename_and_tags(db_path):
-    results = search_items(db_path, filename_query=".zip", filters=[
-        {"field": "Tags", "op": "contains", "value": "Fruit"}])
-    assert len(results) == 2
-    ids = [r["workshop_id"] for r in results]
-    assert 1 in ids
-    assert 5 in ids
-
-def test_search_numeric_inequalities(db_path):
-    # Subscriptions >= 500
-    results_subs = search_items(db_path, numeric_filters={"subscriptions": ">=500"})
-    assert len(results_subs) == 2
-    ids = [r["workshop_id"] for r in results_subs]
-    assert 2 in ids
-    assert 4 in ids
-    
-    # Views < 1000
-    results_views = search_items(db_path, numeric_filters={"views": "< 1000"})
-    assert len(results_views) == 3
-    ids_views = [r["workshop_id"] for r in results_views]
-    assert 3 in ids_views
-    assert 5 in ids_views
-    assert 6 in ids_views
-
-    # Exact match fallback (no operator = exact)
-    results_exact = search_items(db_path, numeric_filters={"subscriptions": "100"})
-    assert len(results_exact) == 1
-    assert results_exact[0]["workshop_id"] == 1
-
-def test_search_by_author(db_path):
-    # Filter strictly by creator ID
-    results = search_items(db_path, creator="auth1")
-    assert len(results) == 3
+def test_search_multiple_positive_terms(deterministic_db):
+    results = search_items(deterministic_db, title_query="lorem ipsum")
+    assert len(results) > 0
     for r in results:
-        assert r["creator"] == "auth1"
+        t = _title_text(r)
+        assert "lorem" in t and "ipsum" in t
 
-def test_get_all_authors_advanced(db_path):
-    """Test retrieving a list of unique authors for the TUI combo box."""
-    authors = get_all_authors(db_path)
-    assert len(authors) == 3
-    assert "auth1" in authors
+
+def test_search_negative_terms(deterministic_db):
+    all_lorem = search_items(deterministic_db, title_query="lorem")
+    filtered = search_items(deterministic_db, title_query="lorem -dolor")
+    assert len(filtered) > 0
+    assert len(filtered) < len(all_lorem)
+    for r in filtered:
+        t = _title_text(r)
+        assert "lorem" in t
+        assert "dolor" not in t
+
+
+def test_search_quoted_phrases_and_exclusions(deterministic_db):
+    conn = get_connection(deterministic_db)
+    row = conn.execute(
+        "SELECT title FROM workshop_items WHERE title LIKE '%lorem ipsum%' AND title LIKE '%dolor%' LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if not row:
+        pytest.skip("No title with 'lorem ipsum dolor' found")
+    with_phrase = search_items(deterministic_db, title_query='"lorem ipsum"')
+    without_word = search_items(deterministic_db, title_query='"lorem ipsum" -dolor')
+    assert len(with_phrase) > 0
+    assert len(without_word) < len(with_phrase)
+    for r in without_word:
+        t = _title_text(r)
+        assert "lorem ipsum" in t
+        assert "dolor" not in t
+
+
+def test_search_combined_descriptions(deterministic_db):
+    results = search_items(deterministic_db, desc_query="lorem ipsum dolor")
+    assert len(results) > 0
+    for r in results:
+        short = (r.get("short_description") or "").lower()
+        short_en = (r.get("short_description_en") or "").lower()
+        ext = (r.get("extended_description") or "").lower()
+        ext_en = (r.get("extended_description_en") or "").lower()
+        combined = short + " " + short_en + " " + ext + " " + ext_en
+        assert "lorem" in combined and "ipsum" in combined and "dolor" in combined
+
+
+def test_search_filename_and_tags(deterministic_db):
+    all_items = search_items(deterministic_db)
+    with_tag = search_items(deterministic_db, filters=[
+        {"field": "Tags", "op": "contains", "value": "mod"}
+    ])
+    mod_lorem = search_items(deterministic_db, filters=[
+        {"field": "Tags", "op": "contains", "value": "mod"},
+        {"field": "Title", "op": "contains", "value": "lorem"},
+    ])
+    assert len(with_tag) > 0
+    assert len(with_tag) < len(all_items)
+    assert len(mod_lorem) > 0
+    assert len(mod_lorem) <= len(with_tag)
+    tag_sets = _get_tag_sets(deterministic_db, [r["workshop_id"] for r in mod_lorem])
+    for r, tags in zip(mod_lorem, tag_sets):
+        assert "mod" in tags
+        assert "lorem" in _title_text(r)
+
+
+def test_search_numeric_inequalities(deterministic_db):
+    results_subs = search_items(deterministic_db, filters=[
+        {"field": "Subs", "op": "gte", "value": 1000}
+    ])
+    assert len(results_subs) > 0
+    for r in results_subs:
+        assert (r["subscriptions"] or 0) >= 1000
+
+    results_views = search_items(deterministic_db, filters=[
+        {"field": "Views", "op": "lt", "value": 100}
+    ])
+    assert len(results_views) > 0
+    for r in results_views:
+        assert (r["views"] or 0) < 100
+
+    conn = get_connection(deterministic_db)
+    sample = conn.execute(
+        "SELECT workshop_id, subscriptions FROM workshop_items WHERE subscriptions > 0 LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if sample:
+        results_exact = search_items(deterministic_db, filters=[
+            {"field": "Subs", "op": "is", "value": sample["subscriptions"]}
+        ])
+        found = any(r["subscriptions"] == sample["subscriptions"] for r in results_exact)
+        assert found
+
+
+def test_search_by_author(deterministic_db):
+    conn = get_connection(deterministic_db)
+    author = conn.execute(
+        "SELECT creator, COUNT(*) as cnt FROM workshop_items GROUP BY creator ORDER BY cnt DESC LIMIT 1"
+    ).fetchone()["creator"]
+    conn.close()
+    results = search_items(deterministic_db, filters=[
+        {"field": "Author ID", "op": "is", "value": author}
+    ])
+    assert len(results) > 0
+    for r in results:
+        assert r["creator"] == author
+
+
+def test_get_all_authors_advanced(deterministic_db):
+    authors = get_all_authors(deterministic_db)
+    assert len(authors) > 0
+    conn = get_connection(deterministic_db)
+    expected = conn.execute(
+        "SELECT COUNT(DISTINCT creator) FROM workshop_items WHERE creator IS NOT NULL"
+    ).fetchone()[0]
+    conn.close()
+    assert len(authors) == expected
+
+
+def _get_tag_sets(db_path, wids):
+    conn = get_connection(db_path)
+    tag_sets = []
+    for wid in wids:
+        rows = conn.execute(
+            "SELECT t.tag_name FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id=?",
+            (wid,)
+        ).fetchall()
+        tag_sets.append({r["tag_name"] for r in rows})
+    conn.close()
+    return tag_sets

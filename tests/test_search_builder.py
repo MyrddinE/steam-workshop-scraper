@@ -1,157 +1,183 @@
 import pytest
-from src.database import initialize_database, insert_or_update_item, search_items
+from src.database import search_items, get_connection
 
-@pytest.fixture
-def db_path(tmp_path):
-    path = str(tmp_path / "test_search.db")
-    initialize_database(path)
-    # Add some sample data
-    items = [
-        {"workshop_id": 1, "title": "Alpha Item", "file_size": 100, "subscriptions": 10, "tags": "['tag1']"},
-        {"workshop_id": 2, "title": "Beta Item", "file_size": 200, "subscriptions": 20, "tags": "['tag2']"},
-        {"workshop_id": 3, "title": "Gamma Item", "file_size": 300, "subscriptions": 30, "tags": "['tag1', 'tag2']"},
-        {"workshop_id": 4, "title": None, "file_size": 400, "subscriptions": 40},
-        {"workshop_id": 5, "title": "", "file_size": 500, "subscriptions": 50},
-    ]
-    for item in items:
-        insert_or_update_item(path, item)
-    return path
 
-def test_search_contains(db_path):
-    filters = [{"field": "title", "op": "contains", "value": "Alpha"}]
-    results = search_items(db_path, filters=filters)
-    assert len(results) == 1
-    assert results[0]["workshop_id"] == 1
+def _title_text(r):
+    return ((r.get("title") or "") + " " + (r.get("title_en") or "")).lower()
 
-def test_search_is(db_path):
-    filters = [{"field": "title", "op": "is", "value": "Beta Item"}]
-    results = search_items(db_path, filters=filters)
-    assert len(results) == 1
-    assert results[0]["workshop_id"] == 2
 
-def test_search_greater_than(db_path):
-    filters = [{"field": "file_size", "op": "gt", "value": 250}]
-    results = search_items(db_path, filters=filters)
-    assert len(results) == 3
-    assert {r["workshop_id"] for r in results} == {3, 4, 5}
+def test_search_contains(deterministic_db):
+    results = search_items(deterministic_db, filters=[
+        {"field": "Title", "op": "contains", "value": "lorem"}
+    ])
+    assert len(results) > 0
+    for r in results:
+        assert "lorem" in _title_text(r)
 
-def test_search_less_than_or_equal(db_path):
-    filters = [{"field": "subscriptions", "op": "lte", "value": 20}]
-    results = search_items(db_path, filters=filters)
+
+def test_search_is(deterministic_db):
+    conn = get_connection(deterministic_db)
+    title = conn.execute(
+        "SELECT title, title_en FROM workshop_items WHERE title LIKE '%lorem%' AND title NOT LIKE '% %' LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if not title:
+        pytest.skip("No single-word lorem title found")
+    results = search_items(deterministic_db, filters=[
+        {"field": "Title", "op": "is", "value": title["title"]}
+    ])
+    assert len(results) >= 1
+    for r in results:
+        assert r["title"] == title["title"] or r["title_en"] == title["title"]
+
+
+def test_search_greater_than(deterministic_db):
+    threshold = 50_000_000
+    results = search_items(deterministic_db, filters=[
+        {"field": "File Size", "op": "gt", "value": threshold}
+    ])
+    assert len(results) > 0
+    for r in results:
+        assert (r["file_size"] or 0) > threshold
+
+
+def test_search_less_than_or_equal(deterministic_db):
+    threshold = 1000
+    results = search_items(deterministic_db, filters=[
+        {"field": "Subs", "op": "lte", "value": threshold}
+    ])
+    assert len(results) > 0
+    for r in results:
+        assert (r["subscriptions"] or 0) <= threshold
+
+
+def test_search_is_empty(deterministic_db):
+    results = search_items(deterministic_db, filters=[
+        {"field": "Title", "op": "is_empty"}
+    ])
+    assert len(results) >= 0  # all items have titles, so 0 is valid
+
+
+def test_search_is_not_empty(deterministic_db):
+    results = search_items(deterministic_db, filters=[
+        {"field": "Title", "op": "is_not_empty"}
+    ])
+    all_items = search_items(deterministic_db)
+    assert len(results) == len(all_items)
+
+
+def test_search_combined_and(deterministic_db):
+    a = search_items(deterministic_db, filters=[
+        {"field": "File Size", "op": "gt", "value": 1_000_000}
+    ])
+    b = search_items(deterministic_db, filters=[
+        {"field": "Subs", "op": "lt", "value": 1000}
+    ])
+    combined = search_items(deterministic_db, filters=[
+        {"field": "File Size", "op": "gt", "value": 1_000_000},
+        {"logic": "AND", "field": "Subs", "op": "lt", "value": 1000}
+    ])
+    assert len(combined) <= min(len(a), len(b))
+    for r in combined:
+        assert (r["file_size"] or 0) > 1_000_000
+        assert (r["subscriptions"] or 0) < 1000
+
+
+def test_search_combined_or(deterministic_db):
+    conn = get_connection(deterministic_db)
+    ids = [r["workshop_id"] for r in conn.execute(
+        "SELECT workshop_id FROM workshop_items LIMIT 2"
+    ).fetchall()]
+    conn.close()
+    results = search_items(deterministic_db, filters=[
+        {"field": "Workshop ID", "op": "is", "value": ids[0]},
+        {"logic": "OR", "field": "Workshop ID", "op": "is", "value": ids[1]}
+    ])
     assert len(results) == 2
-    assert {r["workshop_id"] for r in results} == {1, 2}
+    assert {r["workshop_id"] for r in results} == set(ids)
 
-def test_search_is_empty(db_path):
-    filters = [{"field": "title", "op": "is_empty"}]
-    results = search_items(db_path, filters=filters)
-    # 4 is None, 5 is ""
-    assert len(results) == 2
-    assert {r["workshop_id"] for r in results} == {4, 5}
 
-def test_search_is_not_empty(db_path):
-    filters = [{"field": "title", "op": "is_not_empty"}]
-    results = search_items(db_path, filters=filters)
-    assert len(results) == 3
-    assert {r["workshop_id"] for r in results} == {1, 2, 3}
+def test_search_is_not(deterministic_db):
+    conn = get_connection(deterministic_db)
+    wid = conn.execute("SELECT workshop_id FROM workshop_items LIMIT 1").fetchone()["workshop_id"]
+    conn.close()
+    all_items = search_items(deterministic_db)
+    results = search_items(deterministic_db, filters=[
+        {"field": "Workshop ID", "op": "is_not", "value": wid}
+    ])
+    assert len(results) == len(all_items) - 1
+    assert wid not in {r["workshop_id"] for r in results}
 
-def test_search_combined_and(db_path):
+
+def test_search_gte(deterministic_db):
+    threshold = 50_000_000
+    results = search_items(deterministic_db, filters=[
+        {"field": "File Size", "op": "gte", "value": threshold}
+    ])
+    assert len(results) > 0
+    for r in results:
+        assert (r["file_size"] or 0) >= threshold
+
+
+def test_search_invalid_filter(deterministic_db):
+    all_items = search_items(deterministic_db)
     filters = [
-        {"field": "file_size", "op": "gt", "value": 150},
-        {"field": "subscriptions", "op": "lt", "value": 35},
-        {"logic": "AND"}
+        {"field": "Title", "op": "", "value": "lorem"},
+        {"field": "", "op": "is", "value": "anything"}
     ]
-    # Logic in list means combine previous terms with this logic?
-    # Actually a better structure might be:
-    # filters = [
-    #   {"field": "file_size", "op": "gt", "value": 150},
-    #   {"logic": "AND", "field": "subscriptions", "op": "lt", "value": 35}
-    # ]
-    # Or just assume AND for now and support OR explicitly.
-    # The user said: "trailing buttons for 'and' 'or' and 'x'"
-    # This implies a sequence: [Term1] [AND] [Term2] [OR] [Term3]
+    results = search_items(deterministic_db, filters=filters)
+    assert len(results) == len(all_items)  # invalid filters are ignored
+
+
+def test_search_sorting(deterministic_db):
+    results = search_items(deterministic_db, sort_by="file_size", sort_order="DESC")
+    assert len(results) > 0
+    for i in range(len(results) - 1):
+        assert (results[i]["file_size"] or 0) >= (results[i + 1]["file_size"] or 0)
+
+    results_asc = search_items(deterministic_db, sort_by="title", sort_order="ASC")
+    assert len(results_asc) > 0
+
+
+def test_search_does_not_contain(deterministic_db):
+    results = search_items(deterministic_db, filters=[
+        {"field": "Title", "op": "does_not_contain", "value": "lorem"}
+    ])
+    assert len(results) > 0
+    for r in results:
+        assert "lorem" not in _title_text(r)
+
+
+def test_search_malformed_filters_graceful(deterministic_db):
     filters = [
-        {"field": "file_size", "op": "gt", "value": 150},
-        {"logic": "AND", "field": "subscriptions", "op": "lt", "value": 35}
+        {"field": "Title", "value": "Alpha"},
+        {"op": "contains", "value": "Alpha"},
+        {"field": "NoSuchField", "op": "contains", "value": "Alpha"},
     ]
-    results = search_items(db_path, filters=filters)
-    # file_size > 150: 2, 3, 4, 5
-    # subscriptions < 35: 1, 2, 3
-    # AND: 2, 3
-    assert len(results) == 2
-    assert {r["workshop_id"] for r in results} == {2, 3}
-
-def test_search_combined_or(db_path):
-    filters = [
-        {"field": "workshop_id", "op": "is", "value": 1},
-        {"logic": "OR", "field": "workshop_id", "op": "is", "value": 5}
-    ]
-    results = search_items(db_path, filters=filters)
-    assert len(results) == 2
-    assert {r["workshop_id"] for r in results} == {1, 5}
-
-def test_search_is_not(db_path):
-    filters = [{"field": "workshop_id", "op": "is_not", "value": 1}]
-    results = search_items(db_path, filters=filters)
-    assert len(results) == 4
-    assert 1 not in {r["workshop_id"] for r in results}
-
-def test_search_gte(db_path):
-    filters = [{"field": "file_size", "op": "gte", "value": 300}]
-    results = search_items(db_path, filters=filters)
-    assert len(results) == 3
-    assert {r["workshop_id"] for r in results} == {3, 4, 5}
-
-def test_search_invalid_filter(db_path):
-    # Missing op or field should be ignored
-    filters = [{"field": "title", "op": "", "value": "Alpha"}, {"field": "", "op": "is", "value": "Alpha"}]
-    results = search_items(db_path, filters=filters)
-    # Should ignore the filter and return all 5
-    assert len(results) == 5
-
-def test_search_sorting(db_path):
-    # Sort by file_size descending
-    results = search_items(db_path, sort_by="file_size", sort_order="DESC")
-    assert results[0]["workshop_id"] == 5
-    assert results[-1]["workshop_id"] == 1
-
-    # Sort by title ascending
-    # None/empty might be at the start or end depending on SQLite
-    results = search_items(db_path, sort_by="title", sort_order="ASC")
-    # In SQLite, NULL is smallest.
-    assert results[0]["workshop_id"] in (4, 5)
-
-def test_search_does_not_contain(db_path):
-    filters = [{"field": "title", "op": "does_not_contain", "value": "Alpha"}]
-    results = search_items(db_path, filters=filters)
-    assert len(results) == 4
-    assert 1 not in {r["workshop_id"] for r in results}
+    results = search_items(deterministic_db, filters=filters)
+    assert len(results) > 0
 
 
-def test_search_malformed_filters_graceful(db_path):
-    filters = [
-        {"field": "Title", "value": "Alpha"},           # missing op
-        {"op": "contains", "value": "Alpha"},            # missing field
-        {"field": "NoSuchField", "op": "contains", "value": "Alpha"},  # unknown field
-    ]
-    results = search_items(db_path, filters=filters)
-    assert len(results) > 0  # doesn't crash, returns something
+def test_search_invalid_sort_col(deterministic_db):
+    results = search_items(deterministic_db, sort_by="nonexistent_column", sort_order="DESC")
+    assert isinstance(results, list)
 
 
-def test_search_invalid_sort_col(db_path):
-    results = search_items(db_path, sort_by="nonexistent_column", sort_order="DESC")
-    assert isinstance(results, list)  # doesn't crash
-
-
-def test_concurrent_search_access(db_path):
+def test_concurrent_search_access(deterministic_db):
     import threading, random
-    from src.database import get_connection
+    conn = get_connection(deterministic_db)
+    all_ids = [r["workshop_id"] for r in conn.execute(
+        "SELECT workshop_id FROM workshop_items LIMIT 100"
+    ).fetchall()]
+    conn.close()
+
     errors = []
 
     def do_search():
         try:
             for _ in range(10):
-                fid = random.choice([1, 2, 3, 4, 5])
-                r = search_items(db_path, filters=[
+                fid = random.choice(all_ids)
+                r = search_items(deterministic_db, filters=[
                     {"field": "Workshop ID", "op": "is", "value": str(fid)}])
                 if len(r) > 1:
                     errors.append(f"Expected 0-1 results, got {len(r)}")

@@ -591,3 +591,24 @@ def test_save_app_filter_defaults(db_path):
     assert tracking["filter_text"] == ""
     assert tracking["required_tags"] == "[]"
     assert tracking["excluded_tags"] == "[]"
+
+
+def test_search_on_large_dataset(deterministic_db):
+    """Basic search on the 10k-item deterministic database works end-to-end."""
+    results = search_items(deterministic_db)
+    assert len(results) == 10000
+    # Filtered search returns proper subset
+    filtered = search_items(deterministic_db, filters=[
+        {"field": "Tags", "op": "contains", "value": "mod"}
+    ])
+    assert 0 < len(filtered) < len(results)
+
+
+def test_stats_with_real_data(deterministic_db):
+    """get_db_stats returns sensible counts on 10k-item dataset."""
+    from src.database import get_db_stats
+    stats = get_db_stats(deterministic_db)
+    total_from_status = sum(s["count"] for s in stats["status_counts"])
+    assert total_from_status == 10000
+    assert len(stats["tag_counts"]) == 10
+    assert sum(stats["tag_counts"].values()) > 0

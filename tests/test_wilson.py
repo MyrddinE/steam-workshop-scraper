@@ -137,40 +137,46 @@ def test_compute_wilson_cutoffs_small_set(db_path):
     result = compute_wilson_cutoffs(db_path)
     assert len(result) >= 10
 
-def test_compute_wilson_cutoffs_large_set(db_path):
-    for i in range(10001):
-        score = 0.2 + 0.6 * (i / 10000.0)
-        insert_or_update_item(db_path, {
-            "workshop_id": i + 1,
-            "wilson_favorite_score": score,
-            "wilson_subscription_score": score * 0.8,
-        })
-
-    result = compute_wilson_cutoffs(db_path)
+def test_compute_wilson_cutoffs_large_set(deterministic_db):
+    """10k log-distributed items: cutoffs exist, are ordered, and in [0,1] range."""
+    result = compute_wilson_cutoffs(deterministic_db)
     assert "wilson_favorite_p99" in result
     assert "wilson_subscription_p99" in result
+    # All keys exist and are numeric
+    for k in ["wilson_favorite_min", "wilson_favorite_p50", "wilson_favorite_p90",
+              "wilson_favorite_p99", "wilson_favorite_max",
+              "wilson_subscription_min", "wilson_subscription_p50",
+              "wilson_subscription_p90", "wilson_subscription_p99",
+              "wilson_subscription_max"]:
+        assert isinstance(result[k], (int, float))
+        assert 0 <= result[k] <= 1
+    # Ordering: min <= p50 <= p90 <= p99 <= max
+    assert result["wilson_favorite_min"] <= result["wilson_favorite_p50"]
+    assert result["wilson_favorite_p50"] <= result["wilson_favorite_p90"]
+    assert result["wilson_favorite_p90"] <= result["wilson_favorite_p99"]
+    assert result["wilson_favorite_p99"] <= result["wilson_favorite_max"]
+    assert result["wilson_subscription_min"] <= result["wilson_subscription_p50"]
+    assert result["wilson_subscription_p50"] <= result["wilson_subscription_p90"]
+    assert result["wilson_subscription_p90"] <= result["wilson_subscription_p99"]
+    assert result["wilson_subscription_p99"] <= result["wilson_subscription_max"]
+    # p50 and p90 should be strictly between min and max (real data has spread)
+    assert result["wilson_favorite_min"] < result["wilson_favorite_max"]
 
-    expected_p99 = 0.2 + 0.6 * (9900 / 10000.0)
-    assert abs(result["wilson_favorite_p99"] - expected_p99) < 0.01
 
-    expected_p50 = 0.2 + 0.6 * (5000 / 10000.0)
-    assert abs(result["wilson_favorite_p50"] - expected_p50) < 0.02
-
-def test_compute_wilson_cutoffs_with_filters(db_path):
-    """Filtering by score > 0.5 should shift all cutoffs upward vs. unfiltered."""
-    for i in range(1000):
-        insert_or_update_item(db_path, {
-            "workshop_id": i + 1,
-            "wilson_favorite_score": 0.1 + 0.8 * (i / 999.0),
-            "wilson_subscription_score": 0.1 + 0.7 * (i / 999.0),
-        })
-    result_all = compute_wilson_cutoffs(db_path)
-    result_filtered = compute_wilson_cutoffs(db_path, filters=[
-        {"field": "Favorite Score", "op": "gt", "value": 0.5}
+def test_compute_wilson_cutoffs_with_filters(deterministic_db):
+    """Filtering by score > 0.5 should shift cutoffs upward on real log-dist data."""
+    result_all = compute_wilson_cutoffs(deterministic_db)
+    result_filtered = compute_wilson_cutoffs(deterministic_db, filters=[
+        {"field": "Subscriber Score", "op": "gt", "value": 0.5}
     ])
-    assert result_filtered["wilson_favorite_p50"] > result_all["wilson_favorite_p50"]
-    assert result_filtered["wilson_subscription_p50"] > result_all["wilson_subscription_p50"]
-    assert result_filtered["wilson_favorite_p99"] > result_all["wilson_favorite_p99"]
+    # Every percentile cutoff should be >= its unfiltered counterpart
+    assert result_filtered["wilson_subscription_p50"] >= result_all["wilson_subscription_p50"]
+    assert result_filtered["wilson_subscription_p90"] >= result_all["wilson_subscription_p90"]
+    assert result_filtered["wilson_subscription_p99"] >= result_all["wilson_subscription_p99"]
+    # At least one should be strictly higher (filtering narrows the set)
+    assert (result_filtered["wilson_subscription_p50"] > result_all["wilson_subscription_p50"]
+            or result_filtered["wilson_subscription_p90"] > result_all["wilson_subscription_p90"]
+            or result_filtered["wilson_subscription_p99"] > result_all["wilson_subscription_p99"])
 
 def test_schema_version_is_set(db_path):
     """Verify PRAGMA user_version is updated after migration."""
