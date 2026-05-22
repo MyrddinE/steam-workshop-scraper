@@ -118,9 +118,14 @@ def serve_userscript(filename):
 
     host = request.host
     if host and not host.startswith('127.') and not host.startswith('localhost'):
-        includes = [f'// @include      http://{host}/*']
+        base = f"http://{host}"
+        extras = [
+            f'// @include      {base}/*',
+            f'// @updateURL    {base}/userscript/{filename}',
+            f'// @downloadURL  {base}/userscript/{filename}',
+        ]
         marker = '// ==/UserScript=='
-        content = content.replace(marker, '\n'.join(includes) + '\n' + marker)
+        content = content.replace(marker, '\n'.join(extras) + '\n' + marker)
 
     return content, 200, {'Content-Type': 'application/javascript; charset=utf-8'}
 
