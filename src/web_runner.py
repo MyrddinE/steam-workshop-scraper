@@ -37,6 +37,26 @@ def main():
 
     logging.info(f"Starting web server on http://{host}:{port}")
     from waitress import serve
+
+    # Suppress Waitress's unconditional WARNING; replace with tiered logging
+    logging.getLogger('waitress.task').setLevel(logging.ERROR)
+    import waitress.task
+    _orig_add_task = waitress.task.ThreadedTaskDispatcher.add_task
+
+    def _add_task_with_tiered_logging(self, task):
+        _orig_add_task(self, task)
+        queue_size = len(self.queue)
+        idle_threads = len(self.threads) - self.stop_count - self.active_count
+        depth = queue_size - idle_threads
+        if depth >= 10:
+            logging.warning("Task queue depth is %d", depth)
+        elif depth >= 5:
+            logging.info("Task queue depth is %d", depth)
+        elif depth > 0:
+            logging.debug("Task queue depth is %d", depth)
+
+    waitress.task.ThreadedTaskDispatcher.add_task = _add_task_with_tiered_logging
+
     serve(app, host=host, port=port)
 
 
