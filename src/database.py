@@ -64,7 +64,7 @@ FIELD_NAME_MAP = {
     "Title": "title", "Description": "short_description", "Filename": "filename",
     "Tags": "tags", "Author ID": "creator", "File Size": "file_size",
     "Subs": "subscriptions", "Favs": "favorited", "Views": "views",
-    "Workshop ID": "workshop_id", "AppID": "consumer_appid", "Language ID": "language",
+    "Workshop ID": "workshop_id", "AppID": "consumer_appid", "App ID": "consumer_appid", "Language ID": "language",
     "Subscriber Score": "wilson_subscription_score", "Favorite Score": "wilson_favorite_score",
     "Full Text": "full_text",
 }

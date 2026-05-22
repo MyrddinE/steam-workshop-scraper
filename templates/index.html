@@ -121,13 +121,16 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 <script>
 const WEB_DELAY = {{ web_delay }};
 const FIELD_OPS = {
-  text: ['contains','does_not_contain','is','is_not','is_empty','is_not_empty'],
-  numeric: ['is','is_not','gt','lt','gte','lte','is_empty','is_not_empty','percentile'],
+  tag_text: ['contains','does_not_contain'],
+  text: ['contains','does_not_contain','is','is_not'],
+  numeric: ['gt','lt','gte','lte','percentile'],
   id: ['is','is_not']
 };
-const NUMERIC_FIELDS = ['File Size','Subs','Favs','Views','Language ID','Subscriber Score','Favorite Score'];
-const ID_FIELDS = ['Author ID','Workshop ID','AppID'];
-const ALL_FIELDS = ['Title','Description','Filename','Tags','Author ID','File Size','Subs','Favs','Views','Workshop ID','AppID','Language ID','Subscriber Score','Favorite Score','Full Text'];
+const TAG_TEXT_FIELDS = ['Full Text','Tags'];
+const TEXT_FIELDS = ['Title','Description'];
+const NUMERIC_FIELDS = ['Subs','Favs','Views','Subscriber Score','Favorite Score'];
+const ID_FIELDS = ['Author ID','Workshop ID','App ID'];
+const ALL_FIELDS = ['Full Text','Title','Description','Tags','Subscriber Score','Favorite Score','Author ID','Workshop ID','App ID','Subs','Favs','Views'];
 
 let currentOffset = 0, hasMore = true, loading = false, cutoffs = {};
 let _cutoffsCache = null, _cutoffsFilterKey = '';
@@ -140,6 +143,8 @@ function updateOps(row) {
   const cur = opSelect.value;
   let ops;
   if (ID_FIELDS.includes(field)) ops = FIELD_OPS.id;
+  else if (TAG_TEXT_FIELDS.includes(field)) ops = FIELD_OPS.tag_text;
+  else if (TEXT_FIELDS.includes(field)) ops = FIELD_OPS.text;
   else if (NUMERIC_FIELDS.includes(field)) ops = FIELD_OPS.numeric;
   else ops = FIELD_OPS.text;
   opSelect.innerHTML = ops.map(o => `<option value="${o}">${o.replace(/_/g,' ')}</option>`).join('');
