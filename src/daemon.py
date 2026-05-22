@@ -239,17 +239,6 @@ class Daemon:
     def process_batch(self):
         """Processes a single batch of workshop items."""
         try:
-            queue_depth = count_unscraped_items(self.db_path)
-            if queue_depth >= 10:
-                logging.warning(f"Task queue depth: {queue_depth}")
-            elif queue_depth >= 5:
-                logging.info(f"Task queue depth: {queue_depth}")
-            else:
-                logging.debug(f"Task queue depth: {queue_depth}")
-        except Exception:
-            pass
-
-        try:
             items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size,
                                                        staleness_days=self.item_staleness_days)
         except Exception as e:
