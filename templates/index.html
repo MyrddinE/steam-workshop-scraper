@@ -425,13 +425,38 @@ function renderDetail(item) {
   const size = fmtSize(item.file_size);
   const sc = sizeClass(item.file_size);
 
+  const fmtTs = (ts) => ts ? new Date(ts*1000).toISOString().slice(0,19).replace('T',' ') : 'N/A';
+  const tooltip = [
+    `Workshop ID: ${item.workshop_id}`,
+    `Filename: ${item.filename || 'N/A'}`,
+    `App Name: ${item.app_name || 'N/A'}`,
+    `Creator AppID: ${item.consumer_appid || item.creator_appid || 'N/A'}`,
+    `File Type: ${item.file_type ?? 'N/A'}`,
+    `Language: ${item.language ?? 'N/A'}`,
+    `Visibility: ${item.visibility ?? 'N/A'}`,
+    `Banned: ${item.banned ? 'Yes' + (item.ban_reason ? ' — ' + item.ban_reason : '') : 'No'}`,
+    `Image Ext: ${item.image_extension || 'none'}`,
+    `Queued for Sub: ${item.is_queued_for_subscription ? 'Yes' : 'No'}`,
+    `Status: ${item.status ?? 'N/A'}`,
+    `Translation Priority: ${item.translation_priority || 0}`,
+    `Needs Web Scrape: ${item.needs_web_scrape || 0}`,
+    `Needs Image: ${item.needs_image || 0}`,
+    `dt_found: ${fmtTs(item.dt_found)}`,
+    `dt_updated: ${fmtTs(item.dt_updated)}`,
+    `dt_attempted: ${fmtTs(item.dt_attempted)}`,
+    `dt_translated: ${fmtTs(item.dt_translated)}`,
+    `hcontent_file: ${item.hcontent_file || 'N/A'}`,
+    `hcontent_preview: ${item.hcontent_preview || 'N/A'}`,
+    `preview_url: ${(item.preview_url || 'N/A').slice(0, 80)}`,
+  ].join('&#10;');
+
   let desc = item.description_html || '';
   if (!desc && (item.short_description_en || item.short_description)) {
     desc = '<p>' + (item.short_description_en || item.short_description) + '</p>';
   }
 
   pane.innerHTML = `
-    <h2><a href="${url}" target="_blank">${title}</a></h2>
+    <h2><a href="${url}" target="_blank" title="${tooltip}">${title}</a></h2>
     <p>by <b>${creator}</b> &mdash; <small>Workshop ID: ${item.workshop_id}</small></p>
     <p class="stat-wilson"><span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}" title="${_subTitleText}">Subscriber Score: ${wss!=null?wss+'%':'N/A'}</span> &nbsp; <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}" title="${_favTitleText}">Favorite Score: ${wfs!=null?wfs+'%':'N/A'}</span></p>
     <div class="stat-row"><span class="stat-label">Created:</span> ${created}</div>
