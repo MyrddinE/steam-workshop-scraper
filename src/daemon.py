@@ -247,7 +247,8 @@ class Daemon:
             conn = get_connection(self.db_path)
             conn.execute(
                 "UPDATE workshop_items SET api_priority = 1 "
-                "WHERE api_priority = 0 AND status = 200 AND dt_updated < ?",
+                "WHERE api_priority = 0 AND status = 200 AND dt_updated < ? "
+                "AND (status IS NULL OR status != -1)",
                 (threshold,)
             )
             conn.commit()
@@ -313,7 +314,8 @@ class Daemon:
             merged_data["status"] = api_status
             
             if api_status == 404:
-                logging.warning(f"[{item_id}] Item not found (404) via API, it may have been deleted.")
+                logging.warning(f"[{item_id}] Item not found (404) via API. Marking as dead (status=-1).")
+                merged_data["status"] = -1
                 insert_or_update_item(self.db_path, merged_data)
                 self.api_failures += 1
                 self.api_successes = 0

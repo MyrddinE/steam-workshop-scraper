@@ -804,22 +804,21 @@ class WorkshopItem(ListItem):
 
     @staticmethod
     def _has_pending(item):
-        return ((item.get("needs_image", 0) > 0 and not item.get("image_extension"))
-                or item.get("translation_priority", 0) > 0
-                or item.get("needs_web_scrape", 0) > 0
-                or item.get("api_priority", 0) >= 10)
+        return ((item.get("needs_image", 0) >= 5 and not item.get("image_extension"))
+                or item.get("translation_priority", 0) >= 5
+                or item.get("needs_web_scrape", 0) >= 5
+                or item.get("api_priority", 0) >= 5)
 
     def compose(self) -> ComposeResult:
         wid = self.item_data.get("workshop_id", "N/A")
         title = self.item_data.get("title_en") or self.item_data.get("title", "Unknown Title")
         creator = self.item_data.get("personaname_en") or self.item_data.get("personaname") or self.item_data.get("creator", "Unknown Creator")
-        appid = self.item_data.get("consumer_appid", "Unknown AppID")
         is_queued = self.item_data.get("is_queued_for_subscription", 0)
         prefix = "[green]*[/green] " if is_queued else "  "
         spin = self.BRAILLE[self._frame] if self._has_pending(self.item_data) else " "
 
-        yield Label(f"{prefix}[b]{title}[/b] ({wid}) {spin}")
-        yield Label(f"  By: {creator} | AppID: {appid}")
+        yield Label(f"{prefix}[b]{title}[/b] ({wid})")
+        yield Label(f"  By: {creator}   {spin}")
 
     async def refresh_item(self) -> None:
         """Re-compose the item to reflect any changes in item_data."""

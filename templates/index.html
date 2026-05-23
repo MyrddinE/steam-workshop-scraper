@@ -339,10 +339,10 @@ function _placeSentinel() {
 }
 
 function _itemHasPending(item) {
-  return (item.needs_image > 0 && !item.image_extension)
-      || item.translation_priority > 0
-      || item.needs_web_scrape > 0
-      || item.api_priority >= 10;
+  return (item.needs_image >= 5 && !item.image_extension)
+      || item.translation_priority >= 5
+      || item.needs_web_scrape >= 5
+      || item.api_priority >= 5;
 }
 
 function _listNeedsPoll(items) {

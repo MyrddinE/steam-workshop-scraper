@@ -129,7 +129,10 @@ class ImageScraperThread(threading.Thread):
                 logging.warning(f"[I:{wid}] Image download failed: {e}")
                 new_pri = max(0, (item.get("needs_image") or 1) - 1)
                 conn = self._get_conn()
-                conn.execute("UPDATE workshop_items SET needs_image=? WHERE workshop_id=?", (new_pri, wid))
+                conn.execute(
+                    "UPDATE workshop_items SET needs_image=?, api_priority=MAX(api_priority, 2) WHERE workshop_id=?",
+                    (new_pri, wid)
+                )
                 conn.commit()
                 conn.close()
                 self.image_failures += 1

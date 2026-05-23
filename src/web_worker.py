@@ -68,6 +68,13 @@ class WebScraperThread(threading.Thread):
                     self.web_successes = 0
                 time.sleep(self.web_delay)
             else:
+                conn = get_connection(self.db_path)
+                conn.execute(
+                    "UPDATE workshop_items SET api_priority = MAX(api_priority, 2) WHERE workshop_id = ?",
+                    (workshop_id,)
+                )
+                conn.commit()
+                conn.close()
                 self.web_failures += 1
                 self.web_successes = 0
                 if self.web_failures >= 2 and self.web_had_streak:

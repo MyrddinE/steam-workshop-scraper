@@ -418,12 +418,7 @@ def api_update_visible():
     conn = get_connection(_db_path)
     placeholders = ','.join('?' * len(ids))
     conn.execute(
-        f"UPDATE workshop_items SET api_priority = MAX(api_priority, 10) WHERE workshop_id IN ({placeholders})",
-        ids,
-    )
-    # Ensure the max is applied correctly — SQLite MAX in SET doesn't work directly
-    conn.execute(
-        f"UPDATE workshop_items SET api_priority = 10 WHERE workshop_id IN ({placeholders})",
+        f"UPDATE workshop_items SET api_priority = 10 WHERE workshop_id IN ({placeholders}) AND (status IS NULL OR status != -1)",
         ids,
     )
     updated = conn.total_changes

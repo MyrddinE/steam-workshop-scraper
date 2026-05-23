@@ -1097,7 +1097,7 @@ def get_next_items_to_scrape(db_path: str, limit: int = 10, staleness_days: int 
 
     sql = """
         SELECT * FROM workshop_items
-        WHERE api_priority > 0
+        WHERE api_priority > 0 AND (status IS NULL OR status != -1)
         ORDER BY api_priority DESC, dt_updated ASC
         LIMIT ?
     """
