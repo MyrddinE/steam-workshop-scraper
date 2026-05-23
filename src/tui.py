@@ -1347,13 +1347,13 @@ class ScraperApp(App):
             logging.debug("Scroll-triggered load-more check failed")
             pass
 
-    def _tick_spinners(self) -> None:
+    async def _tick_spinners(self) -> None:
         WorkshopItem._frame = (WorkshopItem._frame + 1) % len(WorkshopItem.BRAILLE)
         try:
             list_view = self.query_one("#results-list", ListView)
             for child in list_view.children:
                 if hasattr(child, 'item_data') and WorkshopItem._has_pending(child.item_data):
-                    child.refresh_item()
+                    await child.refresh_item()
         except Exception:
             pass
 
@@ -1702,23 +1702,34 @@ class ScraperApp(App):
             list_view = self.query_one("#results-list", ListView)
         except Exception:
             return
-        ids = [
-            child.item_data["workshop_id"]
-            for child in list_view.children
-            if hasattr(child, 'item_data') and child.item_data
-        ]
-        if not ids:
+
+        # Compute viewport-visible items from scroll position
+        scroll_y = list_view.scroll_y
+        visible_h = list_view.size.height
+        child_h = 2  # each WorkshopItem is 2 lines
+        visible_ids = []
+        for i, child in enumerate(list_view.children):
+            if hasattr(child, 'item_data') and child.item_data:
+                top = i * child_h
+                bot = top + child_h
+                if bot > scroll_y and top < scroll_y + visible_h:
+                    visible_ids.append(child.item_data["workshop_id"])
+                    child.item_data["api_priority"] = 10  # update in-memory for spinner
+                    if hasattr(child, 'refresh_item'):
+                        child.refresh_item()
+
+        if not visible_ids:
             self.notify("No items visible.")
             return
         conn = get_connection(self.db_path)
-        placeholders = ",".join("?" * len(ids))
+        placeholders = ",".join("?" * len(visible_ids))
         conn.execute(
             f"UPDATE workshop_items SET api_priority = 10 WHERE workshop_id IN ({placeholders})",
-            ids,
+            visible_ids,
         )
         conn.commit()
         conn.close()
-        self.notify(f"Queued {len(ids)} items for update.")
+        self.notify(f"Queued {len(visible_ids)} items for update.")
 
     def action_show_sub_queue(self) -> None:
         """Shows the subscription queue modal screen."""
