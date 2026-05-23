@@ -366,11 +366,12 @@ def test_get_next_items_to_scrape_priority(db_path):
     items = get_next_items_to_scrape(db_path, limit=7)
     item_ids = [item['workshop_id'] for item in items]
     
-    # 206 items are now handled by web thread, not returned here
-    assert len(item_ids) == 4
-    assert set(item_ids[0:2]) == {5, 6}
-    assert item_ids[2:4] == [7, 1]
-    assert all(i not in item_ids for i in (2, 3, 4))
+    # All items have api_priority=3 (default), ordered by dt_updated ASC
+    assert len(item_ids) == 7
+    # NULL dt_updated sorts first, then oldest first
+    assert item_ids[0:2] == [5, 6]      # NULL dt_updated
+    assert item_ids[2:5] == [7, 1, 3]   # oldest dt_updated
+    assert item_ids[5:7] == [4, 2]      # newer
 
 def test_get_user_not_found(db_path):
     from src.database import get_user

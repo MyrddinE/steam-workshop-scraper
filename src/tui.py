@@ -795,25 +795,30 @@ class DetailsPane(VerticalScroll):
 
 class WorkshopItem(ListItem):
     """A list item representing a workshop item."""
+    BRAILLE = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    _frame = 0
+
     def __init__(self, item_data: dict):
         super().__init__()
         self.item_data = item_data
 
+    @staticmethod
+    def _has_pending(item):
+        return ((item.get("needs_image", 0) > 0 and not item.get("image_extension"))
+                or item.get("translation_priority", 0) > 0
+                or item.get("needs_web_scrape", 0) > 0
+                or item.get("api_priority", 0) >= 10)
+
     def compose(self) -> ComposeResult:
         wid = self.item_data.get("workshop_id", "N/A")
-
-        # Prefer translated title for the list view
         title = self.item_data.get("title_en") or self.item_data.get("title", "Unknown Title")
-
-        # Prefer translated persona name
         creator = self.item_data.get("personaname_en") or self.item_data.get("personaname") or self.item_data.get("creator", "Unknown Creator")
-
         appid = self.item_data.get("consumer_appid", "Unknown AppID")
-        
         is_queued = self.item_data.get("is_queued_for_subscription", 0)
         prefix = "[green]*[/green] " if is_queued else "  "
+        spin = self.BRAILLE[self._frame] if self._has_pending(self.item_data) else " "
 
-        yield Label(f"{prefix}[b]{title}[/b] ({wid})")
+        yield Label(f"{prefix}[b]{title}[/b] ({wid}) {spin}")
         yield Label(f"  By: {creator} | AppID: {appid}")
 
     async def refresh_item(self) -> None:
@@ -1327,6 +1332,9 @@ class ScraperApp(App):
         list_view = self.query_one("#results-list", ListView)
         self.watch(list_view, "scroll_y", self._check_scroll_bottom)
 
+        # Animate braille spinner on pending items
+        self.set_interval(0.15, self._tick_spinners)
+
     def _check_scroll_bottom(self, scroll_y: float) -> None:
         self.save_state()
         try:
@@ -1337,6 +1345,16 @@ class ScraperApp(App):
                 self.run_worker(self.load_more_items())
         except Exception:
             logging.debug("Scroll-triggered load-more check failed")
+            pass
+
+    def _tick_spinners(self) -> None:
+        WorkshopItem._frame = (WorkshopItem._frame + 1) % len(WorkshopItem.BRAILLE)
+        try:
+            list_view = self.query_one("#results-list", ListView)
+            for child in list_view.children:
+                if hasattr(child, 'item_data') and WorkshopItem._has_pending(child.item_data):
+                    child.refresh_item()
+        except Exception:
             pass
 
     def compose(self) -> ComposeResult:
@@ -1383,6 +1401,7 @@ class ScraperApp(App):
 
         compact_buttons = Horizontal(
             Button("Fetch New", id="btn-fetch-new", classes="compact-btn"),
+            Button("Upd.Vis", id="btn-update-visible", classes="compact-btn"),
             id="compact-buttons"
         )
 
@@ -1548,6 +1567,8 @@ class ScraperApp(App):
             with open('.fetch_new', 'w') as f:
                 f.write('1')
             self.notify("Fetch-new triggered! The daemon will scan recently-updated items on its next cycle.")
+        elif event.button.id == "btn-update-visible":
+            await self.action_update_visible()
         elif event.button.id in ("btn-queue-sub", "btn-unqueue-sub"):
             await self.action_toggle_queue()
         elif event.button.id == "btn-execute-search":
@@ -1675,6 +1696,30 @@ class ScraperApp(App):
         """Shows the database statistics screen."""
         self.push_screen(StatsScreen(self.db_path))
         
+    async def action_update_visible(self) -> None:
+        """Queues all visible list items for API re-fetch (priority 10)."""
+        try:
+            list_view = self.query_one("#results-list", ListView)
+        except Exception:
+            return
+        ids = [
+            child.item_data["workshop_id"]
+            for child in list_view.children
+            if hasattr(child, 'item_data') and child.item_data
+        ]
+        if not ids:
+            self.notify("No items visible.")
+            return
+        conn = get_connection(self.db_path)
+        placeholders = ",".join("?" * len(ids))
+        conn.execute(
+            f"UPDATE workshop_items SET api_priority = 10 WHERE workshop_id IN ({placeholders})",
+            ids,
+        )
+        conn.commit()
+        conn.close()
+        self.notify(f"Queued {len(ids)} items for update.")
+
     def action_show_sub_queue(self) -> None:
         """Shows the subscription queue modal screen."""
         self.push_screen(SubscriptionQueueScreen(self.db_path, self.pause_lock_file))

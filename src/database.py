@@ -17,7 +17,7 @@ WORKSHOP_ITEM_COLUMNS = frozenset({
     "lifetime_subscriptions", "lifetime_favorited", "translation_priority",
     "is_queued_for_subscription", "wilson_favorite_score",
     "wilson_subscription_score", "needs_web_scrape",
-    "image_extension", "needs_image",
+    "image_extension", "needs_image", "api_priority",
 })
 
 USER_COLUMNS = frozenset({
@@ -446,7 +446,8 @@ def initialize_database(db_path: str):
         wilson_subscription_score REAL DEFAULT NULL,
         needs_web_scrape INTEGER DEFAULT 0,
         image_extension TEXT DEFAULT NULL,
-        needs_image INTEGER DEFAULT 0
+        needs_image INTEGER DEFAULT 0,
+        api_priority INTEGER NOT NULL DEFAULT 3
     )
     """)
 
@@ -563,7 +564,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 11
+    EXPECTED_VERSION = 12
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -918,6 +919,36 @@ def initialize_database(db_path: str):
         cursor.execute("PRAGMA user_version = 11")
         logging.info("Migration 10->11 complete.")
 
+    if db_version < 12:
+        logging.info("Running migration 11->12: adding api_priority column...")
+        staleness_days = 30
+        threshold = int(time.time()) - staleness_days * 86400
+
+        cols = {r[1] for r in cursor.execute("PRAGMA table_info(workshop_items)").fetchall()}
+        if "api_priority" not in cols:
+            cursor.execute(
+                "ALTER TABLE workshop_items ADD COLUMN api_priority INTEGER NOT NULL DEFAULT 0"
+            )
+
+        # Never-scraped items (status IS NULL) → priority 3 (default new-item)
+        cursor.execute(
+            "UPDATE workshop_items SET api_priority = 3 WHERE status IS NULL"
+        )
+        never_count = cursor.rowcount
+
+        # Stale items → priority 1 (periodic refresh)
+        cursor.execute(
+            "UPDATE workshop_items SET api_priority = 1 "
+            "WHERE status = 200 AND dt_updated IS NOT NULL AND dt_updated < ?",
+            (threshold,)
+        )
+        stale_count = cursor.rowcount
+
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 12")
+        logging.info(f"Migration 11->12 complete. "
+                     f"Never-scraped={never_count}, Stale={stale_count}")
+
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON workshop_items (status)")
@@ -1059,34 +1090,20 @@ def insert_or_update_item(db_path: str, item_data: dict) -> bool:
 def get_next_items_to_scrape(db_path: str, limit: int = 10, staleness_days: int = 30) -> list[dict]:
     """
     Retrieves the next batch of workshop items to be scraped.
-    Prioritizes items that have never been scraped, then those with partial
-    content (status 206) sorted by subscriber count (DESC), and finally
-    the oldest successfully scraped items.
-    Returns a list of full item data dictionaries.
+    Prioritizes by api_priority (higher = more urgent), then oldest dt_updated.
     """
     conn = get_connection(db_path)
     cursor = conn.cursor()
-    threshold = int(time.time()) - staleness_days * 86400
 
     sql = """
         SELECT * FROM workshop_items
-        WHERE
-            status IS NULL OR
-            (status = 200 AND dt_updated < ?)
-        ORDER BY
-            CASE
-                WHEN status IS NULL THEN 0
-                WHEN status = 200 AND dt_updated < ? THEN 2
-                ELSE 3
-            END ASC,
-            dt_updated ASC
+        WHERE api_priority > 0
+        ORDER BY api_priority DESC, dt_updated ASC
         LIMIT ?
     """
-    cursor.execute(sql, (threshold, threshold, limit))
+    cursor.execute(sql, (limit,))
     
-    # Return full dictionaries
     items = [dict(row) for row in cursor.fetchall()]
-    
     conn.close()
     return items
 

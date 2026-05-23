@@ -13,7 +13,9 @@ header { padding: .5rem 1rem; border-bottom: 1px solid var(--pico-muted-border-c
 main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 #results-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 #results-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: .5rem; overflow-y: auto; align-content: start; flex: 1; min-height: 0; }
-.grid-cell { cursor: pointer; padding: .5em; border: 1px solid var(--pico-muted-border-color); border-radius: 4px; display: flex; flex-direction: column; gap: .25em; outline: none; }
+.grid-cell { cursor: pointer; padding: .5em; border: 1px solid var(--pico-muted-border-color); border-radius: 4px; display: flex; flex-direction: column; gap: .25em; outline: none; position: relative; }
+.grid-cell .grid-spinner { display: none; position: absolute; bottom: 4px; right: 4px; width: 12px; height: 12px; border: 2px solid var(--pico-muted-border-color); border-top-color: #44aa44; border-radius: 50%; animation: spin .6s linear infinite; }
+.grid-cell.has-spinner .grid-spinner { display: block; }
 .grid-cell:hover { border-color: var(--pico-primary-hover-background); }
 .grid-cell:focus-visible { outline: 2px solid #44aa44; outline-offset: 2px; }
 .grid-cell.selected { outline: 2px solid #44aa44; outline-offset: 2px; }
@@ -32,6 +34,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .filter-row input.value-input { flex: 3; }
 .filter-row button { padding: 2px 6px; min-width: 2rem; }
 #detail-pane { flex: 1; overflow-y: auto; min-height: 0; }
+#detail-buttons { flex-shrink: 0; border-top: 1px solid var(--pico-muted-border-color); padding: .35rem 0 0 0; display: flex; gap: .25rem; }
 .stat-row { margin-bottom: .25rem; }
 .stat-label { color: var(--pico-muted-color); }
 .stat-wilson { font-weight: bold; }
@@ -94,6 +97,10 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
     </div>
     <div id="detail-pane">
       <p class="stat-label">Select an item to see details.</p>
+    </div>
+    <div id="detail-buttons">
+      <button onclick="fetch('/api/fetch_new',{method:'POST'}).then(()=>alert('Fetch-new triggered!'))">Fetch New</button>
+      <button onclick="doUpdateVisible()">Update Visible</button>
     </div>
   </div>
 </main>
@@ -290,7 +297,9 @@ async function doSearch(reset = true) {
       <div class="grid-scores">
         <span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}">S ${wss!=null?wss+'%':'—'}</span>
         <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}">F ${wfs!=null?wfs+'%':'—'}</span>
-      </div>`;
+      </div>
+      <div class="grid-spinner"></div>`;
+    if (_itemHasPending(item)) div.classList.add('has-spinner');
     div.onclick = () => showDetail(item.workshop_id);
     grid.appendChild(div);
   });
@@ -329,10 +338,16 @@ function _placeSentinel() {
   _scrollObserver.observe(sentinel);
 }
 
+function _itemHasPending(item) {
+  return (item.needs_image > 0 && !item.image_extension)
+      || item.translation_priority > 0
+      || item.needs_web_scrape > 0
+      || item.api_priority >= 10;
+}
+
 function _listNeedsPoll(items) {
   for (const item of items) {
-    if ((item.translation_priority || 0) > 0) return true;
-    if ((item.needs_image || 0) > 0 && !item.image_extension) return true;
+    if (_itemHasPending(item)) return true;
   }
   return false;
 }
@@ -345,11 +360,9 @@ function _startListPoll(filters, sortBy, sortOrder) {
     try {
       const grid = document.getElementById('results-grid');
       const pending = [];
-      grid.querySelectorAll('.grid-cell[data-wid]').forEach(el => {
+      grid.querySelectorAll('.grid-cell.has-spinner[data-wid]').forEach(el => {
         const wid = parseInt(el.getAttribute('data-wid'), 10);
-        if (el.querySelector('.grid-img-placeholder')) {
-          pending.push(wid);
-        }
+        pending.push(wid);
       });
       if (!pending.length) { _stopListPoll(); return; }
 
@@ -371,11 +384,11 @@ function _startListPoll(filters, sortBy, sortOrder) {
           if (ph) {
             ph.outerHTML = `<img class="grid-img" src="/images/${item.workshop_id}.${item.image_extension}" loading="lazy" alt="">`;
           }
-        } else if (!item.image_extension) {
-          const ph = el.querySelector('.grid-img-placeholder');
-          if (ph && (item.needs_image > 0)) {
-            ph.textContent += '.';
-          }
+        }
+        if (_itemHasPending(item)) {
+          el.classList.add('has-spinner');
+        } else {
+          el.classList.remove('has-spinner');
         }
         const wfs = item.wilson_favorite_score != null ? (item.wilson_favorite_score*100).toFixed(1) : null;
         const wss = item.wilson_subscription_score != null ? (item.wilson_subscription_score*100).toFixed(1) : null;
@@ -468,9 +481,6 @@ function renderDetail(item) {
     <div class="stat-row"><span class="stat-label">Tags:</span> <small>${tags}</small></div>
     <p><button onclick="doSubscribe(${item.workshop_id}, ${item.consumer_appid || 0});return false;">Subscribe</button></p>
     ${desc ? '<div style="border-left:3px solid var(--pico-muted-border-color);padding-left:.5rem;margin-top:.5rem">'+desc+'</div>' : ''}
-    <div style="margin-top:.5rem">
-      <button onclick="fetch('/api/fetch_new',{method:'POST'}).then(()=>alert('Fetch-new triggered! The daemon will scan recently-updated items on its next cycle.'))">Fetch New</button>
-    </div>
   `;
 }
 
@@ -526,6 +536,31 @@ async function showDetail(wid) {
 
 const US_RAW_URL = '/userscript/steam_subscribe.user.js';
 const US_EXPECTED_VER = parseInt(document.querySelector('meta[name="userscript-version"]')?.content || '1', 10);
+
+async function doUpdateVisible() {
+  const visibleIds = [];
+  document.querySelectorAll('.grid-cell[data-wid]').forEach(el => {
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom > 0 && rect.top < window.innerHeight) {
+      visibleIds.push(parseInt(el.getAttribute('data-wid'), 10));
+    }
+  });
+  if (!visibleIds.length) { alert('No items visible.'); return; }
+  const resp = await fetch('/api/update_visible', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ids: visibleIds})
+  });
+  const data = await resp.json();
+  alert('Queued ' + data.queued + ' items for update.');
+  // Re-trigger polling to show spinners
+  const items = [];
+  document.querySelectorAll('.grid-cell[data-wid]').forEach(el => {
+    const wid = parseInt(el.getAttribute('data-wid'), 10);
+    items.push({workshop_id: wid, translation_priority: 0, needs_image: 0, needs_web_scrape: 0, api_priority: 10});
+  });
+  _startListPoll([], '', '');
+}
+
 
 function _userscriptPresent() {
   const body = document.body;

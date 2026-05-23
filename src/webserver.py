@@ -219,6 +219,7 @@ def api_items():
                w.dt_translated, w.is_queued_for_subscription, w.needs_web_scrape,
                w.needs_image, w.translation_priority, w.file_size, w.image_extension,
                w.wilson_subscription_score, w.wilson_favorite_score,
+               w.api_priority,
                u.personaname, u.personaname_en
         FROM workshop_items w LEFT JOIN users u ON w.creator = u.steamid
         WHERE w.workshop_id IN ({placeholders})
@@ -406,6 +407,29 @@ def api_fetch_new():
     with open('.fetch_new', 'w') as f:
         f.write('1')
     return jsonify({"ok": True})
+
+
+@app.route('/api/update_visible', methods=['POST'])
+def api_update_visible():
+    data = request.get_json(silent=True) or {}
+    ids = data.get('ids', [])
+    if not ids or not isinstance(ids, list):
+        return jsonify({"error": "ids list required"}), 400
+    conn = get_connection(_db_path)
+    placeholders = ','.join('?' * len(ids))
+    conn.execute(
+        f"UPDATE workshop_items SET api_priority = MAX(api_priority, 10) WHERE workshop_id IN ({placeholders})",
+        ids,
+    )
+    # Ensure the max is applied correctly — SQLite MAX in SET doesn't work directly
+    conn.execute(
+        f"UPDATE workshop_items SET api_priority = 10 WHERE workshop_id IN ({placeholders})",
+        ids,
+    )
+    updated = conn.total_changes
+    conn.commit()
+    conn.close()
+    return jsonify({"queued": updated})
 
 
 @app.route('/api/queued')

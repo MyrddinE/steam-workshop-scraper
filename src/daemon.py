@@ -138,6 +138,7 @@ class Daemon:
             "subscriptions", "favorited", "views", "tags", "extended_description", "extended_description_en", "language",
             "lifetime_subscriptions", "lifetime_favorited", "translation_priority",
             "wilson_favorite_score", "wilson_subscription_score",
+            "api_priority",
         }
         known_ignored_keys = {"result", "is_queued_for_subscription", "needs_web_scrape", "image_extension", "needs_image"}
         clean = {}
@@ -150,6 +151,7 @@ class Daemon:
                 logger(f"Discarding unknown API column: '{k}' with value '{val_preview}' for item {item_id}")
 
         clean["dt_updated"] = now_ts
+        clean["api_priority"] = 0  # mark as fetched, no longer queued
         if "tags" in clean:
             clean["tags"] = normalize_tags(clean["tags"])
         return clean
@@ -238,6 +240,21 @@ class Daemon:
 
     def process_batch(self):
         """Processes a single batch of workshop items."""
+
+        # Periodic staleness sweep: promote stale items from 0 -> 1
+        try:
+            threshold = int(time.time()) - self.item_staleness_days * 86400
+            conn = get_connection(self.db_path)
+            conn.execute(
+                "UPDATE workshop_items SET api_priority = 1 "
+                "WHERE api_priority = 0 AND status = 200 AND dt_updated < ?",
+                (threshold,)
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
         try:
             items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size,
                                                        staleness_days=self.item_staleness_days)
@@ -292,6 +309,7 @@ class Daemon:
 
             merged_data = existing_data.copy()
             merged_data["dt_updated"] = now_ts
+            merged_data["api_priority"] = 0
             merged_data["status"] = api_status
             
             if api_status == 404:
@@ -532,7 +550,7 @@ class Daemon:
                 page_new = 0
                 for item in items:
                     wid = int(item.get("publishedfileid", 0))
-                    if wid and insert_or_update_item(self.db_path, {"workshop_id": wid}):
+                    if wid and insert_or_update_item(self.db_path, {"workshop_id": wid, "api_priority": 5}):
                         page_new += 1
 
                 page += 1
