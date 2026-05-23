@@ -103,12 +103,11 @@ class ImageScraperThread(threading.Thread):
                     for chunk in resp.iter_content(8192):
                         f.write(chunk)
 
-                now_ts = int(time.time())
                 insert_or_update_item(self.db_path, {
                     "workshop_id": wid,
                     "image_extension": ext,
                     "needs_image": 0,
-                    "dt_attempted": now_ts,
+                    "dt_attempted": item.get("time_updated", 0),
                 })
 
                 title = item.get("title_en") or item.get("title") or str(wid)

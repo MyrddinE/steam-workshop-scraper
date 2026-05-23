@@ -394,7 +394,7 @@ async def test_tui_clear_pending_command(tmp_path):
     # 1. Pending (should be removed)
     insert_or_update_item(db_path, {"workshop_id": 1, "status": None, "dt_updated": None})
     # 2. Not Pending (should remain)
-    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "dt_updated": "2023-01-01"})
+    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "dt_updated": 1672531200})
     
     mock_config = {
         "database": {"path": db_path},

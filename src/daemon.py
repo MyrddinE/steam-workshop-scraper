@@ -149,7 +149,7 @@ class Daemon:
                 logger = logging.info if v is not None and str(v).strip() != "" else logging.debug
                 logger(f"Discarding unknown API column: '{k}' with value '{val_preview}' for item {item_id}")
 
-        clean["dt_attempted"] = now_ts
+        clean["dt_updated"] = now_ts
         if "tags" in clean:
             clean["tags"] = normalize_tags(clean["tags"])
         return clean
@@ -291,7 +291,7 @@ class Daemon:
             api_status = api_data.get("status", 0)
 
             merged_data = existing_data.copy()
-            merged_data["dt_attempted"] = now_ts
+            merged_data["dt_updated"] = now_ts
             merged_data["status"] = api_status
             
             if api_status == 404:
@@ -494,7 +494,7 @@ class Daemon:
             return True
         conn = get_connection(self.db_path)
         scraped = conn.execute(
-            "SELECT COUNT(*) FROM workshop_items WHERE dt_attempted IS NOT NULL"
+            "SELECT COUNT(*) FROM workshop_items WHERE dt_updated IS NOT NULL"
         ).fetchone()[0]
         conn.close()
         return scraped >= 500

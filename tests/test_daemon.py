@@ -49,7 +49,7 @@ def test_daemon_process_batch_success(mock_sleep, mock_flag_web, mock_insert, mo
     mock_count.return_value = 1000
     mock_get_items.return_value = [{'workshop_id': 123}]
     mock_api.return_value = {"title": "Test Mod", "creator": "111"}
-    mock_get_user.return_value = {"steamid": 111, "dt_updated": "2026-01-01T00:00:00"}
+    mock_get_user.return_value = {"steamid": 111, "dt_updated": 1767225600}
 
     daemon = Daemon(mock_config)
     daemon.process_batch()
@@ -135,7 +135,7 @@ def test_api_delay_decreases_on_success(mock_sleep, mock_flag_web, mock_insert, 
     mock_count.return_value = 1000
     mock_get_items.return_value = items
     mock_api.return_value = {"title": "Mod", "creator": "111"}
-    mock_get_user.return_value = {"steamid": 111, "dt_updated": "2026-01-01T00:00:00"}
+    mock_get_user.return_value = {"steamid": 111, "dt_updated": 1767225600}
 
     daemon = Daemon(mock_config)
     daemon.api_delay = 1.0

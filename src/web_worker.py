@@ -39,12 +39,11 @@ class WebScraperThread(threading.Thread):
             scrape_data = scrape_extended_details(url)
 
             if scrape_data:
-                now_ts = int(time.time())
                 update = {
                     "workshop_id": workshop_id,
                     "extended_description": scrape_data.get("description"),
                     "needs_web_scrape": 0,
-                    "dt_attempted": now_ts,
+                    "dt_attempted": item.get("time_updated", 0),
                 }
                 insert_or_update_item(self.db_path, update)
 

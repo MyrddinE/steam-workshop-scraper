@@ -20,7 +20,7 @@ def test_count_unscraped_items(db_path):
     
     insert_or_update_item(db_path, {"workshop_id": 1}) # Unscraped
     insert_or_update_item(db_path, {"workshop_id": 2}) # Unscraped
-    insert_or_update_item(db_path, {"workshop_id": 3, "dt_attempted": 1672531200}) # Scraped
+    insert_or_update_item(db_path, {"workshop_id": 3, "dt_updated": 1672531200}) # Scraped
     
     assert count_unscraped_items(db_path) == 2
 
@@ -61,10 +61,10 @@ def test_insert_or_update_item(db_path):
     conn.close()
 
 def test_get_next_items_to_scrape(db_path):
-    """Tests that items are fetched in order of oldest dt_attempted (NULLs first)."""
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "dt_updated": 1696204800, "dt_attempted": 1696118400})
+    """Tests that items are fetched in order of oldest dt_updated (NULLs first)."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "dt_updated": 1696118400})
     insert_or_update_item(db_path, {"workshop_id": 2, "status": None}) # NULL status, should come first
-    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "dt_updated": 1696204800, "dt_attempted": 1696204800})
+    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "dt_updated": 1696204800})
     
     items = get_next_items_to_scrape(db_path, limit=3)
     assert len(items) == 3
@@ -347,10 +347,10 @@ def test_get_next_items_to_scrape_priority(db_path):
     import time
     
     # 1. Successfully scraped items, stalest first (status = 200)
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "dt_updated": 1672531200, "dt_attempted": 1672531200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "dt_updated": 1672531200})
     # Item 2 is recent, so it should be excluded from re-scraping
     recent_epoch = int(time.time()) - 86400
-    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "dt_updated": recent_epoch, "dt_attempted": recent_epoch})
+    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "dt_updated": recent_epoch})
     
     # 2. Partially failed items (status = 206) - with different subscription counts
     insert_or_update_item(db_path, {"workshop_id": 3, "status": 206, "dt_updated": 1735689600, "subscriptions": 100})
@@ -361,7 +361,7 @@ def test_get_next_items_to_scrape_priority(db_path):
     insert_or_update_item(db_path, {"workshop_id": 6})
     
     # 4. Old items (older than 7 days)
-    insert_or_update_item(db_path, {"workshop_id": 7, "status": 200, "dt_updated": 1640995200, "dt_attempted": 1640995200})
+    insert_or_update_item(db_path, {"workshop_id": 7, "status": 200, "dt_updated": 1640995200})
 
     items = get_next_items_to_scrape(db_path, limit=7)
     item_ids = [item['workshop_id'] for item in items]

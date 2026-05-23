@@ -563,7 +563,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 10
+    EXPECTED_VERSION = 11
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -868,6 +868,56 @@ def initialize_database(db_path: str):
         cursor.execute("PRAGMA user_version = 10")
         logging.info("Migration 9→10 complete.")
 
+    if db_version < 11:
+        logging.info("Running migration 10→11: repurposing dt_* columns...")
+        from datetime import datetime, timezone as _tz
+
+        # Step 1: dt_attempted (fetch time) → dt_found where dt_found is NULL.
+        # Preserves our best approximation of when the item was first found,
+        # since most items have only been fetched once.
+        cursor.execute(
+            "UPDATE workshop_items SET dt_found = dt_attempted "
+            "WHERE dt_found IS NULL AND dt_attempted IS NOT NULL"
+        )
+        found_count = cursor.rowcount
+        logging.info(f"  Step 1: dt_attempted → dt_found for {found_count} items")
+
+        # Step 2: dt_attempted (fetch time) → dt_updated where dt_updated is NULL.
+        cursor.execute(
+            "UPDATE workshop_items SET dt_updated = dt_attempted "
+            "WHERE dt_updated IS NULL AND dt_attempted IS NOT NULL"
+        )
+        updated_count = cursor.rowcount
+        logging.info(f"  Step 2: dt_attempted → dt_updated for {updated_count} items")
+
+        # Step 3: dt_attempted → time_updated (version marker for web scrape).
+        cursor.execute(
+            "UPDATE workshop_items SET dt_attempted = time_updated "
+            "WHERE time_updated IS NOT NULL"
+        )
+        attempted_count = cursor.rowcount
+        logging.info(f"  Step 3: dt_attempted = time_updated for {attempted_count} items")
+
+        # Step 4: dt_translated → time_updated where translation exists.
+        cursor.execute(
+            "UPDATE workshop_items SET dt_translated = time_updated "
+            "WHERE dt_translated IS NOT NULL AND time_updated IS NOT NULL"
+        )
+        trans_count = cursor.rowcount
+
+        # For items with translations but no time_updated, leave as-is (epoch already).
+        cursor.execute(
+            "SELECT COUNT(*) FROM workshop_items "
+            "WHERE dt_translated IS NOT NULL AND time_updated IS NULL"
+        )
+        trans_skipped = cursor.fetchone()[0]
+        logging.info(f"  Step 4: dt_translated = time_updated for {trans_count} items, "
+                     f"{trans_skipped} items with translation but no time_updated left as-is")
+
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 11")
+        logging.info("Migration 10→11 complete.")
+
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON workshop_items (status)")
@@ -976,6 +1026,10 @@ def insert_or_update_item(db_path: str, item_data: dict) -> bool:
     cursor = conn.execute("SELECT 1 FROM workshop_items WHERE workshop_id = ?", (item_data["workshop_id"],))
     is_new = cursor.fetchone() is None
 
+    if is_new and "dt_found" not in item_data:
+        item_data["dt_found"] = int(time.time())
+        columns = [col for col in item_data.keys() if col in WORKSHOP_ITEM_COLUMNS]
+
     placeholders = ",".join(["?"] * len(columns))
     # Build the values list using the FILTERED column order
     vals = [item_data[col] for col in columns]
@@ -1018,14 +1072,14 @@ def get_next_items_to_scrape(db_path: str, limit: int = 10, staleness_days: int 
         SELECT * FROM workshop_items
         WHERE
             status IS NULL OR
-            (status = 200 AND dt_attempted < ?)
+            (status = 200 AND dt_updated < ?)
         ORDER BY
             CASE
                 WHEN status IS NULL THEN 0
-                WHEN status = 200 AND dt_attempted < ? THEN 2
+                WHEN status = 200 AND dt_updated < ? THEN 2
                 ELSE 3
             END ASC,
-            dt_attempted ASC
+            dt_updated ASC
         LIMIT ?
     """
     cursor.execute(sql, (threshold, threshold, limit))
@@ -1037,9 +1091,9 @@ def get_next_items_to_scrape(db_path: str, limit: int = 10, staleness_days: int 
     return items
 
 def count_unscraped_items(db_path: str) -> int:
-    """Returns the number of items that have never been scraped (dt_attempted is NULL)."""
+    """Returns the number of items that have never been fetched via API (dt_updated is NULL)."""
     conn = get_connection(db_path)
-    cursor = conn.execute("SELECT COUNT(workshop_id) as count FROM workshop_items WHERE dt_attempted IS NULL")
+    cursor = conn.execute("SELECT COUNT(workshop_id) as count FROM workshop_items WHERE dt_updated IS NULL")
     row = cursor.fetchone()
     conn.close()
     return row["count"] if row else 0
@@ -1320,13 +1374,13 @@ def _classify_translation_status(item) -> str:
         return "No data (never scraped)"
     return "Needs Translation (Unicode)"
 
-def _classify_attempted_recency(dt_attempted, staleness_days: int = 30) -> str:
-    """Classifies a dt_attempted timestamp (Unix epoch integer) as 'fresh', 'stale', or 'blank'."""
-    if not dt_attempted:
+def _classify_fetch_recency(dt_updated, staleness_days: int = 30) -> str:
+    """Classifies a dt_updated timestamp (Unix epoch integer) as 'fresh', 'stale', or 'blank'."""
+    if not dt_updated:
         return "blank"
     try:
         threshold = int(time.time()) - staleness_days * 86400
-        return "fresh" if int(dt_attempted) >= threshold else "stale"
+        return "fresh" if int(dt_updated) >= threshold else "stale"
     except (ValueError, TypeError):
         return "blank"
 
@@ -1348,7 +1402,7 @@ def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
     status_counts = [dict(row) for row in cursor.fetchall()]
 
     cursor.execute("""
-        SELECT dt_attempted, dt_translated, title, short_description, extended_description,
+        SELECT dt_updated, dt_translated, title, short_description, extended_description,
                translation_priority, title_en, short_description_en, extended_description_en
         FROM workshop_items
     """)
@@ -1360,11 +1414,11 @@ def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
         "Queued": 0, "Translated": 0,
         "No data (never scraped)": 0,
     }
-    dt_attempted_counts = {"fresh": 0, "stale": 0, "blank": 0}
+    dt_updated_counts = {"fresh": 0, "stale": 0, "blank": 0}
 
     for item in all_items:
         translation_status[_classify_translation_status(item)] += 1
-        dt_attempted_counts[_classify_attempted_recency(item["dt_attempted"], staleness_days)] += 1
+        dt_updated_counts[_classify_fetch_recency(item["dt_updated"], staleness_days)] += 1
 
     cursor.execute("SELECT MAX(dt_updated) FROM workshop_items")
     highest_dt_updated = cursor.fetchone()[0]
@@ -1389,7 +1443,7 @@ def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
         "status_counts": status_counts,
         "translation_status": translation_status,
         "tag_counts": tag_counts,
-        "dt_attempted_counts": dt_attempted_counts,
+        "dt_updated_counts": dt_updated_counts,
         "highest_dt_updated": highest_dt_updated,
         "app_stats": app_stats,
         "priority_breakdowns": priority_breakdowns,
@@ -1497,7 +1551,7 @@ def get_next_web_scrape_item(db_path: str) -> dict | None:
     cursor = conn.execute("""
         SELECT * FROM workshop_items
         WHERE needs_web_scrape > 0
-        ORDER BY needs_web_scrape DESC, dt_attempted ASC
+        ORDER BY needs_web_scrape DESC, dt_updated ASC
         LIMIT 1
     """)
     row = cursor.fetchone()
@@ -1546,7 +1600,7 @@ def get_next_image_item(db_path: str) -> dict | None:
     cursor = conn.execute("""
         SELECT * FROM workshop_items
         WHERE needs_image > 0
-        ORDER BY needs_image DESC, dt_attempted ASC
+        ORDER BY needs_image DESC, dt_updated ASC
         LIMIT 1
     """)
     row = cursor.fetchone()

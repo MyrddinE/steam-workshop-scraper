@@ -61,7 +61,7 @@ def deterministic_db(tmp_path_factory):
     db_path = str(tmp_path_factory.mktemp("data") / "test.db")
     initialize_database(db_path)
     rng = random.Random(_DET_SEED)
-    now = int(time.time())
+    now = int(time.time())  # used for dt_found in insert_or_update_item
 
     # Pre-generate IDs with random spacing
     app_ids = []
@@ -139,7 +139,7 @@ def deterministic_db(tmp_path_factory):
             item["title_en"] = _det_pick_words(rng, _DET_LOREM_WORDS, rng.randint(1, 10))
             item["short_description_en"] = _det_pick_words(rng, _DET_LOREM_WORDS, rng.randint(1, 50))
             item["extended_description_en"] = _det_pick_words(rng, _DET_LOREM_WORDS, rng.randint(1, 50))
-            item["dt_translated"] = now
+            item["dt_translated"] = item["time_updated"]
 
         insert_or_update_item(db_path, item)
 
