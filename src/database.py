@@ -860,7 +860,7 @@ def initialize_database(db_path: str):
         logging.info(f"Migration 8→9 complete. Recalculated {updated} favorite scores.")
 
     if db_version < 10:
-        logging.info("Running migration 9→10: adding index on is_queued_for_subscription...")
+        logging.info("Running migration 9->10: adding index on is_queued_for_subscription...")
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_is_queued ON workshop_items (is_queued_for_subscription)"
         )
@@ -869,7 +869,7 @@ def initialize_database(db_path: str):
         logging.info("Migration 9→10 complete.")
 
     if db_version < 11:
-        logging.info("Running migration 10→11: repurposing dt_* columns...")
+        logging.info("Running migration 10->11: repurposing dt_* columns...")
         from datetime import datetime, timezone as _tz
 
         # Step 1: dt_attempted (fetch time) → dt_found where dt_found is NULL.
@@ -880,7 +880,7 @@ def initialize_database(db_path: str):
             "WHERE dt_found IS NULL AND dt_attempted IS NOT NULL"
         )
         found_count = cursor.rowcount
-        logging.info(f"  Step 1: dt_attempted → dt_found for {found_count} items")
+        logging.info(f"  Step 1: dt_attempted -> dt_found for {found_count} items")
 
         # Step 2: dt_attempted (fetch time) → dt_updated where dt_updated is NULL.
         cursor.execute(
@@ -888,7 +888,7 @@ def initialize_database(db_path: str):
             "WHERE dt_updated IS NULL AND dt_attempted IS NOT NULL"
         )
         updated_count = cursor.rowcount
-        logging.info(f"  Step 2: dt_attempted → dt_updated for {updated_count} items")
+        logging.info(f"  Step 2: dt_attempted -> dt_updated for {updated_count} items")
 
         # Step 3: dt_attempted → time_updated (version marker for web scrape).
         cursor.execute(
@@ -916,7 +916,7 @@ def initialize_database(db_path: str):
 
         conn.commit()
         cursor.execute("PRAGMA user_version = 11")
-        logging.info("Migration 10→11 complete.")
+        logging.info("Migration 10->11 complete.")
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
