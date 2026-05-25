@@ -955,6 +955,9 @@ class SearchBuilder(VerticalScroll):
         for i, row in enumerate(rows):
             op = row.query_one("#op-select", Select).value
             val = row.query_one("#value-input", Input).value
+            field = row.query_one("#field-select", Select).value
+            if not isinstance(field, str) or not isinstance(op, str) or not field.strip() or not op.strip():
+                continue  # skip unconfigured rows (Sentinel.BLANK etc.)
             if op == "percentile":
                 try:
                     v = int(float(val))
@@ -965,7 +968,7 @@ class SearchBuilder(VerticalScroll):
                     val = "0"
                     row.query_one("#value-input", Input).value = val
             f = {
-                "field": row.query_one("#field-select", Select).value,
+                "field": field,
                 "op": op,
                 "value": val,
             }
@@ -1575,13 +1578,11 @@ class ScraperApp(App):
         elif event.button.id in ("btn-and", "btn-or"):
             logic = "AND" if event.button.id == "btn-and" else "OR"
             self.query_one("#search-builder", SearchBuilder).add_row(logic)
-            await self.execute_search()
         
         elif event.button.id == "btn-remove":
             row = event.button.parent
             if isinstance(row, SearchRow):
                 row.remove()
-                self.call_after_refresh(self.execute_search)
 
         elif event.button.id == "btn-jump-author" and self.current_item_creator:
             # Save state before switching to single creator mode
