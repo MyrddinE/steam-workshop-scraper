@@ -130,6 +130,8 @@ def _build_fts_clause(op: str, val) -> tuple[str, list]:
     """Builds a WHERE clause using FTS5 MATCH for the workshop_fts table.
     Returns a clause suitable for:  w.rowid IN (SELECT rowid FROM workshop_fts WHERE <clause>)
     or:  w.rowid NOT IN (SELECT rowid FROM workshop_fts WHERE <clause>)"""
+    if not val or not str(val).strip():
+        return ("", [])  # empty string is invalid FTS5 syntax
     if op == "contains":
         return ("workshop_fts MATCH ?", [str(val)])
     if op == "does_not_contain":

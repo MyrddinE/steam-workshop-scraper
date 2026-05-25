@@ -1424,14 +1424,12 @@ class ScraperApp(App):
         yield Footer()
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
-        await self.execute_search()
+        pass  # search only on explicit "Execute Search" click
 
     async def on_select_changed(self, event: Select.Changed) -> None:
-        # Avoid triggering search while initializing Selects
-        if event.value is not None:
-            if self._has_restored_state:
-                self.save_state()
-                await self.execute_search()
+        # Save state when sort/filter changes, but don't auto-search
+        if event.value is not None and self._has_restored_state:
+            self.save_state()
 
     async def execute_search(self) -> None:
         """Executes a new search, resetting pagination."""
