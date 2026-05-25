@@ -192,7 +192,7 @@ def _compute_percentile_threshold(db_path: str, db_col: str, percentile_val, bas
     sql = f"""
         SELECT COALESCE(MIN({db_col}), 0) FROM (
             SELECT {db_col}, NTILE(100) OVER (ORDER BY {db_col} DESC) as tile
-            FROM workshop_items
+            FROM workshop_items w
             {where_sql}
         ) WHERE tile = {tile}
     """
