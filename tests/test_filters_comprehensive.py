@@ -448,25 +448,14 @@ def _get_tag_sets(db_path, wids):
 def test_random_filter_combinations_no_crash(deterministic_db):
     """Call search_items with random filter combinations to catch SQL errors."""
     import random
-    from src.database import get_connection
+    from src.database import get_connection, FILTER_SCHEMA
 
     rng = random.Random(42)
 
-    field_ops = {
-        "Tags": ["contains", "does_not_contain"],
-        "Full Text": ["contains", "does_not_contain"],
-        "Title": ["contains", "does_not_contain", "is", "is_not"],
-        "Description": ["contains", "does_not_contain", "is", "is_not"],
-        "Subscriber Score": ["gt", "lt", "gte", "lte", "percentile"],
-        "Favorite Score": ["gt", "lt", "gte", "lte", "percentile"],
-        "Subs": ["gt", "lt", "gte", "lte", "percentile"],
-        "Favs": ["gt", "lt", "gte", "lte", "percentile"],
-        "Views": ["gt", "lt", "gte", "lte", "percentile"],
-        "File Size": ["gt", "lt", "gte", "lte"],
-        "Author ID": ["is", "is_not"],
-        "Workshop ID": ["is", "is_not"],
-        "App ID": ["is", "is_not"],
-    }
+    # Build field→ops map and type map from central schema
+    field_ops = {f["field"]: f["ops"] for f in FILTER_SCHEMA}
+    ID_FIELDS = [f["field"] for f in FILTER_SCHEMA if f["type"] == "id"]
+    STRING_FIELDS = [f["field"] for f in FILTER_SCHEMA if f["type"] == "string"]
 
     # Pre-fetch some real values for "is" operators
     conn = get_connection(deterministic_db)
@@ -499,7 +488,7 @@ def test_random_filter_combinations_no_crash(deterministic_db):
                     val = sample_appid["consumer_appid"] if sample_appid else 10000
                 else:
                     val = "lorem"
-            elif field in ("Tags", "Full Text", "Title", "Description"):
+            elif field in STRING_FIELDS:
                 val = rng.choice(["mod", "lorem", "ipsum", "天地", "dolor"])
             else:
                 val = rng.randint(0, 1_000_000)

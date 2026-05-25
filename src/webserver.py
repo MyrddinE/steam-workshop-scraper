@@ -6,7 +6,7 @@ import re
 import logging
 import requests
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, get_queued_items
+from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, get_queued_items, FILTER_SCHEMA
 from src.analysis import view_window_analysis
 
 app = Flask(__name__, template_folder='../templates')
@@ -104,7 +104,9 @@ def serve_image(filename):
 @app.route('/')
 def index():
     web_delay = float((_config.get("daemon", {}) or {}).get("web_delay_seconds", 5.0))
-    return render_template('index.html', web_delay=web_delay)
+    import json as _json
+    return render_template('index.html', web_delay=web_delay,
+                           filter_schema_json=_json.dumps(FILTER_SCHEMA))
 
 
 @app.route('/userscript/<path:filename>')

@@ -131,17 +131,17 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 
 <script>
 const WEB_DELAY = {{ web_delay }};
-const FIELD_OPS = {
-  tag_text: ['contains','does_not_contain'],
-  text: ['contains','does_not_contain','is','is_not'],
-  numeric: ['gt','lt','gte','lte','percentile'],
-  id: ['is','is_not']
-};
-const TAG_TEXT_FIELDS = ['Full Text','Tags'];
-const TEXT_FIELDS = ['Title','Description'];
-const NUMERIC_FIELDS = ['Subs','Favs','Views','Subscriber Score','Favorite Score'];
-const ID_FIELDS = ['Author ID','Workshop ID','App ID'];
-const ALL_FIELDS = ['Full Text','Title','Description','Tags','Subscriber Score','Favorite Score','Author ID','Workshop ID','App ID','Subs','Favs','Views'];
+const FILTER_SCHEMA = {{ filter_schema_json | safe }};
+
+// Derived from schema
+const ALL_FIELDS = FILTER_SCHEMA.map(f => f.field);
+const FIELD_OPS = {};
+FILTER_SCHEMA.forEach(f => {
+  FIELD_OPS[f.field] = f.ops;
+});
+const ID_FIELDS = FILTER_SCHEMA.filter(f => f.type === 'id').map(f => f.field);
+const NUMERIC_FIELDS = FILTER_SCHEMA.filter(f => f.type === 'number').map(f => f.field);
+const TEXT_FIELDS = FILTER_SCHEMA.filter(f => f.type === 'string').map(f => f.field);
 
 let currentOffset = 0, hasMore = true, loading = false, cutoffs = {};
 let _cutoffsCache = null, _cutoffsFilterKey = '';
@@ -152,12 +152,7 @@ function updateOps(row) {
   const field = row.querySelector('.field-select').value;
   const opSelect = row.querySelector('.op-select');
   const cur = opSelect.value;
-  let ops;
-  if (ID_FIELDS.includes(field)) ops = FIELD_OPS.id;
-  else if (TAG_TEXT_FIELDS.includes(field)) ops = FIELD_OPS.tag_text;
-  else if (TEXT_FIELDS.includes(field)) ops = FIELD_OPS.text;
-  else if (NUMERIC_FIELDS.includes(field)) ops = FIELD_OPS.numeric;
-  else ops = FIELD_OPS.text;
+  const ops = FIELD_OPS[field] || ['contains','does_not_contain'];
   opSelect.innerHTML = ops.map(o => `<option value="${o}">${o.replace(/_/g,' ')}</option>`).join('');
   if (ops.includes(cur)) opSelect.value = cur;
 }

@@ -60,14 +60,30 @@ def normalize_tags(raw_tags) -> str:
             normalized = [raw_tags]
     return json.dumps(sorted(set(normalized)), ensure_ascii=False)
 
-FIELD_NAME_MAP = {
-    "Title": "title", "Description": "short_description", "Filename": "filename",
-    "Tags": "tags", "Author ID": "creator", "File Size": "file_size",
-    "Subs": "subscriptions", "Favs": "favorited", "Views": "views",
-    "Workshop ID": "workshop_id", "AppID": "consumer_appid", "App ID": "consumer_appid", "Language ID": "language",
-    "Subscriber Score": "wilson_subscription_score", "Favorite Score": "wilson_favorite_score",
-    "Full Text": "full_text",
-}
+FILTER_SCHEMA = [
+    {"field": "Full Text",        "db_col": "full_text",                 "type": "string", "ops": ["contains", "does_not_contain"]},
+    {"field": "Title",            "db_col": "title",                     "type": "string", "ops": ["contains", "does_not_contain", "is", "is_not"]},
+    {"field": "Description",      "db_col": "short_description",          "type": "string", "ops": ["contains", "does_not_contain", "is", "is_not"]},
+    {"field": "Tags",             "db_col": "tags",                      "type": "string", "ops": ["contains", "does_not_contain"]},
+    {"field": "Subscriber Score", "db_col": "wilson_subscription_score", "type": "number", "ops": ["gt", "lt", "gte", "lte", "percentile"]},
+    {"field": "Favorite Score",   "db_col": "wilson_favorite_score",     "type": "number", "ops": ["gt", "lt", "gte", "lte", "percentile"]},
+    {"field": "Author ID",        "db_col": "creator",                   "type": "id",     "ops": ["is", "is_not"]},
+    {"field": "Workshop ID",      "db_col": "workshop_id",               "type": "id",     "ops": ["is", "is_not"]},
+    {"field": "App ID",           "db_col": "consumer_appid",            "type": "id",     "ops": ["is", "is_not"]},
+    {"field": "Subs",             "db_col": "subscriptions",             "type": "number", "ops": ["gt", "lt", "gte", "lte", "percentile"]},
+    {"field": "Favs",             "db_col": "favorited",                 "type": "number", "ops": ["gt", "lt", "gte", "lte", "percentile"]},
+    {"field": "Views",            "db_col": "views",                     "type": "number", "ops": ["gt", "lt", "gte", "lte", "percentile"]},
+    {"field": "File Size",        "db_col": "file_size",                  "type": "number", "ops": ["gt", "lt", "gte", "lte"]},
+]
+
+# Build FIELD_NAME_MAP and ALL_FILTER_FIELDS from the schema
+ALL_FILTER_FIELDS = [f["field"] for f in FILTER_SCHEMA]
+FIELD_NAME_MAP = {f["field"]: f["db_col"] for f in FILTER_SCHEMA}
+# AppID backwards-compat alias
+FIELD_NAME_MAP["AppID"] = "consumer_appid"
+# Language ID is still accepted but not in the UI filter list
+FIELD_NAME_MAP["Language ID"] = "language"
+FIELD_NAME_MAP["Filename"] = "filename"
 
 # Fields that have a translated _en counterpart; these are dual-searched
 # when the operator is a text-matching one (contains, is, etc.)

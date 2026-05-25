@@ -9,7 +9,7 @@ from textual.screen import Screen, ModalScreen
 from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button, Markdown, DataTable, RichLog
 from textual.containers import Horizontal, Vertical, VerticalScroll, Center, Grid
 from textual.reactive import reactive
-from src.database import search_items, get_all_authors, initialize_database, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, get_db_stats, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, get_connection
+from src.database import search_items, get_all_authors, initialize_database, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, get_db_stats, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, get_connection, FILTER_SCHEMA, ALL_FILTER_FIELDS
 from src.analysis import view_window_analysis
 from src.config import load_config, save_config
 import os
@@ -827,27 +827,22 @@ class WorkshopItem(ListItem):
 
 class SearchRow(Horizontal):
     """A single row in the search builder."""
-    def __init__(self, fields: list[str], operators: dict[str, list[str]], is_first: bool = False, initial_filter: dict = None):
+    def __init__(self, fields: list[str], field_ops_map: dict, is_first: bool = False, initial_filter: dict = None):
         super().__init__(classes="search-row")
         self.fields = fields
-        self.operators_map = operators
+        self.field_ops_map = field_ops_map  # {field_name: [op_names]}
         self.is_first = is_first
         self.initial_filter = initial_filter or {}
+
+    def _ops_for_field(self, field: str) -> list[str]:
+        return self.field_ops_map.get(field, ["contains", "does_not_contain"])
 
     def compose(self) -> ComposeResult:
         field = self.initial_filter.get("field", self.fields[0])
         field_options = [(f, f) for f in self.fields]
         yield Select(field_options, prompt="Field", id="field-select", classes="row-field", value=field)
 
-        # Determine ops based on field
-        if field in ["Author ID", "Workshop ID", "AppID"]:
-            op_type = "id"
-        elif field in ["File Size", "Subs", "Favs", "Views", "Language ID", "Subscriber Score", "Favorite Score"]:
-            op_type = "numeric"
-        else:
-            op_type = "text"
-            
-        ops = self.operators_map[op_type]
+        ops = self._ops_for_field(field)
         op_options = [(o.replace("_", " "), o) for o in ops]
         
         op = self.initial_filter.get("op", ops[0])
@@ -870,15 +865,7 @@ class SearchRow(Horizontal):
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "field-select":
             field = str(event.value)
-            # Determine field type to show relevant operators
-            if field == "Author ID" or field == "Workshop ID" or field == "AppID":
-                op_type = "id"
-            elif field in ["File Size", "Subs", "Favs", "Views", "Language ID", "Subscriber Score", "Favorite Score"]:
-                op_type = "numeric"
-            else:
-                op_type = "text"
-                
-            ops = self.operators_map[op_type]
+            ops = self._ops_for_field(field)
             try:
                 op_select = self.query_one("#op-select", Select)
                 current_val = op_select.value
@@ -916,17 +903,10 @@ class SearchRow(Horizontal):
 class SearchBuilder(VerticalScroll):
     """A container for multiple SearchRows."""
     def compose(self) -> ComposeResult:
-        self.fields = [
-            "Title", "Description", "Filename", "Tags", "Author ID",
-            "File Size", "Subs", "Favs", "Views", "Workshop ID", "AppID", "Language ID",
-            "Subscriber Score", "Favorite Score", "Full Text",
-        ]
-        self.operators = {
-            "text": ["contains", "does_not_contain", "is", "is_not", "is_empty", "is_not_empty"],
-            "numeric": ["is", "is_not", "gt", "lt", "gte", "lte", "is_empty", "is_not_empty", "percentile"],
-            "id": ["is", "is_not"]
-        }
-        yield SearchRow(self.fields, self.operators, is_first=True)
+        self.fields = ALL_FILTER_FIELDS
+        # field_name -> [ops] lookup from the central schema
+        self.field_ops = {f["field"]: f["ops"] for f in FILTER_SCHEMA}
+        yield SearchRow(self.fields, self.field_ops, is_first=True)
 
     def add_row(self, logic: str) -> None:
         new_row = SearchRow(self.fields, self.operators)
