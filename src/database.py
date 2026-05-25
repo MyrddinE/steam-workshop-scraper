@@ -178,6 +178,8 @@ def _compute_percentile_threshold(db_path: str, db_col: str, percentile_val, bas
                 if op in ("is", "is_not"):
                     continue
                 clause, clause_params = _build_json_tag_clause(f_db_col, op, val)
+            elif f_db_col == "full_text":
+                continue  # FTS5 virtual column, not a real column
             else:
                 clause, clause_params = _build_filter_clause(f_db_col, op, val)
             if clause:

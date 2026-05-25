@@ -258,6 +258,19 @@ def test_subs_percentile_p99_returns_few(deterministic_db):
     assert 1 <= len(result) <= 300  # top 1% should be ~100 items
 
 
+def test_percentile_with_tag_filter(deterministic_db):
+    """Percentile combined with tag filter — exercises _compute_percentile_threshold
+    with tag clauses in base_filters (w.workshop_id in the subquery)."""
+    result = search_items(deterministic_db, filters=[
+        {"field": "Tags", "op": "contains", "value": "mod"},
+        {"field": "Subs", "op": "percentile", "value": 50},
+    ])
+    assert len(result) > 0
+    tag_sets = _get_tag_sets(deterministic_db, [r["workshop_id"] for r in result])
+    for tags in tag_sets:
+        assert "mod" in tags
+
+
 # ── ID operators (is, is_not) ─────────────────────────────────────────────────
 
 def test_author_id_is(deterministic_db):
@@ -428,3 +441,77 @@ def _get_tag_sets(db_path, wids):
         tag_sets.append({r["tag_name"] for r in rows})
     conn.close()
     return tag_sets
+
+
+# ── Fuzz test: random filter combinations must not crash ──────────────────────
+
+def test_random_filter_combinations_no_crash(deterministic_db):
+    """Call search_items with random filter combinations to catch SQL errors."""
+    import random
+    from src.database import get_connection
+
+    rng = random.Random(42)
+
+    field_ops = {
+        "Tags": ["contains", "does_not_contain"],
+        "Full Text": ["contains", "does_not_contain"],
+        "Title": ["contains", "does_not_contain", "is", "is_not"],
+        "Description": ["contains", "does_not_contain", "is", "is_not"],
+        "Subscriber Score": ["gt", "lt", "gte", "lte", "percentile"],
+        "Favorite Score": ["gt", "lt", "gte", "lte", "percentile"],
+        "Subs": ["gt", "lt", "gte", "lte", "percentile"],
+        "Favs": ["gt", "lt", "gte", "lte", "percentile"],
+        "Views": ["gt", "lt", "gte", "lte", "percentile"],
+        "File Size": ["gt", "lt", "gte", "lte"],
+        "Author ID": ["is", "is_not"],
+        "Workshop ID": ["is", "is_not"],
+        "App ID": ["is", "is_not"],
+    }
+
+    # Pre-fetch some real values for "is" operators
+    conn = get_connection(deterministic_db)
+    sample_title = conn.execute(
+        "SELECT title FROM workshop_items WHERE title LIKE '%lorem%' LIMIT 1"
+    ).fetchone()
+    sample_author = conn.execute("SELECT creator FROM workshop_items LIMIT 1").fetchone()
+    sample_wid = conn.execute("SELECT workshop_id FROM workshop_items LIMIT 1").fetchone()
+    sample_appid = conn.execute("SELECT consumer_appid FROM workshop_items LIMIT 1").fetchone()
+    conn.close()
+
+    for _ in range(50):
+        num_filters = rng.randint(1, 5)
+        filters = []
+        for i in range(num_filters):
+            field = rng.choice(list(field_ops.keys()))
+            op = rng.choice(field_ops[field])
+
+            # Pick a reasonable value for the operator
+            if op == "percentile":
+                val = rng.randint(0, 99)
+            elif op in ("is", "is_not"):
+                if field == "Title":
+                    val = sample_title["title"] if sample_title else "lorem"
+                elif field == "Author ID":
+                    val = sample_author["creator"] if sample_author else 1_000_000_000
+                elif field == "Workshop ID":
+                    val = sample_wid["workshop_id"] if sample_wid else 1_000_000
+                elif field == "App ID":
+                    val = sample_appid["consumer_appid"] if sample_appid else 10000
+                else:
+                    val = "lorem"
+            elif field in ("Tags", "Full Text", "Title", "Description"):
+                val = rng.choice(["mod", "lorem", "ipsum", "天地", "dolor"])
+            else:
+                val = rng.randint(0, 1_000_000)
+
+            f = {"field": field, "op": op, "value": val}
+            if i > 0:
+                f["logic"] = rng.choice(["AND", "OR"])
+            filters.append(f)
+
+        # Must not crash
+        try:
+            results = search_items(deterministic_db, filters=filters)
+            assert isinstance(results, list)
+        except Exception as e:
+            pytest.fail(f"search_items crashed with filters={filters}: {e}")
