@@ -1024,7 +1024,7 @@ def get_queued_items(db_path: str) -> list[dict]:
     conn = get_connection(db_path)
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT workshop_id, title FROM workshop_items WHERE is_queued_for_subscription = 1 ORDER BY title"
+        "SELECT workshop_id, title, title_en FROM workshop_items WHERE is_queued_for_subscription = 1 ORDER BY title"
     )
     items = [dict(row) for row in cursor.fetchall()]
     conn.close()

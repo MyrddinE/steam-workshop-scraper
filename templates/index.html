@@ -716,7 +716,7 @@ async function _startAutoSubscribe() {
     <div class="sub-queue-item" data-wid="${it.workshop_id}">
       <span class="spinner"></span>
       <span class="countdown"></span>
-      <span>${it.title || 'Untitled'}</span>
+      <span>${it.title_en || it.title || 'Untitled'}</span>
     </div>
   `).join('');
 
