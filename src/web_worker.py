@@ -68,6 +68,7 @@ class WebScraperThread(threading.Thread):
                     self.web_successes = 0
                 time.sleep(self.web_delay)
             else:
+                logging.warning(f"[W:{workshop_id}] Web scrape failed (no data returned)")
                 conn = get_connection(self.db_path)
                 conn.execute(
                     "UPDATE workshop_items SET api_priority = MAX(api_priority, 2) WHERE workshop_id = ?",
