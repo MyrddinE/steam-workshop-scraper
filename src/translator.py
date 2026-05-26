@@ -56,9 +56,9 @@ class TranslatorThread(threading.Thread):
                         self._translate_batch(batch, client, model)
                         time.sleep(1)
                     else:
-                        time.sleep(10)
+                        time.sleep(30)
                 else:
-                    time.sleep(10)
+                    time.sleep(30)
             except Exception as e:
                 logging.error(f"Translator thread error: {e}")
                 time.sleep(30)
