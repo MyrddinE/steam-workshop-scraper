@@ -314,7 +314,7 @@ class Daemon:
             merged_data["status"] = api_status
             
             if api_status == 404:
-                logging.warning(f"[{item_id}] Item not found (404) via API. Marking as dead (status=-1).")
+                logging.warning(f"[A:{item_id}] Item not found (404) via API. Marking as dead (status=-1).")
                 merged_data["status"] = -1
                 insert_or_update_item(self.db_path, merged_data)
                 self.api_failures += 1
@@ -328,7 +328,7 @@ class Daemon:
                     self.api_had_streak = False
                 continue
             elif api_status == 500:
-                logging.error(f"[{item_id}] API request failed (500). Retrying later.")
+                logging.error(f"[A:{item_id}] API request failed (500). Retrying later.")
                 insert_or_update_item(self.db_path, merged_data)
                 self.api_failures += 1
                 self.api_successes = 0
@@ -405,7 +405,7 @@ class Daemon:
                 except (ValueError, TypeError):
                     pass
 
-            logging.info(f"[{item_id}] \"{display_title}\"{' — \033[31mignored\033[0m' if not enriched else ''}")
+            logging.info(f"[A:{item_id}] \"{display_title}\"{' — \033[31mignored\033[0m' if not enriched else ''}")
             
             self.api_successes += 1
             self.api_failures = 0
