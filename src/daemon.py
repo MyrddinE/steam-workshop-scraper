@@ -554,12 +554,31 @@ class Daemon:
                     logging.info(f"Page mode for AppID {appid}: ~{result.get('total', '?')} total items by update time.")
 
                 page_new = 0
-                for item in items:
-                    wid = int(item.get("publishedfileid", 0))
-                    if wid:
-                        insert_or_update_item(self.db_path, {"workshop_id": wid, "api_priority": 5})
+                wid_to_api_updated = {int(it.get("publishedfileid", 0)): it.get("time_updated") or 0 for it in items if it.get("publishedfileid")}
+
+                # Fetch existing time_updated in one query
+                conn = get_connection(self.db_path)
+                placeholders = ",".join("?" * len(wid_to_api_updated))
+                existing_rows = {}
+                if wid_to_api_updated:
+                    rows = conn.execute(
+                        f"SELECT workshop_id, time_updated FROM workshop_items WHERE workshop_id IN ({placeholders})",
+                        list(wid_to_api_updated.keys()),
+                    ).fetchall()
+                    existing_rows = {r["workshop_id"]: r["time_updated"] for r in rows}
+
+                for wid, api_updated in wid_to_api_updated.items():
+                    db_updated = existing_rows.get(wid)
+                    if db_updated is None:
+                        # Wholly new item
+                        page_new += 1
+                    elif api_updated and (not db_updated or api_updated > db_updated):
+                        # Existing item with a fresher update time on Steam
                         page_new += 1
 
+                    insert_or_update_item(self.db_path, {"workshop_id": wid, "api_priority": 5})
+
+                conn.close()
                 page += 1
 
                 if page_new == 0:
