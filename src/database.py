@@ -1840,3 +1840,27 @@ def clear_pending_items(db_path: str) -> int:
     conn.commit()
     conn.close()
     return count
+
+
+def bump_api_priority_for_list(db_path: str, workshop_id: int):
+    """Bumps api_priority to 5 for list items if currently < 5."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "UPDATE workshop_items SET api_priority = 5 "
+        "WHERE workshop_id = ? AND api_priority < 5 AND (status IS NULL OR status != -1)",
+        (workshop_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def bump_api_priority_for_detail(db_path: str, workshop_id: int):
+    """Bumps api_priority to 10 for detail items if currently < 10."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "UPDATE workshop_items SET api_priority = 10 "
+        "WHERE workshop_id = ? AND api_priority < 10 AND (status IS NULL OR status != -1)",
+        (workshop_id,)
+    )
+    conn.commit()
+    conn.close()

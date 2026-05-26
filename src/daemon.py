@@ -344,6 +344,9 @@ class Daemon:
             merged_data = self._merge_and_clean_api_data(api_data, merged_data, item_id, now_ts)
             display_title = merged_data.get('title_en') or merged_data.get('title', 'Unknown Title')
 
+            # Capture the pre-fetch priority to inherit for image/web/translation flagging
+            inherited_prio = existing_data.get("api_priority", 0)
+
             merged_data["wilson_favorite_score"] = wilson_lower(
                 merged_data.get("favorited", 0) or 0,
                 merged_data.get("lifetime_subscriptions", 0) or 0)
@@ -364,24 +367,25 @@ class Daemon:
                     merged_data["extended_description"] = existing_data["extended_description"]
                     enriched = True
                 else:
-                    flag_for_web_scrape(self.db_path, item_id, 3)
+                    flag_for_web_scrape(self.db_path, item_id, max(3, inherited_prio))
                     enriched = True
             else:
-                flag_for_web_scrape(self.db_path, item_id, 1)
+                flag_for_web_scrape(self.db_path, item_id, max(1, inherited_prio))
 
             # Flag for image download if preview URL is present
             if merged_data.get("preview_url"):
-                flag_for_image(self.db_path, item_id, 3 if enriched else 1)
+                flag_for_image(self.db_path, item_id, max(3, inherited_prio) if enriched else max(1, inherited_prio))
 
             merged_data["status"] = 200
             insert_or_update_item(self.db_path, merged_data)
 
             # Flag translation for title and short description (ASCII check)
             if enriched:
+                t_prio = max(3, inherited_prio)
                 for field in [("title_en", merged_data.get("title")),
                               ("short_description_en", merged_data.get("short_description"))]:
                     if field[1]:
-                        flag_field_for_translation(self.db_path, "item", item_id, field[0], field[1], 3)
+                        flag_field_for_translation(self.db_path, "item", item_id, field[0], field[1], t_prio)
             
             # Step 3: Fetch User/Creator details (only for enriched items)
             creator_id = merged_data.get("creator")

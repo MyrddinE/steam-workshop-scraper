@@ -9,7 +9,7 @@ from textual.screen import Screen, ModalScreen
 from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button, Markdown, DataTable, RichLog
 from textual.containers import Horizontal, Vertical, VerticalScroll, Center, Grid
 from textual.reactive import reactive
-from src.database import search_items, get_all_authors, initialize_database, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, get_db_stats, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, get_connection, FILTER_SCHEMA, ALL_FILTER_FIELDS
+from src.database import search_items, get_all_authors, initialize_database, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, get_db_stats, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, get_connection, FILTER_SCHEMA, ALL_FILTER_FIELDS, bump_api_priority_for_list, bump_api_priority_for_detail
 from src.analysis import view_window_analysis
 from src.config import load_config, save_config
 import os
@@ -909,7 +909,7 @@ class SearchBuilder(VerticalScroll):
         yield SearchRow(self.fields, self.field_ops, is_first=True)
 
     def add_row(self, logic: str) -> None:
-        new_row = SearchRow(self.fields, self.operators)
+        new_row = SearchRow(self.fields, self.field_ops)
         self.mount(new_row)
         new_row.logic = logic
 
@@ -919,12 +919,12 @@ class SearchBuilder(VerticalScroll):
             row.remove()
             
         if not filters:
-            self.mount(SearchRow(self.fields, self.operators, is_first=True))
+            self.mount(SearchRow(self.fields, self.field_ops, is_first=True))
             return
 
         for i, f in enumerate(filters):
             is_first = (i == 0)
-            row = SearchRow(self.fields, self.operators, is_first=is_first, initial_filter=f)
+            row = SearchRow(self.fields, self.field_ops, is_first=is_first, initial_filter=f)
             if not is_first:
                 row.logic = f.get("logic", "AND")
             self.mount(row)
@@ -1479,6 +1479,7 @@ class ScraperApp(App):
                 bump_translation_for_list(self.db_path, item["workshop_id"])
             if item.get("needs_image", 0) > 0:
                 bump_image_priority_for_list(self.db_path, item["workshop_id"])
+            bump_api_priority_for_list(self.db_path, item["workshop_id"])
             
         self.current_offset += len(results)
         
@@ -1524,6 +1525,7 @@ class ScraperApp(App):
                     bump_web_priority_for_detail(self.db_path, wid)
                     bump_translation_for_detail(self.db_path, wid)
                     bump_image_priority_for_detail(self.db_path, wid)
+                    bump_api_priority_for_detail(self.db_path, wid)
                 
                 detail_pane = self.query_one("#item-details", DetailsPane)
                 detail_pane.workshop_id = item_data.get("workshop_id")

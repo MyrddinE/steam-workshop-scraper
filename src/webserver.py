@@ -6,7 +6,7 @@ import re
 import logging
 import requests
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, get_queued_items, FILTER_SCHEMA
+from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, get_queued_items, FILTER_SCHEMA, bump_api_priority_for_detail
 from src.analysis import view_window_analysis
 
 app = Flask(__name__, template_folder='../templates')
@@ -193,6 +193,7 @@ def api_item(workshop_id):
     bump_image_priority_for_detail(_db_path, workshop_id)
     _ensure_image_flagged(workshop_id, 10)
     bump_translation_for_detail(_db_path, workshop_id)
+    bump_api_priority_for_detail(_db_path, workshop_id)
 
     item = get_item_details(_db_path, workshop_id)
     if not item:
