@@ -556,16 +556,17 @@ class Daemon:
                 page_new = 0
                 for item in items:
                     wid = int(item.get("publishedfileid", 0))
-                    if wid and insert_or_update_item(self.db_path, {"workshop_id": wid, "api_priority": 5}):
+                    if wid:
+                        insert_or_update_item(self.db_path, {"workshop_id": wid, "api_priority": 5})
                         page_new += 1
 
                 page += 1
 
                 if page_new == 0:
-                    logging.info(f"Page mode: no new items on page {page}, stopping for AppID {appid}.")
+                    logging.info(f"Page mode: no new or updated items on page {page}, stopping for AppID {appid}.")
                     break
 
-                logging.info(f"Page mode: page {page} added {page_new} new items for AppID {appid}.")
+                logging.info(f"Page mode: page {page} added/updated {page_new} items for AppID {appid}.")
                 cursor = result.get("next_cursor") or ""
                 time.sleep(self.api_delay)
 
