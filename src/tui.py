@@ -1581,7 +1581,7 @@ class ScraperApp(App):
             await builder.query(SearchRow).remove()
 
             # Add a fresh first row
-            new_row = SearchRow(builder.fields, builder.operators, is_first=True)
+            new_row = SearchRow(builder.fields, builder.field_ops, is_first=True)
             await builder.mount(new_row)
 
             # Use call_after_refresh to ensure selects are populated

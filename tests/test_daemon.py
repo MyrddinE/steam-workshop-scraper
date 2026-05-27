@@ -188,3 +188,102 @@ def test_wilson_lower_edge_cases():
     assert 0.0 <= wilson_lower(5, 10) <= 1.0
     assert 0.0 <= wilson_lower(100, 100) <= 1.0
 
+
+def test_merge_and_clean_sets_api_priority_zero(mock_config):
+    """_merge_and_clean_api_data sets api_priority=0 and dt_updated."""
+    with patch('src.database.initialize_database'), \
+         patch('src.daemon.save_config'):
+        daemon = Daemon(mock_config)
+        api_data = {"title": "Test"}
+        existing = {"workshop_id": 1}
+        now = 1000000
+        result = daemon._merge_and_clean_api_data(api_data, existing, 1, now)
+        assert result["api_priority"] == 0
+        assert result["dt_updated"] == now
+
+
+@patch('src.database.initialize_database')
+@patch('src.daemon.save_config')
+@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.count_unscraped_items', return_value=0)
+@patch('src.daemon.get_workshop_details_api')
+@patch('src.daemon.insert_or_update_item')
+@patch('src.daemon.flag_for_web_scrape')
+@patch('src.daemon.flag_for_image')
+@patch('src.daemon.get_connection')
+@patch('src.daemon.get_user')
+def test_process_batch_404_status_marker(
+    mock_user, mock_conn, mock_img, mock_web, mock_insert,
+    mock_api, mock_count, mock_items, mock_save, mock_init, mock_config
+):
+    """Verify 404 item gets status=-1 passed to insert."""
+    mock_api.return_value = {"status": 404, "publishedfileid": 1}
+    mock_items.return_value = [{"workshop_id": 1}]
+    mock_user.return_value = None
+    daemon = Daemon(mock_config)
+    daemon.process_batch()
+    # Check that insert was called with status=-1 somewhere in the call args
+    for call in mock_insert.call_args_list:
+        data = call[0][1] if len(call[0]) > 1 else {}
+        if data.get("workshop_id") == 1:
+            assert data.get("status") == -1
+            assert data.get("api_priority") == 0
+
+
+@patch('src.database.initialize_database')
+@patch('src.daemon.save_config')
+@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.count_unscraped_items', return_value=0)
+@patch('src.daemon.get_workshop_details_api')
+@patch('src.daemon.insert_or_update_item')
+@patch('src.daemon.flag_for_web_scrape')
+@patch('src.daemon.flag_for_image')
+@patch('src.daemon.get_connection')
+@patch('src.daemon.get_user')
+@patch('src.daemon.get_app_tracking', return_value=None)
+def test_process_batch_inherits_priority(
+    mock_track, mock_user, mock_conn, mock_img, mock_web, mock_insert,
+    mock_api, mock_count, mock_items, mock_save, mock_init, mock_config
+):
+    """flag_for_web_scrape and flag_for_image get max(inherited, default)."""
+    mock_api.return_value = {"title": "Test", "creator": "111", "preview_url": "http://x"}
+    mock_items.return_value = [{"workshop_id": 1, "api_priority": 5, "status": 200}]
+    mock_user.return_value = None
+    daemon = Daemon(mock_config)
+    daemon.process_batch()
+    # Web scrape should be flagged at max(3, 5) = 5 (enriched, inherited_prio=5)
+    # Image should be flagged at max(3, 5) = 5
+    for call in mock_web.call_args_list:
+        assert call[0][2] >= 5
+    for call in mock_img.call_args_list:
+        assert call[0][2] >= 5
+
+
+def test_page_discovery_eligible_trigger_file(mock_config):
+    """_page_discovery_eligible returns True when .fetch_new exists."""
+    from src.daemon import Daemon
+    import os
+    with patch('src.database.initialize_database'), \
+         patch('src.daemon.save_config'):
+        daemon = Daemon(mock_config)
+        daemon._cursor_exhausted = False
+        # Without trigger file
+        assert daemon._page_discovery_eligible() is False
+        # With trigger file
+        with open('.fetch_new', 'w') as f:
+            f.write('1')
+        try:
+            assert daemon._page_discovery_eligible() is True
+        finally:
+            os.remove('.fetch_new')
+
+
+def test_staleness_sweep_sql_has_status_200():
+    """Verify the staleness sweep SQL only targets status=200 items."""
+    from src.daemon import Daemon
+    import inspect
+    src = inspect.getsource(Daemon.process_batch)
+    # The sweep query must include "status = 200" to exclude dead items
+    assert "status = 200" in src
+    assert "api_priority = 1" in src
+

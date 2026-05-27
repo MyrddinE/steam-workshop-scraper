@@ -130,7 +130,7 @@ class ImageScraperThread(threading.Thread):
                 new_pri = max(0, (item.get("needs_image") or 1) - 1)
                 conn = self._get_conn()
                 conn.execute(
-                    "UPDATE workshop_items SET needs_image=?, api_priority=MAX(api_priority, 2) WHERE workshop_id=?",
+                    "UPDATE workshop_items SET needs_image=?, api_priority = CASE WHEN api_priority < 2 THEN 2 ELSE api_priority END WHERE workshop_id=?",
                     (new_pri, wid)
                 )
                 conn.commit()

@@ -108,3 +108,83 @@ def test_translate_batch_writes_translation_and_resets_priority(tmp_path):
     queue_count = conn.execute("SELECT COUNT(*) FROM translation_queue WHERE item_id = 1").fetchone()[0]
     assert queue_count == 0
     conn.close()
+
+
+def test_translate_batch_stamps_time_updated(tmp_path):
+    """dt_translated is set to time_updated (version marker), not wall-clock."""
+    import sqlite3
+    from src.database import initialize_database, insert_or_update_item, flag_field_for_translation
+
+    db_path = str(tmp_path / "test_trans.db")
+    initialize_database(db_path)
+    known_ts = 1710000000
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "title": "\u30c6\u30b9\u30c8", "short_description": "test",
+        "subscriptions": 10, "lifetime_subscriptions": 20, "favorited": 5,
+        "views": 100, "status": 200, "time_updated": known_ts,
+    })
+    flag_field_for_translation(db_path, "item", 1, "title_en", "\u30c6\u30b9\u30c8", 10)
+
+    config = {"database": {"path": db_path}, "openai": {"api_key": "SK-TEST", "endpoint": "https://test/v1", "model": "gpt-test"}}
+    from src.translator import TranslatorThread
+    thread = TranslatorThread(config)
+    thread.db_path = db_path
+
+    from unittest.mock import MagicMock
+    import json
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = json.dumps([
+        {"id": "item_1_title_en", "translated": "Hello"},
+    ])
+    mock_client.chat.completions.create.return_value = mock_response
+
+    batch = [{"id": 1, "item_type": "item", "item_id": 1, "field": "title_en", "original_text": "\u30c6\u30b9\u30c8", "priority": 10}]
+    thread._translate_batch(batch, mock_client, "gpt-test")
+
+    conn = sqlite3.connect(db_path)
+    result = conn.execute("SELECT dt_translated FROM workshop_items WHERE workshop_id = 1").fetchone()
+    conn.close()
+    assert result[0] == known_ts
+
+
+def test_translate_batch_falls_back_when_no_time_updated(tmp_path):
+    """When time_updated is NULL, dt_translated falls back to a reasonable epoch."""
+    import sqlite3
+    from src.database import initialize_database, insert_or_update_item, flag_field_for_translation
+
+    db_path = str(tmp_path / "test_trans.db")
+    initialize_database(db_path)
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "title": "\u30c6\u30b9\u30c8", "short_description": "test",
+        "subscriptions": 10, "lifetime_subscriptions": 20, "favorited": 5,
+        "views": 100, "status": 200,  # no time_updated
+    })
+    flag_field_for_translation(db_path, "item", 1, "title_en", "\u30c6\u30b9\u30c8", 10)
+
+    config = {"database": {"path": db_path}, "openai": {"api_key": "SK-TEST", "endpoint": "https://test/v1", "model": "gpt-test"}}
+    from src.translator import TranslatorThread
+    thread = TranslatorThread(config)
+    thread.db_path = db_path
+
+    from unittest.mock import MagicMock
+    import json
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = json.dumps([
+        {"id": "item_1_title_en", "translated": "Hello"},
+    ])
+    mock_client.chat.completions.create.return_value = mock_response
+
+    batch = [{"id": 1, "item_type": "item", "item_id": 1, "field": "title_en", "original_text": "\u30c6\u30b9\u30c8", "priority": 10}]
+    thread._translate_batch(batch, mock_client, "gpt-test")
+
+    conn = sqlite3.connect(db_path)
+    result = conn.execute("SELECT dt_translated FROM workshop_items WHERE workshop_id = 1").fetchone()
+    conn.close()
+    import time
+    assert result[0] is not None
+    # Should be a recent epoch (within last 60 seconds of now)
+    assert abs(result[0] - int(time.time())) < 60

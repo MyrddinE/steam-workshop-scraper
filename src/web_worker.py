@@ -71,7 +71,7 @@ class WebScraperThread(threading.Thread):
                 logging.warning(f"[W:{workshop_id}] Web scrape failed (no data returned)")
                 conn = get_connection(self.db_path)
                 conn.execute(
-                    "UPDATE workshop_items SET api_priority = MAX(api_priority, 2) WHERE workshop_id = ?",
+                    "UPDATE workshop_items SET api_priority = CASE WHEN api_priority < 2 THEN 2 ELSE api_priority END WHERE workshop_id = ?",
                     (workshop_id,)
                 )
                 conn.commit()

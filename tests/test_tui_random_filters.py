@@ -8,30 +8,22 @@ from textual.widgets import Select, Input
 async def test_random_filters_save_load(mock_config):
     from unittest.mock import patch
     
-    # Generate 5 random 5-part filters
-    fields = [
-        "Title", "Description", "Filename", "Tags", "Author ID",
-        "File Size", "Subs", "Favs", "Views", "Workshop ID", "AppID", "Language ID"
-    ]
-    operators_map = {
-        "text": ["contains", "does_not_contain", "is", "is_not", "is_empty", "is_not_empty"],
-        "numeric": ["is", "is_not", "gt", "lt", "gte", "lte", "is_empty", "is_not_empty"],
-        "id": ["is", "is_not"]
-    }
+    # Generate 5 random 5-part filters from the central schema
+    from src.database import FILTER_SCHEMA
+    fields = [f["field"] for f in FILTER_SCHEMA]
+    field_ops_map = {f["field"]: f["ops"] for f in FILTER_SCHEMA}
     
     random_filters = []
     for _ in range(5):
         filter_set = []
         for i in range(5):
             field = random.choice(fields)
-            if field in ["Author ID", "Workshop ID", "AppID"]:
-                op_type = "id"
-            elif field in ["File Size", "Subs", "Favs", "Views", "Language ID"]:
-                op_type = "numeric"
+            ops = field_ops_map.get(field, ["contains"])
+            op = random.choice(ops)
+            if op == "percentile":
+                val = str(random.randint(0, 99))
             else:
-                op_type = "text"
-            op = random.choice(operators_map[op_type])
-            val = f"test_val_{random.randint(1, 100)}"
+                val = f"test_val_{random.randint(1, 100)}"
             
             f = {"field": field, "op": op, "value": val}
             if i > 0:

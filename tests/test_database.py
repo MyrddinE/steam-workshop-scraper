@@ -11,7 +11,13 @@ from src.database import (
     search_items,
     get_connection,
     count_unscraped_items,
-    clear_pending_items
+    clear_pending_items,
+    flag_for_web_scrape,
+    flag_for_image,
+    bump_api_priority_for_list,
+    bump_api_priority_for_detail,
+    clear_subscription_queue_status,
+    get_queued_items,
 )
 
 def test_count_unscraped_items(db_path):
@@ -613,3 +619,75 @@ def test_stats_with_real_data(deterministic_db):
     assert total_from_status == 10000
     assert len(stats["tag_counts"]) == 10
     assert sum(stats["tag_counts"].values()) > 0
+
+
+def test_get_next_items_to_scrape_priority_order(db_path):
+    """Higher api_priority items are returned first."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 1, "dt_updated": 100})
+    insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 10, "dt_updated": 200})
+    insert_or_update_item(db_path, {"workshop_id": 3, "api_priority": 5, "dt_updated": 300})
+    items = get_next_items_to_scrape(db_path, limit=3)
+    assert [i["workshop_id"] for i in items] == [2, 3, 1]
+
+
+def test_get_next_items_to_scrape_excludes_dead(db_path):
+    """Items with status=-1 are not returned."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 10, "status": -1})
+    insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 5, "status": 200})
+    items = get_next_items_to_scrape(db_path, limit=2)
+    assert [i["workshop_id"] for i in items] == [2]
+
+
+def test_flag_for_web_scrape_sets_priority(db_path):
+    """flag_for_web_scrape updates the needs_web_scrape column."""
+    insert_or_update_item(db_path, {"workshop_id": 1})
+    flag_for_web_scrape(db_path, 1, 7)
+    conn = get_connection(db_path)
+    val = conn.execute("SELECT needs_web_scrape FROM workshop_items WHERE workshop_id=1").fetchone()[0]
+    conn.close()
+    assert val == 7
+
+
+def test_flag_for_image_max_semantics(db_path):
+    """flag_for_image uses MAX — never downgrades."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "needs_image": 10})
+    flag_for_image(db_path, 1, 3)
+    conn = get_connection(db_path)
+    val = conn.execute("SELECT needs_image FROM workshop_items WHERE workshop_id=1").fetchone()[0]
+    conn.close()
+    assert val == 10  # not downgraded to 3
+
+
+def test_bump_api_priority_for_list_and_detail(db_path):
+    """Bump functions set correct priority and skip dead items."""
+    insert_or_update_item(db_path, {"workshop_id": 1})  # unscraped
+    insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 8})  # already high
+    insert_or_update_item(db_path, {"workshop_id": 3, "status": -1, "api_priority": 0})  # dead
+
+    bump_api_priority_for_list(db_path, 1)
+    bump_api_priority_for_list(db_path, 2)
+    bump_api_priority_for_list(db_path, 3)
+
+    conn = get_connection(db_path)
+    p1 = conn.execute("SELECT api_priority FROM workshop_items WHERE workshop_id=1").fetchone()[0]
+    p2 = conn.execute("SELECT api_priority FROM workshop_items WHERE workshop_id=2").fetchone()[0]
+    p3 = conn.execute("SELECT api_priority FROM workshop_items WHERE workshop_id=3").fetchone()[0]
+    conn.close()
+    assert p1 == 5   # bumped from default 3 -> 5
+    assert p2 == 8   # already high, not downgraded
+    assert p3 == 0   # dead, not bumped
+
+    # Detail bump
+    bump_api_priority_for_detail(db_path, 1)
+    conn = get_connection(db_path)
+    p1 = conn.execute("SELECT api_priority FROM workshop_items WHERE workshop_id=1").fetchone()[0]
+    conn.close()
+    assert p1 == 10  # bumped to 10
+
+
+def test_clear_subscription_queue_status(db_path):
+    """clear_subscription_queue_status sets flag to 0."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "is_queued_for_subscription": 1})
+    clear_subscription_queue_status(db_path, 1)
+    queued = get_queued_items(db_path)
+    assert not any(q["workshop_id"] == 1 for q in queued)
