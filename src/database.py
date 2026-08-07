@@ -1,4 +1,5 @@
 import sqlite3
+import os
 import shlex
 import re
 import json
@@ -415,6 +416,30 @@ def _safe_add_columns(cursor, table: str, columns: list[tuple[str, str]]):
             if "duplicate column" not in str(e):
                 raise
 
+HEX_CHARS = "0123456789abcdef"
+
+def get_image_subdirs(workshop_id) -> tuple[str, str, str]:
+    """
+    Returns the three levels of subdirectory names for a given workshop_id using
+    a 3-level 12-bit hexadecimal hashing scheme (1 char / 4 bits per level).
+    """
+    try:
+        wid = int(workshop_id)
+    except (ValueError, TypeError):
+        return "0", "0", "0"
+    
+    char1 = HEX_CHARS[wid & 0xF]
+    char2 = HEX_CHARS[(wid >> 4) & 0xF]
+    char3 = HEX_CHARS[(wid >> 8) & 0xF]
+    return char1, char2, char3
+
+def get_image_path(base_dir: str, workshop_id, ext: str) -> str:
+    """
+    Returns the full nested path to an image file.
+    """
+    char1, char2, char3 = get_image_subdirs(workshop_id)
+    return os.path.join(base_dir, char1, char2, char3, f"{workshop_id}.{ext}")
+
 def initialize_database(db_path: str):
     """
     Initializes the SQLite database and creates the workshop_items table and indexes.
@@ -584,7 +609,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 12
+    EXPECTED_VERSION = 13
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -967,7 +992,44 @@ def initialize_database(db_path: str):
         conn.commit()
         cursor.execute("PRAGMA user_version = 12")
         logging.info(f"Migration 11->12 complete. "
-                     f"Never-scraped={never_count}, Stale={stale_count}")
+                      f"Never-scraped={never_count}, Stale={stale_count}")
+
+    if db_version < 13:
+        logging.info("Running migration 12->13: migrating image folder structure to 3-level hexadecimal hash bucket folders...")
+        db_dir = os.path.dirname(os.path.abspath(db_path))
+        base_images_dir = os.path.join(db_dir, "images")
+        if not os.path.isdir(base_images_dir):
+            base_images_dir = "images"
+
+        cursor.execute("SELECT workshop_id, image_extension FROM workshop_items WHERE image_extension IS NOT NULL AND image_extension != ''")
+        rows = cursor.fetchall()
+
+        migrated_count = 0
+        already_migrated_count = 0
+        missing_count = 0
+
+        for row in rows:
+            wid = row["workshop_id"]
+            ext = row["image_extension"]
+
+            old_path = os.path.join(base_images_dir, f"{wid}.{ext}")
+
+            char1, char2, char3 = get_image_subdirs(wid)
+            new_dir = os.path.join(base_images_dir, char1, char2, char3)
+            new_path = os.path.join(new_dir, f"{wid}.{ext}")
+
+            if os.path.exists(old_path):
+                os.makedirs(new_dir, exist_ok=True)
+                os.rename(old_path, new_path)
+                migrated_count += 1
+            elif os.path.exists(new_path):
+                already_migrated_count += 1
+            else:
+                missing_count += 1
+
+        cursor.execute("PRAGMA user_version = 13")
+        conn.commit()
+        logging.info(f"Migration 12->13 complete. Migrated: {migrated_count}, Already: {already_migrated_count}, Missing: {missing_count}")
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")

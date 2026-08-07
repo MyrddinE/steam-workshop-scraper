@@ -98,6 +98,23 @@ def template_fsize(n):
 
 @app.route('/images/<path:filename>')
 def serve_image(filename):
+    # If the filename contains path separators, it is already nested
+    if '/' in filename or '\\' in filename:
+        return send_from_directory(_images_dir, filename)
+
+    # Otherwise, it's a flat filename like "1039919954.jpg"
+    if '.' in filename:
+        name_part, ext = filename.rsplit('.', 1)
+        try:
+            wid = int(name_part)
+            from src.database import get_image_subdirs
+            char1, char2, char3 = get_image_subdirs(wid)
+            nested_path = f"{char1}/{char2}/{char3}/{filename}"
+            return send_from_directory(_images_dir, nested_path)
+        except ValueError:
+            # Not an integer workshop_id, serve flat
+            pass
+
     return send_from_directory(_images_dir, filename)
 
 

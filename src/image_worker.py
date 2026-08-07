@@ -6,7 +6,7 @@ import logging
 import threading
 import requests
 from datetime import datetime, timezone
-from src.database import get_next_image_item, insert_or_update_item
+from src.database import get_next_image_item, insert_or_update_item, get_image_path
 
 
 MIME_MAP = {
@@ -96,7 +96,8 @@ class ImageScraperThread(threading.Thread):
                     time.sleep(self.image_delay)
                     continue
 
-                img_path = os.path.join("images", f"{wid}.{ext}")
+                img_path = get_image_path("images", wid, ext)
+                os.makedirs(os.path.dirname(img_path), exist_ok=True)
                 with open(img_path, "wb") as f:
                     if magic_header:
                         f.write(magic_header)
