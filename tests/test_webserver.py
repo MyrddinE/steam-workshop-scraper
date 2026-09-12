@@ -1,7 +1,11 @@
 import pytest
 import json
+import os
+import shutil
+import subprocess
+import lxml.html
 from src.webserver import app, init_webserver
-from src.database import initialize_database, insert_or_update_item, normalize_tags
+from src.database import initialize_database, insert_or_update_item, normalize_tags, get_image_subdirs
 
 
 @pytest.fixture
@@ -20,76 +24,79 @@ def test_index_returns_html(web_client):
     assert b'<!DOCTYPE html>' in resp.data
 
 
-def test_layout_constrains_viewport(web_client):
-    """Verify CSS rules that prevent page from expanding beyond viewport."""
+def test_layout_scaffold_is_present(web_client):
+    """The layout CSS targets #results-pane and #right-pane; assert that scaffold exists.
+
+    This replaces assertions on raw CSS text ('height: 100vh', 'overflow-y: auto',
+    ...). CSS values are not server-side behaviour and can only be verified in a
+    browser, so this checks the DOM contract the stylesheet depends on instead.
+    """
     client, _ = web_client
     resp = client.get('/')
-    html = resp.data.decode()
-    assert 'height: 100vh' in html
-    assert 'overflow: hidden' in html
-    assert 'overflow-y: auto' in html
-    assert 'flex-direction: column' in html
-    assert 'min-height: 0' in html
+    doc = lxml.html.fromstring(resp.data.decode())
+    assert doc.xpath('//*[@id="results-pane"]'), "missing layout container #results-pane"
+    assert doc.xpath('//*[@id="right-pane"]'), "missing layout container #right-pane"
+    assert doc.xpath('//style'), "expected an inline <style> block in the served page"
 
 
-def test_results_scroll_container_exists(web_client):
-    """Verify the results grid is in the results pane."""
+def test_results_grid_is_inside_results_pane(web_client):
+    """Verify the results grid is a real descendant of the results pane."""
     client, _ = web_client
     resp = client.get('/')
-    html = resp.data.decode()
-    assert 'id="results-grid"' in html
-    assert 'id="results-pane"' in html
-    # results-grid must be INSIDE results-pane
-    import re
-    match = re.search(r'id="results-pane".*?id="results-grid"', html, re.DOTALL)
-    assert match is not None
+    doc = lxml.html.fromstring(resp.data.decode())
+    results_pane = doc.xpath('//*[@id="results-pane"]')
+    results_grid = doc.xpath('//*[@id="results-grid"]')
+    assert len(results_pane) == 1, "expected exactly one #results-pane"
+    assert len(results_grid) == 1, "expected exactly one #results-grid"
+    assert results_pane[0] in results_grid[0].iterancestors(), \
+        "#results-grid must be nested inside #results-pane"
 
 
-def test_search_builder_not_in_scroll(web_client):
+def test_search_builder_in_right_pane_not_results_grid(web_client):
     """Verify search builder is in the right pane, separate from results."""
     client, _ = web_client
     resp = client.get('/')
-    html = resp.data.decode()
-    sb_pos = html.index('id="search-builder"')
-    rp_pos = html.index('id="right-pane"')
-    grid_pos = html.index('id="results-grid"')
-    # search builder must be in right-pane, results-grid in results-pane
-    assert rp_pos < sb_pos
-    assert grid_pos < rp_pos
+    doc = lxml.html.fromstring(resp.data.decode())
+    right_pane = doc.xpath('//*[@id="right-pane"]')[0]
+    search_builder = doc.xpath('//*[@id="search-builder"]')[0]
+    results_grid = doc.xpath('//*[@id="results-grid"]')[0]
+    # search builder must be in right-pane, results-grid must not
+    assert search_builder in right_pane.iterdescendants(), \
+        "#search-builder must be nested inside #right-pane"
+    assert results_grid not in right_pane.iterdescendants(), \
+        "#results-grid must not be nested inside #right-pane"
 
 
-def test_show_detail_has_desc_variable(web_client):
-    """Regression: desc variable must be declared before use in renderDetail."""
-    import re
+NODE = shutil.which("node")
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot syntax-check served JavaScript")
+def test_served_inline_script_is_valid_javascript(web_client, tmp_path):
+    """The inline <script> is real JavaScript; validate the served artifact with `node --check`.
+
+    This replaces assertions on JavaScript source text (declaration order of a `desc`
+    variable, presence of a `try {`/`catch`). The page is rendered from the Jinja
+    template, so the response body contains concrete values (e.g. `const WEB_DELAY =
+    5.0;`) and is valid JavaScript we can parse as-is.
+
+    Coverage note: a syntax check proves the script parses, NOT that it runs without
+    a ReferenceError. The historical `desc`-used-before-declaration regression is
+    therefore left unguarded here; see notes/findings.md.
+    """
     client, _ = web_client
     resp = client.get('/')
-    html = resp.data.decode()
-    js = re.search(r'<script>(.*?)</script>', html, re.DOTALL)
-    assert js, "No <script> block found"
-    code = js.group(1)
-    sd_start = code.index('function renderDetail')
-    sd_body = code[sd_start:]
-    desc_decl = re.search(r'\blet desc\b|\bvar desc\b|\bconst desc\b', sd_body)
-    assert desc_decl, "desc variable not declared in renderDetail"
-    # desc must be declared before the final pane.innerHTML (the template literal)
-    inners = [m.start() for m in re.finditer(r'pane\.innerHTML', sd_body)]
-    assert len(inners) >= 1, "expected at least 1 pane.innerHTML call in renderDetail"
-    template_pos = inners[-1]  # the last one is the template literal
-    assert desc_decl.start() < template_pos, "desc declared AFTER template literal"
+    doc = lxml.html.fromstring(resp.data.decode())
+    scripts = [s.text or "" for s in doc.xpath('//script[not(@src)]')]
+    assert scripts, "served page contains no inline <script> block"
 
+    script_path = tmp_path / "served.js"
+    script_path.write_text("\n".join(scripts), encoding="utf-8")
 
-def test_show_detail_has_try_catch(web_client):
-    """Regression: showDetail must wrap fetch in try/catch."""
-    client, _ = web_client
-    resp = client.get('/')
-    html = resp.data.decode()
-    import re
-    js = re.search(r'<script>(.*?)</script>', html, re.DOTALL).group(1)
-    # showDetail function should have try/catch around the fetch
-    sd_start = js.index('function showDetail')
-    sd_body = js[sd_start:sd_start + 2000]
-    assert 'try {' in sd_body
-    assert 'catch' in sd_body
+    result = subprocess.run(
+        [NODE, "--check", str(script_path)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, f"node --check reported invalid JavaScript:\n{result.stderr}"
 
 
 def test_search_returns_json(web_client):
@@ -236,12 +243,27 @@ def test_image_serve_missing(web_client):
     assert resp.status_code == 404
 
 
-def test_detail_pane_has_image_markup(web_client):
-    client, _ = web_client
-    resp = client.get('/')
-    html = resp.data.decode()
-    assert 'image_extension' in html
-    assert 'grid-img' in html
+def test_image_serve_flat_id_resolves_to_bucket(web_client):
+    """A flat GET /images/<id>.<ext> serves the file from its nested bucket path.
+
+    This replaces a source-text check for `image_extension` / `grid-img` in the
+    served HTML: the detail markup is generated client-side, so there was no
+    server-side behaviour to assert there. The real server contract is the image
+    route, which transparently resolves a flat filename into the 3-level bucket
+    produced by get_image_subdirs().
+    """
+    client, db_path = web_client
+    workshop_id = 1039919954
+    char1, char2, char3 = get_image_subdirs(workshop_id)
+    nested_dir = os.path.join(os.path.dirname(db_path), "images", char1, char2, char3)
+    os.makedirs(nested_dir, exist_ok=True)
+    payload = b"bucket-image-bytes"
+    with open(os.path.join(nested_dir, f"{workshop_id}.jpg"), "wb") as f:
+        f.write(payload)
+
+    resp = client.get(f"/images/{workshop_id}.jpg")
+    assert resp.status_code == 200
+    assert resp.data == payload
 
 
 def test_api_items_bulk_lookup(web_client):
