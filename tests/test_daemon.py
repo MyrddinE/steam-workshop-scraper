@@ -279,10 +279,14 @@ def test_page_discovery_eligible_trigger_file(mock_config):
 
 
 def test_staleness_sweep_sql_has_status_200():
-    """Verify the staleness sweep SQL only targets status=200 items."""
+    """Verify the staleness sweep SQL only targets status=200 items.
+
+    The sweep lives in its own method now (it used to be inlined at the top of
+    process_batch), so this inspects that method instead.
+    """
     from src.daemon import Daemon
     import inspect
-    src = inspect.getsource(Daemon.process_batch)
+    src = inspect.getsource(Daemon._promote_stale_items)
     # The sweep query must include "status = 200" to exclude dead items
     assert "status = 200" in src
     assert "api_priority = 1" in src

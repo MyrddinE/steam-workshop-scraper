@@ -253,9 +253,27 @@ class Daemon:
                 logging.error(f"Error expanding user discovery: {e}")
 
     def process_batch(self):
-        """Processes a single batch of workshop items."""
+        """Process one batch: housekeeping, acquire work, then process each item."""
+        self._promote_stale_items()
 
-        # Periodic staleness sweep: promote stale items from 0 -> 1
+        items_to_scrape = self._acquire_batch()
+        if items_to_scrape is None:
+            return  # database error, already logged
+        if not items_to_scrape:
+            self._wait_for_work()
+            return
+
+        for existing_data in items_to_scrape:
+            if not self.running or self._pid_file_removed():
+                break
+            self._process_item(existing_data)
+
+    def _promote_stale_items(self) -> None:
+        """Periodic sweep: promote stale items from API priority 0 to 1.
+
+        Failures are swallowed deliberately (housekeeping must never stop the
+        fetch loop); see notes/findings.md for the capture-on-failure follow-up.
+        """
         try:
             threshold = int(time.time()) - self.item_staleness_days * 86400
             conn = get_connection(self.db_path)
@@ -270,160 +288,187 @@ class Daemon:
         except Exception:
             pass
 
-        try:
-            items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size,
-                                                       staleness_days=self.item_staleness_days)
-        except Exception as e:
-            logging.error(f"Database error in process_batch: {e}")
-            time.sleep(5)
-            return
-        
-        if not items_to_scrape:
-            logging.debug("No items to scrape. Expanding discovery...")
-            if self._page_discovery_eligible():
-                self._run_page_discovery()
-                # Fall through to cursor mode if page mode didn't fill the queue
-                if not self.running:
-                    return
-            self.seed_database()
-            try:
-                items_to_scrape = get_next_items_to_scrape(self.db_path, limit=self.batch_size,
-                                                           staleness_days=self.item_staleness_days)
-            except Exception as e:
-                logging.error(f"Database error after seeding: {e}")
-                time.sleep(5)
-                return
-        
-        if not items_to_scrape:
-            for _ in range(600):
-                if not self.running:
-                    return
-                if self._pid_file_removed():
-                    return
-                time.sleep(1)
-            return
+    def _acquire_batch(self):
+        """Return the next batch of items, refilling the queue when it is empty.
 
-        for existing_data in items_to_scrape:
+        Returns None when this iteration should be abandoned: a database error, or
+        the daemon stopping during discovery.
+        """
+        items_to_scrape = self._fetch_batch()
+        if items_to_scrape is None or items_to_scrape:
+            return items_to_scrape
+
+        logging.debug("No items to scrape. Expanding discovery...")
+        if self._page_discovery_eligible():
+            self._run_page_discovery()
+            # Fall through to cursor mode if page mode didn't fill the queue
             if not self.running:
-                break
+                return None
+        self.seed_database()
+        return self._fetch_batch("Database error after seeding")
+
+    def _fetch_batch(self, error_message: str = "Database error in process_batch"):
+        """Read one batch from the database. Returns None on database error."""
+        try:
+            return get_next_items_to_scrape(self.db_path, limit=self.batch_size,
+                                            staleness_days=self.item_staleness_days)
+        except Exception as e:
+            logging.error(f"{error_message}: {e}")
+            time.sleep(5)
+            return None
+
+    def _wait_for_work(self) -> None:
+        """Idle poll: wait up to ten minutes for work to appear."""
+        for _ in range(600):
+            if not self.running:
+                return
             if self._pid_file_removed():
-                break
+                return
+            time.sleep(1)
 
-            now_ts = int(time.time())
-            item_id = existing_data['workshop_id']
-            if existing_data.get('title') is None or existing_data.get('creator') is None:
-                log_action = 'Add'
-            elif existing_data.get('extended_description') is None:
-                log_action = 'Complete'
-            else:
-                log_action = 'Update'
+    def _process_item(self, existing_data: dict) -> None:
+        """Fetch, merge, score, flag and persist a single workshop item."""
+        now_ts = int(time.time())
+        item_id = existing_data['workshop_id']
 
-            # Step 1: Query API
-            api_data = get_workshop_details_api(item_id, self.api_key)
-            api_status = api_data.get("status", 0)
+        # Step 1: Query API
+        api_data = get_workshop_details_api(item_id, self.api_key)
+        api_status = api_data.get("status", 0)
 
-            merged_data = existing_data.copy()
-            merged_data["dt_updated"] = now_ts
-            merged_data["api_priority"] = 0
-            merged_data["status"] = api_status
-            
-            if api_status == 404:
-                logging.warning(f"[A:{item_id}] Item not found (404) via API. Marking as dead (status=-1).")
-                merged_data["status"] = -1
-                insert_or_update_item(self.db_path, merged_data)
-                continue
-            elif api_status == 500:
-                logging.error(f"[A:{item_id}] API request failed (500). Retrying later.")
-                insert_or_update_item(self.db_path, merged_data)
-                self.api_failures += 1
-                self.api_successes = 0
-                if self.api_failures >= 2 and self.api_had_streak:
-                    old_delay = self.api_delay
-                    self.api_delay = min(round(self.api_delay * (1.05 ** 10), 3),2)
-                    set_api_delay(self.api_delay)
-                    logging.info(f"Multiple consecutive API failures! Increasing API delay from {old_delay} to {self.api_delay}s.")
-                    self._save_config_value("api_delay_seconds", self.api_delay)
-                    self.api_had_streak = False
-                continue
+        merged_data = existing_data.copy()
+        merged_data["dt_updated"] = now_ts
+        merged_data["api_priority"] = 0
+        merged_data["status"] = api_status
 
-            merged_data = self._merge_and_clean_api_data(api_data, merged_data, item_id, now_ts)
-            display_title = merged_data.get('title_en') or merged_data.get('title', 'Unknown Title')
-
-            # Capture the pre-fetch priority to inherit for image/web/translation flagging
-            inherited_prio = existing_data.get("api_priority", 0)
-
-            merged_data["wilson_favorite_score"] = wilson_lower(
-                merged_data.get("favorited", 0) or 0,
-                merged_data.get("lifetime_subscriptions", 0) or 0)
-            merged_data["wilson_subscription_score"] = wilson_lower(
-                merged_data.get("subscriptions", 0) or 0,
-                merged_data.get("lifetime_subscriptions", 0) or 0)
-
-            appid = merged_data.get("consumer_appid")
-            enriched = False
-            if self._should_enrich(appid, merged_data):
-                old_time_updated = existing_data.get("time_updated")
-                new_time_updated = merged_data.get("time_updated")
-                unchanged = (existing_data.get("extended_description") is not None
-                             and old_time_updated is not None
-                             and old_time_updated == new_time_updated)
-
-                if unchanged:
-                    merged_data["extended_description"] = existing_data["extended_description"]
-                    enriched = True
-                else:
-                    flag_for_web_scrape(self.db_path, item_id, max(3, inherited_prio))
-                    enriched = True
-            else:
-                flag_for_web_scrape(self.db_path, item_id, max(1, inherited_prio))
-
-            # Flag for image download if preview URL is present
-            if merged_data.get("preview_url"):
-                flag_for_image(self.db_path, item_id, max(3, inherited_prio) if enriched else max(1, inherited_prio))
-
-            merged_data["status"] = 200
+        if api_status == 404:
+            logging.warning(f"[A:{item_id}] Item not found (404) via API. Marking as dead (status=-1).")
+            merged_data["status"] = -1
             insert_or_update_item(self.db_path, merged_data)
+            return
+        if api_status == 500:
+            logging.error(f"[A:{item_id}] API request failed (500). Retrying later.")
+            insert_or_update_item(self.db_path, merged_data)
+            self._record_api_failure()
+            return
 
-            # Flag translation for title and short description (ASCII check)
-            if enriched:
-                t_prio = max(3, inherited_prio)
-                for field in [("title_en", merged_data.get("title")),
-                              ("short_description_en", merged_data.get("short_description"))]:
-                    if field[1]:
-                        flag_field_for_translation(self.db_path, "item", item_id, field[0], field[1], t_prio)
-            
-            # Step 3: Fetch User/Creator details (only for enriched items)
-            creator_id = merged_data.get("creator")
-            if creator_id and enriched:
-                try:
-                    creator_id = int(creator_id)
-                    existing_user = get_user(self.db_path, creator_id)
-                    should_update_user = True
-                    if existing_user and existing_user.get("dt_updated"):
-                        staleness = int(time.time()) - existing_user["dt_updated"]
-                        if staleness < self.user_staleness_days * 86400:
-                            should_update_user = False
-                    if should_update_user:
-                        summaries = get_player_summaries([creator_id], self.api_key)
-                        if creator_id in summaries:
-                            insert_or_update_user(self.db_path, self._build_user_record(creator_id, summaries[creator_id].get("personaname")))
-                except (ValueError, TypeError):
-                    pass
+        # Step 2: Merge, score, and queue follow-up work
+        merged_data = self._merge_and_clean_api_data(api_data, merged_data, item_id, now_ts)
+        display_title = merged_data.get('title_en') or merged_data.get('title', 'Unknown Title')
 
-            logging.info(f"[A:{item_id}] \"{display_title}\"{' — \033[31mignored\033[0m' if not enriched else ''}")
-            
-            self.api_successes += 1
-            self.api_failures = 0
-            if self.api_successes >= 5:
-                self.api_had_streak = True
-            if self.api_successes >= 100:
-                old_delay = self.api_delay
-                self.api_delay = max(0.01, round(self.api_delay / 1.05, 3))
-                if old_delay != self.api_delay:
-                    set_api_delay(self.api_delay)
-                    logging.info(f"100 consecutive API successes! Decreasing API delay from {old_delay} to {self.api_delay} seconds.")
-                    self._save_config_value("api_delay_seconds", self.api_delay)
-                self.api_successes = 0
+        # Capture the pre-fetch priority to inherit for image/web/translation flagging
+        inherited_prio = existing_data.get("api_priority", 0)
+
+        self._score_wilson(merged_data)
+        enriched = self._flag_scrape_and_image(merged_data, existing_data, item_id, inherited_prio)
+
+        merged_data["status"] = 200
+        insert_or_update_item(self.db_path, merged_data)
+
+        self._flag_translations(merged_data, item_id, enriched, inherited_prio)
+
+        # Step 3: Fetch User/Creator details (only for enriched items)
+        self._refresh_creator(merged_data, enriched)
+
+        logging.info(f"[A:{item_id}] \"{display_title}\"{' — \033[31mignored\033[0m' if not enriched else ''}")
+        self._record_api_success()
+
+    def _score_wilson(self, merged_data: dict) -> None:
+        """Populate the derived Wilson scores from the freshly fetched counts."""
+        merged_data["wilson_favorite_score"] = wilson_lower(
+            merged_data.get("favorited", 0) or 0,
+            merged_data.get("lifetime_subscriptions", 0) or 0)
+        merged_data["wilson_subscription_score"] = wilson_lower(
+            merged_data.get("subscriptions", 0) or 0,
+            merged_data.get("lifetime_subscriptions", 0) or 0)
+
+    def _flag_scrape_and_image(self, merged_data: dict, existing_data: dict,
+                               item_id: int, inherited_prio: int) -> bool:
+        """Queue web-scrape and image work for this item.
+
+        Returns whether the item was enriched. Note the mixed sources: the
+        unchanged-check compares the pre-fetch record against the merged one, so
+        both must be passed.
+        """
+        appid = merged_data.get("consumer_appid")
+        enriched = False
+        if self._should_enrich(appid, merged_data):
+            old_time_updated = existing_data.get("time_updated")
+            new_time_updated = merged_data.get("time_updated")
+            unchanged = (existing_data.get("extended_description") is not None
+                         and old_time_updated is not None
+                         and old_time_updated == new_time_updated)
+
+            if unchanged:
+                merged_data["extended_description"] = existing_data["extended_description"]
+                enriched = True
+            else:
+                flag_for_web_scrape(self.db_path, item_id, max(3, inherited_prio))
+                enriched = True
+        else:
+            flag_for_web_scrape(self.db_path, item_id, max(1, inherited_prio))
+
+        # Flag for image download if preview URL is present
+        if merged_data.get("preview_url"):
+            flag_for_image(self.db_path, item_id, max(3, inherited_prio) if enriched else max(1, inherited_prio))
+        return enriched
+
+    def _flag_translations(self, merged_data: dict, item_id: int,
+                           enriched: bool, inherited_prio: int) -> None:
+        """Flag title and short description for translation (non-ASCII only)."""
+        if not enriched:
+            return
+        t_prio = max(3, inherited_prio)
+        for field in [("title_en", merged_data.get("title")),
+                      ("short_description_en", merged_data.get("short_description"))]:
+            if field[1]:
+                flag_field_for_translation(self.db_path, "item", item_id, field[0], field[1], t_prio)
+
+    def _refresh_creator(self, merged_data: dict, enriched: bool) -> None:
+        """Refresh the creator's persona name if it is missing or stale."""
+        creator_id = merged_data.get("creator")
+        if not (creator_id and enriched):
+            return
+        try:
+            creator_id = int(creator_id)
+            existing_user = get_user(self.db_path, creator_id)
+            should_update_user = True
+            if existing_user and existing_user.get("dt_updated"):
+                staleness = int(time.time()) - existing_user["dt_updated"]
+                if staleness < self.user_staleness_days * 86400:
+                    should_update_user = False
+            if should_update_user:
+                summaries = get_player_summaries([creator_id], self.api_key)
+                if creator_id in summaries:
+                    insert_or_update_user(self.db_path, self._build_user_record(creator_id, summaries[creator_id].get("personaname")))
+        except (ValueError, TypeError):
+            pass
+
+    def _record_api_failure(self) -> None:
+        """Count a failed fetch and back off once a success streak has ended."""
+        self.api_failures += 1
+        self.api_successes = 0
+        if self.api_failures >= 2 and self.api_had_streak:
+            old_delay = self.api_delay
+            self.api_delay = min(round(self.api_delay * (1.05 ** 10), 3),2)
+            set_api_delay(self.api_delay)
+            logging.info(f"Multiple consecutive API failures! Increasing API delay from {old_delay} to {self.api_delay}s.")
+            self._save_config_value("api_delay_seconds", self.api_delay)
+            self.api_had_streak = False
+
+    def _record_api_success(self) -> None:
+        """Count a good fetch and speed up after a long success streak."""
+        self.api_successes += 1
+        self.api_failures = 0
+        if self.api_successes >= 5:
+            self.api_had_streak = True
+        if self.api_successes >= 100:
+            old_delay = self.api_delay
+            self.api_delay = max(0.01, round(self.api_delay / 1.05, 3))
+            if old_delay != self.api_delay:
+                set_api_delay(self.api_delay)
+                logging.info(f"100 consecutive API successes! Decreasing API delay from {old_delay} to {self.api_delay} seconds.")
+                self._save_config_value("api_delay_seconds", self.api_delay)
+            self.api_successes = 0
 
     def _pid_file_removed(self) -> bool:
         if not self.running:
