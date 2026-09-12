@@ -26,8 +26,8 @@ def _dest(tmp_path) -> str:
 # ── snapshot_database ────────────────────────────────────────────────────────
 
 def test_snapshot_of_populated_db_succeeds_and_verifies(db_path, tmp_path):
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "A", "dt_updated": 111})
-    insert_or_update_item(db_path, {"workshop_id": 2, "title": "B", "dt_updated": 222})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "A", "api_fetched_at": 111})
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": "B", "api_fetched_at": 222})
 
     dest = _dest(tmp_path)
     meta = snapshot_database(db_path, dest)
@@ -36,13 +36,13 @@ def test_snapshot_of_populated_db_succeeds_and_verifies(db_path, tmp_path):
     assert meta["bytes"] == os.path.getsize(dest)
     assert meta["bytes"] > 0
     assert meta["rows"] == 2
-    assert meta["max_dt_updated"] == 222
+    assert meta["max_api_fetched_at"] == 222
     assert meta["sha256"] == hashlib.sha256(open(dest, "rb").read()).hexdigest()
     # taken_at is an ISO-8601 timestamp
     assert datetime.fromisoformat(meta["taken_at"]) is not None
 
     # The snapshot is independently usable and passes the same verification.
-    assert verify_snapshot(dest, db_path) == {"rows": 2, "max_dt_updated": 222}
+    assert verify_snapshot(dest, db_path) == {"rows": 2, "max_api_fetched_at": 222}
     conn = sqlite3.connect(dest)
     try:
         assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
@@ -59,7 +59,7 @@ def test_snapshot_verifier_rejects_empty_file(db_path, tmp_path):
 
 
 def test_snapshot_verifier_rejects_row_count_mismatch(db_path, tmp_path):
-    insert_or_update_item(db_path, {"workshop_id": 1, "dt_updated": 1})
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 1})
 
     other_db = str(tmp_path / "other.db")
     initialize_database(other_db)  # same schema, zero rows
@@ -71,7 +71,7 @@ def test_snapshot_verifier_rejects_row_count_mismatch(db_path, tmp_path):
 
 
 def test_failed_verification_leaves_previous_destination_untouched(db_path, tmp_path):
-    insert_or_update_item(db_path, {"workshop_id": 1, "dt_updated": 10})
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 10})
     dest = _dest(tmp_path)
     snapshot_database(db_path, dest)
 
@@ -90,7 +90,7 @@ def test_failed_verification_leaves_previous_destination_untouched(db_path, tmp_
 
 
 def test_snapshot_database_handles_pre_existing_stale_temp(db_path, tmp_path):
-    insert_or_update_item(db_path, {"workshop_id": 7, "dt_updated": 1})
+    insert_or_update_item(db_path, {"workshop_id": 7, "api_fetched_at": 1})
     dest = _dest(tmp_path)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     with open(dest + ".tmp", "wb") as handle:
@@ -112,11 +112,11 @@ def test_manifest_entry_updated_in_place_and_others_preserved(db_path, tmp_path)
     # An unrelated producer's entry must survive untouched.
     update_manifest(outbox, {"path": "logs/daemon.log", "kind": "log", "bytes": 5})
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "dt_updated": 100})
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 100})
     meta1 = snapshot_database(db_path, dest)
     update_manifest(outbox, build_db_manifest_entry(outbox, dest, meta1))
 
-    insert_or_update_item(db_path, {"workshop_id": 2, "dt_updated": 200})
+    insert_or_update_item(db_path, {"workshop_id": 2, "api_fetched_at": 200})
     meta2 = snapshot_database(db_path, dest)
     update_manifest(outbox, build_db_manifest_entry(outbox, dest, meta2))
 
@@ -167,7 +167,7 @@ def test_backup_thread_run_now_swallows_failure(tmp_path):
 
 
 def test_backup_thread_run_now_publishes_snapshot_and_manifest(db_path, tmp_path):
-    insert_or_update_item(db_path, {"workshop_id": 1, "dt_updated": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 5})
     outbox = str(tmp_path / "outbox")
     worker = BackupThread(db_path, outbox, 60)
 
@@ -243,7 +243,7 @@ def test_daemon_run_takes_final_snapshot_on_shutdown(tmp_path):
 
     db = str(tmp_path / "test.db")
     initialize_database(db)
-    insert_or_update_item(db, {"workshop_id": 1, "dt_updated": 42})
+    insert_or_update_item(db, {"workshop_id": 1, "api_fetched_at": 42})
     outbox = str(tmp_path / "outbox")
     config = {
         "database": {"path": db},

@@ -30,7 +30,7 @@ def test_web_worker_failure_sets_api_priority(db_path):
     with patch('src.web_worker.get_next_web_scrape_item') as mock_next, \
          patch('src.web_worker.scrape_extended_details', return_value=None), \
          patch('time.sleep'):  # don't actually sleep
-        mock_next.return_value = {"workshop_id": 1, "time_updated": 123456}
+        mock_next.return_value = {"workshop_id": 1, "steam_updated_at": 123456}
         worker.start()
         worker.running = False  # stop after current iteration
         worker.join(timeout=2)
@@ -81,7 +81,7 @@ def test_image_worker_failure_sets_api_priority(db_path):
          patch('src.image_worker.time.sleep'):  # don't actually sleep
         mock_next.return_value = {
             "workshop_id": 1, "preview_url": "http://example.com/img.jpg",
-            "needs_image": 5, "time_updated": 123456,
+            "needs_image": 5, "steam_updated_at": 123456,
         }
         worker.start()
         import time as _time

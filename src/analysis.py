@@ -13,9 +13,9 @@ def view_window_analysis(db_path: str, bucket_days: int = 7) -> dict:
     """
     conn = get_connection(db_path)
     cursor = conn.execute("""
-        SELECT time_created, views FROM workshop_items
-        WHERE time_created IS NOT NULL
-          AND time_created > 0
+        SELECT steam_created_at, views FROM workshop_items
+        WHERE steam_created_at IS NOT NULL
+          AND steam_created_at > 0
           AND views IS NOT NULL
           AND views > 0
     """)
@@ -31,7 +31,7 @@ def view_window_analysis(db_path: str, bucket_days: int = 7) -> dict:
     buckets = [[] for _ in range(num_buckets)]
 
     for row in rows:
-        age_days = max(0, (now - row["time_created"]) // 86400)
+        age_days = max(0, (now - row["steam_created_at"]) // 86400)
         idx = min(age_days // bucket_days, num_buckets - 1)
         buckets[idx].append(row["views"])
 

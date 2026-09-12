@@ -26,7 +26,7 @@ def test_count_unscraped_items(db_path):
     
     insert_or_update_item(db_path, {"workshop_id": 1}) # Unscraped
     insert_or_update_item(db_path, {"workshop_id": 2}) # Unscraped
-    insert_or_update_item(db_path, {"workshop_id": 3, "dt_updated": 1672531200}) # Scraped
+    insert_or_update_item(db_path, {"workshop_id": 3, "api_fetched_at": 1672531200}) # Scraped
     
     assert count_unscraped_items(db_path) == 2
 
@@ -49,7 +49,7 @@ def test_insert_or_update_item(db_path):
     item = {
         "workshop_id": 123,
         "title": "Test Item",
-        "dt_attempted": 1696104000
+        "scrape_version": 1696104000
     }
     # First insert should return True
     assert insert_or_update_item(db_path, item) is True
@@ -67,10 +67,10 @@ def test_insert_or_update_item(db_path):
     conn.close()
 
 def test_get_next_items_to_scrape(db_path):
-    """Tests that items are fetched in order of oldest dt_updated (NULLs first)."""
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "dt_updated": 1696118400})
+    """Tests that items are fetched in order of oldest api_fetched_at (NULLs first)."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "api_fetched_at": 1696118400})
     insert_or_update_item(db_path, {"workshop_id": 2, "status": None}) # NULL status, should come first
-    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "dt_updated": 1696204800})
+    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "api_fetched_at": 1696204800})
     
     items = get_next_items_to_scrape(db_path, limit=3)
     assert len(items) == 3
@@ -105,17 +105,17 @@ def test_search_items(db_path):
     assert results_tags[0]["workshop_id"] == 4
 
 def test_clear_pending_items(db_path):
-    """Test clearing pending items (status NULL or 404 AND dt_updated NULL)."""
-    # 1. Pending (status NULL, dt_updated NULL) - Should be removed
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": None, "dt_updated": None})
-    # 2. Pending (status 404, dt_updated NULL) - Should be removed
-    insert_or_update_item(db_path, {"workshop_id": 2, "status": 404, "dt_updated": None})
+    """Test clearing pending items (status NULL or 404 AND api_fetched_at NULL)."""
+    # 1. Pending (status NULL, api_fetched_at NULL) - Should be removed
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": None, "api_fetched_at": None})
+    # 2. Pending (status 404, api_fetched_at NULL) - Should be removed
+    insert_or_update_item(db_path, {"workshop_id": 2, "status": 404, "api_fetched_at": None})
     # 3. Not Pending (status 200) - Should NOT be removed
-    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "dt_updated": None})
-    # 4. Not Pending (has dt_updated) - Should NOT be removed
-    insert_or_update_item(db_path, {"workshop_id": 4, "status": None, "dt_updated": 1672531200})
+    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "api_fetched_at": None})
+    # 4. Not Pending (has api_fetched_at) - Should NOT be removed
+    insert_or_update_item(db_path, {"workshop_id": 4, "status": None, "api_fetched_at": 1672531200})
 
-    insert_or_update_item(db_path, {"workshop_id": 5, "status": 200, "dt_updated": 1672531200})
+    insert_or_update_item(db_path, {"workshop_id": 5, "status": 200, "api_fetched_at": 1672531200})
 
     deleted_count = clear_pending_items(db_path)
     assert deleted_count == 2
@@ -353,30 +353,30 @@ def test_get_next_items_to_scrape_priority(db_path):
     import time
     
     # 1. Successfully scraped items, stalest first (status = 200)
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "dt_updated": 1672531200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "api_fetched_at": 1672531200})
     # Item 2 is recent, so it should be excluded from re-scraping
     recent_epoch = int(time.time()) - 86400
-    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "dt_updated": recent_epoch})
+    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "api_fetched_at": recent_epoch})
     
     # 2. Partially failed items (status = 206) - with different subscription counts
-    insert_or_update_item(db_path, {"workshop_id": 3, "status": 206, "dt_updated": 1735689600, "subscriptions": 100})
-    insert_or_update_item(db_path, {"workshop_id": 4, "status": 206, "dt_updated": 1738368000, "subscriptions": 500})
+    insert_or_update_item(db_path, {"workshop_id": 3, "status": 206, "api_fetched_at": 1735689600, "subscriptions": 100})
+    insert_or_update_item(db_path, {"workshop_id": 4, "status": 206, "api_fetched_at": 1738368000, "subscriptions": 500})
     
     # 3. Unscraped new items (status IS NULL)
     insert_or_update_item(db_path, {"workshop_id": 5})
     insert_or_update_item(db_path, {"workshop_id": 6})
     
     # 4. Old items (older than 7 days)
-    insert_or_update_item(db_path, {"workshop_id": 7, "status": 200, "dt_updated": 1640995200})
+    insert_or_update_item(db_path, {"workshop_id": 7, "status": 200, "api_fetched_at": 1640995200})
 
     items = get_next_items_to_scrape(db_path, limit=7)
     item_ids = [item['workshop_id'] for item in items]
     
-    # All items have api_priority=3 (default), ordered by dt_updated ASC
+    # All items have api_priority=3 (default), ordered by api_fetched_at ASC
     assert len(item_ids) == 7
-    # NULL dt_updated sorts first, then oldest first
-    assert item_ids[0:2] == [5, 6]      # NULL dt_updated
-    assert item_ids[2:5] == [7, 1, 3]   # oldest dt_updated
+    # NULL api_fetched_at sorts first, then oldest first
+    assert item_ids[0:2] == [5, 6]      # NULL api_fetched_at
+    assert item_ids[2:5] == [7, 1, 3]   # oldest api_fetched_at
     assert item_ids[5:7] == [4, 2]      # newer
 
 def test_get_user_not_found(db_path):
@@ -623,9 +623,9 @@ def test_stats_with_real_data(deterministic_db):
 
 def test_get_next_items_to_scrape_priority_order(db_path):
     """Higher api_priority items are returned first."""
-    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 1, "dt_updated": 100})
-    insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 10, "dt_updated": 200})
-    insert_or_update_item(db_path, {"workshop_id": 3, "api_priority": 5, "dt_updated": 300})
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 1, "api_fetched_at": 100})
+    insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 10, "api_fetched_at": 200})
+    insert_or_update_item(db_path, {"workshop_id": 3, "api_priority": 5, "api_fetched_at": 300})
     items = get_next_items_to_scrape(db_path, limit=3)
     assert [i["workshop_id"] for i in items] == [2, 3, 1]
 
@@ -691,3 +691,208 @@ def test_clear_subscription_queue_status(db_path):
     clear_subscription_queue_status(db_path, 1)
     queued = get_queued_items(db_path)
     assert not any(q["workshop_id"] == 1 for q in queued)
+
+
+# ── v13 -> v14 migration cleanup ─────────────────────────────────────────────
+
+def _make_v13_db(path: str):
+    """Build a schema-v13 database (historical column names, all v13 columns)."""
+    conn = sqlite3.connect(path)
+    conn.execute("""
+        CREATE TABLE workshop_items (
+            workshop_id INTEGER PRIMARY KEY,
+            status INTEGER,
+            title TEXT,
+            creator INTEGER,
+            creator_appid INTEGER,
+            consumer_appid INTEGER,
+            filename TEXT,
+            file_size INTEGER,
+            preview_url TEXT,
+            hcontent_file TEXT,
+            hcontent_preview TEXT,
+            short_description TEXT,
+            time_created INTEGER,
+            time_updated INTEGER,
+            visibility INTEGER,
+            banned INTEGER,
+            ban_reason TEXT,
+            app_name TEXT,
+            file_type INTEGER,
+            subscriptions INTEGER,
+            favorited INTEGER,
+            views INTEGER,
+            extended_description TEXT,
+            language INTEGER,
+            lifetime_subscriptions INTEGER,
+            lifetime_favorited INTEGER,
+            title_en TEXT,
+            short_description_en TEXT,
+            extended_description_en TEXT,
+            translation_priority INTEGER DEFAULT 0,
+            is_queued_for_subscription INTEGER DEFAULT 0,
+            wilson_favorite_score REAL DEFAULT NULL,
+            wilson_subscription_score REAL DEFAULT NULL,
+            needs_web_scrape INTEGER DEFAULT 0,
+            image_extension TEXT DEFAULT NULL,
+            needs_image INTEGER DEFAULT 0,
+            dt_found INTEGER,
+            dt_updated INTEGER,
+            dt_attempted INTEGER,
+            dt_translated INTEGER,
+            api_priority INTEGER NOT NULL DEFAULT 3
+        )
+    """)
+    conn.execute("PRAGMA user_version = 13")
+    conn.commit()
+    conn.close()
+
+
+def test_migration_14_renames_and_cleans_data(tmp_path):
+    """Migration 13->14 renames the clocks and cleans the misleading contents."""
+    from src.database import initialize_database
+
+    db = str(tmp_path / "v13.db")
+    _make_v13_db(db)
+    conn = sqlite3.connect(db)
+    # 1: succeeded once (has Steam payload)
+    conn.execute("INSERT INTO workshop_items (workshop_id, status, dt_found, dt_updated, dt_attempted, time_updated)"
+                 " VALUES (1, 200, 100, 111, 222, 999)")
+    # 2: failed/no payload (steam_updated_at NULL) but was attempted
+    conn.execute("INSERT INTO workshop_items (workshop_id, status, dt_found, dt_updated, dt_attempted, time_updated)"
+                 " VALUES (2, 500, 300, 333, 444, NULL)")
+    # 3: anomalous row with dt_found NULL but a successful fetch
+    conn.execute("INSERT INTO workshop_items (workshop_id, status, dt_found, dt_updated, dt_attempted, time_updated)"
+                 " VALUES (3, 200, NULL, 555, 666, 888)")
+    conn.commit()
+    conn.close()
+
+    initialize_database(db)
+
+    conn = get_connection(db)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(workshop_items)")}
+    assert {"first_seen_at", "api_fetched_at", "last_fetch_attempted_at",
+            "scrape_version", "translate_version", "steam_created_at",
+            "steam_updated_at"}.issubset(cols)
+
+    rows = {r["workshop_id"]: dict(r) for r in conn.execute("SELECT * FROM workshop_items")}
+    conn.close()
+
+    # Attempt clock backfilled from the old dt_updated for every row that had one.
+    assert rows[1]["last_fetch_attempted_at"] == 111
+    assert rows[2]["last_fetch_attempted_at"] == 333
+    # api_fetched_at keeps the value only where Steam content actually arrived.
+    assert rows[1]["api_fetched_at"] == 111
+    assert rows[2]["api_fetched_at"] is None
+    # The pre-rename artefact is cleared where there is no Steam payload.
+    assert rows[2]["scrape_version"] is None
+    assert rows[1]["scrape_version"] == 222
+    # The anomalous first_seen_at row is repaired from api_fetched_at.
+    assert rows[3]["first_seen_at"] == 555
+
+
+def test_migration_14_is_idempotent(tmp_path):
+    from src.database import initialize_database
+
+    db = str(tmp_path / "v13.db")
+    _make_v13_db(db)
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO workshop_items (workshop_id, status, dt_found, dt_updated, time_updated)"
+                 " VALUES (1, 200, 100, 111, 999)")
+    conn.commit()
+    conn.close()
+
+    initialize_database(db)
+    conn = get_connection(db)
+    cols_after_first = {r[1] for r in conn.execute("PRAGMA table_info(workshop_items)")}
+    conn.close()
+
+    initialize_database(db)  # must not raise or re-add legacy columns
+
+    conn = get_connection(db)
+    cols_after_second = {r[1] for r in conn.execute("PRAGMA table_info(workshop_items)")}
+    conn.close()
+    assert cols_after_first == cols_after_second
+    assert "dt_updated" not in cols_after_second
+    assert "api_fetched_at" in cols_after_second
+    assert "last_fetch_attempted_at" in cols_after_second
+
+
+# ── first_seen_at guard (bug fix) ────────────────────────────────────────────
+
+def test_insert_first_seen_at_defaults_when_explicitly_none(db_path):
+    """A caller passing first_seen_at=None must not suppress the default."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "first_seen_at": None})
+    conn = get_connection(db_path)
+    val = conn.execute("SELECT first_seen_at FROM workshop_items WHERE workshop_id=1").fetchone()[0]
+    conn.close()
+    assert val is not None
+
+    # An explicit value is preserved.
+    insert_or_update_item(db_path, {"workshop_id": 2, "first_seen_at": 123})
+    conn = get_connection(db_path)
+    val2 = conn.execute("SELECT first_seen_at FROM workshop_items WHERE workshop_id=2").fetchone()[0]
+    conn.close()
+    assert val2 == 123
+
+
+# ── translation_queue.queued_at ──────────────────────────────────────────────
+
+def test_flag_field_for_translation_stamps_queued_at(db_path):
+    """New queue rows record our queue time; legacy NULLs are not fabricated."""
+    from src.database import flag_field_for_translation
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト", "status": 200})
+    flag_field_for_translation(db_path, "item", 1, "title_en", "テスト", 5)
+
+    conn = get_connection(db_path)
+    row = conn.execute(
+        "SELECT queued_at FROM translation_queue WHERE item_id=1"
+    ).fetchone()
+    conn.close()
+    assert row["queued_at"] is not None
+    assert abs(row["queued_at"] - int(time.time())) < 60
+
+
+def test_translation_queue_legacy_null_queued_at_sorts_first(db_path):
+    """A NULL queued_at (unknown/legacy) must be served before a dated row at the
+    same priority, so newly queued work cannot jump the backlog."""
+    from src.database import get_next_batch_for_translation
+
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT INTO translation_queue (item_type, item_id, field, original_text, priority, queued_at) "
+        "VALUES ('item', 1, 'title_en', 'legacy', 5, NULL)"
+    )
+    conn.execute(
+        "INSERT INTO translation_queue (item_type, item_id, field, original_text, priority, queued_at) "
+        "VALUES ('item', 2, 'title_en', 'dated', 5, ?)",
+        (int(time.time()),)
+    )
+    conn.commit()
+    conn.close()
+
+    batch = get_next_batch_for_translation(db_path, limit=2)
+    assert [row["item_id"] for row in batch] == [1, 2]
+
+
+# ── get_db_stats classify fix ─────────────────────────────────────────────────
+
+def test_get_db_stats_fetch_recency_uses_last_fetch_attempted_at(db_path):
+    """The fresh/stale/blank breakdown measures OUR fetch recency, not Steam age."""
+    from src.database import get_db_stats
+
+    now = int(time.time())
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200,
+                                    "last_fetch_attempted_at": now})
+    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200,
+                                    "last_fetch_attempted_at": now - 40 * 86400})
+    # A Steam-version value must NOT influence the fetch-recency breakdown.
+    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200,
+                                    "scrape_version": now - 40 * 86400})
+
+    stats = get_db_stats(db_path)
+    assert stats["fetch_recency_counts"] == {"fresh": 1, "stale": 1, "blank": 1}
+    assert "dt_updated_counts" not in stats
+    assert "highest_api_fetched_at" in stats

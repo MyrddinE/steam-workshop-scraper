@@ -24,7 +24,7 @@ def test_view_window_analysis_basic(db_path):
         views = 1000 - (age_days * 15) if age_days < 60 else 10
         insert_or_update_item(db_path, {
             "workshop_id": i + 1,
-            "time_created": created,
+            "steam_created_at": created,
             "views": max(1, int(views)),
         })
 
@@ -39,7 +39,7 @@ def test_view_window_analysis_custom_bucket(db_path):
     for i in range(50):
         insert_or_update_item(db_path, {
             "workshop_id": i + 1,
-            "time_created": now - i * 86400,
+            "steam_created_at": now - i * 86400,
             "views": 500,
         })
 
@@ -50,13 +50,13 @@ def test_view_window_analysis_custom_bucket(db_path):
 
 def test_view_window_analysis_ignores_invalid(db_path):
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "time_created": 0, "views": 100,
+        "workshop_id": 1, "steam_created_at": 0, "views": 100,
     })
     insert_or_update_item(db_path, {
-        "workshop_id": 2, "time_created": None, "views": 100,
+        "workshop_id": 2, "steam_created_at": None, "views": 100,
     })
     insert_or_update_item(db_path, {
-        "workshop_id": 3, "title": "No views", "time_created": int(time.time()),
+        "workshop_id": 3, "title": "No views", "steam_created_at": int(time.time()),
     })
     result = view_window_analysis(db_path)
     assert result["items_analyzed"] == 0

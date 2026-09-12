@@ -144,20 +144,20 @@ class StatsScreen(Screen):
         self._last_update = time.monotonic()
 
         # General Stats
-        highest_val = stats.get("highest_dt_updated")
+        highest_val = stats.get("highest_api_fetched_at")
         highest_dt = datetime.datetime.fromtimestamp(highest_val).strftime('%Y-%m-%d %H:%M') if highest_val else "N/A"
         status_text = ""
         for row in stats["status_counts"]:
             status_text += f"  Status {row['status']}: {row['count']}\n"
 
         dt_text = ""
-        for category, count in stats["dt_updated_counts"].items():
+        for category, count in stats["fetch_recency_counts"].items():
             dt_text += f"  {category}: {count}\n"
 
         general_content = (
-            f"Highest dt_updated: {highest_dt}\n\n"
+            f"Highest api_fetched_at (last successful API fetch): {highest_dt}\n\n"
             f"Record count by status:\n{status_text}\n"
-            f"Record count by dt_updated:\n{dt_text}"
+            f"Record count by fetch recency (last_fetch_attempted_at):\n{dt_text}"
         )
         self.query_one("#general-stats-content", Static).update(general_content)
 
@@ -700,7 +700,7 @@ class DetailsPane(VerticalScroll):
         self.query_one("#btn-queue-sub").display = not is_queued
         self.query_one("#btn-unqueue-sub").display = is_queued
         
-        display_translated = self.show_translated and item.get("dt_translated")
+        display_translated = self.show_translated and item.get("translate_version")
         title = item.get("title_en") if display_translated and item.get("title_en") else item.get("title", "N/A")
         
         creator_name = item.get("personaname_en") if display_translated and item.get("personaname_en") else item.get("personaname")
@@ -724,7 +724,7 @@ class DetailsPane(VerticalScroll):
             desc = item.get("extended_description") or item.get("short_description") or "N/A"
 
         toggle_btn = self.query_one("#btn-toggle-translation")
-        if item.get("dt_translated"):
+        if item.get("translate_version"):
             toggle_btn.display = True
             toggle_btn.label = "Show Original" if self.show_translated else "Show Translation"
         else:
@@ -736,10 +736,10 @@ class DetailsPane(VerticalScroll):
             self.query_one(f"#stat-{stat}", Label).display = True
 
         self.query_one("#stat-id", Label).update(f"[b]ID:[/b] {item.get('workshop_id', 'N/A')}")
-        self.query_one("#stat-created", Label).update(f"[b]Created:[/b] {format_ts(item.get('time_created'))}")
+        self.query_one("#stat-created", Label).update(f"[b]Created:[/b] {format_ts(item.get('steam_created_at'))}")
         
-        updated_ts = item.get('time_updated')
-        updated_str = format_ts(updated_ts) if updated_ts and updated_ts != item.get('time_created') else "N/A"
+        updated_ts = item.get('steam_updated_at')
+        updated_str = format_ts(updated_ts) if updated_ts and updated_ts != item.get('steam_created_at') else "N/A"
         
         updated_label = self.query_one("#stat-updated", Label)
         if updated_str == "N/A":
@@ -767,7 +767,7 @@ class DetailsPane(VerticalScroll):
         wilson_label.display = bool(item.get("wilson_favorite_score") is not None)
 
         md_content = bbcode_to_markdown(desc)
-        if item.get("translation_priority", 0) > 0 and not item.get("dt_translated"):
+        if item.get("translation_priority", 0) > 0 and not item.get("translate_version"):
              md_content = f"> *[yellow]Translation requested, currently in queue...[/yellow]*\n\n{md_content}"
              
         self.query_one("#detail-content", Markdown).update(md_content)
@@ -1364,9 +1364,9 @@ class ScraperApp(App):
             ("Favorited", "favorited"),
             ("Views", "views"),
             ("Workshop ID", "workshop_id"),
-            ("Created Time", "time_created"),
-            ("Updated Time", "time_updated"),
-            ("Fetched Time", "dt_updated"),
+            ("Created Time", "steam_created_at"),
+            ("Updated Time", "steam_updated_at"),
+            ("Fetched Time", "api_fetched_at"),
             ("Subscriber Score", "wilson_subscription_score"),
             ("Favorite Score", "wilson_favorite_score"),
         ]

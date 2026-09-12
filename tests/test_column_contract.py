@@ -13,6 +13,8 @@ adding a column no longer means remembering to edit a second literal set in
 ``daemon.py``.
 """
 
+import sqlite3
+
 import pytest
 
 from src.database import WORKSHOP_ITEM_COLUMNS, initialize_database, get_connection
@@ -62,3 +64,61 @@ def test_queue_owned_columns_never_survive_a_merge(fresh_columns):
 def test_ignored_keys_are_the_excluded_ones_plus_result(fresh_columns):
     """`result` is the one API field dropped without a warning log."""
     assert MERGE_IGNORED_KEYS == MERGE_EXCLUDED_KEYS | {"result"}
+
+
+def test_migrated_from_old_schema_matches_fresh(fresh_columns, tmp_path):
+    """A database upgraded from the pre-rename schema ends up with the exact same
+    workshop_items columns as a brand-new one.
+
+    The old schema uses the historical column names (and TEXT timestamps) so the
+    whole migration chain, including 13->14, has to run.
+    """
+    old_path = str(tmp_path / "old_schema.db")
+    conn = sqlite3.connect(old_path)
+    conn.execute("""
+        CREATE TABLE workshop_items (
+            workshop_id INTEGER PRIMARY KEY,
+            dt_found TEXT,
+            dt_updated TEXT,
+            dt_attempted TEXT,
+            status INTEGER,
+            title TEXT,
+            creator INTEGER,
+            creator_appid INTEGER,
+            consumer_appid INTEGER,
+            filename TEXT,
+            file_size INTEGER,
+            preview_url TEXT,
+            hcontent_file TEXT,
+            hcontent_preview TEXT,
+            short_description TEXT,
+            time_created INTEGER,
+            time_updated INTEGER,
+            visibility INTEGER,
+            banned INTEGER,
+            ban_reason TEXT,
+            app_name TEXT,
+            file_type INTEGER,
+            subscriptions INTEGER,
+            favorited INTEGER,
+            views INTEGER,
+            tags TEXT,
+            extended_description TEXT
+        )
+    """)
+    conn.execute(
+        "INSERT INTO workshop_items (workshop_id, title, status) VALUES (1, 'pre-existing', 200)"
+    )
+    conn.commit()
+    conn.close()
+
+    initialize_database(old_path)
+
+    conn = get_connection(old_path)
+    migrated_columns = {row[1] for row in conn.execute(f"PRAGMA table_info({ITEM_TABLE})")}
+    conn.close()
+
+    assert migrated_columns == fresh_columns == set(WORKSHOP_ITEM_COLUMNS)
+    assert "last_fetch_attempted_at" in migrated_columns
+    assert "dt_found" not in migrated_columns
+    assert "time_created" not in migrated_columns

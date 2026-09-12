@@ -126,18 +126,22 @@ Return ONLY a JSON array matching this exact format, preserving all 'id' values:
 
                 if row["item_type"] == "user":
                     table, id_col = "users", "steamid"
-                    version_ts = now_ts  # users don't have time_updated
+                    # Users have no steam_updated_at, so this column holds OUR
+                    # wall-clock time and is named translated_at, not a version.
+                    version_col = "translated_at"
+                    version_ts = now_ts
                 else:
                     table, id_col = "workshop_items", "workshop_id"
-                    # Look up time_updated for version tracking
+                    # Look up steam_updated_at for version tracking
+                    version_col = "translate_version"
                     ver = conn.execute(
-                        "SELECT time_updated FROM workshop_items WHERE workshop_id = ?",
+                        "SELECT steam_updated_at FROM workshop_items WHERE workshop_id = ?",
                         (row["item_id"],)
                     ).fetchone()
-                    version_ts = ver["time_updated"] if ver and ver["time_updated"] else now_ts
+                    version_ts = ver["steam_updated_at"] if ver and ver["steam_updated_at"] else now_ts
 
                 conn.execute(
-                    f"UPDATE {table} SET {row['field']} = ?, dt_translated = ? WHERE {id_col} = ?",
+                    f"UPDATE {table} SET {row['field']} = ?, {version_col} = ? WHERE {id_col} = ?",
                     (trans_text, version_ts, row["item_id"])
                 )
                 conn.execute("DELETE FROM translation_queue WHERE id = ?", (row["id"],))
@@ -152,12 +156,12 @@ Return ONLY a JSON array matching this exact format, preserving all 'id' values:
                 ).fetchone()["cnt"]
                 if remaining == 0:
                     ver = conn.execute(
-                        "SELECT time_updated FROM workshop_items WHERE workshop_id = ?",
+                        "SELECT steam_updated_at FROM workshop_items WHERE workshop_id = ?",
                         (item_id,)
                     ).fetchone()
-                    version_ts = ver["time_updated"] if ver and ver["time_updated"] else now_ts
+                    version_ts = ver["steam_updated_at"] if ver and ver["steam_updated_at"] else now_ts
                     conn.execute(
-                        "UPDATE workshop_items SET translation_priority = 0, dt_translated = ? WHERE workshop_id = ?",
+                        "UPDATE workshop_items SET translation_priority = 0, translate_version = ? WHERE workshop_id = ?",
                         (version_ts, item_id)
                     )
 

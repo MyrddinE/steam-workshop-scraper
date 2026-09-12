@@ -55,7 +55,7 @@ def test_translator_daemon_exception():
 
 
 def test_translate_batch_writes_translation_and_resets_priority(tmp_path):
-    """Verify _translate_batch updates _en columns, stamps dt_translated,
+    """Verify _translate_batch updates _en columns, stamps translate_version,
     deletes from translation_queue, and resets translation_priority."""
     import sqlite3
     from src.database import initialize_database, insert_or_update_item, flag_field_for_translation
@@ -100,7 +100,7 @@ def test_translate_batch_writes_translation_and_resets_priority(tmp_path):
 
     conn = sqlite3.connect(db_path)
     result = conn.execute(
-        "SELECT title_en, dt_translated, translation_priority FROM workshop_items WHERE workshop_id = 1"
+        "SELECT title_en, translate_version, translation_priority FROM workshop_items WHERE workshop_id = 1"
     ).fetchone()
     assert result[0] == "Hello"
     assert result[1] is not None
@@ -110,8 +110,8 @@ def test_translate_batch_writes_translation_and_resets_priority(tmp_path):
     conn.close()
 
 
-def test_translate_batch_stamps_time_updated(tmp_path):
-    """dt_translated is set to time_updated (version marker), not wall-clock."""
+def test_translate_batch_stamps_steam_updated_at(tmp_path):
+    """translate_version is set to steam_updated_at (version marker), not wall-clock."""
     import sqlite3
     from src.database import initialize_database, insert_or_update_item, flag_field_for_translation
 
@@ -121,7 +121,7 @@ def test_translate_batch_stamps_time_updated(tmp_path):
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "\u30c6\u30b9\u30c8", "short_description": "test",
         "subscriptions": 10, "lifetime_subscriptions": 20, "favorited": 5,
-        "views": 100, "status": 200, "time_updated": known_ts,
+        "views": 100, "status": 200, "steam_updated_at": known_ts,
     })
     flag_field_for_translation(db_path, "item", 1, "title_en", "\u30c6\u30b9\u30c8", 10)
 
@@ -144,13 +144,13 @@ def test_translate_batch_stamps_time_updated(tmp_path):
     thread._translate_batch(batch, mock_client, "gpt-test")
 
     conn = sqlite3.connect(db_path)
-    result = conn.execute("SELECT dt_translated FROM workshop_items WHERE workshop_id = 1").fetchone()
+    result = conn.execute("SELECT translate_version FROM workshop_items WHERE workshop_id = 1").fetchone()
     conn.close()
     assert result[0] == known_ts
 
 
-def test_translate_batch_falls_back_when_no_time_updated(tmp_path):
-    """When time_updated is NULL, dt_translated falls back to a reasonable epoch."""
+def test_translate_batch_falls_back_when_no_steam_updated_at(tmp_path):
+    """When steam_updated_at is NULL, translate_version falls back to a reasonable epoch."""
     import sqlite3
     from src.database import initialize_database, insert_or_update_item, flag_field_for_translation
 
@@ -159,7 +159,7 @@ def test_translate_batch_falls_back_when_no_time_updated(tmp_path):
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "\u30c6\u30b9\u30c8", "short_description": "test",
         "subscriptions": 10, "lifetime_subscriptions": 20, "favorited": 5,
-        "views": 100, "status": 200,  # no time_updated
+        "views": 100, "status": 200,  # no steam_updated_at
     })
     flag_field_for_translation(db_path, "item", 1, "title_en", "\u30c6\u30b9\u30c8", 10)
 
@@ -182,7 +182,7 @@ def test_translate_batch_falls_back_when_no_time_updated(tmp_path):
     thread._translate_batch(batch, mock_client, "gpt-test")
 
     conn = sqlite3.connect(db_path)
-    result = conn.execute("SELECT dt_translated FROM workshop_items WHERE workshop_id = 1").fetchone()
+    result = conn.execute("SELECT translate_version FROM workshop_items WHERE workshop_id = 1").fetchone()
     conn.close()
     import time
     assert result[0] is not None

@@ -43,7 +43,7 @@ class WebScraperThread(threading.Thread):
                     "workshop_id": workshop_id,
                     "extended_description": scrape_data.get("description"),
                     "needs_web_scrape": 0,
-                    "dt_attempted": item.get("time_updated", 0),
+                    "scrape_version": item.get("steam_updated_at", 0),
                 }
                 insert_or_update_item(self.db_path, update)
 

@@ -1,5 +1,15 @@
-import sqlite3
 import os
+import tempfile
+
+# SQLite resolves its temporary-file directory once per process from
+# $SQLITE_TMPDIR (then $TMPDIR, /var/tmp, /usr/tmp, /tmp). Some sandboxed and
+# CI environments leave /var/tmp unwritable, and SQLite then fails index builds
+# with SQLITE_CANTOPEN instead of falling back. Point it at Python's writable
+# temp directory before the sqlite3 module is imported and caches its search
+# path.
+os.environ.setdefault("SQLITE_TMPDIR", tempfile.gettempdir())
+
+import sqlite3
 import shlex
 import re
 import json
@@ -8,10 +18,11 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 WORKSHOP_ITEM_COLUMNS = frozenset({
-    "workshop_id", "dt_found", "dt_updated", "dt_attempted", "dt_translated",
+    "workshop_id", "first_seen_at", "api_fetched_at", "last_fetch_attempted_at",
+    "scrape_version", "translate_version",
     "status", "title", "title_en", "creator", "creator_appid", "consumer_appid",
     "filename", "file_size", "preview_url", "hcontent_file", "hcontent_preview",
-    "short_description", "short_description_en", "time_created", "time_updated",
+    "short_description", "short_description_en", "steam_created_at", "steam_updated_at",
     "visibility", "banned", "ban_reason", "app_name", "file_type",
     "subscriptions", "favorited", "views",
     "extended_description", "extended_description_en", "language",
@@ -21,9 +32,12 @@ WORKSHOP_ITEM_COLUMNS = frozenset({
     "image_extension", "needs_image", "api_priority",
 })
 
+# ``users.dt_translated`` was renamed to ``translated_at`` (not
+# ``translate_version``) because it holds our wall-clock time for users, not a
+# Steam ``steam_updated_at`` version key: users have no ``steam_updated_at``.
 USER_COLUMNS = frozenset({
     "steamid", "personaname", "personaname_en",
-    "dt_updated", "dt_translated", "translation_priority",
+    "api_fetched_at", "translated_at", "translation_priority",
 })
 
 def get_connection(db_path: str):
@@ -109,7 +123,7 @@ _TEXT_NEG_OPS = {"does_not_contain", "is_not"}
 
 VALID_SORT_COLS = {
     "title", "file_size", "subscriptions", "favorited", "views",
-    "workshop_id", "time_created", "time_updated", "dt_updated",
+    "workshop_id", "steam_created_at", "steam_updated_at", "api_fetched_at",
     "wilson_favorite_score", "wilson_subscription_score",
 }
 
@@ -450,11 +464,22 @@ def initialize_database(db_path: str):
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS workshop_items (
         workshop_id INTEGER PRIMARY KEY,
-        -- dt_* columns: daemon-managed timestamps (Unix epoch INTEGER)
-        -- time_* columns: Steam-side timestamps (Unix INTEGER)
+        -- NOTE: the timestamp columns below deliberately keep their HISTORICAL
+        -- names here. A brand-new database starts at user_version = 0 and runs
+        -- the entire migration chain, and migrations 6->7, 7->8, 10->11 and
+        -- 11->12 all read these old names (dt_found, dt_updated, dt_attempted,
+        -- dt_translated, time_created, time_updated) before migration 13->14
+        -- renames them. Renaming them here would break fresh databases, exactly
+        -- like removing the legacy `tags` column below would. After the chain
+        -- runs, a fresh database has the same final columns as a migrated one.
         dt_found INTEGER,
         dt_updated INTEGER,
         dt_attempted INTEGER,
+        -- Our clock: set on every API fetch attempt, success or failure. Added in
+        -- migration 13->14. api_fetched_at only moves on success, so this is the
+        -- only record of when we last tried; get_db_stats reports fetch recency
+        -- from it.
+        last_fetch_attempted_at INTEGER,
         status INTEGER,
         title TEXT,
         creator INTEGER, -- FK to users.steamid (LEFT JOIN used; FK omitted
@@ -534,7 +559,6 @@ def initialize_database(db_path: str):
         ("title_en", "TEXT"),
         ("short_description_en", "TEXT"),
         ("extended_description_en", "TEXT"),
-        ("dt_translated", "TEXT"),
         ("translation_priority", "INTEGER DEFAULT 0"),
         ("is_queued_for_subscription", "INTEGER DEFAULT 0"),
         ("wilson_favorite_score", "REAL DEFAULT NULL"),
@@ -543,6 +567,14 @@ def initialize_database(db_path: str):
         ("image_extension", "TEXT DEFAULT NULL"),
         ("needs_image", "INTEGER DEFAULT 0"),
     ])
+
+    # dt_translated was renamed to translate_version in migration 13->14. A
+    # pre-v14 database still needs the old column to exist before migration 6->7
+    # converts it from TEXT to INTEGER, but an already-renamed database must not
+    # get it added back (that would be a stray duplicate of translate_version).
+    _item_cols_now = {r[1] for r in cursor.execute("PRAGMA table_info(workshop_items)").fetchall()}
+    if "dt_translated" not in _item_cols_now and "translate_version" not in _item_cols_now:
+        cursor.execute("ALTER TABLE workshop_items ADD COLUMN dt_translated TEXT")
 
     # Create app_tracking table for historical scraping and filter storage
     cursor.execute("""
@@ -574,11 +606,18 @@ def initialize_database(db_path: str):
     # and drop the obsolete app_state table.
     cursor.execute("SELECT COUNT(*) FROM app_tracking")
     if cursor.fetchone()[0] == 0:
-        cursor.execute("""
+        # The Steam-side "last updated" column is named time_updated before
+        # migration 13->14 and steam_updated_at after it. This block runs before
+        # the migrations, so on an already-migrated database it must use the new
+        # name (otherwise re-initializing a v14 database with an empty
+        # app_tracking table would reference a column that no longer exists).
+        _cols_now = {r[1] for r in cursor.execute("PRAGMA table_info(workshop_items)").fetchall()}
+        _steam_updated = "time_updated" if "time_updated" in _cols_now else "steam_updated_at"
+        cursor.execute(f"""
             INSERT INTO app_tracking (appid, last_historical_date_scanned)
-            SELECT consumer_appid, MAX(time_updated)
+            SELECT consumer_appid, MAX({_steam_updated})
             FROM workshop_items
-            WHERE consumer_appid IS NOT NULL AND time_updated IS NOT NULL
+            WHERE consumer_appid IS NOT NULL AND {_steam_updated} IS NOT NULL
             GROUP BY consumer_appid
         """)
     
@@ -614,7 +653,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 13
+    EXPECTED_VERSION = 14
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -1036,23 +1075,158 @@ def initialize_database(db_path: str):
         conn.commit()
         logging.info(f"Migration 12->13 complete. Migrated: {migrated_count}, Already: {already_migrated_count}, Missing: {missing_count}")
 
+    if db_version < 14:
+        logging.info("Running migration 13->14: renaming timestamp columns to the three-clock vocabulary...")
+
+        def _table_columns(table):
+            return {r[1] for r in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
+
+        def _rename_column(table, old_name, new_name):
+            """Rename `old_name` -> `new_name` if needed.
+
+            Idempotent/resumable: returns True only when the rename was actually
+            performed. A re-run after a partial migration (or on a fresh database
+            whose CREATE TABLE already carries the name) is a safe no-op.
+            """
+            cols = _table_columns(table)
+            if old_name in cols and new_name not in cols:
+                cursor.execute(f"ALTER TABLE {table} RENAME COLUMN {old_name} TO {new_name}")
+                return True
+            return False
+
+        # --- Step 1: last_fetch_attempted_at ---------------------------------
+        # Our attempt clock. Add the column and backfill it from the OLD
+        # dt_updated, which was written on every attempt (success or failure),
+        # so that value genuinely IS the attempt time. This must happen before
+        # the rename below removes the dt_updated name.
+        item_cols = _table_columns("workshop_items")
+        if "last_fetch_attempted_at" not in item_cols:
+            cursor.execute("ALTER TABLE workshop_items ADD COLUMN last_fetch_attempted_at INTEGER")
+        if "dt_updated" in item_cols:
+            cursor.execute(
+                "UPDATE workshop_items SET last_fetch_attempted_at = dt_updated "
+                "WHERE last_fetch_attempted_at IS NULL AND dt_updated IS NOT NULL"
+            )
+            logging.info("  last_fetch_attempted_at backfilled from dt_updated for %d rows",
+                         cursor.rowcount)
+            # Commit the backfill on its own before the (metadata-only) renames.
+            # On the production database this UPDATE touches ~1.7M rows, and
+            # holding that plus the DDL in one transaction grows the WAL without
+            # bound. Commit, then force a checkpoint so the (multi-hundred-MB)
+            # WAL is flushed back into the database before the later DDL runs:
+            # leaving it un-checkpointed makes a subsequent DROP INDEX fail with
+            # SQLITE_CANTOPEN on this filesystem.
+            conn.commit()
+            cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+        # --- Step 2: rename every clock column -------------------------------
+        renames = {
+            "workshop_items": [
+                ("dt_found", "first_seen_at"),          # our clock: first insert
+                ("dt_updated", "api_fetched_at"),       # our clock: last SUCCESS
+                ("dt_attempted", "scrape_version"),     # Steam value: version key
+                ("dt_translated", "translate_version"), # Steam value: version key
+                ("time_created", "steam_created_at"),   # Steam clock
+                ("time_updated", "steam_updated_at"),   # Steam clock
+            ],
+            "users": [
+                ("dt_updated", "api_fetched_at"),       # our clock
+                ("dt_translated", "translated_at"),     # our clock (NOT a version)
+            ],
+            "translation_queue": [
+                ("dt_queued", "queued_at"),             # our clock: queue time
+            ],
+        }
+        for table, pairs in renames.items():
+            for old_name, new_name in pairs:
+                if _rename_column(table, old_name, new_name):
+                    logging.info("  renamed %s.%s -> %s", table, old_name, new_name)
+
+        # --- Step 3: clear the migration artefact ----------------------------
+        # Migration 10->11 repurposed dt_attempted into a Steam version key by
+        # setting it to time_updated, but rows with no Steam payload kept their
+        # pre-migration fetch time. Now that the column is scrape_version those
+        # stale values are meaningless. They are already preserved in
+        # first_seen_at, so clearing them loses nothing.
+        cursor.execute(
+            "UPDATE workshop_items SET scrape_version = NULL "
+            "WHERE steam_updated_at IS NULL AND scrape_version IS NOT NULL"
+        )
+        logging.info("  cleared stale scrape_version on %d rows that have no Steam payload",
+                     cursor.rowcount)
+
+        # --- Step 4: api_fetched_at means "last SUCCESSFUL API content pull" --
+        # The old dt_updated was written on every attempt, so rows that never
+        # received API content (steam_updated_at IS NULL: the 500/404/-1 rows)
+        # would otherwise inherit pure attempt times under a name that promises
+        # success. This is the best available approximation: for a row that
+        # succeeded once and then failed a later attempt, the old dt_updated
+        # holds the FAILURE time and the true last-success time cannot be
+        # recovered from the existing data. It self-corrects on the next
+        # successful fetch.
+        cursor.execute(
+            "UPDATE workshop_items SET api_fetched_at = NULL "
+            "WHERE steam_updated_at IS NULL AND api_fetched_at IS NOT NULL"
+        )
+        logging.info(
+            "  api_fetched_at cleared on %d rows that never received API content "
+            "(approximation: true last-success time is unrecoverable where a later attempt failed)",
+            cursor.rowcount)
+
+        # --- Step 5: repair the anomalous first_seen_at row ------------------
+        # A caller once passed first_seen_at=None explicitly, suppressing the
+        # insert default; one live row ended up with first_seen_at IS NULL. Its
+        # api_fetched_at is a usable lower bound on when it was first seen.
+        cursor.execute(
+            "UPDATE workshop_items SET first_seen_at = api_fetched_at "
+            "WHERE first_seen_at IS NULL AND api_fetched_at IS NOT NULL"
+        )
+        logging.info("  first_seen_at repaired from api_fetched_at for %d rows", cursor.rowcount)
+
+        # Commit the cleanup DML explicitly before any DDL below. Python's
+        # sqlite3 module otherwise commits an open DML transaction implicitly at
+        # the first DDL statement, which on a multi-hundred-MB WAL leaves the
+        # connection unable to open the database for the *next* DDL
+        # (SQLITE_CANTOPEN). Checkpointing keeps the WAL small as well.
+        conn.commit()
+        cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+        # --- Step 6: recreate the affected indexes under clear names ---------
+        # SQLite rewrites index *definitions* on RENAME COLUMN but keeps the old
+        # index *names*, so drop the stale idx_dt_* names and recreate them
+        # explicitly against the new columns.
+        for idx in ["idx_dt_updated", "idx_dt_attempted",
+                    "idx_status_dt_attempted", "idx_creator_dt_updated"]:
+            cursor.execute(f"DROP INDEX IF EXISTS {idx}")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_fetched_at ON workshop_items (api_fetched_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_scraped_version ON workshop_items (scrape_version)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_status_scraped_version ON workshop_items (status, scrape_version)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_api_fetched_at ON workshop_items (creator, api_fetched_at)")
+
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 14")
+        conn.commit()
+        logging.info("Migration 13->14 complete.")
+
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON workshop_items (status)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_dt_updated ON workshop_items (dt_updated)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_dt_attempted ON workshop_items (dt_attempted)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_fetched_at ON workshop_items (api_fetched_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_scraped_version ON workshop_items (scrape_version)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_title ON workshop_items (title)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator ON workshop_items (creator)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_short_description ON workshop_items (short_description)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_extended_description ON workshop_items (extended_description)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_status_dt_attempted ON workshop_items (status, dt_attempted)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_status_scraped_version ON workshop_items (status, scrape_version)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_appid_status ON workshop_items (consumer_appid, status)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_dt_updated ON workshop_items (creator, dt_updated)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_api_fetched_at ON workshop_items (creator, api_fetched_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_translation_priority ON workshop_items (translation_priority)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_is_queued ON workshop_items (is_queued_for_subscription)")
-    # Sort-column indexes — avoid expensive full-table sorts
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_time_created ON workshop_items (time_created)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_time_updated ON workshop_items (time_updated)")
+    # Sort-column indexes — avoid expensive full-table sorts. idx_time_created /
+    # idx_time_updated keep their historical names (SQLite rewrote their
+    # definitions to the renamed columns); only the target columns matter here.
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_time_created ON workshop_items (steam_created_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_time_updated ON workshop_items (steam_updated_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_file_size ON workshop_items (file_size)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions ON workshop_items (subscriptions)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_favorited ON workshop_items (favorited)")
@@ -1144,8 +1318,8 @@ def insert_or_update_item(db_path: str, item_data: dict) -> bool:
     cursor = conn.execute("SELECT 1 FROM workshop_items WHERE workshop_id = ?", (item_data["workshop_id"],))
     is_new = cursor.fetchone() is None
 
-    if is_new and "dt_found" not in item_data:
-        item_data["dt_found"] = int(time.time())
+    if is_new and not item_data.get("first_seen_at"):
+        item_data["first_seen_at"] = int(time.time())
         columns = [col for col in item_data.keys() if col in WORKSHOP_ITEM_COLUMNS]
 
     placeholders = ",".join(["?"] * len(columns))
@@ -1177,7 +1351,8 @@ def insert_or_update_item(db_path: str, item_data: dict) -> bool:
 def get_next_items_to_scrape(db_path: str, limit: int = 10, staleness_days: int = 30) -> list[dict]:
     """
     Retrieves the next batch of workshop items to be scraped.
-    Prioritizes by api_priority (higher = more urgent), then oldest dt_updated.
+    Prioritizes by api_priority (higher = more urgent), then oldest api_fetched_at
+    (NULLs first: never-successfully-fetched items come first).
     """
     conn = get_connection(db_path)
     cursor = conn.cursor()
@@ -1185,7 +1360,7 @@ def get_next_items_to_scrape(db_path: str, limit: int = 10, staleness_days: int 
     sql = """
         SELECT * FROM workshop_items
         WHERE api_priority > 0 AND (status IS NULL OR status != -1)
-        ORDER BY api_priority DESC, dt_updated ASC
+        ORDER BY api_priority DESC, api_fetched_at ASC
         LIMIT ?
     """
     cursor.execute(sql, (limit,))
@@ -1195,9 +1370,9 @@ def get_next_items_to_scrape(db_path: str, limit: int = 10, staleness_days: int 
     return items
 
 def count_unscraped_items(db_path: str) -> int:
-    """Returns the number of items that have never been fetched via API (dt_updated is NULL)."""
+    """Returns the number of items that have never been fetched via API (api_fetched_at is NULL)."""
     conn = get_connection(db_path)
-    cursor = conn.execute("SELECT COUNT(workshop_id) as count FROM workshop_items WHERE dt_updated IS NULL")
+    cursor = conn.execute("SELECT COUNT(workshop_id) as count FROM workshop_items WHERE api_fetched_at IS NULL")
     row = cursor.fetchone()
     conn.close()
     return row["count"] if row else 0
@@ -1305,7 +1480,7 @@ def get_item_details(db_path: str, workshop_id: int) -> dict | None:
     """Fetches all columns for a single workshop item, joined with user info."""
     conn = get_connection(db_path)
     sql = """
-        SELECT w.*, u.personaname, u.personaname_en, u.dt_translated as user_dt_translated,
+        SELECT w.*, u.personaname, u.personaname_en, u.translated_at as user_translated_at,
                (SELECT GROUP_CONCAT(t.tag_name, ', ') FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id = w.workshop_id) as tags
         FROM workshop_items w
         LEFT JOIN users u ON w.creator = u.steamid
@@ -1333,7 +1508,7 @@ def search_items(db_path: str, query: str = "", appid: int = None,
     
     if summary_only:
         cols = ("w.workshop_id, w.title, w.title_en, w.creator, w.consumer_appid, "
-                "w.dt_translated, w.is_queued_for_subscription, w.needs_web_scrape, "
+                "w.translate_version, w.is_queued_for_subscription, w.needs_web_scrape, "
                 "w.needs_image, w.translation_priority, w.file_size, w.image_extension, "
                 "w.wilson_subscription_score, w.wilson_favorite_score, u.personaname, u.personaname_en,"
                 "(SELECT GROUP_CONCAT(t.tag_name, ', ') FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id = w.workshop_id) as tags")
@@ -1478,13 +1653,15 @@ def _classify_translation_status(item) -> str:
         return "No data (never scraped)"
     return "Needs Translation (Unicode)"
 
-def _classify_fetch_recency(dt_updated, staleness_days: int = 30) -> str:
-    """Classifies a dt_updated timestamp (Unix epoch integer) as 'fresh', 'stale', or 'blank'."""
-    if not dt_updated:
+def _classify_fetch_recency(attempted_at, staleness_days: int = 30) -> str:
+    """Classifies a last_fetch_attempted_at timestamp (Unix epoch integer) as
+    'fresh', 'stale', or 'blank'. This is OUR fetch recency (every attempt),
+    not the age of the Steam content."""
+    if not attempted_at:
         return "blank"
     try:
         threshold = int(time.time()) - staleness_days * 86400
-        return "fresh" if int(dt_updated) >= threshold else "stale"
+        return "fresh" if int(attempted_at) >= threshold else "stale"
     except (ValueError, TypeError):
         return "blank"
 
@@ -1506,7 +1683,7 @@ def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
     status_counts = [dict(row) for row in cursor.fetchall()]
 
     cursor.execute("""
-        SELECT dt_attempted, dt_updated, dt_translated, title, short_description, extended_description,
+        SELECT last_fetch_attempted_at, translate_version, title, short_description, extended_description,
                translation_priority, title_en, short_description_en, extended_description_en
         FROM workshop_items
     """)
@@ -1518,14 +1695,14 @@ def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
         "Queued": 0, "Translated": 0,
         "No data (never scraped)": 0,
     }
-    dt_updated_counts = {"fresh": 0, "stale": 0, "blank": 0}
+    fetch_recency_counts = {"fresh": 0, "stale": 0, "blank": 0}
 
     for item in all_items:
         translation_status[_classify_translation_status(item)] += 1
-        dt_updated_counts[_classify_fetch_recency(item["dt_attempted"], staleness_days)] += 1
+        fetch_recency_counts[_classify_fetch_recency(item["last_fetch_attempted_at"], staleness_days)] += 1
 
-    cursor.execute("SELECT MAX(dt_updated) FROM workshop_items")
-    highest_dt_updated = cursor.fetchone()[0]
+    cursor.execute("SELECT MAX(api_fetched_at) FROM workshop_items")
+    highest_api_fetched_at = cursor.fetchone()[0]
 
     cursor.execute("SELECT appid, last_page_scanned, last_cursor FROM app_tracking")
     app_stats = [dict(row) for row in cursor.fetchall()]
@@ -1547,8 +1724,8 @@ def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
         "status_counts": status_counts,
         "translation_status": translation_status,
         "tag_counts": tag_counts,
-        "dt_updated_counts": dt_updated_counts,
-        "highest_dt_updated": highest_dt_updated,
+        "fetch_recency_counts": fetch_recency_counts,
+        "highest_api_fetched_at": highest_api_fetched_at,
         "app_stats": app_stats,
         "priority_breakdowns": priority_breakdowns,
     }
@@ -1655,7 +1832,7 @@ def get_next_web_scrape_item(db_path: str) -> dict | None:
     cursor = conn.execute("""
         SELECT * FROM workshop_items
         WHERE needs_web_scrape > 0
-        ORDER BY needs_web_scrape DESC, dt_updated ASC
+        ORDER BY needs_web_scrape DESC, api_fetched_at ASC
         LIMIT 1
     """)
     row = cursor.fetchone()
@@ -1704,7 +1881,7 @@ def get_next_image_item(db_path: str) -> dict | None:
     cursor = conn.execute("""
         SELECT * FROM workshop_items
         WHERE needs_image > 0
-        ORDER BY needs_image DESC, dt_updated ASC
+        ORDER BY needs_image DESC, api_fetched_at ASC
         LIMIT 1
     """)
     row = cursor.fetchone()
@@ -1763,10 +1940,15 @@ def flag_field_for_translation(db_path: str, item_type: str, item_id: int, field
                 (priority, existing["id"])
             )
     else:
+        # queued_at is our queue clock (Unix epoch INTEGER). It is written here
+        # for NEW rows only; pre-v14 rows keep it NULL because we genuinely do
+        # not know when they were queued. The explicit NULL ordering in
+        # get_next_batch_for_translation keeps that legacy backlog ahead of
+        # newly queued work.
         conn.execute(
-            "INSERT INTO translation_queue (item_type, item_id, field, original_text, priority, dt_queued) "
+            "INSERT INTO translation_queue (item_type, item_id, field, original_text, priority, queued_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (item_type, item_id, field, text, priority, None)
+            (item_type, item_id, field, text, priority, int(time.time()))
         )
     conn.commit()
     conn.close()
@@ -1824,10 +2006,18 @@ def bump_translation_for_detail(db_path: str, workshop_id: int):
 
 
 def get_next_batch_for_translation(db_path: str, limit: int = 20) -> list[dict]:
-    """Returns up to `limit` highest-priority fields for translation."""
+    """Returns up to `limit` highest-priority fields for translation.
+
+    Ordering is ``priority DESC`` then oldest-queued first. The
+    ``queued_at IS NOT NULL`` term (0 for NULL, 1 otherwise) deliberately puts
+    legacy rows whose ``queued_at`` is unknown BEFORE any dated row at the same
+    priority: unknown queue time must not jump the backlog, and SQLite's
+    implicit NULL-first sort is now made explicit and self-documenting.
+    """
     conn = get_connection(db_path)
     cursor = conn.execute(
-        "SELECT * FROM translation_queue ORDER BY priority DESC, dt_queued ASC LIMIT ?",
+        "SELECT * FROM translation_queue "
+        "ORDER BY priority DESC, queued_at IS NOT NULL, queued_at ASC LIMIT ?",
         (limit,)
     )
     rows = [dict(row) for row in cursor.fetchall()]
@@ -1896,12 +2086,12 @@ def update_app_tracking_cursor(db_path: str, appid: int, cursor: str) -> None:
 def clear_pending_items(db_path: str) -> int:
     """
     Removes all workshop items that are 'pending' (never successfully scraped).
-    Criteria: (status IS NULL OR status = 404) AND dt_updated IS NULL.
+    Criteria: (status IS NULL OR status = 404) AND api_fetched_at IS NULL.
     Returns the number of rows deleted.
     """
     conn = get_connection(db_path)
     cursor = conn.execute(
-        "DELETE FROM workshop_items WHERE (status IS NULL OR status = 404) AND dt_updated IS NULL"
+        "DELETE FROM workshop_items WHERE (status IS NULL OR status = 404) AND api_fetched_at IS NULL"
     )
     count = cursor.rowcount
     conn.commit()

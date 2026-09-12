@@ -297,7 +297,7 @@ async def test_tui_details_pane_translation_fallback_and_priority(mock_config):
     mock_results = [{
         "workshop_id": 1, 
         "title": "Title", 
-        "dt_translated": "2023-01-01", 
+        "translate_version": "2023-01-01", 
         "translation_priority": 0,
         "tags": "{invalid_json",
         "extended_description": "Original Desc"
@@ -400,9 +400,9 @@ async def test_tui_clear_pending_command(tmp_path):
     initialize_database(db_path)
     
     # 1. Pending (should be removed)
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": None, "dt_updated": None})
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": None, "api_fetched_at": None})
     # 2. Not Pending (should remain)
-    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "dt_updated": 1672531200})
+    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "api_fetched_at": 1672531200})
     
     mock_config = {
         "database": {"path": db_path},

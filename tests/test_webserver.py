@@ -204,7 +204,7 @@ def test_analysis(web_client):
     for i in range(20):
         insert_or_update_item(db_path, {
             "workshop_id": i + 1,
-            "time_created": now - i * 86400,
+            "steam_created_at": now - i * 86400,
             "views": 100,
         })
 

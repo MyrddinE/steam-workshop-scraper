@@ -67,7 +67,7 @@ def test_daemon_pipeline_mocked(db_path):
         mock_api.return_value = {
             "title": "Pipeline Mod", "creator": 200, "tags": [{"tag": "test"}]
         }
-        mock_get_user.return_value = {"steamid": 200, "dt_updated": 1767225600}
+        mock_get_user.return_value = {"steamid": 200, "api_fetched_at": 1767225600}
 
         daemon = Daemon(config)
         daemon.process_batch()
