@@ -20,7 +20,8 @@ from src.database import (
     get_connection,
     get_item_details,
     normalize_tags,
-    _evaluate_filters
+    _evaluate_filters,
+    WORKSHOP_ITEM_COLUMNS,
 )
 from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries, query_workshop_files, set_api_delay, query_workshop_page_updated
 from src.translator import TranslatorThread, is_ascii
@@ -28,6 +29,30 @@ from src.config import save_config
 from src.database import flag_for_web_scrape, flag_field_for_translation, flag_for_image
 from src.web_worker import WebScraperThread
 from src.image_worker import ImageScraperThread
+
+
+# --- API merge allow-list ----------------------------------------------------
+# Item columns that are owned by the queue-flagging helpers rather than by the
+# API merge. They must NOT survive a merge: flag_for_web_scrape / flag_for_image
+# set them explicitly between the merge and the insert, so carrying a stale value
+# through the merge would clobber the flag that was just set.
+MERGE_EXCLUDED_KEYS = frozenset({
+    "is_queued_for_subscription",
+    "needs_web_scrape",
+    "image_extension",
+    "needs_image",
+})
+
+# Keys retained from an API merge into the item record:
+#   * every real column (WORKSHOP_ITEM_COLUMNS), minus the queue-owned ones above
+#   * "tags", which is no longer a column -- it lives in the workshop_tags
+#     junction table -- but is consumed by insert_or_update_item's tag sync and
+#     so must survive the merge
+# Derived rather than hand-listed: adding a column now updates this automatically.
+MERGE_ITEM_KEYS = (WORKSHOP_ITEM_COLUMNS - MERGE_EXCLUDED_KEYS) | {"tags"}
+
+# Keys the merge knows about and drops silently (no "unknown column" log line).
+MERGE_IGNORED_KEYS = MERGE_EXCLUDED_KEYS | {"result"}
 
 
 def wilson_lower(successes: int, trials: int, z: float = 1.96) -> float:
@@ -130,22 +155,11 @@ class Daemon:
         if "description" in merged:
             merged["short_description"] = merged.pop("description")
 
-        allowed_keys = {
-            "workshop_id", "dt_found", "dt_updated", "dt_attempted", "dt_translated", "status", "title", "title_en",
-            "creator", "creator_appid", "consumer_appid", "filename", "file_size", "preview_url",
-            "hcontent_file", "hcontent_preview", "short_description", "short_description_en", "time_created",
-            "time_updated", "visibility", "banned", "ban_reason", "app_name", "file_type",
-            "subscriptions", "favorited", "views", "tags", "extended_description", "extended_description_en", "language",
-            "lifetime_subscriptions", "lifetime_favorited", "translation_priority",
-            "wilson_favorite_score", "wilson_subscription_score",
-            "api_priority",
-        }
-        known_ignored_keys = {"result", "is_queued_for_subscription", "needs_web_scrape", "image_extension", "needs_image"}
         clean = {}
         for k, v in merged.items():
-            if k in allowed_keys:
+            if k in MERGE_ITEM_KEYS:
                 clean[k] = v
-            elif k not in known_ignored_keys:
+            elif k not in MERGE_IGNORED_KEYS:
                 val_preview = str(v)[:20] + "..." if len(str(v)) > 20 else str(v)
                 logger = logging.info if v is not None and str(v).strip() != "" else logging.debug
                 logger(f"Discarding unknown API column: '{k}' with value '{val_preview}' for item {item_id}")
