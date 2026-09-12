@@ -11,6 +11,9 @@ daemon:
   request_delay_seconds: 1.5
   target_appids:
     - 294100 # RimWorld
+  # Database backups are OFF unless both keys below are set.
+  # outbox_dir: "outbox"
+  # backup_interval_seconds: 3600
 
 openai:
   api_key: "YOUR_OPENAI_API_KEY_HERE" # Can be overridden by OPENAI_API_KEY env var
