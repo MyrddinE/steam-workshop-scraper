@@ -236,7 +236,7 @@ def api_items():
     placeholders = ','.join('?' * len(ids))
     sql = f"""
         SELECT w.workshop_id, w.title, w.title_en, w.creator, w.consumer_appid,
-               w.dt_translated, w.is_queued_for_subscription, w.needs_web_scrape,
+               w.translate_version, w.is_queued_for_subscription, w.needs_web_scrape,
                w.needs_image, w.translation_priority, w.file_size, w.image_extension,
                w.wilson_subscription_score, w.wilson_favorite_score,
                w.api_priority,

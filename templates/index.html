@@ -82,9 +82,9 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
           <option value="favorited">Favorites</option>
           <option value="views">Views</option>
           <option value="workshop_id">Workshop ID</option>
-          <option value="time_created">Created Time</option>
-          <option value="time_updated">Updated Time</option>
-          <option value="dt_updated">Fetched Time</option>
+          <option value="steam_created_at">Created Time</option>
+          <option value="steam_updated_at">Updated Time</option>
+          <option value="api_fetched_at">Fetched Time</option>
           <option value="wilson_subscription_score">Subscriber Score</option>
           <option value="wilson_favorite_score">Favorite Score</option>
         </select>
@@ -422,8 +422,8 @@ function renderDetail(item) {
 
   const subs = item.subscriptions||0, lsubs = item.lifetime_subscriptions||0;
   const favs = item.favorited||0, lfavs = item.lifetime_favorited||0;
-  const created = item.time_created ? new Date(item.time_created*1000).toISOString().slice(0,10) : 'N/A';
-  const updated = item.time_updated && item.time_updated !== item.time_created ? new Date(item.time_updated*1000).toISOString().slice(0,10) : null;
+  const created = item.steam_created_at ? new Date(item.steam_created_at*1000).toISOString().slice(0,10) : 'N/A';
+  const updated = item.steam_updated_at && item.steam_updated_at !== item.steam_created_at ? new Date(item.steam_updated_at*1000).toISOString().slice(0,10) : null;
   const tags = (()=>{
     const raw = item.tags || '';
     if (!raw) return 'None';
@@ -450,10 +450,10 @@ function renderDetail(item) {
     `Translation Priority: ${item.translation_priority || 0}`,
     `Needs Web Scrape: ${item.needs_web_scrape || 0}`,
     `Needs Image: ${item.needs_image || 0}`,
-    `dt_found: ${fmtTs(item.dt_found)}`,
-    `dt_updated: ${fmtTs(item.dt_updated)}`,
-    `dt_attempted: ${fmtTs(item.dt_attempted)}`,
-    `dt_translated: ${fmtTs(item.dt_translated)}`,
+    `first_seen_at: ${fmtTs(item.first_seen_at)}`,
+    `api_fetched_at: ${fmtTs(item.api_fetched_at)}`,
+    `scrape_version: ${fmtTs(item.scrape_version)}`,
+    `translate_version: ${fmtTs(item.translate_version)}`,
     `hcontent_file: ${item.hcontent_file || 'N/A'}`,
     `hcontent_preview: ${item.hcontent_preview || 'N/A'}`,
   ].join('&#10;');

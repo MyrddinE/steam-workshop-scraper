@@ -49,7 +49,7 @@ def test_daemon_process_batch_success(mock_sleep, mock_flag_web, mock_insert, mo
     mock_count.return_value = 1000
     mock_get_items.return_value = [{'workshop_id': 123}]
     mock_api.return_value = {"title": "Test Mod", "creator": "111"}
-    mock_get_user.return_value = {"steamid": 111, "dt_updated": 1767225600}
+    mock_get_user.return_value = {"steamid": 111, "api_fetched_at": 1767225600}
 
     daemon = Daemon(mock_config)
     daemon.process_batch()
@@ -135,7 +135,7 @@ def test_api_delay_decreases_on_success(mock_sleep, mock_flag_web, mock_insert, 
     mock_count.return_value = 1000
     mock_get_items.return_value = items
     mock_api.return_value = {"title": "Mod", "creator": "111"}
-    mock_get_user.return_value = {"steamid": 111, "dt_updated": 1767225600}
+    mock_get_user.return_value = {"steamid": 111, "api_fetched_at": 1767225600}
 
     daemon = Daemon(mock_config)
     daemon.api_delay = 1.0
@@ -190,7 +190,7 @@ def test_wilson_lower_edge_cases():
 
 
 def test_merge_and_clean_sets_api_priority_zero(mock_config):
-    """_merge_and_clean_api_data sets api_priority=0 and dt_updated."""
+    """_merge_and_clean_api_data sets api_priority=0 and api_fetched_at."""
     with patch('src.database.initialize_database'), \
          patch('src.daemon.save_config'):
         daemon = Daemon(mock_config)
@@ -199,7 +199,7 @@ def test_merge_and_clean_sets_api_priority_zero(mock_config):
         now = 1000000
         result = daemon._merge_and_clean_api_data(api_data, existing, 1, now)
         assert result["api_priority"] == 0
-        assert result["dt_updated"] == now
+        assert result["api_fetched_at"] == now
 
 
 @patch('src.database.initialize_database')
@@ -287,7 +287,7 @@ def test_promote_stale_items_only_promotes_stale_live_unqueued(db_path, tmp_path
     temporary database.
 
     The sweep must:
-      * promote  api_priority = 0 + status = 200 + dt_updated stale  -> 1
+      * promote  api_priority = 0 + status = 200 + api_fetched_at stale  -> 1
       * leave    fresh status = 200 rows alone
       * leave    dead rows (status = -1) alone
       * leave    rows already queued (api_priority != 0) alone
@@ -299,10 +299,10 @@ def test_promote_stale_items_only_promotes_stale_live_unqueued(db_path, tmp_path
     stale = now - 40 * 86400  # default item_staleness_days is 30
     fresh = now
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "api_priority": 0, "dt_updated": stale})
-    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "api_priority": 0, "dt_updated": fresh})
-    insert_or_update_item(db_path, {"workshop_id": 3, "status": -1, "api_priority": 0, "dt_updated": stale})
-    insert_or_update_item(db_path, {"workshop_id": 4, "status": 200, "api_priority": 5, "dt_updated": stale})
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "api_priority": 0, "api_fetched_at": stale})
+    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "api_priority": 0, "api_fetched_at": fresh})
+    insert_or_update_item(db_path, {"workshop_id": 3, "status": -1, "api_priority": 0, "api_fetched_at": stale})
+    insert_or_update_item(db_path, {"workshop_id": 4, "status": 200, "api_priority": 5, "api_fetched_at": stale})
 
     config = {
         "database": {"path": db_path},
@@ -324,4 +324,100 @@ def test_promote_stale_items_only_promotes_stale_live_unqueued(db_path, tmp_path
     conn.close()
 
     assert priorities == {1: 1, 2: 0, 3: 0, 4: 5}
+
+
+# ── api_fetched_at vs last_fetch_attempted_at (bug fixes #1 and #2) ───────────
+
+def _real_db_daemon(db_path, tmp_path):
+    config = {
+        "database": {"path": db_path},
+        "api": {"key": "TEST"},
+        "daemon": {"batch_size": 1, "target_appids": [1]},
+    }
+    return Daemon(config, config_path=str(tmp_path / "config.yaml"))
+
+
+def test_process_item_500_records_attempt_but_not_fetch(db_path, tmp_path):
+    """A 500 is an attempt: last_fetch_attempted_at moves, api_fetched_at does not."""
+    from src.database import insert_or_update_item, get_connection
+
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "status": 200, "api_priority": 5,
+        "api_fetched_at": 1000, "last_fetch_attempted_at": 1000,
+    })
+    daemon = _real_db_daemon(db_path, tmp_path)
+    existing = {"workshop_id": 1, "status": 200, "api_priority": 5,
+                "api_fetched_at": 1000, "last_fetch_attempted_at": 1000}
+
+    with patch("src.daemon.get_workshop_details_api", return_value={"status": 500}):
+        daemon._process_item(existing)
+
+    conn = get_connection(db_path)
+    row = dict(conn.execute("SELECT * FROM workshop_items WHERE workshop_id=1").fetchone())
+    conn.close()
+    assert row["api_fetched_at"] == 1000          # success clock untouched
+    assert row["last_fetch_attempted_at"] > 1000  # attempt clock moved
+
+
+def test_process_item_404_records_attempt_but_not_fetch(db_path, tmp_path):
+    from src.database import insert_or_update_item, get_connection
+
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "status": 200, "api_priority": 5,
+        "api_fetched_at": 1000, "last_fetch_attempted_at": 1000,
+    })
+    daemon = _real_db_daemon(db_path, tmp_path)
+    existing = {"workshop_id": 1, "status": 200, "api_priority": 5,
+                "api_fetched_at": 1000, "last_fetch_attempted_at": 1000}
+
+    with patch("src.daemon.get_workshop_details_api", return_value={"status": 404}):
+        daemon._process_item(existing)
+
+    conn = get_connection(db_path)
+    row = dict(conn.execute("SELECT * FROM workshop_items WHERE workshop_id=1").fetchone())
+    conn.close()
+    assert row["status"] == -1
+    assert row["api_fetched_at"] == 1000
+    assert row["last_fetch_attempted_at"] > 1000
+
+
+def test_process_item_success_moves_both_clocks(db_path, tmp_path):
+    from src.database import insert_or_update_item, get_connection
+
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "status": 200, "api_priority": 5,
+        "api_fetched_at": 1000, "last_fetch_attempted_at": 1000,
+    })
+    daemon = _real_db_daemon(db_path, tmp_path)
+    existing = {"workshop_id": 1, "status": 200, "api_priority": 5,
+                "api_fetched_at": 1000, "last_fetch_attempted_at": 1000}
+
+    with patch("src.daemon.get_workshop_details_api",
+               return_value={"title": "T", "status": 200}):
+        daemon._process_item(existing)
+
+    conn = get_connection(db_path)
+    row = dict(conn.execute("SELECT * FROM workshop_items WHERE workshop_id=1").fetchone())
+    conn.close()
+    assert row["api_fetched_at"] > 1000
+    assert row["last_fetch_attempted_at"] > 1000
+
+
+def test_merge_remaps_steam_api_time_fields():
+    """The Steam API still returns time_created/time_updated; the merge must map
+    them onto steam_created_at/steam_updated_at rather than discard them."""
+    from src.daemon import Daemon
+
+    config = {"database": {"path": "test.db"}, "api": {"key": "K"},
+              "daemon": {"target_appids": [1]}}
+    with patch("src.daemon.save_config"):
+        daemon = Daemon(config)
+        result = daemon._merge_and_clean_api_data(
+            {"time_created": 111, "time_updated": 222, "title": "T"},
+            {"workshop_id": 1}, 1, 999)
+    assert result["steam_created_at"] == 111
+    assert result["steam_updated_at"] == 222
+    assert "time_created" not in result
+    assert "time_updated" not in result
+    assert result["api_fetched_at"] == 999
 

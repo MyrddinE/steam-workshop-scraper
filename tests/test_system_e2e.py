@@ -21,7 +21,7 @@ def system_config(tmp_path):
     
     # Add dummy items to suppress automatic seeding/discovery expansion during test
     for i in range(101):
-        insert_or_update_item(db_path, {"workshop_id": 99000 + i, "dt_attempted": 1768233600, "status": 200})
+        insert_or_update_item(db_path, {"workshop_id": 99000 + i, "scrape_version": 1768233600, "status": 200})
     
     return {
         "database": {"path": db_path},

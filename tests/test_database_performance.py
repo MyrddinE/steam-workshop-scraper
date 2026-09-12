@@ -21,7 +21,7 @@ def test_clear_pending_items_performance(tmp_path):
             # Not pending
             data.append((i, "2023-01-01", "200", "2023-01-01"))
             
-    conn.executemany("INSERT INTO workshop_items (workshop_id, dt_found, status, dt_updated) VALUES (?, ?, ?, ?)", data)
+    conn.executemany("INSERT INTO workshop_items (workshop_id, first_seen_at, status, api_fetched_at) VALUES (?, ?, ?, ?)", data)
     conn.commit()
     conn.close()
     

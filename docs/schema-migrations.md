@@ -177,6 +177,51 @@ Converts all 8 `dt_*` columns across 3 tables from ISO 8601 TEXT to Unix epoch I
 
 Creates indexes on `time_created`, `time_updated`, `file_size`, `subscriptions`, `favorited`, `views`, `wilson_subscription_score`, and `wilson_favorite_score` for fast ORDER BY.
 
+### v13 → v14: Three-clock rename + fetch-semantics cleanup
+
+Renames the timestamps so the three clocks are unambiguous, and cleans up data
+that the old shared names had made misleading. All renames are
+`ALTER TABLE ... RENAME COLUMN` (metadata-only; no table data is rewritten).
+`workshop_fts` is untouched — none of its indexed columns are renamed.
+
+| Table | Old | New | Meaning |
+|---|---|---|---|
+| workshop_items | `time_created` | `steam_created_at` | Steam clock: author created it |
+| workshop_items | `time_updated` | `steam_updated_at` | Steam clock: author last updated it |
+| workshop_items | `dt_found` | `first_seen_at` | our clock: row first inserted |
+| workshop_items | `dt_updated` | `api_fetched_at` | our clock: last **successful** content pull |
+| workshop_items | `dt_attempted` | `scrape_version` | **Steam value**: `steam_updated_at` when the web scraper ran |
+| workshop_items | `dt_translated` | `translate_version` | **Steam value**: `steam_updated_at` when translation ran |
+| workshop_items | — | `last_fetch_attempted_at` | our clock: last fetch attempt, success **or** failure |
+| users | `dt_updated` | `api_fetched_at` | our clock |
+| users | `dt_translated` | `translated_at` | our wall-clock time (users have no `steam_updated_at`) |
+| translation_queue | `dt_queued` | `queued_at` | our clock: queue time (INTEGER epoch; NULL = unknown) |
+
+Data cleanup performed by the migration:
+
+* `last_fetch_attempted_at` is backfilled from the old `dt_updated`, whose
+  history genuinely *is* attempt times.
+* `scrape_version` is set NULL where `steam_updated_at IS NULL` (the ~810-row
+  migration artefact from 10→11; those values are already preserved in
+  `first_seen_at`).
+* `api_fetched_at` is set NULL where `steam_updated_at IS NULL`: rows that never
+  received an API payload must not inherit pure attempt times under a name that
+  promises success. **This is the best available approximation** — for a row
+  that succeeded once and then failed a later attempt, the old `dt_updated`
+  holds the *failure* time and the true last-success time cannot be recovered
+  from existing data. It self-corrects on the next successful fetch.
+* `first_seen_at` is repaired from `api_fetched_at` for the single anomalous row
+  that had `first_seen_at IS NULL`.
+* `queued_at` is deliberately **not** backfilled: the pre-existing queue backlog
+  keeps NULL (unknown), and `get_next_batch_for_translation` orders with
+  `queued_at IS NOT NULL, queued_at ASC` so those unknown-time rows stay ahead
+  of newly queued work.
+
+Indexes recreated under clear names: `idx_api_fetched_at`, `idx_scraped_version`,
+`idx_status_scraped_version`, `idx_creator_api_fetched_at`; the old `idx_dt_*`
+names are dropped. `idx_time_created` / `idx_time_updated` keep their historical
+names (SQLite rewrites their definitions to the renamed columns).
+
 ---
 
 ## Database Utility Functions

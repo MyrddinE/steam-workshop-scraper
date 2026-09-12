@@ -108,7 +108,7 @@ class ImageScraperThread(threading.Thread):
                     "workshop_id": wid,
                     "image_extension": ext,
                     "needs_image": 0,
-                    "dt_attempted": item.get("time_updated", 0),
+                    "scrape_version": item.get("steam_updated_at", 0),
                 })
 
                 title = item.get("title_en") or item.get("title") or str(wid)

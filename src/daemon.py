@@ -150,7 +150,7 @@ class Daemon:
         record = {
             "steamid": steamid,
             "personaname": personaname,
-            "dt_updated": int(time.time())
+            "api_fetched_at": int(time.time())
         }
         if not is_ascii(personaname):
             record["translation_priority"] = 1
@@ -169,6 +169,12 @@ class Daemon:
             merged["consumer_appid"] = merged.pop("consumer_app_id")
         if "description" in merged:
             merged["short_description"] = merged.pop("description")
+        # The Steam API still calls these fields time_created / time_updated;
+        # the database columns are now named steam_created_at / steam_updated_at.
+        if "time_created" in merged:
+            merged["steam_created_at"] = merged.pop("time_created")
+        if "time_updated" in merged:
+            merged["steam_updated_at"] = merged.pop("time_updated")
 
         clean = {}
         for k, v in merged.items():
@@ -179,7 +185,9 @@ class Daemon:
                 logger = logging.info if v is not None and str(v).strip() != "" else logging.debug
                 logger(f"Discarding unknown API column: '{k}' with value '{val_preview}' for item {item_id}")
 
-        clean["dt_updated"] = now_ts
+        # Success path only: this helper is called after a usable API payload has
+        # arrived, so api_fetched_at means "last SUCCESSFUL content pull".
+        clean["api_fetched_at"] = now_ts
         clean["api_priority"] = 0  # mark as fetched, no longer queued
         if "tags" in clean:
             clean["tags"] = normalize_tags(clean["tags"])
@@ -296,7 +304,7 @@ class Daemon:
             conn = get_connection(self.db_path)
             conn.execute(
                 "UPDATE workshop_items SET api_priority = 1 "
-                "WHERE api_priority = 0 AND status = 200 AND dt_updated < ? "
+                "WHERE api_priority = 0 AND status = 200 AND api_fetched_at < ? "
                 "AND (status IS NULL OR status != -1)",
                 (threshold,)
             )
@@ -353,7 +361,14 @@ class Daemon:
         api_status = api_data.get("status", 0)
 
         merged_data = existing_data.copy()
-        merged_data["dt_updated"] = now_ts
+        # Attempt clock: set unconditionally, before the status branches, so a
+        # 404, a 500 and a success all persist it. This is not optional
+        # bookkeeping: get_next_items_to_scrape orders by api_fetched_at ASC,
+        # and api_fetched_at now only moves on success, so without the attempt
+        # clock a just-failed item keeps its stale api_fetched_at and is retried
+        # at the front of its priority band in a tight loop. get_db_stats also
+        # reports fetch recency from this column.
+        merged_data["last_fetch_attempted_at"] = now_ts
         merged_data["api_priority"] = 0
         merged_data["status"] = api_status
 
@@ -409,11 +424,11 @@ class Daemon:
         appid = merged_data.get("consumer_appid")
         enriched = False
         if self._should_enrich(appid, merged_data):
-            old_time_updated = existing_data.get("time_updated")
-            new_time_updated = merged_data.get("time_updated")
+            old_steam_updated = existing_data.get("steam_updated_at")
+            new_steam_updated = merged_data.get("steam_updated_at")
             unchanged = (existing_data.get("extended_description") is not None
-                         and old_time_updated is not None
-                         and old_time_updated == new_time_updated)
+                         and old_steam_updated is not None
+                         and old_steam_updated == new_steam_updated)
 
             if unchanged:
                 merged_data["extended_description"] = existing_data["extended_description"]
@@ -449,8 +464,8 @@ class Daemon:
             creator_id = int(creator_id)
             existing_user = get_user(self.db_path, creator_id)
             should_update_user = True
-            if existing_user and existing_user.get("dt_updated"):
-                staleness = int(time.time()) - existing_user["dt_updated"]
+            if existing_user and existing_user.get("api_fetched_at"):
+                staleness = int(time.time()) - existing_user["api_fetched_at"]
                 if staleness < self.user_staleness_days * 86400:
                     should_update_user = False
             if should_update_user:
@@ -598,7 +613,7 @@ class Daemon:
             return True
         conn = get_connection(self.db_path)
         scraped = conn.execute(
-            "SELECT COUNT(*) FROM workshop_items WHERE dt_updated IS NOT NULL"
+            "SELECT COUNT(*) FROM workshop_items WHERE api_fetched_at IS NOT NULL"
         ).fetchone()[0]
         conn.close()
         return scraped >= 500
@@ -636,16 +651,16 @@ class Daemon:
                 page_new = 0
                 wid_to_api_updated = {int(it.get("publishedfileid", 0)): it.get("time_updated") or 0 for it in items if it.get("publishedfileid")}
 
-                # Fetch existing time_updated in one query
+                # Fetch existing steam_updated_at in one query
                 conn = get_connection(self.db_path)
                 placeholders = ",".join("?" * len(wid_to_api_updated))
                 existing_rows = {}
                 if wid_to_api_updated:
                     rows = conn.execute(
-                        f"SELECT workshop_id, time_updated FROM workshop_items WHERE workshop_id IN ({placeholders})",
+                        f"SELECT workshop_id, steam_updated_at FROM workshop_items WHERE workshop_id IN ({placeholders})",
                         list(wid_to_api_updated.keys()),
                     ).fetchall()
-                    existing_rows = {r["workshop_id"]: r["time_updated"] for r in rows}
+                    existing_rows = {r["workshop_id"]: r["steam_updated_at"] for r in rows}
 
                 for wid, api_updated in wid_to_api_updated.items():
                     db_updated = existing_rows.get(wid)

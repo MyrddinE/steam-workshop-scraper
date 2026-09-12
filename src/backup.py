@@ -67,7 +67,7 @@ def _sha256_file(path: str) -> str:
 
 
 def read_source_stats(db_path: str) -> dict:
-    """Read ``(rows, max_dt_updated)`` from the source with a read-only view.
+    """Read ``(rows, max_api_fetched_at)`` from the source with a read-only view.
 
     The connection is marked ``PRAGMA query_only = ON`` so this can never write
     to the live database, and it is short-lived so it does not hold a read lock
@@ -78,8 +78,8 @@ def read_source_stats(db_path: str) -> dict:
     try:
         conn.execute("PRAGMA query_only = ON;")
         rows = conn.execute("SELECT COUNT(*) FROM workshop_items").fetchone()[0]
-        max_dt_updated = conn.execute("SELECT MAX(dt_updated) FROM workshop_items").fetchone()[0]
-        return {"rows": rows, "max_dt_updated": max_dt_updated}
+        max_api_fetched_at = conn.execute("SELECT MAX(api_fetched_at) FROM workshop_items").fetchone()[0]
+        return {"rows": rows, "max_api_fetched_at": max_api_fetched_at}
     finally:
         conn.close()
 
@@ -92,7 +92,7 @@ def verify_snapshot(snapshot_path: str, source_db_path: str) -> dict:
     ``workshop_items`` table; and its row count matches the source's, read via
     :func:`read_source_stats`.
 
-    Returns ``{"rows": int, "max_dt_updated": ...}`` on success and raises
+    Returns ``{"rows": int, "max_api_fetched_at": ...}`` on success and raises
     :class:`BackupError` on any failure. Tests monkeypatch this function to
     simulate a bad snapshot.
     """
@@ -109,7 +109,7 @@ def verify_snapshot(snapshot_path: str, source_db_path: str) -> dict:
             check = conn.execute("PRAGMA quick_check").fetchall()
             if check != [("ok",)]:
                 raise BackupError(f"quick_check failed for {snapshot_path}: {check}")
-            row = conn.execute("SELECT COUNT(*), MAX(dt_updated) FROM workshop_items").fetchone()
+            row = conn.execute("SELECT COUNT(*), MAX(api_fetched_at) FROM workshop_items").fetchone()
         finally:
             conn.close()
     except sqlite3.DatabaseError as exc:
@@ -132,7 +132,7 @@ def verify_snapshot(snapshot_path: str, source_db_path: str) -> dict:
                 f"{snapshot_rows}, source has {source['rows']}"
             )
 
-    return {"rows": snapshot_rows, "max_dt_updated": row[1]}
+    return {"rows": snapshot_rows, "max_api_fetched_at": row[1]}
 
 
 def _check_free_space(source_db_path: str, dest_dir: str) -> None:
@@ -169,7 +169,7 @@ def snapshot_database(db_path: str, dest_path: str) -> dict:
     On any failure the previous ``dest_path`` is left completely untouched, the
     temp file is removed, and :class:`BackupError` is raised. On success the
     metadata dict is returned: ``bytes``, ``sha256``, ``taken_at`` (ISO UTC),
-    ``rows`` and ``max_dt_updated``.
+    ``rows`` and ``max_api_fetched_at``.
     """
     dest_dir = os.path.dirname(os.path.abspath(dest_path))
     os.makedirs(dest_dir, exist_ok=True)
@@ -215,7 +215,7 @@ def snapshot_database(db_path: str, dest_path: str) -> dict:
         "sha256": sha256,
         "taken_at": taken_at,
         "rows": stats["rows"],
-        "max_dt_updated": stats["max_dt_updated"],
+        "max_api_fetched_at": stats["max_api_fetched_at"],
     }
 
 
@@ -236,7 +236,7 @@ def build_db_manifest_entry(outbox_dir: str, dest_path: str, metadata: dict) -> 
         "mtime": mtime,
         "taken_at": metadata["taken_at"],
         "rows": metadata["rows"],
-        "max_dt_updated": metadata["max_dt_updated"],
+        "max_api_fetched_at": metadata["max_api_fetched_at"],
     }
 
 
