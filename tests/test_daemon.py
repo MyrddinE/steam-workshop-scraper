@@ -278,16 +278,50 @@ def test_page_discovery_eligible_trigger_file(mock_config):
             os.remove('.fetch_new')
 
 
-def test_staleness_sweep_sql_has_status_200():
-    """Verify the staleness sweep SQL only targets status=200 items.
+def test_promote_stale_items_only_promotes_stale_live_unqueued(db_path, tmp_path):
+    """Behaviour: the periodic sweep promotes stale, live, not-yet-queued items.
 
-    The sweep lives in its own method now (it used to be inlined at the top of
-    process_batch), so this inspects that method instead.
+    This replaces a source-text assertion on the sweep SQL. A source check passed
+    even if the query was reassembled in a way that changed its meaning, and broke
+    whenever the code merely moved; this exercises the real statement against a
+    temporary database.
+
+    The sweep must:
+      * promote  api_priority = 0 + status = 200 + dt_updated stale  -> 1
+      * leave    fresh status = 200 rows alone
+      * leave    dead rows (status = -1) alone
+      * leave    rows already queued (api_priority != 0) alone
     """
-    from src.daemon import Daemon
-    import inspect
-    src = inspect.getsource(Daemon._promote_stale_items)
-    # The sweep query must include "status = 200" to exclude dead items
-    assert "status = 200" in src
-    assert "api_priority = 1" in src
+    import time
+    from src.database import insert_or_update_item, get_connection
+
+    now = int(time.time())
+    stale = now - 40 * 86400  # default item_staleness_days is 30
+    fresh = now
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "api_priority": 0, "dt_updated": stale})
+    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "api_priority": 0, "dt_updated": fresh})
+    insert_or_update_item(db_path, {"workshop_id": 3, "status": -1, "api_priority": 0, "dt_updated": stale})
+    insert_or_update_item(db_path, {"workshop_id": 4, "status": 200, "api_priority": 5, "dt_updated": stale})
+
+    config = {
+        "database": {"path": db_path},
+        "api": {"key": "TEST"},
+        "daemon": {"batch_size": 1, "target_appids": [1]},
+    }
+    # Daemon.__init__ calls save_config(self.config_path, ...), and save_config
+    # writes to the file when it exists. Point config_path at a path that does not
+    # exist so the write is a no-op and the developer's real config.yaml is never
+    # touched.
+    daemon = Daemon(config, config_path=str(tmp_path / "config.yaml"))
+    daemon._promote_stale_items()
+
+    conn = get_connection(db_path)
+    priorities = {
+        row["workshop_id"]: row["api_priority"]
+        for row in conn.execute("SELECT workshop_id, api_priority FROM workshop_items")
+    }
+    conn.close()
+
+    assert priorities == {1: 1, 2: 0, 3: 0, 4: 5}
 
