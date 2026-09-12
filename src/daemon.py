@@ -29,6 +29,7 @@ from src.config import save_config
 from src.database import flag_for_web_scrape, flag_field_for_translation, flag_for_image
 from src.web_worker import WebScraperThread
 from src.image_worker import ImageScraperThread
+from src.backup import BackupThread
 
 
 # --- API merge allow-list ----------------------------------------------------
@@ -100,6 +101,20 @@ class Daemon:
         
         # Translator thread
         self.translator = TranslatorThread(config)
+
+        # Optional database backup into a pull-outbox. The feature defaults to
+        # OFF: it is only enabled when both `outbox_dir` (or `backup_dir`) and a
+        # positive `backup_interval_seconds` are configured, so turning it on for
+        # the live instance is a deliberate switch.
+        self.outbox_dir = daemon_config.get("outbox_dir") or daemon_config.get("backup_dir")
+        self.backup_interval_seconds = float(daemon_config.get("backup_interval_seconds") or 0)
+        self._backup_worker = None
+        if self.outbox_dir and self.backup_interval_seconds > 0:
+            self._backup_worker = BackupThread(
+                self.db_path, self.outbox_dir, self.backup_interval_seconds)
+            logging.info(
+                "Database backup enabled: outbox=%s interval=%ss",
+                self.outbox_dir, self.backup_interval_seconds)
         
         # State variables for dynamic delay adjustment
         self.api_successes = 0
@@ -219,6 +234,8 @@ class Daemon:
             self._web_worker.running = False
         if hasattr(self, '_image_worker'):
             self._image_worker.running = False
+        if self._backup_worker is not None:
+            self._backup_worker.running = False
 
     def expand_user_discovery(self):
         """
@@ -490,6 +507,8 @@ class Daemon:
         self._web_worker.start()
         self._image_worker = ImageScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value)
         self._image_worker.start()
+        if self._backup_worker is not None:
+            self._backup_worker.start()
         while self.running:
             self.process_batch()
             self._pid_file_removed()
@@ -503,6 +522,17 @@ class Daemon:
         self.translator.running = False
         self.translator.join(timeout=5)
         logging.info("Translator thread stopped.")
+        if self._backup_worker is not None:
+            self._backup_worker.running = False
+            self._backup_worker.join(timeout=5)
+            logging.info("Backup thread stopped.")
+            # Final synchronous snapshot, taken only after every writer thread
+            # has been joined so no writer can be mid-transaction. Backup
+            # failures are logged and swallowed: shutdown must still complete.
+            try:
+                self._backup_worker.run_now()
+            except Exception as e:
+                logging.error(f"Final database backup failed: {e}")
 
     def seed_database(self, target_new: int = 100):
         """
