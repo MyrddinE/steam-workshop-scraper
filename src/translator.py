@@ -35,6 +35,7 @@ class TranslatorThread(threading.Thread):
         super().__init__(daemon=True)
         self.config = config
         self.db_path = config.get("database", {}).get("path", "workshop.db")
+        self.batch_size = config.get("openai").get("batch", 20)
         self.running = True
 
     def run(self):
@@ -49,10 +50,10 @@ class TranslatorThread(threading.Thread):
 
         while self.running:
             try:
-                batch = get_next_batch_for_translation(self.db_path, limit=20)
+                batch = get_next_batch_for_translation(self.db_path, limit=self.batch_size)
                 if batch:
                     urgent = any(row.get("priority", 0) >= 5 for row in batch)
-                    if len(batch) >= 20 or urgent:
+                    if len(batch) >= self.batch_size or urgent:
                         self._translate_batch(batch, client, model)
                         time.sleep(1)
                     else:

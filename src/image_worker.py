@@ -140,7 +140,7 @@ class ImageScraperThread(threading.Thread):
                 self.image_successes = 0
                 if self.image_failures >= 2 and self.image_had_streak:
                     old = self.image_delay
-                    self.image_delay = round(self.image_delay * (1.05 ** 10), 3)
+                    self.image_delay = min(round(self.image_delay * (1.05 ** 10), 3),20)
                     logging.info(f"Multiple consecutive image failures! Increasing delay from {old} to {self.image_delay}s.")
                     if self._save_cb:
                         self._save_cb("image_delay_seconds", self.image_delay)

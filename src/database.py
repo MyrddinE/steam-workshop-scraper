@@ -966,7 +966,7 @@ def initialize_database(db_path: str):
 
     if db_version < 12:
         logging.info("Running migration 11->12: adding api_priority column...")
-        staleness_days = 30
+        staleness_days = 30 # Use default for migration
         threshold = int(time.time()) - staleness_days * 86400
 
         cols = {r[1] for r in cursor.execute("PRAGMA table_info(workshop_items)").fetchall()}
@@ -1501,7 +1501,7 @@ def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
     status_counts = [dict(row) for row in cursor.fetchall()]
 
     cursor.execute("""
-        SELECT dt_updated, dt_translated, title, short_description, extended_description,
+        SELECT dt_attempted, dt_updated, dt_translated, title, short_description, extended_description,
                translation_priority, title_en, short_description_en, extended_description_en
         FROM workshop_items
     """)
@@ -1517,7 +1517,7 @@ def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
 
     for item in all_items:
         translation_status[_classify_translation_status(item)] += 1
-        dt_updated_counts[_classify_fetch_recency(item["dt_updated"], staleness_days)] += 1
+        dt_updated_counts[_classify_fetch_recency(item["dt_attempted"], staleness_days)] += 1
 
     cursor.execute("SELECT MAX(dt_updated) FROM workshop_items")
     highest_dt_updated = cursor.fetchone()[0]

@@ -80,7 +80,7 @@ class WebScraperThread(threading.Thread):
                 self.web_successes = 0
                 if self.web_failures >= 2 and self.web_had_streak:
                     old = self.web_delay
-                    self.web_delay = round(self.web_delay * (1.05 ** 10), 3)
+                    self.web_delay = min(round(self.web_delay * (1.05 ** 10), 3),20)
                     logging.info(f"Multiple consecutive web scrape failures! Increasing web delay from {old} to {self.web_delay}s.")
                     if self._save_cb:
                         self._save_cb("web_delay_seconds", self.web_delay)

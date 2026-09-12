@@ -317,15 +317,6 @@ class Daemon:
                 logging.warning(f"[A:{item_id}] Item not found (404) via API. Marking as dead (status=-1).")
                 merged_data["status"] = -1
                 insert_or_update_item(self.db_path, merged_data)
-                self.api_failures += 1
-                self.api_successes = 0
-                if self.api_failures >= 2 and self.api_had_streak:
-                    old_delay = self.api_delay
-                    self.api_delay = round(self.api_delay * (1.05 ** 10), 3)
-                    set_api_delay(self.api_delay)
-                    logging.info(f"Multiple consecutive API failures! Increasing API delay from {old_delay} to {self.api_delay}s.")
-                    self._save_config_value("api_delay_seconds", self.api_delay)
-                    self.api_had_streak = False
                 continue
             elif api_status == 500:
                 logging.error(f"[A:{item_id}] API request failed (500). Retrying later.")
@@ -334,7 +325,7 @@ class Daemon:
                 self.api_successes = 0
                 if self.api_failures >= 2 and self.api_had_streak:
                     old_delay = self.api_delay
-                    self.api_delay = round(self.api_delay * (1.05 ** 10), 3)
+                    self.api_delay = min(round(self.api_delay * (1.05 ** 10), 3),2)
                     set_api_delay(self.api_delay)
                     logging.info(f"Multiple consecutive API failures! Increasing API delay from {old_delay} to {self.api_delay}s.")
                     self._save_config_value("api_delay_seconds", self.api_delay)
