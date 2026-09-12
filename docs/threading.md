@@ -1,6 +1,6 @@
 # Threading & Concurrency Model
 
-The daemon runs four background threads plus the main loop. The TUI and web server run in the main process with their own threading. This document covers thread responsibilities, shared state, locking, and coordination.
+The daemon runs three worker threads — web scraper, image downloader, and translator — plus the main loop, and one more (the backup thread) when database backups are configured. The TUI and web server run in the main process with their own threading. This document covers thread responsibilities, shared state, locking, and coordination.
 
 ---
 
@@ -8,32 +8,32 @@ The daemon runs four background threads plus the main loop. The TUI and web serv
 
 ### Main Loop (`run` / `process_batch`)
 
-Runs on the main thread. Spawns three worker threads, then enters a `while self.running` loop calling `process_batch` repeatedly. Each iteration:
+Runs on the main thread. Spawns the worker threads, then enters a `while self.running` loop calling `process_batch` repeatedly. Each iteration:
 1. Checks for PID file existence (graceful shutdown signal from TUI)
 2. Fetches items due for processing
 3. If none, triggers discovery (page-based or cursor-based)
 4. For each item: calls Steam API, merges data, writes to DB, flags for web/image/translation
 5. Dynamic API delay sleeps between items
 
-The main loop is the only thread that writes metadata fields (title, description, subscriptions, etc.) and the only thread that creates new items. It reads `dt_attempted` to determine staleness.
+The main loop is the only thread that writes metadata fields (title, description, subscriptions, etc.) and the only thread that creates new items. It reads `api_fetched_at` to determine staleness.
 
 ### Web Scraper Thread (`WebScraperThread`)
 
-Independent daemon thread. Picks up items with highest `needs_web_scrape` priority (10 = detail view, 5 = list view, 3 = new item, 1 = backlog). Downloads the Steam Community page, extracts extended_description and full-size preview_url. Writes `extended_description`, `preview_url`, `needs_web_scrape`, `dt_attempted`. Flags non-ASCII extended_description for translation.
+Independent daemon thread. Picks up items with highest `needs_web_scrape` priority (10 = detail view, 5 = list view, 3 = new item, 1 = backlog). Downloads the Steam Community page, extracts extended_description and tags. Writes `extended_description`, `needs_web_scrape`, `scrape_version`. Flags non-ASCII extended_description for translation.
 
-**Shared state**: Reads `workshop_items` (preview_url, extended_description, etc.), writes `extended_description`, `preview_url`, `needs_web_scrape`, `dt_attempted`, `image_extension` (via insert_or_update_item). Writes `translation_queue` via `flag_field_for_translation`.
+**Shared state**: Reads `workshop_items` (preview_url, extended_description, etc.), writes `extended_description`, `needs_web_scrape`, `scrape_version` (via `insert_or_update_item`). Writes `translation_queue` via `flag_field_for_translation`. On failure it raises `api_priority` to 2.
 
 ### Image Download Thread (`ImageScraperThread`)
 
-Independent daemon thread. Picks up items with highest `needs_image` priority. Downloads the preview image, detects MIME/extension, saves to `images/` directory. Writes `image_extension`, `needs_image`, `dt_attempted`.
+Independent daemon thread. Picks up items with highest `needs_image` priority. Downloads the preview image, detects MIME/extension, saves to the bucketed `images/` directory. Writes `image_extension`, `needs_image`, `scrape_version`.
 
-**Shared state**: Reads `workshop_items` (preview_url, image_extension, needs_image). Writes `image_extension`, `needs_image`, `dt_attempted`.
+**Shared state**: Reads `workshop_items` (preview_url, image_extension, needs_image). Writes `image_extension`, `needs_image`, `scrape_version`. On failure it decrements `needs_image` and raises `api_priority` to 2.
 
 ### Translation Thread (`TranslatorThread`)
 
 Independent daemon thread. Batch-fetches fields from `translation_queue` (up to 20), sends to OpenAI API, writes translated fields to `_en` columns. Handles both `workshop_items` (title_en, short_description_en, extended_description_en) and `users` (personaname_en).
 
-**Shared state**: Reads `translation_queue`. Writes `_en` columns on `workshop_items` and `users`, stamps `dt_translated`, deletes from `translation_queue`, resets `translation_priority` to 0 when queue is empty for an item.
+**Shared state**: Reads `translation_queue`. Writes `_en` columns on `workshop_items` and `users`, stamps `translate_version` on items and `translated_at` on users, deletes from `translation_queue`, resets `translation_priority` to 0 when the queue is empty for an item.
 
 ---
 
@@ -46,11 +46,11 @@ The database runs in WAL (Write-Ahead Logging) mode, set during `initialize_data
 ### Column Ownership
 
 No formal locking protocol exists, but columns have clear ownership:
-- **Main loop**: title, short_description, extended_description (via insert_or_update_item), subscriptions, favorited, views, tags, time_*, dt_found, wilson_*, translation_priority
-- **Web scraper**: extended_description, preview_url, needs_web_scrape
+- **Main loop**: title, short_description, extended_description (via insert_or_update_item), subscriptions, favorited, views, tags, `steam_*`, `first_seen_at`, `api_fetched_at`, `last_fetch_attempted_at`, `wilson_*`, `translation_priority`
+- **Web scraper**: extended_description, needs_web_scrape
 - **Image thread**: image_extension, needs_image
-- **Translator**: title_en, short_description_en, extended_description_en, personaname_en, dt_translated
-- **All threads**: dt_attempted (stamped by whoever last processed the item)
+- **Translator**: title_en, short_description_en, extended_description_en, personaname_en, translate_version (translated_at on users)
+- **Web scraper and image thread**: scrape_version (stamped by whichever last processed the item)
 
 ### Priority Bumping
 

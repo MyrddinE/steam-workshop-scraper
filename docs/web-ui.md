@@ -153,7 +153,7 @@ Proxies a Steam Workshop subscribe request using stored session credentials.
 
 ### `/api/sessionid` — POST
 
-Accepts sessionid from the userscript. Stores in `_sessionid` global (for server-side subscribe) and `_config["session"]["login_secure"]` (for Steam cookie). The TUI subscribe action also calls through the server endpoint.
+Accepts sessionid from the userscript. Stores it in the `_sessionid` global (for server-side subscribe); if the payload also carries a `login_secure` value, that is written to `_config["session"]["login_secure"]` (for the Steam cookie). The TUI subscribe action also calls through the server endpoint.
 
 ### `/api/stats`, `/api/tags`, `/api/authors`, `/api/analysis`
 

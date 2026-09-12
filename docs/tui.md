@@ -85,9 +85,9 @@ When items appear in the list, the TUI bumps their priority for web scraping, tr
 
 Displays detailed metadata for the selected item. Shows: formatted title, creator, Wilson scores with percentile-colored markup, created/updated dates (Steam timestamps formatted via `format_ts`), file size (color-coded via `format_size`), views (formatted via `format_count`), subscription/favorite counts (current/lifetime), tags (parsed via `parse_tags`), description text, and action buttons.
 
-**Translation toggle**: The `dt_translated` field determines whether the pane shows translated or original text. A "Show Original"/"Show Translation" button appears only when `dt_translated` is set.
+**Translation toggle**: The `translate_version` field determines whether the pane shows translated or original text. A "Show Original"/"Show Translation" button appears only when `translate_version` is set.
 
-**Queue indicator**: If `translation_priority > 0` and `dt_translated` is not set, a banner shows "Translation requested, currently in queue..."
+**Queue indicator**: If `translation_priority > 0` and `translate_version` is not set, a banner shows "Translation requested, currently in queue..."
 
 ### Detail Fetching
 
@@ -100,7 +100,7 @@ When a list item is highlighted, the TUI calls `bump_*_for_detail` functions (pr
 ### `StatsScreen`
 
 Opened by Ctrl+R. Displays:
-- **General Statistics**: status code distribution, dt_attempted recency (fresh/stale/blank), highest dt_updated
+- **General Statistics**: status code distribution, `last_fetch_attempted_at` recency (fresh/stale/blank), highest `api_fetched_at`
 - **Translation Status**: classification by translation state (Translated, ASCII, Queued, Needs Translation, No data)
 - **Priority Breakdowns**: counts by priority level for `translation_priority`, `needs_image`, and `needs_web_scrape`
 - **App Tracking**: per-AppID tracking data

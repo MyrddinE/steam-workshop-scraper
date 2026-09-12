@@ -118,7 +118,9 @@ The `search_items` function wraps FTS clauses in `w.rowid IN (SELECT rowid FROM 
 
 ### `workshop_fts` virtual table (database)
 
-A content-sync FTS5 table defined in migration 4→5. Uses `content='workshop_items', content_rowid='workshop_id'` to automatically read from the base table — no triggers needed. Columns: `title, title_en, short_description, short_description_en, extended_description, extended_description_en`.
+A content-sync FTS5 table defined in migration 4→5. Uses `content='workshop_items', content_rowid='workshop_id'`. Columns: `title, title_en, short_description, short_description_en, extended_description, extended_description_en`.
+
+The table is populated once, by an FTS5 `'rebuild'` in that migration. There are no triggers and no runtime rebuild, so the index does not reflect rows inserted or updated afterward (see [schema-migrations.md](schema-migrations.md)).
 
 FTS5 tokenizes text by whitespace and punctuation (default unicode61 tokenizer). Multi-word searches are implicit AND. Phrase searches use double-quoting. FTS5 uses an inverted index for near-instant substring matching — dramatically faster than `LIKE '%text%'` which requires a full table scan.
 
@@ -219,11 +221,11 @@ Checks whether an item's tags (parsed from JSON) match a filter. Used by `_evalu
 
 ### `VALID_SORT_COLS` (database)
 
-Whitelist of columns that can appear in `ORDER BY`. Any sort column not in this set produces an empty sort clause (no sorting). Contains: `title, file_size, subscriptions, favorited, views, workshop_id, time_created, time_updated, dt_updated, wilson_favorite_score, wilson_subscription_score`.
+Whitelist of columns that can appear in `ORDER BY`. Any sort column not in this set produces an empty sort clause (no sorting). Contains: `title, file_size, subscriptions, favorited, views, workshop_id, steam_created_at, steam_updated_at, api_fetched_at, wilson_favorite_score, wilson_subscription_score`.
 
 ### `_build_sort_clause` (database)
 
-Validates the sort column against `VALID_SORT_COLS`, then builds `ORDER BY w.{col} {ASC|DESC}`. The `w.` prefix prevents ambiguity in JOIN queries (both `workshop_items` and `users` have a `dt_updated` column).
+Validates the sort column against `VALID_SORT_COLS`, then builds `ORDER BY w.{col} {ASC|DESC}`. The `w.` prefix prevents ambiguity in JOIN queries (both `workshop_items` and `users` have an `api_fetched_at` column).
 
 ---
 
