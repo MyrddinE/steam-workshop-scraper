@@ -1142,6 +1142,19 @@ def initialize_database(db_path: str):
                 if _rename_column(table, old_name, new_name):
                     logging.info("  renamed %s.%s -> %s", table, old_name, new_name)
 
+        # queued_at is deliberately NOT backfilled: we genuinely do not know when
+        # the pre-existing queue rows were queued, and inventing a timestamp in a
+        # migration whose purpose is removing misleading values would defeat it.
+        # get_next_batch_for_translation keeps NULL (= unknown) ahead of dated
+        # rows, so ordering within the legacy backlog stays arbitrary until it
+        # drains.
+        queued_null_count = cursor.execute(
+            "SELECT COUNT(*) FROM translation_queue WHERE queued_at IS NULL"
+        ).fetchone()[0]
+        logging.info("  left queued_at NULL on %d pre-existing translation_queue rows; "
+                     "their ordering stays arbitrary until the backlog drains",
+                     queued_null_count)
+
         # --- Step 3: clear the migration artefact ----------------------------
         # Migration 10->11 repurposed dt_attempted into a Steam version key by
         # setting it to time_updated, but rows with no Steam payload kept their
