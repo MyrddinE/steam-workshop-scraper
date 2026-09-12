@@ -35,7 +35,7 @@ class TranslatorThread(threading.Thread):
         super().__init__(daemon=True)
         self.config = config
         self.db_path = config.get("database", {}).get("path", "workshop.db")
-        self.batch_size = config.get("openai").get("batch", 20)
+        self.batch_size = config.get("openai", {}).get("batch", 20)
         self.running = True
 
     def run(self):

@@ -477,6 +477,11 @@ def initialize_database(db_path: str):
         subscriptions INTEGER,
         favorited INTEGER,
         views INTEGER,
+        -- Legacy JSON tags column. Deliberately present here even though tags now
+        -- live in the workshop_tags junction table: migrations 1->2 and 5->6 both
+        -- read it, and on a fresh database user_version starts at 0 so the whole
+        -- migration chain runs. Migration 5->6 drops it at the end of the chain.
+        -- Removing it from this statement breaks fresh databases.
         tags TEXT,
         extended_description TEXT,
         language INTEGER,
