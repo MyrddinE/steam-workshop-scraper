@@ -1,14 +1,4 @@
 import os
-import tempfile
-
-# SQLite resolves its temporary-file directory once per process from
-# $SQLITE_TMPDIR (then $TMPDIR, /var/tmp, /usr/tmp, /tmp). Some sandboxed and
-# CI environments leave /var/tmp unwritable, and SQLite then fails index builds
-# with SQLITE_CANTOPEN instead of falling back. Point it at Python's writable
-# temp directory before the sqlite3 module is imported and caches its search
-# path.
-os.environ.setdefault("SQLITE_TMPDIR", tempfile.gettempdir())
-
 import sqlite3
 import shlex
 import re
