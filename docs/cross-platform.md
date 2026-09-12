@@ -58,9 +58,9 @@ On Windows with `--daemon`, the logger is configured with `_fix_windows_encoding
 
 ---
 
-## `dt_*` Timestamps
+## Timestamp Representation
 
-All daemon-managed timestamps are Unix epoch integers (seconds since 1970-01-01). This avoids platform-specific datetime string parsing and makes comparisons simple integer arithmetic. The conversion from ISO 8601 TEXT to INTEGER was done in migration v6→v7 using SQLite's `strftime('%s', col)` which works identically on all platforms.
+All daemon-managed timestamps are Unix epoch integers (seconds since 1970-01-01). This avoids platform-specific datetime string parsing and makes comparisons simple integer arithmetic. The conversion from ISO 8601 TEXT to INTEGER was done in migration v6→v7 using SQLite's `strftime('%s', col)`, which works identically on all platforms. The current columns and their meanings are in [timestamps.md](timestamps.md).
 
 ---
 

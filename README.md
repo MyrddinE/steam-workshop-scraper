@@ -90,6 +90,12 @@ workshop-tui
 *   **Phrases**: Wrap words in quotes to search for exact phrases (e.g., `"cool mod"`).
 *   **Numeric Fields**: Type `>= 1000` in the Subscriptions field to only see highly popular items.
 
+## Documentation
+
+Published documentation lives in [`docs/`](docs/README.md). Start with the
+[index](docs/README.md) for a map of the architecture, data model, pipeline, interfaces, and
+operations docs.
+
 ## Development & Testing
 
 This project was built using strict Test-Driven Development (TDD). The test suite includes unit tests, database concurrency tests, UI interaction tests, Unicode fuzzing, and live-internet contract verification.
