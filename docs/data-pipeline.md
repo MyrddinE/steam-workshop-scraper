@@ -168,11 +168,12 @@ Because a successful translation **deletes** its `translation_queue` row, `flag_
 staleness sweep — which returns every `status = 200` item to the fetch queue every
 `item_staleness_days` (default 30) — an enriched item with a non-ASCII title is re-flagged on each
 re-fetch, and the translator translates whatever is queued. **Unchanged, already-translated content
-is therefore re-translated on roughly a monthly cycle**, at API cost. Tracked in `code-issues.md`.
+is therefore re-translated on roughly a monthly cycle**, at API cost. Tracked in
+[code-issues.md](code-issues.md) (#3).
 
 Separately, nothing compares `steam_updated_at` against `translate_version`, so *changed* source text
 does not trigger re-translation either. The version keys exist for that decision; the decision is not
-implemented. See `timestamps.md`.
+implemented. See [timestamps.md](timestamps.md) and [code-issues.md](code-issues.md) (#4).
 
 ---
 

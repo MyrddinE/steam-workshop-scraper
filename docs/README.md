@@ -44,4 +44,4 @@ reference for the code in `src/`.
 
 | Document | Covers |
 |---|---|
-| [code-issues.md](code-issues.md) | Verified status of known defects, with evidence and an audit date. |
+| [code-issues.md](code-issues.md) | Known defects, each re-checked against the source, with status and priority. |

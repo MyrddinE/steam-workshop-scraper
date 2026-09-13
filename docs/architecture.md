@@ -63,6 +63,10 @@ For every identified `workshop_id`, the daemon executes a multi-stage enrichment
 * **Partial data handling**: A failed API request persists its outcome status and is retried
   (`500`) or marked dead (`-1`); a failed web scrape leaves the item's `needs_web_scrape` priority
   in place so it is retried, while the metadata already fetched stays usable.
+* **Error handling**: A failure is either recovered from or reported. A handler that recovers logs
+  the operation and the exception; silence is reserved for failures already represented by a return
+  value or a status column — a best-effort cleanup, an optional probe — and each such handler states
+  why silence is safe. Broad `except Exception` is uncommon and names what it protects.
 
 ### The Terminal User Interface (TUI)
 
