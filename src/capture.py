@@ -65,6 +65,25 @@ _app_version_cache = None
 _CLASS_RE = re.compile(rb"""class\s*=\s*["']([^"']*)["']""", re.IGNORECASE)
 _TITLE_RE = re.compile(rb"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
+# Element contents that tell you nothing about why a selector missed. A modern
+# Steam page is mostly script: in the live capture that prompted this, the first
+# 64 KB of a 303 KB page was <script> and <link> tags with no markup that
+# identified the document, so neither the artefact nor its shape digest
+# described the page. Removing these first spends the byte budget on markup.
+_NOISE_RE = re.compile(rb"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+
+
+def _strip_noise(raw: bytes) -> bytes:
+    """Drop script and style bodies, leaving the markup around them.
+
+    Purely a size measure: the elements are replaced by an empty pair so the
+    document's structure stays readable and the same input always strips the
+    same way.
+    """
+    if not raw:
+        return raw
+    return _NOISE_RE.sub(rb"<\1/>", raw)
+
 
 # ── configuration ────────────────────────────────────────────────────────────
 
@@ -343,9 +362,14 @@ def _record_failure(kind, stage, workshop_id, selector, http_status,
         raw = body.encode("utf-8", "replace")
     else:
         raw = bytes(body)
-    truncated = raw[:MAX_BODY_BYTES]
+    stripped = _strip_noise(raw)
+    retained = stripped[:MAX_BODY_BYTES]
+    retention = {
+        "truncated": len(stripped) > MAX_BODY_BYTES,
+        "noise_stripped": len(stripped) != len(raw),
+    }
 
-    digest, class_count, title_tag = describe_shape(truncated)
+    digest, class_count, title_tag = describe_shape(retained)
     gid = group_id(kind, selector, stage)
     now = _utc_now_iso()
 
@@ -380,7 +404,7 @@ def _record_failure(kind, stage, workshop_id, selector, http_status,
             variant["samples"] += 1
             group["sample_count"] += 1
             record = _write_sample(
-                gid, digest, variant["samples"], raw, truncated, kind, stage,
+                gid, digest, variant["samples"], raw, retained, retention, kind, stage,
                 workshop_id, selector, http_status, final_url, content_type,
                 class_count, title_tag, context, now)
             _flush_group(gid)
@@ -390,7 +414,7 @@ def _record_failure(kind, stage, workshop_id, selector, http_status,
         return None
 
 
-def _write_sample(gid, digest, sample_number, raw, truncated, kind, stage,
+def _write_sample(gid, digest, sample_number, raw, retained, retention, kind, stage,
                   workshop_id, selector, http_status, final_url, content_type,
                   class_count, title_tag, context, now):
     group_dir = os.path.join(failures_dir(_outbox_dir), gid)
@@ -398,7 +422,7 @@ def _write_sample(gid, digest, sample_number, raw, truncated, kind, stage,
     body_path = os.path.join(group_dir, stem + ".body")
     record_path = os.path.join(group_dir, stem + ".json")
 
-    _write_atomic(body_path, truncated)
+    _write_atomic(body_path, retained)
 
     record = {
         "kind": kind,
@@ -410,7 +434,8 @@ def _write_sample(gid, digest, sample_number, raw, truncated, kind, stage,
         "content_type": content_type,
         "body_file": _relative(_outbox_dir, body_path),
         "body_bytes": len(raw),
-        "body_truncated": len(raw) > len(truncated),
+        "body_truncated": retention["truncated"],
+        "body_noise_stripped": retention["noise_stripped"],
         "body_sha256": hashlib.sha256(raw).hexdigest(),
         "shape": {
             "class_digest": digest,
