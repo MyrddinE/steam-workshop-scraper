@@ -643,7 +643,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 14
+    EXPECTED_VERSION = 15
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -1210,6 +1210,79 @@ def initialize_database(db_path: str):
         cursor.execute("PRAGMA user_version = 14")
         conn.commit()
         logging.info("Migration 13->14 complete.")
+
+    if db_version < 15:
+        logging.info("Running migration 14->15: rebuilding the full-text index and adding sync triggers...")
+
+        # Migration 4->5 created workshop_fts and populated it once, but installed
+        # no triggers and never rebuilt it again. Every row inserted, updated or
+        # deleted since is therefore missing from the index: on the production
+        # database it held 640,471 documents against 1,725,544 items (62.9 %
+        # absent). Rebuild it from the content table first, then keep it correct.
+        cursor.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS workshop_fts USING fts5(
+                title, title_en,
+                short_description, short_description_en,
+                extended_description, extended_description_en,
+                content='workshop_items', content_rowid='workshop_id'
+            )
+        """)
+
+        # The rebuild rewrites a large part of the index, so commit and checkpoint
+        # it on its own before the DDL below starts. This mirrors migration 13->14:
+        # holding a multi-hundred-MB WAL open across later DDL is what produced
+        # SQLITE_CANTOPEN on this filesystem.
+        cursor.execute("INSERT INTO workshop_fts(workshop_fts) VALUES ('rebuild')")
+        conn.commit()
+        cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        logging.info("  full-text index rebuilt from workshop_items")
+
+        # External-content FTS5 has no way to look up a row's old tokens, so
+        # removal must go through the special 'delete' command with the OLD
+        # column values. A plain DELETE FROM workshop_fts would silently leave the
+        # old tokens in the index and corrupt every later MATCH.
+        _FTS_COLUMNS = ("title", "title_en", "short_description",
+                        "short_description_en", "extended_description",
+                        "extended_description_en")
+        fts_cols = ", ".join(_FTS_COLUMNS)
+        fts_new = ", ".join(f"new.{c}" for c in _FTS_COLUMNS)
+        fts_old = ", ".join(f"old.{c}" for c in _FTS_COLUMNS)
+
+        cursor.execute("DROP TRIGGER IF EXISTS workshop_items_fts_insert")
+        cursor.execute("DROP TRIGGER IF EXISTS workshop_items_fts_delete")
+        cursor.execute("DROP TRIGGER IF EXISTS workshop_items_fts_update")
+
+        cursor.execute(f"""
+            CREATE TRIGGER workshop_items_fts_insert AFTER INSERT ON workshop_items BEGIN
+                INSERT INTO workshop_fts(rowid, {fts_cols})
+                VALUES (new.workshop_id, {fts_new});
+            END
+        """)
+        cursor.execute(f"""
+            CREATE TRIGGER workshop_items_fts_delete AFTER DELETE ON workshop_items BEGIN
+                INSERT INTO workshop_fts(workshop_fts, rowid, {fts_cols})
+                VALUES ('delete', old.workshop_id, {fts_old});
+            END
+        """)
+        # Scoped to the six indexed columns on purpose: most writes to
+        # workshop_items are queue/priority updates that touch none of them, and an
+        # unscoped trigger would rewrite a chunk of the index on every priority
+        # bump. insert_or_update_item builds its SET list from the keys actually
+        # supplied, so this fires exactly when an indexed column is written.
+        cursor.execute(f"""
+            CREATE TRIGGER workshop_items_fts_update
+            AFTER UPDATE OF {fts_cols} ON workshop_items BEGIN
+                INSERT INTO workshop_fts(workshop_fts, rowid, {fts_cols})
+                VALUES ('delete', old.workshop_id, {fts_old});
+                INSERT INTO workshop_fts(rowid, {fts_cols})
+                VALUES (new.workshop_id, {fts_new});
+            END
+        """)
+
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 15")
+        conn.commit()
+        logging.info("Migration 14->15 complete.")
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")

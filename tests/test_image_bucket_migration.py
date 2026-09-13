@@ -59,11 +59,12 @@ def test_migration_12_to_13(tmp_path):
     # 4. Run initialize_database again (triggers migration 12->13 because db_version = 12)
     initialize_database(db_path)
     
-    # 5. Assert database version bumped to 14 (12->13 image buckets, then 13->14)
+    # 5. Assert database version bumped to the terminal version (12->13 image
+    # buckets, 13->14 renames, 14->15 full-text index)
     conn = get_connection(db_path)
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert version == 14
+    assert version == 15
     
     # 6. Assert files were migrated correctly
     # Case A should be moved
