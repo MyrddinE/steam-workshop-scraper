@@ -5,7 +5,7 @@ import io
 import sys
 import os
 from src.daemon import Daemon
-from src.config import load_config
+from src.config import ConfigError, load_config
 from src.database import initialize_database
 
 
@@ -78,6 +78,10 @@ def main():
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
         logging.error(f"Configuration file not found: {config_path}")
         sys.exit(1)
+    except ConfigError as exc:
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+        logging.error("%s", exc)
+        sys.exit(2)
 
     if is_daemon:
         _daemonize()
