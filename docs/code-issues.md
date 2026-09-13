@@ -26,6 +26,45 @@ as a backlog. Each claim below has been re-checked against the source rather tha
 | 11 | `_SafeStreamHandler` startup log is misleading | **Unverified (cosmetic)** | The handler exists (`daemon_runner.py`); log-message accuracy not assessed. |
 | 12 | JSON column dropped but leftover migration references tags | **Informational** | `database.py` drops the legacy column defensively and logs the skip. |
 
+## Issues found since this audit
+
+Not part of the original list above; these surfaced while verifying it.
+
+### 13. Background paths re-queue already-translated fields — present
+
+The daemon (`daemon.py`, `_flag_translations`) and the web scraper (`web_worker.py`) flag non-ASCII
+fields for translation without checking whether the `_en` counterpart is already populated. The two
+user-view paths (`bump_translation_for_list` / `_for_detail`) *do* check, so the guards are
+inconsistent across the four triggers.
+
+A successful translation deletes its `translation_queue` row, so the "already queued" check inside
+`flag_field_for_translation` gives no protection afterwards. Combined with the staleness sweep
+(`item_staleness_days`, default 30), an enriched item with a non-ASCII title is re-flagged and then
+re-translated on roughly a monthly cycle even when nothing about it has changed — repeated identical
+work and repeated OpenAI spend. The live snapshot already holds 704,525 non-ASCII titles and 142,748
+translations, so the recurring batch is large.
+
+Cheapest fix: add the `not translated` guard to the two background paths, matching the UI paths.
+
+### 14. Changed source text never triggers re-translation — gap
+
+`scrape_version` and `translate_version` record `steam_updated_at` at scrape and translation time,
+but nothing compares them against the current `steam_updated_at`. So when an author edits an item,
+its existing translation is never refreshed. Fixing #13 on its own would make that permanent, which
+is why the two belong together.
+
+### Related, documented elsewhere
+
+- **Full-text search is missing most of the library.** `workshop_fts` is content-sync with no
+  triggers, and the only `'rebuild'` sits inside the `db_version < 5` migration, so rows inserted
+  afterwards were never indexed: `workshop_fts_docsize` holds 640,471 documents against 1,725,544
+  items — **62.9% absent**. Detail in `search-filter.md` and `schema-migrations.md`.
+- `api_priority = 2` is written by the web and image worker failure paths, outside the documented
+  `0/1/3/5/10` scale (`data-model.md`).
+- `update_app_tracking` and `update_app_tracking_page` are imported by `daemon.py` but never called.
+
+Like the table above, this section is a snapshot. Re-read the code before acting on it.
+
 ## Bottom Line
 
 Five of the twelve claims were already resolved (#1, #2, #3, #5, #9) while still presented as live

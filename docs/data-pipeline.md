@@ -141,6 +141,39 @@ Inserts or bumps an entry in `translation_queue`, and also raises the parent row
 
 Called when items are displayed in the list or detail view. For each non-ASCII text field (title, short_description, extended_description), checks if the `_en` translated counterpart is already populated. If not, flags the field for translation at priority 5 (list) or 10 (detail). This ensures viewed items get translated promptly.
 
+### What queues a field for translation
+
+Four events add a field to `translation_queue`, and they do **not** apply the same guards.
+
+| Trigger | Code path | Fields | Priority | Checks already-translated? |
+|---|---|---|---|---|
+| Daemon enriches an item via the API | `daemon.py`, `_flag_translations` (from `_process_item`) | `title_en`, `short_description_en` | `max(3, inherited)` | **No** |
+| Web scrape succeeds | `web_worker.py`, `WebScraperThread` | `extended_description_en` | 3 | **No** |
+| Item appears in a list | `bump_translation_for_list` (TUI list load, `POST /api/search`) | all three | 5 | Yes |
+| Item opened in the detail pane | `bump_translation_for_detail` (TUI selection, `GET /api/item/<id>`) | all three | 10 | Yes |
+
+Two conditions apply to every trigger:
+
+- **Only non-empty, non-ASCII text is queued.** `flag_field_for_translation` returns immediately
+  for empty or ASCII text, so an ASCII-only title is never sent anywhere.
+- **Priority only rises.** Flagging a field already in the queue with a higher priority updates the
+  entry; a lower priority is ignored. It is never downgraded.
+
+The guard asymmetry matters. The two background triggers — the daemon and the web scraper — check
+only that the text is non-ASCII. The two user-view triggers additionally skip fields whose `_en`
+counterpart is already populated.
+
+Because a successful translation **deletes** its `translation_queue` row, `flag_field_for_translation`'s
+"already in the queue" check offers no protection once a field has been translated. Combined with the
+staleness sweep — which returns every `status = 200` item to the fetch queue every
+`item_staleness_days` (default 30) — an enriched item with a non-ASCII title is re-flagged on each
+re-fetch, and the translator translates whatever is queued. **Unchanged, already-translated content
+is therefore re-translated on roughly a monthly cycle**, at API cost. Tracked in `code-issues.md`.
+
+Separately, nothing compares `steam_updated_at` against `translate_version`, so *changed* source text
+does not trigger re-translation either. The version keys exist for that decision; the decision is not
+implemented. See `timestamps.md`.
+
 ---
 
 ## Display & Search Visibility
