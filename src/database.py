@@ -643,7 +643,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 15
+    EXPECTED_VERSION = 16
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -1314,6 +1314,39 @@ def initialize_database(db_path: str):
         conn.commit()
         logging.info("Migration 14->15 complete.")
 
+    if db_version < 16:
+        logging.info("Running migration 15->16: requeueing items stranded by transient API failures...")
+
+        # Before this version a transient API failure (status 500) cleared
+        # api_priority, and _promote_stale_items promotes only rows at status 200.
+        # A failed item therefore left every queue with nothing able to bring it
+        # back: not queued, and ineligible for the staleness sweep. On the
+        # production database that stranded 2,581 rows. Requeue them at backlog
+        # priority so they are retried rather than abandoned.
+        cursor.execute(
+            "UPDATE workshop_items SET api_priority = 1 "
+            "WHERE status = 500 AND api_priority = 0"
+        )
+        stranded_failures = cursor.rowcount
+
+        # Rows discovered but never attempted are unreachable for the same
+        # structural reason: not queued, and the sweep only promotes rows that
+        # have succeeded at least once. Permanent failures (status -1) are left
+        # alone -- they are correctly dequeued.
+        cursor.execute(
+            "UPDATE workshop_items SET api_priority = 1 "
+            "WHERE status IS NULL AND api_fetched_at IS NULL AND api_priority = 0"
+        )
+        stranded_unattempted = cursor.rowcount
+
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 16")
+        conn.commit()
+        logging.info(
+            "Migration 15->16 complete. Requeued %d transient failures and %d never-attempted items.",
+            stranded_failures, stranded_unattempted,
+        )
+
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON workshop_items (status)")
@@ -1488,6 +1521,26 @@ def count_unscraped_items(db_path: str) -> int:
     """Returns the number of items that have never been fetched via API (api_fetched_at is NULL)."""
     conn = get_connection(db_path)
     cursor = conn.execute("SELECT COUNT(workshop_id) as count FROM workshop_items WHERE api_fetched_at IS NULL")
+    row = cursor.fetchone()
+    conn.close()
+    return row["count"] if row else 0
+
+
+def count_fetchable_items(db_path: str) -> int:
+    """Returns how many items the API fetch queue can actually hand out.
+
+    This is the population ``get_next_items_to_scrape`` selects: queued and not
+    dead. It is deliberately distinct from ``count_unscraped_items``, which
+    counts items never successfully fetched regardless of whether they are
+    queued. Those two populations do not overlap, and treating the second as a
+    measure of the first is how discovery came to be suppressed permanently
+    while the fetch queue held a single item.
+    """
+    conn = get_connection(db_path)
+    cursor = conn.execute(
+        "SELECT COUNT(workshop_id) as count FROM workshop_items "
+        "WHERE api_priority > 0 AND (status IS NULL OR status != -1)"
+    )
     row = cursor.fetchone()
     conn.close()
     return row["count"] if row else 0

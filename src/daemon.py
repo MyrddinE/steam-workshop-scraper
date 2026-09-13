@@ -9,6 +9,7 @@ from src.database import (
     get_next_items_to_scrape, 
     insert_or_update_item, 
     count_unscraped_items, 
+    count_fetchable_items, 
     insert_or_update_user, 
     get_user, 
     flag_for_translation,
@@ -607,8 +608,18 @@ class Daemon:
             return
 
         for appid in self.target_appids:
-            if count_unscraped_items(self.db_path) >= target_new:
-                logging.info(f"Queue appropriately filled (>= {target_new}) for AppID {appid}. Skipping discovery.")
+            # The guard must measure work the fetch queue can actually hand out.
+            # It used to test count_unscraped_items -- items never successfully
+            # fetched -- which is a disjoint population: on production this read
+            # 890 while the fetch queue held 1, so discovery was suppressed
+            # permanently and the queue could never refill.
+            fetchable = count_fetchable_items(self.db_path)
+            if fetchable >= target_new:
+                logging.info(
+                    "Queue appropriately filled (%d fetchable, >= %d) for AppID %s. "
+                    "Skipping discovery. (%d items have never been fetched but are not queued.)",
+                    fetchable, target_new, appid, count_unscraped_items(self.db_path),
+                )
                 continue
 
             app_tracking = get_app_tracking(self.db_path, appid)
