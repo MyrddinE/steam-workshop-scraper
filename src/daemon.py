@@ -92,6 +92,11 @@ class Daemon:
         self.api_key = config.get("api", {}).get("key", "")
         self.batch_size = config.get("daemon", {}).get("batch_size", 10)
         daemon_config = config.get("daemon", {})
+        if daemon_config.get("api_delay_seconds") is None and daemon_config.get("request_delay_seconds") is not None:
+            logging.warning(
+                "Config key 'request_delay_seconds' is deprecated and still honoured; "
+                "rename it to 'api_delay_seconds'."
+            )
         self.api_delay = daemon_config.get("api_delay_seconds") or daemon_config.get("request_delay_seconds", 1.5)
         self.item_staleness_days = int(daemon_config.get("item_staleness_days") or 30)
         self.user_staleness_days = int(daemon_config.get("user_staleness_days") or 90)
