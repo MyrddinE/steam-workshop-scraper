@@ -56,7 +56,11 @@ No formal locking protocol exists, but columns have clear ownership:
 
 The `needs_web_scrape`, `needs_image`, and `translation_priority` columns use priority levels (10 = highest, 1 = lowest, 0 = done). Bump functions use `MAX(current, new_priority)` to upgrade without downgrading. This allows the main loop and frontend views to independently bump priority without coordination.
 
-The image thread uses a direct UPDATE to set `needs_image = max(0, current - 1)` on failure, deliberately using a non-MAX path to decrement priority for transient failures.
+The image thread uses a direct UPDATE to set `needs_image = max(0, current - 1)` on failure, deliberately using a non-MAX path to decrement priority for transient failures. The web scraper does the same for a selector miss, but floors at 1 (`MAX(1, needs_web_scrape - 1)`) so the item stays in its queue, and does not raise `api_priority`, because the request itself succeeded. See [failure-capture.md](failure-capture.md).
+
+### The Outbox Manifest
+
+Two producers write the same `manifest.json` when an outbox is configured: the backup thread (database snapshots) and the failure-capture writer. `update_manifest` reads, modifies and rewrites that one file, so its read-modify-write is serialised by a module lock in `backup.py`. Two separate **processes** sharing one outbox would still need a real file lock, which is not implemented.
 
 ### `insert_or_update_item` Concurrency
 

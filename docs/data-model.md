@@ -1,6 +1,6 @@
 # Data Model
 
-The database is a single SQLite file in WAL mode. Its current schema version is 14
+The database is a single SQLite file in WAL mode. Its current schema version is 15
 (`EXPECTED_VERSION` in `src/database.py`). All application state lives in three tables —
 `workshop_items`, `users`, and `translation_queue` — plus two tables that hold tags,
 `tags` and `workshop_tags`.
@@ -148,10 +148,13 @@ distribution of each queue.
 These are properties of the current implementation, stated so a reader does not infer behaviour
 that is not there.
 
-* **The version keys are written but never compared.** `scrape_version` and `translate_version`
-  record `steam_updated_at` at scrape and translation time, but no code compares them against the
-  current `steam_updated_at` to trigger a re-scrape or re-translation. The columns are honest
-  record-keeping; the decision logic does not exist.
+* **`translate_version` drives re-translation; `scrape_version` is only a record.** A translation
+  is current when its `translate_version` is not older than the item's `steam_updated_at`, and every
+  translation trigger applies that rule (see [timestamps.md](timestamps.md)). `scrape_version` is
+  written by the web scraper and the image worker, but no code compares it: the daemon decides
+  whether to re-queue the HTML scrape from `steam_updated_at` and whether `extended_description` is
+  already present, so the HTML scrape refreshes on an item update and the image worker uses its own
+  priority queue.
 * **`language` is never populated.** It is in `WORKSHOP_ITEM_COLUMNS` and the merge allow-list, so
   the API merge would store it if a response included it — none has, and it is NULL for every row
   in the live database.
