@@ -5,9 +5,8 @@ import os
 import logging
 import threading
 from datetime import datetime, timezone
-from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, flag_field_for_translation
+from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, flag_field_for_translation, translation_is_current
 from src.web_scraper import scrape_extended_details
-from src.translator import is_ascii
 
 
 class WebScraperThread(threading.Thread):
@@ -47,9 +46,15 @@ class WebScraperThread(threading.Thread):
                 }
                 insert_or_update_item(self.db_path, update)
 
-                # Flag extended description for translation
+                # Flag extended description for translation, unless the stored
+                # translation was taken at the item's current Steam revision.
+                # A selector miss is handled separately below and does not reach
+                # here (scrape_data is None on a request failure).
                 desc = scrape_data.get("description") or ""
-                if desc and not is_ascii(desc):
+                if desc and not translation_is_current(
+                        item.get("extended_description_en"),
+                        item.get("translate_version"),
+                        item.get("steam_updated_at")):
                     flag_field_for_translation(self.db_path, "item", workshop_id, "extended_description_en", desc, 3)
 
                 display = item.get("title_en") or item.get("title") or str(workshop_id)

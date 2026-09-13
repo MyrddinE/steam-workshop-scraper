@@ -26,7 +26,7 @@ from src.database import (
 from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries, query_workshop_files, set_api_delay, query_workshop_page_updated
 from src.translator import TranslatorThread, is_ascii
 from src.config import save_config
-from src.database import flag_for_web_scrape, flag_field_for_translation, flag_for_image
+from src.database import flag_for_web_scrape, flag_field_for_translation, flag_for_image, translation_is_current
 from src.web_worker import WebScraperThread
 from src.image_worker import ImageScraperThread
 from src.backup import BackupThread
@@ -446,14 +446,26 @@ class Daemon:
 
     def _flag_translations(self, merged_data: dict, item_id: int,
                            enriched: bool, inherited_prio: int) -> None:
-        """Flag title and short description for translation (non-ASCII only)."""
+        """Flag title and short description for translation.
+
+        The non-ASCII test lives in flag_field_for_translation. What this adds is
+        the freshness test: a field whose translation was taken at the item's
+        current Steam revision is left alone, so the staleness sweep does not
+        re-translate unchanged text, while a field left behind by a source edit
+        is re-queued. See translation_is_current.
+        """
         if not enriched:
             return
         t_prio = max(3, inherited_prio)
-        for field in [("title_en", merged_data.get("title")),
-                      ("short_description_en", merged_data.get("short_description"))]:
-            if field[1]:
-                flag_field_for_translation(self.db_path, "item", item_id, field[0], field[1], t_prio)
+        version = merged_data.get("translate_version")
+        steam_updated = merged_data.get("steam_updated_at")
+        for field, text, translated in [
+            ("title_en", merged_data.get("title"), merged_data.get("title_en")),
+            ("short_description_en", merged_data.get("short_description"),
+             merged_data.get("short_description_en")),
+        ]:
+            if text and not translation_is_current(translated, version, steam_updated):
+                flag_field_for_translation(self.db_path, "item", item_id, field, text, t_prio)
 
     def _refresh_creator(self, merged_data: dict, enriched: bool) -> None:
         """Refresh the creator's persona name if it is missing or stale."""

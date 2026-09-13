@@ -1998,6 +1998,33 @@ def bump_image_priority_for_detail(db_path: str, workshop_id: int):
     conn.close()
 
 
+def translation_is_current(translated_text, translate_version, steam_updated_at) -> bool:
+    """Whether a stored translation still matches the item's current revision.
+
+    ``translate_version`` records the item's ``steam_updated_at`` at the moment
+    the translation was stored (see ``TranslatorThread._translate_batch``), so a
+    translation is current when it exists and was taken at the item's current
+    Steam revision.
+
+    The background paths use this to decide whether to re-queue a field. Without
+    it they re-translate unchanged text on every staleness sweep; with only an
+    "is it translated" check, a genuine source edit would never refresh.
+
+    Unknown provenance (``translate_version`` NULL) counts as stale. That costs
+    one re-translation per row and is currently empty in the live database
+    (0 of 142,748 translated titles). Items with no Steam revision at all
+    (``steam_updated_at`` NULL) cannot have a change detected, so their
+    translations are treated as current rather than re-translated forever.
+    """
+    if not translated_text:
+        return False
+    if steam_updated_at is None:
+        return True
+    if translate_version is None:
+        return False
+    return translate_version >= steam_updated_at
+
+
 def flag_field_for_translation(db_path: str, item_type: str, item_id: int, field: str, text: str, priority: int):
     """Inserts a field into translation_queue, or bumps its priority. Never downgrades.
     Also bumps translation_priority on the parent item/user table."""
