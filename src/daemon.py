@@ -33,10 +33,15 @@ from src.image_worker import ImageScraperThread
 from src.backup import BackupThread
 from src import capture
 
-# API statuses the fetch path has an explicit branch for. Anything else would
-# fall through to the success path below and be persisted as 200, so it is
-# captured as evidence rather than silently misrecorded.
+# API statuses the fetch path has an explicit branch for. Anything else is
+# captured as evidence and then treated as temporary by _settle_api_failure; it
+# is never silently persisted as a success.
 HANDLED_API_STATUSES = frozenset({200, 404, 500})
+
+# The only API outcome that cannot succeed on retry. Everything else -- 500,
+# transport exceptions (which get_workshop_details_api reports as 500), and any
+# status without its own branch -- is retried at one priority level lower.
+PERMANENT_API_STATUSES = frozenset({404})
 
 
 # --- API merge allow-list ----------------------------------------------------
@@ -395,18 +400,14 @@ class Daemon:
         # at the front of its priority band in a tight loop. get_db_stats also
         # reports fetch recency from this column.
         merged_data["last_fetch_attempted_at"] = now_ts
+        # The pre-fetch priority is what a temporary failure steps down from, so
+        # take it before the queue fields are rewritten below.
+        previous_priority = existing_data.get("api_priority") or 0
         merged_data["api_priority"] = 0
         merged_data["status"] = api_status
 
-        if api_status == 404:
-            logging.warning(f"[A:{item_id}] Item not found (404) via API. Marking as dead (status=-1).")
-            merged_data["status"] = -1
-            insert_or_update_item(self.db_path, merged_data)
-            return
-        if api_status == 500:
-            logging.error(f"[A:{item_id}] API request failed (500). Retrying later.")
-            insert_or_update_item(self.db_path, merged_data)
-            self._record_api_failure()
+        if api_status != 200:
+            self._settle_api_failure(merged_data, item_id, api_status, previous_priority)
             return
 
         # Step 2: Merge, score, and queue follow-up work
@@ -429,6 +430,38 @@ class Daemon:
 
         logging.info(f"[A:{item_id}] \"{display_title}\"{' — \033[31mignored\033[0m' if not enriched else ''}")
         self._record_api_success()
+
+    def _settle_api_failure(self, merged_data: dict, item_id: int, api_status: int,
+                            previous_priority: int) -> None:
+        """Persist a failed API outcome: dequeue if permanent, step down if not.
+
+        A temporary failure keeps the item queued one priority level lower rather
+        than clearing its priority. Clearing it left the item in no queue at all,
+        and _promote_stale_items promotes only status 200, so a transient 500
+        became permanent. The floor is 1 because priority 0 means "not queued".
+
+        Statuses with no branch of their own reach here too, on purpose: falling
+        through to the success path would persist them as 200 and count them as a
+        success. The evidence is captured by the caller before this runs.
+        """
+        if api_status in PERMANENT_API_STATUSES:
+            logging.warning(
+                f"[A:{item_id}] Item not found ({api_status}) via API. "
+                "Recording the failure and marking it dead (status=-1)."
+            )
+            merged_data["status"] = -1
+            merged_data["api_priority"] = 0
+            insert_or_update_item(self.db_path, merged_data)
+            return
+
+        retry_priority = max(1, previous_priority - 1)
+        merged_data["api_priority"] = retry_priority
+        insert_or_update_item(self.db_path, merged_data)
+        logging.error(
+            f"[A:{item_id}] API request failed ({api_status}). "
+            f"Requeued at priority {retry_priority} to retry after the current queue."
+        )
+        self._record_api_failure()
 
     def _score_wilson(self, merged_data: dict) -> None:
         """Populate the derived Wilson scores from the freshly fetched counts."""

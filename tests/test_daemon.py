@@ -48,7 +48,7 @@ def test_daemon_init_missing_appids():
 def test_daemon_process_batch_success(mock_sleep, mock_flag_web, mock_insert, mock_insert_user, mock_get_user, mock_api, mock_get_items, mock_count, mock_config):
     mock_count.return_value = 1000
     mock_get_items.return_value = [{'workshop_id': 123}]
-    mock_api.return_value = {"title": "Test Mod", "creator": "111"}
+    mock_api.return_value = {"title": "Test Mod", "creator": "111", "status": 200}
     mock_get_user.return_value = {"steamid": 111, "api_fetched_at": 1767225600}
 
     daemon = Daemon(mock_config)
@@ -134,7 +134,10 @@ def test_api_delay_decreases_on_success(mock_sleep, mock_flag_web, mock_insert, 
     items = [{'workshop_id': i} for i in range(100)]
     mock_count.return_value = 1000
     mock_get_items.return_value = items
-    mock_api.return_value = {"title": "Mod", "creator": "111"}
+    # A fresh dict per call: _merge_and_clean_api_data pops keys off the response,
+    # so a shared mock object loses its "status" after the first item and every
+    # later item reads as an unhandled code rather than a success.
+    mock_api.side_effect = lambda *a, **k: {"title": "Mod", "creator": "111", "status": 200}
     mock_get_user.return_value = {"steamid": 111, "api_fetched_at": 1767225600}
 
     daemon = Daemon(mock_config)
@@ -246,7 +249,7 @@ def test_process_batch_inherits_priority(
     mock_api, mock_count, mock_items, mock_save, mock_init, mock_config
 ):
     """flag_for_web_scrape and flag_for_image get max(inherited, default)."""
-    mock_api.return_value = {"title": "Test", "creator": "111", "preview_url": "http://x"}
+    mock_api.return_value = {"title": "Test", "creator": "111", "preview_url": "http://x", "status": 200}
     mock_items.return_value = [{"workshop_id": 1, "api_priority": 5, "status": 200}]
     mock_user.return_value = None
     daemon = Daemon(mock_config)
