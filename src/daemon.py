@@ -476,20 +476,25 @@ class Daemon:
                                item_id: int, inherited_prio: int) -> bool:
         """Queue web-scrape and image work for this item.
 
-        Returns whether the item was enriched. Note the mixed sources: the
-        unchanged-check compares the pre-fetch record against the merged one, so
-        both must be passed.
+        Returns whether the item was enriched. Both stages are gated on the same
+        revision test, because the API refresh is the change detector: it is the
+        cheapest call and the only stage that goes stale on a timer, so when it
+        observes an unchanged steam_updated_at the dependent work is already
+        current and is not re-queued. Per-queue staleness sweeps are deliberately
+        not used.
+
+        Note the mixed sources: the revision comparison is between the pre-fetch
+        record and the merged one, so both must be passed.
         """
+        old_steam_updated = existing_data.get("steam_updated_at")
+        new_steam_updated = merged_data.get("steam_updated_at")
+        revision_unchanged = (old_steam_updated is not None
+                              and old_steam_updated == new_steam_updated)
+
         appid = merged_data.get("consumer_appid")
         enriched = False
         if self._should_enrich(appid, merged_data):
-            old_steam_updated = existing_data.get("steam_updated_at")
-            new_steam_updated = merged_data.get("steam_updated_at")
-            unchanged = (existing_data.get("extended_description") is not None
-                         and old_steam_updated is not None
-                         and old_steam_updated == new_steam_updated)
-
-            if unchanged:
+            if revision_unchanged and existing_data.get("extended_description") is not None:
                 merged_data["extended_description"] = existing_data["extended_description"]
                 enriched = True
             else:
@@ -498,9 +503,13 @@ class Daemon:
         else:
             flag_for_web_scrape(self.db_path, item_id, max(1, inherited_prio))
 
-        # Flag for image download if preview URL is present
-        if merged_data.get("preview_url"):
-            flag_for_image(self.db_path, item_id, max(3, inherited_prio) if enriched else max(1, inherited_prio))
+        # Image work, on the same revision test. Without it every API fetch
+        # re-flagged the image, so previews that had not changed were downloaded
+        # again on each staleness cycle.
+        if merged_data.get("preview_url") and not (
+                revision_unchanged and existing_data.get("image_extension")):
+            flag_for_image(self.db_path, item_id,
+                           max(3, inherited_prio) if enriched else max(1, inherited_prio))
         return enriched
 
     def _flag_translations(self, merged_data: dict, item_id: int,
