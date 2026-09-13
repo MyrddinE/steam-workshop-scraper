@@ -426,3 +426,53 @@ async def test_tui_clear_pending_command(tmp_path):
             assert 1 not in ids
 
 
+@pytest.mark.asyncio
+async def test_tui_detail_priority_applied_once_per_pane_load(mock_config, mock_results):
+    """Pane load applies detail priority once; the 2-second refresh does not.
+
+    Regression: the bumps lived in the list-highlight handler, which fires on
+    every highlight move, so arrowing through the list re-queued every item it
+    passed at detail priority.
+    """
+    def get_details_mock(db, wid):
+        for r in mock_results:
+            if r["workshop_id"] == wid:
+                return r
+        return None
+
+    with patch('src.tui.load_config', return_value=mock_config), \
+         patch('src.tui.search_items', return_value=mock_results), \
+         patch('src.tui.get_item_details', side_effect=get_details_mock), \
+         patch('src.tui.get_all_authors', return_value=["Author A"]), \
+         patch('src.tui.bump_api_priority_for_detail') as mock_api_bump, \
+         patch('src.tui.bump_web_priority_for_detail'), \
+         patch('src.tui.bump_image_priority_for_detail'), \
+         patch('src.tui.bump_translation_for_detail'):
+
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+
+            list_view = app.query_one(ListView)
+            list_view.index = 0
+            app.set_focus(list_view)
+            await pilot.pause(ASYNC_PAUSE)
+
+            assert mock_api_bump.call_count == 1, "pane load applies detail priority exactly once"
+
+            # Re-highlighting the item the pane already holds must not re-bump.
+            # This is the case the old highlight-handler placement got wrong: it
+            # bumped on every Highlighted event, not on every pane change.
+            from textual.widgets import ListView as _LV
+            app.post_message(_LV.Highlighted(list_view, list_view.children[0]))
+            await pilot.pause(ASYNC_PAUSE)
+            assert mock_api_bump.call_count == 1, "a repeat highlight must not re-queue the item"
+
+            from src.tui import DetailsPane
+            pane = app.query_one("#item-details", DetailsPane)
+            await pane.refresh_data()
+            await pilot.pause(ASYNC_PAUSE)
+
+            assert mock_api_bump.call_count == 1, "the refresh poll must not re-queue the item"
+
+

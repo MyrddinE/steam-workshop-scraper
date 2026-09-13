@@ -491,6 +491,7 @@ function _startDetailPoll(wid, item) {
   _detailPollWid = wid;
   _detailPollTimer = setInterval(async () => {
     try {
+      // Read-only: this polls every 3s, so it must never re-arm the fetch queue.
       const resp = await fetch('/api/item/' + wid);
       if (!resp.ok || wid !== _detailPollWid) { _stopDetailPoll(); return; }
       const updated = await resp.json();
@@ -513,7 +514,9 @@ async function showDetail(wid) {
   const pane = document.getElementById('detail-pane');
   pane.innerHTML = '<p>Loading...</p>';
   try {
-    const resp = await fetch('/api/item/' + wid);
+    // Opening a pane is the one path that applies detail priority. The 3-second
+    // poll below uses the read-only route, so it cannot re-queue the item.
+    const resp = await fetch('/api/item/' + wid + '/open', {method: 'POST'});
     if (!resp.ok) {
       pane.innerHTML = `<p>Error loading item ${wid}: ${resp.status} ${resp.statusText}</p>`;
       return;
