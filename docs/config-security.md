@@ -94,7 +94,7 @@ Deep-merges the in-memory config into the disk file, preserving keys not present
 
 - API keys (`STEAM_API_KEY`, `OPENAI_API_KEY`) are loaded from environment variables or the config file. The config file should not contain these keys.
 - `save_config` strips any config value that matches an environment variable before writing — this prevents accidentally persisting env-derived secrets.
-- The `session.id` and `session.login_secure` are stored in the config file. These are Steam session cookies that authenticate API requests. They should be treated as secrets.
+- The `session.id` and `session.login_secure` are stored in the config file. These are Steam session cookies. `sessionid` is a CSRF token; `steamLoginSecure` is what authenticates the session, and it is what the subscribe call and the workshop scrape both send. Treat both as secrets. `steamLoginSecure` expires, and the userscript refreshes it by pushing to `/api/sessionid`, which persists it so the daemon picks it up without a restart.
 
 ### Session Cookie Handling
 

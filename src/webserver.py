@@ -8,6 +8,7 @@ import requests
 from flask import Flask, request, jsonify, render_template, send_from_directory
 from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, get_queued_items, FILTER_SCHEMA, bump_api_priority_for_detail
 from src.analysis import view_window_analysis
+from src.config import login_secure_value, save_config
 
 app = Flask(__name__, template_folder='../templates')
 app.config['TEMPLATES_AUTO_RELOAD'] = True
@@ -15,12 +16,14 @@ _db_path = "workshop.db"
 _config = {}
 _images_dir = "images"
 _sessionid = ""
+_config_path = "config.yaml"
 
 
-def init_webserver(db_path: str, config: dict):
-    global _db_path, _config, _images_dir
+def init_webserver(db_path: str, config: dict, config_path: str = "config.yaml"):
+    global _db_path, _config, _images_dir, _config_path
     _db_path = db_path
     _config = config
+    _config_path = config_path
     _images_dir = os.path.join(os.path.dirname(os.path.abspath(db_path)), "images")
 
 
@@ -375,9 +378,7 @@ def api_subscribe(workshop_id):
     if not appid:
         return jsonify({"success": -1, "message": "Item has no AppID."}), 400
 
-    login = _config.get("session", {}).get("login_secure", "")
-    if isinstance(login, list):
-        login = '%7C%7C'.join(str(v) for v in login)
+    login = login_secure_value(_config)
     logging.info(f"[Subscribe] POSTing to Steam: id={workshop_id}, appid={appid}, sessionid={sid[:6]}..., login={'set' if login else 'missing'}")
     try:
         resp = requests.post(
@@ -418,7 +419,18 @@ def api_sessionid():
         _sessionid = sid
         if login_secure:
             _config.setdefault("session", {})["login_secure"] = login_secure
-        logging.info(f"SessionID updated from userscript (login_secure: {'set' if login_secure else 'missing'})")
+            # Persist it so the daemon sees it. The daemon is a separate process
+            # from this web server, and the web scraper re-reads config.yaml for
+            # each request, so this is what makes a refreshed login cookie take
+            # effect without restarting anything.
+            try:
+                save_config(_config_path, _config)
+                state = "set and persisted"
+            except Exception as exc:
+                state = f"set but not persisted ({exc})"
+        else:
+            state = "missing"
+        logging.info(f"SessionID updated from userscript (login_secure: {state})")
         return jsonify({"ok": True})
     return jsonify({"ok": False, "message": "No sessionid provided."}), 400
 

@@ -5,7 +5,7 @@ import sys
 import time
 import requests.utils
 import logging
-from src.config import load_config
+from src.config import load_config, login_secure_value
 
 _last_web_call = 0.0
 _WEB_DELAY = 5.0
@@ -30,12 +30,23 @@ def _rate_limit():
 
 
 def _build_workshop_cookies(config: dict) -> dict:
-    """Builds cookies dict for Steam Workshop requests."""
+    """Cookies for Steam Workshop requests, including the login cookie.
+
+    `steamLoginSecure` is the one that authenticates the session — `sessionid`
+    is a CSRF token and does nothing on its own. Without it every request is
+    anonymous, so items Steam only serves to signed-in users come back as an
+    error page or an age check rather than the item. It is omitted entirely
+    when unset, so an anonymous configuration sends exactly what it did before.
+    """
     session_id = config.get("session", {}).get("id", "")
-    return {
+    cookies = {
         'workshop_preferences_v2': '%7B%22bOptedIn%22%3Atrue%7D',
-        'sessionid': session_id
+        'sessionid': session_id,
     }
+    login_secure = login_secure_value(config)
+    if login_secure:
+        cookies['steamLoginSecure'] = login_secure
+    return cookies
 
 def _build_browse_url_params(appid: int, start_date: int, end_date: int, page: int,
                               search_text: str = "", required_tags: list[str] = None,
@@ -87,6 +98,22 @@ def _extract_total_pages(response) -> int:
     page_match = page_pattern.search(response.text)
     return int(page_match.group(1)) if page_match else 1
 
+def _workshop_cookies_or_empty() -> dict:
+    """Cookies for the current config, or none if it cannot be read.
+
+    Read per call rather than cached: the login cookie is short-lived and is
+    refreshed by the userscript pushing to `/api/sessionid`, which persists it.
+    Caching it for the process lifetime would mean a refreshed cookie never took
+    effect until the daemon restarted. An unreadable config yields an anonymous
+    request rather than a failed scrape.
+    """
+    try:
+        return _build_workshop_cookies(load_config("config.yaml"))
+    except Exception as exc:
+        logging.debug("Scraping without cookies: %s", exc)
+        return {}
+
+
 def scrape_extended_details(item_url: str) -> dict | None:
     """
     Scrapes the extended description and tags from a Steam Workshop page.
@@ -99,7 +126,7 @@ def scrape_extended_details(item_url: str) -> dict | None:
     session = HTMLSession()
     _rate_limit()
     try:
-        response = session.get(item_url, timeout=10)
+        response = session.get(item_url, timeout=10, cookies=_workshop_cookies_or_empty())
         response.raise_for_status()
 
         description_element = response.html.find(DESCRIPTION_SELECTOR, first=True)

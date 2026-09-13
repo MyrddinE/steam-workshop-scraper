@@ -24,7 +24,7 @@ def main():
         sys.exit(2)
     db_path = config.get("database", {}).get("path", "workshop.db")
     initialize_database(db_path)
-    init_webserver(db_path, config)
+    init_webserver(db_path, config, config_path=config_path)
 
     web_config = config.get("web", {})
     port = web_config.get("port", 8080)
