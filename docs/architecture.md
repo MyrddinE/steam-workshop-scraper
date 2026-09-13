@@ -62,11 +62,18 @@ For every identified `workshop_id`, the daemon executes a multi-stage enrichment
   cleanly.
 * **Partial data handling**: A failed API request persists its outcome status and is retried
   (`500`) or marked dead (`-1`); a failed web scrape leaves the item's `needs_web_scrape` priority
-  in place so it is retried, while the metadata already fetched stays usable.
+  in place so it is retried, while the metadata already fetched stays usable. A selector miss is
+  treated as a failure too: the item stays queued, stepped down by one so it sinks below current
+  work.
 * **Error handling**: A failure is either recovered from or reported. A handler that recovers logs
   the operation and the exception; silence is reserved for failures already represented by a return
   value or a status column — a best-effort cleanup, an optional probe — and each such handler states
   why silence is safe. Broad `except Exception` is uncommon and names what it protects.
+* **Failure capture**: When the scraper meets input it cannot handle — a selector that no longer
+  matches, an API body that is not JSON, an API status with no branch — the response is written to
+  the pull-outbox as a bounded, structured artefact so a regression test can be built from it, and
+  registered in the same manifest the database snapshots use. Off unless an outbox is configured.
+  See [failure-capture.md](failure-capture.md).
 
 ### The Terminal User Interface (TUI)
 

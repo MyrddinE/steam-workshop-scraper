@@ -120,7 +120,9 @@ The `search_items` function wraps FTS clauses in `w.rowid IN (SELECT rowid FROM 
 
 A content-sync FTS5 table defined in migration 4→5. Uses `content='workshop_items', content_rowid='workshop_id'`. Columns: `title, title_en, short_description, short_description_en, extended_description, extended_description_en`.
 
-The table is populated once, by an FTS5 `'rebuild'` in that migration. There are no triggers and no runtime rebuild, so the index does not reflect rows inserted or updated afterward (see [schema-migrations.md](schema-migrations.md)).
+The table was populated once, by an FTS5 `'rebuild'` in that migration, and for a long time nothing maintained it afterwards — it held 640,471 documents against 1,725,544 items, so 62.9% of the library was invisible to Full Text search. Migration 14→15 rebuilds it and installs three sync triggers on `workshop_items` (insert, delete, and update scoped to the six indexed columns), so the index now tracks every write.
+
+Because the table is *external content*, the update and delete triggers remove the old row with the FTS5 `'delete'` command carrying the previous column values. A plain `DELETE FROM workshop_fts` would leave the old tokens behind and corrupt later matches. The update trigger is scoped with `AFTER UPDATE OF` the six columns on purpose: most writes to `workshop_items` are queue and priority updates that touch none of them, and an unscoped trigger would rewrite part of the index on every priority bump. See [schema-migrations.md](schema-migrations.md) for the migration itself.
 
 FTS5 tokenizes text by whitespace and punctuation (default unicode61 tokenizer). Multi-word searches are implicit AND. Phrase searches use double-quoting. FTS5 uses an inverted index for near-instant substring matching — dramatically faster than `LIKE '%text%'` which requires a full table scan.
 

@@ -2,6 +2,8 @@ import requests
 import time
 import logging
 
+from src import capture
+
 _last_api_call = 0.0
 _API_DELAY = 1.5
 
@@ -41,7 +43,22 @@ def get_workshop_details_api(item_id: int, api_key: str) -> dict | None:
     try:
         response = requests.post(url, data=data, timeout=10)
         response.raise_for_status()
-        json_data = response.json()
+        try:
+            json_data = response.json()
+        except ValueError:
+            # Not JSON: an HTML error page, a proxy notice, a truncated body.
+            # Capture the evidence, then re-raise so control flow is unchanged -
+            # the caller's existing handling of this exception still applies.
+            capture.record_failure(
+                kind="api_unparsed_body",
+                stage="api_fetch",
+                workshop_id=item_id,
+                http_status=response.status_code,
+                final_url=url,
+                body=response.text,
+                content_type=response.headers.get("Content-Type"),
+            )
+            raise
         
         details = json_data.get("response", {}).get("publishedfiledetails", [])
         if not details:

@@ -79,19 +79,20 @@ Checks whether an item passes the enrichment filter for its AppID. Reads `enrich
 A daemon thread that picks up items from `get_next_web_scrape_item`, ordered by `needs_web_scrape DESC, api_fetched_at ASC` (highest priority first, oldest-fetched within priority). For each item:
 
 1. Calls `scrape_extended_details(url)` which fetches the Steam Community workshop page and parses the extended description and tags.
-2. If successful, updates `extended_description`, sets `needs_web_scrape = 0`, and records `scrape_version = steam_updated_at`. The tags the scraper returns are not persisted; tags in the database come from the API.
-3. Flags non-ASCII extended_description for translation at priority 3 via `flag_field_for_translation`.
-4. On failure, raises `api_priority` to 2 so the item is retried (that value has no other source); nothing is cleared, so the item stays in the scrape queue.
+2. If the description was found, updates `extended_description`, sets `needs_web_scrape = 0`, and records `scrape_version = steam_updated_at`. The tags the scraper returns are not persisted; tags in the database come from the API.
+3. Flags non-ASCII `extended_description` for translation at priority 3, unless its translation is already current (see [What queues a field for translation](#what-queues-a-field-for-translation)).
+4. If the request failed, raises `api_priority` to 2 so the item is retried (that value has no other source); nothing is cleared, so the item stays in the scrape queue.
+5. If the page loaded but the description selector did **not** match, that is a failure rather than an empty success: the response is captured as evidence and `needs_web_scrape` is stepped down by one, floored at 1, so the item stays queued but sinks below current work. See [failure-capture.md](failure-capture.md).
 
-**Dynamic delay**: Same 100-success / 2-failure compounding pattern as the daemon, but with its own `web_delay_seconds` config key.
+**Dynamic delay**: Same 100-success / 2-failure compounding pattern as the daemon, but with its own `web_delay_seconds` config key. A selector miss does not participate: the request succeeded, so slowing down would not help.
 
 ### `scrape_extended_details` (web_scraper)
 
 Fetches the HTML page `steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}`. Parses the DOM using `requests-html` to extract:
-- `description`: the full extended description (from `.workshopItemDescription#highlightContent`)
-- `tags`: the tag names from `.workshopTags a`
+- `description`: the full extended description (from `DESCRIPTION_SELECTOR`, `.workshopItemDescription#highlightContent`)
+- `tags`: the tag names from `TAGS_SELECTOR`, `.workshopTags a`
 
-Returns a dict with those two keys, or `None` on any request failure. The caller stores only `description`; the `tags` key is discarded.
+Returns a dict, or `None` on any request failure. A successful request whose description selector did not match returns `description: None` — truthy, so the caller must test the description and not the dict. On that miss the dict also carries the response `body`, `http_status` and `final_url` so the caller can capture it; on a successful parse `body` is `None`, since there is no reason to retain a few hundred KB of HTML on the happy path. The caller stores only `description`; the `tags` key is discarded.
 
 ---
 
@@ -143,12 +144,13 @@ Called when items are displayed in the list or detail view. For each non-ASCII t
 
 ### What queues a field for translation
 
-Four events add a field to `translation_queue`, and they do **not** apply the same guards.
+Four events add a field to `translation_queue`. They all apply the same freshness
+rule; they differ only in which fields they consider and at what priority.
 
-| Trigger | Code path | Fields | Priority | Checks already-translated? |
+| Trigger | Code path | Fields | Priority | Skips a current translation? |
 |---|---|---|---|---|
-| Daemon enriches an item via the API | `daemon.py`, `_flag_translations` (from `_process_item`) | `title_en`, `short_description_en` | `max(3, inherited)` | **No** |
-| Web scrape succeeds | `web_worker.py`, `WebScraperThread` | `extended_description_en` | 3 | **No** |
+| Daemon enriches an item via the API | `daemon.py`, `_flag_translations` (from `_process_item`) | `title_en`, `short_description_en` | `max(3, inherited)` | Yes |
+| Web scrape succeeds | `web_worker.py`, `WebScraperThread` | `extended_description_en` | 3 | Yes |
 | Item appears in a list | `bump_translation_for_list` (TUI list load, `POST /api/search`) | all three | 5 | Yes |
 | Item opened in the detail pane | `bump_translation_for_detail` (TUI selection, `GET /api/item/<id>`) | all three | 10 | Yes |
 
@@ -159,21 +161,25 @@ Two conditions apply to every trigger:
 - **Priority only rises.** Flagging a field already in the queue with a higher priority updates the
   entry; a lower priority is ignored. It is never downgraded.
 
-The guard asymmetry matters. The two background triggers — the daemon and the web scraper — check
-only that the text is non-ASCII. The two user-view triggers additionally skip fields whose `_en`
-counterpart is already populated.
+A field is queued when it has no translation **or** its translation is out of date.
+`translation_is_current` states the rule: a translation is current when the `_en` value exists and
+its `translate_version` is not older than the item's `steam_updated_at`. The translator stamps
+`translate_version` with `steam_updated_at` at translation time, so a source edit makes the
+translation stale and it is re-queued; unchanged text is left alone. See
+[timestamps.md](timestamps.md).
 
-Because a successful translation **deletes** its `translation_queue` row, `flag_field_for_translation`'s
-"already in the queue" check offers no protection once a field has been translated. Combined with the
-staleness sweep — which returns every `status = 200` item to the fetch queue every
-`item_staleness_days` (default 30) — an enriched item with a non-ASCII title is re-flagged on each
-re-fetch, and the translator translates whatever is queued. **Unchanged, already-translated content
-is therefore re-translated on roughly a monthly cycle**, at API cost. Tracked in
-[code-issues.md](code-issues.md) (#3).
+This replaced a pair of defects. The two background triggers used to check only that the text was
+non-ASCII, while the two user-view triggers also checked for an existing translation. Since a
+successful translation **deletes** its queue row, `flag_field_for_translation`'s "already in the
+queue" check offered no protection afterwards — so with the staleness sweep returning every
+`status = 200` item to the fetch queue about monthly, an enriched item with a non-ASCII title was
+re-translated roughly monthly whether or not anything had changed. Meanwhile nothing compared the
+version keys, so *changed* text was never refreshed either. Both are fixed; the freshness rule is
+what keeps the two from contradicting each other.
 
-Separately, nothing compares `steam_updated_at` against `translate_version`, so *changed* source text
-does not trigger re-translation either. The version keys exist for that decision; the decision is not
-implemented. See [timestamps.md](timestamps.md) and [code-issues.md](code-issues.md) (#4).
+Because the version key is per item, not per field, a change to any Steam-visible field re-queues
+all non-ASCII fields of that item. That is coarser than strictly necessary, but it is the
+granularity of the only version stamp that exists.
 
 ---
 

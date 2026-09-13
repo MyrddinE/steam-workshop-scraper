@@ -69,9 +69,37 @@ never received API content at all (`steam_updated_at IS NULL`). Those rows now r
 never-fetched, which is correct. See [schema-migrations.md](schema-migrations.md) for the full
 migration-13→14 behaviour.
 
-## The Version Keys Are Not Compared
+## How the Version Keys Are Used
 
-`scrape_version` and `translate_version` faithfully record the Steam update time at which the
-scraper and translator ran. Nothing compares them against the current `steam_updated_at`: there is
-no code that re-scrapes or re-translates when the two disagree. The intended behaviour is not
-implemented; the columns are records, not triggers.
+`scrape_version` and `translate_version` record the Steam update time at which the scraper and
+translator ran. Both are now compared against the current `steam_updated_at`, which is what makes
+them useful rather than merely honest.
+
+**Translation.** `translation_is_current(translated_text, translate_version, steam_updated_at)`
+decides whether a field needs (re-)translating. A translation is current when the `_en` value exists
+and `translate_version >= steam_updated_at`; otherwise the field is queued. Every trigger in
+[data-pipeline.md](data-pipeline.md) applies this rule, so unchanged text is not re-translated and
+edited text is.
+
+The rule's edges are deliberate:
+
+* **No `_en` value** → not current, so the field is queued. Missing text always needs translating.
+* **`steam_updated_at IS NULL`** (an item that never received a Steam payload) → treated as
+  **current**, because no change can be detected; otherwise such items would be re-translated
+  forever. The translator stamps the wall clock in this case, since there is no Steam value to
+  record.
+* **`translate_version IS NULL` with an `_en` value present** → treated as **stale**, because the
+  provenance is unknown. This costs one re-translation per row. It is currently empty in the
+  production data: of 142,748 translated titles, none has a NULL version.
+* **`translate_version > steam_updated_at`** → current. This happens when a translation was stamped
+  with the wall clock for an item that later acquired a Steam payload, whose update time predates
+  it.
+
+The comparison is per **item**, not per field: `translate_version` is one column on
+`workshop_items`, so an edit to any Steam-visible field makes every non-ASCII field of that item
+stale and re-queues them together. That is the granularity of the only version stamp that exists.
+
+**Scraping.** `scrape_version` is written by the web scraper and the image worker when they run. The
+daemon's `_flag_scrape_and_image` does not compare it: it decides whether to re-queue the HTML scrape
+from `steam_updated_at` against the pre-fetch record and whether `extended_description` is already
+present. The column remains a record of when the scrape ran rather than the trigger for it.

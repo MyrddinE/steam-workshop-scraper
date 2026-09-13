@@ -23,6 +23,7 @@ reference for the code in `src/`.
 | Document | Covers |
 |---|---|
 | [data-pipeline.md](data-pipeline.md) | How an item moves through discovery, API fetch, web scraping, image download, translation, and display. |
+| [failure-capture.md](failure-capture.md) | What happens to input the scraper cannot handle: captured artefacts, their bounds, and promotion to regression tests. |
 
 ## Interfaces
 

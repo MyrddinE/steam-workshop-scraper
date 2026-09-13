@@ -43,10 +43,12 @@ Deep-merges the in-memory config into the disk file, preserving keys not present
 | `daemon.target_appids` | list[int] | (required) | Steam AppIDs to scrape. The daemon refuses to start without this. |
 | `daemon.batch_size` | int | 10 | Items to process per `process_batch` iteration. |
 | `daemon.api_delay_seconds` | float | 1.5 | Seconds to wait between Steam API calls. Dynamically adjusted by the success/failure streak mechanism. |
-| `daemon.web_delay_seconds` | float | 2.0 | Seconds to wait between web scrape requests. Dynamically adjusted. |
+| `daemon.web_delay_seconds` | float | 5.0 | Seconds to wait between web scrape requests. Dynamically adjusted. |
 | `daemon.image_delay_seconds` | float | 2.0 | Seconds to wait between image downloads. Dynamically adjusted. |
 | `daemon.item_staleness_days` | int | 30 | Days before a successfully-scraped item is considered stale and re-scraped. |
 | `daemon.user_staleness_days` | int | 90 | Days before a user profile is re-fetched from Steam. |
+| `daemon.outbox_dir` | string | None | Directory a separate machine pulls artefacts from. Enables [failure capture](failure-capture.md) on its own, and database backups together with `backup_interval_seconds` below. The daemon and the puller must not run as the same OS user unless the outbox is writable by both. `daemon.backup_dir` is an accepted legacy alias. |
+| `daemon.backup_interval_seconds` | float | 0 (off) | Seconds between verified database snapshots into `<outbox_dir>/db/`. Backups are **off** unless this is positive *and* `outbox_dir` is set, so enabling backups on the live instance is a deliberate switch. |
 
 ### `web`
 

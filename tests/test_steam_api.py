@@ -1,3 +1,5 @@
+import os
+
 import pytest
 import responses
 import requests
@@ -171,3 +173,53 @@ def test_query_workshop_items_error():
     assert ids == []
 
 
+
+
+# ── Unparsed API bodies ──────────────────────────────────────────────────────
+# A non-JSON body (an HTML error page, a proxy notice) carries nothing usable,
+# but requests.exceptions.JSONDecodeError subclasses RequestException, so the
+# existing handler already collapsed it to a generic 500 and threw the body
+# away. The body is now captured first; the returned value is unchanged.
+
+@responses.activate
+def test_non_json_body_is_captured_and_still_reported_as_500(tmp_path):
+    import json
+    from src import capture
+
+    outbox = tmp_path / "outbox"
+    capture.configure(str(outbox))
+    try:
+        responses.add(responses.POST, STEAM_API_URL,
+                      body="<html><body>proxy error</body></html>",
+                      status=200, content_type="text/html")
+        result = get_workshop_details_api(4242, "TEST_KEY")
+    finally:
+        capture.configure(None)
+
+    assert result == {"status": 500, "publishedfileid": 4242}
+
+    group = capture.group_id("api_unparsed_body", None, "api_fetch")
+    group_dir = outbox / "failures" / group
+    records = [p for p in group_dir.glob("*.json") if p.name != "_group.json"]
+    assert len(records) == 1, "the unparsed body was not captured"
+
+    record = json.loads(records[0].read_text())
+    assert record["workshop_id"] == 4242
+    assert record["stage"] == "api_fetch"
+    assert record["http_status"] == 200
+    assert record["content_type"] == "text/html"
+    body_file = group_dir / os.path.basename(record["body_file"])
+    assert body_file.read_bytes().startswith(b"<html>")
+
+
+@responses.activate
+def test_non_json_body_with_capture_off_writes_nothing(tmp_path):
+    from src import capture
+
+    capture.configure(None)
+    responses.add(responses.POST, STEAM_API_URL,
+                  body="<html>proxy</html>", status=200, content_type="text/html")
+    result = get_workshop_details_api(1, "TEST_KEY")
+
+    assert result == {"status": 500, "publishedfileid": 1}
+    assert not (tmp_path / "outbox").exists()

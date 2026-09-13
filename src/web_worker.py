@@ -5,9 +5,9 @@ import os
 import logging
 import threading
 from datetime import datetime, timezone
-from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, flag_field_for_translation
-from src.web_scraper import scrape_extended_details
-from src.translator import is_ascii
+from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, flag_field_for_translation, translation_is_current
+from src.web_scraper import scrape_extended_details, DESCRIPTION_SELECTOR
+from src import capture
 
 
 class WebScraperThread(threading.Thread):
@@ -21,6 +21,47 @@ class WebScraperThread(threading.Thread):
         self.web_successes = 0
         self.web_failures = 0
         self.web_had_streak = False
+
+    def _handle_selector_miss(self, item: dict, url: str, scrape_data: dict) -> None:
+        """Handle a page that loaded but whose description selector did not match.
+
+        scrape_extended_details returns ``{"description": None, "tags": []}`` on a
+        miss, which is truthy. The previous code took that as success and wrote
+        ``extended_description = NULL`` with ``needs_web_scrape = 0``, so the item
+        was recorded as permanently scraped with nothing to show for it end.
+
+        A miss is now a failure with two effects. The artefact is captured for a
+        regression test, and the item is stepped down the queue by one, floored at
+        1, so it stays queued and sinks below current work but is never zeroed.
+        This mirrors the needs_image decay in image_worker.py.
+
+        The request itself succeeded, so this deliberately does not raise
+        api_priority and does not touch the network-failure backoff: slowing down
+        would not make a broken selector match.
+        """
+        workshop_id = item["workshop_id"]
+        capture.record_failure(
+            kind="web_selector_miss",
+            stage="web_scrape",
+            workshop_id=workshop_id,
+            selector=DESCRIPTION_SELECTOR,
+            http_status=scrape_data.get("http_status"),
+            final_url=scrape_data.get("final_url") or url,
+            body=scrape_data.get("body"),
+            content_type="text/html",
+        )
+        logging.warning(
+            "[W:%s] Selector %s did not match; item stays queued", workshop_id,
+            DESCRIPTION_SELECTOR)
+
+        conn = get_connection(self.db_path)
+        conn.execute(
+            "UPDATE workshop_items SET needs_web_scrape = MAX(1, needs_web_scrape - 1) "
+            "WHERE workshop_id = ?",
+            (workshop_id,)
+        )
+        conn.commit()
+        conn.close()
 
     def run(self):
         logging.info("Web scraper thread started.")
@@ -38,7 +79,7 @@ class WebScraperThread(threading.Thread):
             url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}"
             scrape_data = scrape_extended_details(url)
 
-            if scrape_data:
+            if scrape_data and scrape_data.get("description") is not None:
                 update = {
                     "workshop_id": workshop_id,
                     "extended_description": scrape_data.get("description"),
@@ -47,9 +88,15 @@ class WebScraperThread(threading.Thread):
                 }
                 insert_or_update_item(self.db_path, update)
 
-                # Flag extended description for translation
+                # Flag extended description for translation, unless the stored
+                # translation was taken at the item's current Steam revision.
+                # A selector miss is handled separately below and does not reach
+                # here (scrape_data is None on a request failure).
                 desc = scrape_data.get("description") or ""
-                if desc and not is_ascii(desc):
+                if desc and not translation_is_current(
+                        item.get("extended_description_en"),
+                        item.get("translate_version"),
+                        item.get("steam_updated_at")):
                     flag_field_for_translation(self.db_path, "item", workshop_id, "extended_description_en", desc, 3)
 
                 display = item.get("title_en") or item.get("title") or str(workshop_id)
@@ -66,6 +113,9 @@ class WebScraperThread(threading.Thread):
                         if self._save_cb:
                             self._save_cb("web_delay_seconds", self.web_delay)
                     self.web_successes = 0
+                time.sleep(self.web_delay)
+            elif scrape_data is not None:
+                self._handle_selector_miss(item, url, scrape_data)
                 time.sleep(self.web_delay)
             else:
                 logging.warning(f"[W:{workshop_id}] Web scrape failed (no data returned)")

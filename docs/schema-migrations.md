@@ -87,7 +87,7 @@ Index on `(tag_id)` for reverse lookups ("all items with this tag").
 
 Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`). Columns: `title, title_en, short_description, short_description_en, extended_description, extended_description_en`. Added in v5, where it is populated once with an FTS5 `'rebuild'`.
 
-**The index is not kept in sync.** There are no triggers on `workshop_items` and no runtime rebuild, so the FTS index reflects the base table only as of the last rebuild (the v5 migration). Rows inserted or updated afterward are absent from Full Text search. This is a known gap, not a design described anywhere else.
+**The index is kept in sync by triggers.** Added in v5, where it is populated once with an FTS5 `'rebuild'`; v15 rebuilds it again and installs `workshop_items_fts_insert`, `workshop_items_fts_delete` and `workshop_items_fts_update`, so the index tracks every write to the six indexed columns. Before v15 it drifted: it held 640,471 documents against 1,725,544 items. See [search-filter.md](search-filter.md) for how matches are built from it.
 
 ### `app_tracking` — per-AppID discovery state
 
@@ -249,6 +249,35 @@ Indexes recreated under clear names: `idx_api_fetched_at`, `idx_scraped_version`
 `idx_status_scraped_version`, `idx_creator_api_fetched_at`; the old `idx_dt_*`
 names are dropped. `idx_time_created` / `idx_time_updated` keep their historical
 names (SQLite rewrites their definitions to the renamed columns).
+
+### v14 → v15: Full-text index rebuild + sync triggers
+
+Repairs the full-text index and stops it drifting again.
+
+* `workshop_fts` is rebuilt from `workshop_items` with the FTS5 `'rebuild'`
+  command. It had been populated once by migration 4→5 with no triggers and no
+  later rebuild, so it held 640,471 documents against 1,725,544 items — 62.9% of
+  the library absent. After the rebuild the two counts match.
+* Three triggers are installed on `workshop_items`:
+  `workshop_items_fts_insert`, `workshop_items_fts_delete`, and
+  `workshop_items_fts_update`.
+* Because `workshop_fts` is an **external-content** table, the delete and update
+  triggers remove the previous row with the FTS5 `'delete'` command carrying the
+  old column values. `DELETE FROM workshop_fts` is not valid for external content
+  and would leave stale tokens behind.
+* The update trigger is scoped `AFTER UPDATE OF` the six indexed columns
+  (`title`, `title_en`, `short_description`, `short_description_en`,
+  `extended_description`, `extended_description_en`). Most writes to
+  `workshop_items` are queue/priority updates that touch none of them, so an
+  unscoped trigger would rewrite part of the index on every priority bump.
+* The rebuild is committed and checkpointed on its own before the triggers are
+  created, following migration 13→14's rule about not holding a large WAL across
+  later DDL on this filesystem.
+
+Measured on a copy of the production snapshot (1,725,544 items), through
+`initialize_database`: the whole 13→15 run takes ~18 s and grows the database by
+~158 MB. Re-running the migration is a no-op beyond one more rebuild, and
+`initialize_database` remains idempotent.
 
 ---
 

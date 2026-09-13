@@ -643,7 +643,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 14
+    EXPECTED_VERSION = 15
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -797,16 +797,31 @@ def initialize_database(db_path: str):
 
             # Phase 1: collect all unique tag names and bulk-create IDs
             all_tag_names = set()
+            phase1_failures = 0
+            phase1_last_error = None
             for i, row in enumerate(rows):
                 try:
                     tag_names = _json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
                     if isinstance(tag_names, list):
                         for t in tag_names:
                             all_tag_names.add(t.get("tag") if isinstance(t, dict) else str(t))
-                except Exception:
+                # A malformed row is counted and reported once after the loop: capture is
+                # not configured yet this early, so a per-row record would be a no-op.
+                except Exception as exc:
                     pass
+                    phase1_failures += 1
+                    phase1_last_error = exc
                 if (i + 1) % 50000 == 0:
                     logging.debug(f"  tag collection progress: {i + 1}/{len(rows)}")
+            if phase1_failures:
+                # initialize_database runs before failure capture is configured, so a
+                # capture call here would be a no-op; aggregate instead of per-row logs.
+                logging.warning(
+                    "Tags migration 5→6 phase 1 (collect tag names): %d of %d rows "
+                    "could not be parsed; the legacy tags column is dropped later, so "
+                    "those tags are lost (last error: %s)",
+                    phase1_failures, len(rows), phase1_last_error,
+                )
             logging.info(f"  Phase 1: creating IDs for {len(all_tag_names)} unique tag names...")
             _ensure_tag_ids(db_path, list(all_tag_names))
             logging.info("  Tag IDs created.")
@@ -816,6 +831,8 @@ def initialize_database(db_path: str):
             logging.info(f"  Phase 2: inserting associations ({len(rows)} items)...")
             batch_size = 10000
             sub_batch = 1000
+            phase2_failures = 0
+            phase2_last_error = None
             for i, row in enumerate(rows):
                 try:
                     tag_names = _json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
@@ -829,14 +846,27 @@ def initialize_database(db_path: str):
                                 "INSERT OR IGNORE INTO workshop_tags (workshop_id, tag_id) VALUES (?, ?)",
                                 (row["workshop_id"], tid)
                             )
-                except Exception:
+                # A malformed row is counted and reported once after the loop: capture is
+                # not configured yet this early, so a per-row record would be a no-op.
+                except Exception as exc:
                     pass
+                    phase2_failures += 1
+                    phase2_last_error = exc
                 if (i + 1) % sub_batch == 0:
                     logging.debug(f"  tag progress: {i + 1}/{len(rows)}")
                 if (i + 1) % batch_size == 0:
                     conn.commit()
                     logging.info(f"  migrated {i + 1}/{len(rows)} items")
 
+            if phase2_failures:
+                # initialize_database runs before failure capture is configured, so a
+                # capture call here would be a no-op; aggregate instead of per-row logs.
+                logging.warning(
+                    "Tags migration 5→6 phase 2 (insert workshop_tags associations): "
+                    "%d of %d rows failed; the legacy tags column is dropped later, so "
+                    "those associations are lost (last error: %s)",
+                    phase2_failures, len(rows), phase2_last_error,
+                )
             conn.commit()
             logging.info(f"Tags: {cursor.execute('SELECT COUNT(*) FROM tags').fetchone()[0]} unique tags, "
                          f"{cursor.execute('SELECT COUNT(*) FROM workshop_tags').fetchone()[0]} associations")
@@ -1211,6 +1241,79 @@ def initialize_database(db_path: str):
         conn.commit()
         logging.info("Migration 13->14 complete.")
 
+    if db_version < 15:
+        logging.info("Running migration 14->15: rebuilding the full-text index and adding sync triggers...")
+
+        # Migration 4->5 created workshop_fts and populated it once, but installed
+        # no triggers and never rebuilt it again. Every row inserted, updated or
+        # deleted since is therefore missing from the index: on the production
+        # database it held 640,471 documents against 1,725,544 items (62.9 %
+        # absent). Rebuild it from the content table first, then keep it correct.
+        cursor.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS workshop_fts USING fts5(
+                title, title_en,
+                short_description, short_description_en,
+                extended_description, extended_description_en,
+                content='workshop_items', content_rowid='workshop_id'
+            )
+        """)
+
+        # The rebuild rewrites a large part of the index, so commit and checkpoint
+        # it on its own before the DDL below starts. This mirrors migration 13->14:
+        # holding a multi-hundred-MB WAL open across later DDL is what produced
+        # SQLITE_CANTOPEN on this filesystem.
+        cursor.execute("INSERT INTO workshop_fts(workshop_fts) VALUES ('rebuild')")
+        conn.commit()
+        cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        logging.info("  full-text index rebuilt from workshop_items")
+
+        # External-content FTS5 has no way to look up a row's old tokens, so
+        # removal must go through the special 'delete' command with the OLD
+        # column values. A plain DELETE FROM workshop_fts would silently leave the
+        # old tokens in the index and corrupt every later MATCH.
+        _FTS_COLUMNS = ("title", "title_en", "short_description",
+                        "short_description_en", "extended_description",
+                        "extended_description_en")
+        fts_cols = ", ".join(_FTS_COLUMNS)
+        fts_new = ", ".join(f"new.{c}" for c in _FTS_COLUMNS)
+        fts_old = ", ".join(f"old.{c}" for c in _FTS_COLUMNS)
+
+        cursor.execute("DROP TRIGGER IF EXISTS workshop_items_fts_insert")
+        cursor.execute("DROP TRIGGER IF EXISTS workshop_items_fts_delete")
+        cursor.execute("DROP TRIGGER IF EXISTS workshop_items_fts_update")
+
+        cursor.execute(f"""
+            CREATE TRIGGER workshop_items_fts_insert AFTER INSERT ON workshop_items BEGIN
+                INSERT INTO workshop_fts(rowid, {fts_cols})
+                VALUES (new.workshop_id, {fts_new});
+            END
+        """)
+        cursor.execute(f"""
+            CREATE TRIGGER workshop_items_fts_delete AFTER DELETE ON workshop_items BEGIN
+                INSERT INTO workshop_fts(workshop_fts, rowid, {fts_cols})
+                VALUES ('delete', old.workshop_id, {fts_old});
+            END
+        """)
+        # Scoped to the six indexed columns on purpose: most writes to
+        # workshop_items are queue/priority updates that touch none of them, and an
+        # unscoped trigger would rewrite a chunk of the index on every priority
+        # bump. insert_or_update_item builds its SET list from the keys actually
+        # supplied, so this fires exactly when an indexed column is written.
+        cursor.execute(f"""
+            CREATE TRIGGER workshop_items_fts_update
+            AFTER UPDATE OF {fts_cols} ON workshop_items BEGIN
+                INSERT INTO workshop_fts(workshop_fts, rowid, {fts_cols})
+                VALUES ('delete', old.workshop_id, {fts_old});
+                INSERT INTO workshop_fts(rowid, {fts_cols})
+                VALUES (new.workshop_id, {fts_new});
+            END
+        """)
+
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 15")
+        conn.commit()
+        logging.info("Migration 14->15 complete.")
+
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON workshop_items (status)")
@@ -1295,15 +1398,24 @@ def insert_or_update_item(db_path: str, item_data: dict) -> bool:
                     parsed = json.loads(tags_raw)
                     if isinstance(parsed, list):
                         tag_names = [t.get("tag") if isinstance(t, dict) else str(t) for t in parsed]
-                except (json.JSONDecodeError, TypeError):
+                except (json.JSONDecodeError, TypeError) as json_exc:
                     # Handle Python-repr strings like "['fruit', 'sweet']"
                     import ast
                     try:
                         parsed = ast.literal_eval(tags_raw)
                         if isinstance(parsed, list):
                             tag_names = [t.get("tag") if isinstance(t, dict) else str(t) for t in parsed]
-                    except (ValueError, SyntaxError):
+                    except (ValueError, SyntaxError) as exc:
                         pass
+                        # Both parses failed: the item is written with no tags, so keep
+                        # the unparseable payload for a regression test. Never raises.
+                        from src import capture
+                        capture.record_failure(
+                            kind="api_unparseable_tags", stage="item_write",
+                            workshop_id=item_data.get("workshop_id"),
+                            body=tags_raw, content_type="application/json",
+                            context={"errors": [f"json: {json_exc}", f"literal_eval: {exc}"]},
+                        )
             if tag_names:
                 tag_ids = _ensure_tag_ids(db_path, tag_names)
                 conn.execute("DELETE FROM workshop_tags WHERE workshop_id = ?", (item_data["workshop_id"],))
@@ -1923,6 +2035,33 @@ def bump_image_priority_for_detail(db_path: str, workshop_id: int):
     )
     conn.commit()
     conn.close()
+
+
+def translation_is_current(translated_text, translate_version, steam_updated_at) -> bool:
+    """Whether a stored translation still matches the item's current revision.
+
+    ``translate_version`` records the item's ``steam_updated_at`` at the moment
+    the translation was stored (see ``TranslatorThread._translate_batch``), so a
+    translation is current when it exists and was taken at the item's current
+    Steam revision.
+
+    The background paths use this to decide whether to re-queue a field. Without
+    it they re-translate unchanged text on every staleness sweep; with only an
+    "is it translated" check, a genuine source edit would never refresh.
+
+    Unknown provenance (``translate_version`` NULL) counts as stale. That costs
+    one re-translation per row and is currently empty in the live database
+    (0 of 142,748 translated titles). Items with no Steam revision at all
+    (``steam_updated_at`` NULL) cannot have a change detected, so their
+    translations are treated as current rather than re-translated forever.
+    """
+    if not translated_text:
+        return False
+    if steam_updated_at is None:
+        return True
+    if translate_version is None:
+        return False
+    return translate_version >= steam_updated_at
 
 
 def flag_field_for_translation(db_path: str, item_type: str, item_id: int, field: str, text: str, priority: int):

@@ -8,7 +8,7 @@ database:
 
 daemon:
   batch_size: 10
-  request_delay_seconds: 1.5
+  api_delay_seconds: 1.5
   target_appids:
     - 294100 # RimWorld
   # Database backups are OFF unless both keys below are set.
@@ -19,7 +19,6 @@ openai:
   api_key: "YOUR_OPENAI_API_KEY_HERE" # Can be overridden by OPENAI_API_KEY env var
   endpoint: "https://api.openai.com/v1"
   model: "gpt-4o-mini"
- example
 
 logging:
   level: "INFO"

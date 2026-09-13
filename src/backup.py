@@ -30,6 +30,13 @@ DB_ARTIFACT_REL_PATH = "db/workshop-backup.db"
 # Suffix appended to a destination path to build the same-directory temp file.
 _TEMP_SUFFIX = ".tmp"
 
+# Serialises the manifest read-modify-write. The backup thread and the failure
+# capture writer are both threads of the daemon and both publish into the same
+# manifest, which update_manifest's single-writer assumption does not allow.
+# A process-level lock is enough for that; two separate processes writing one
+# outbox would still need a real file lock, which is not implemented.
+_MANIFEST_LOCK = threading.Lock()
+
 # How much headroom beyond the source size we want before starting, best-effort.
 _FREE_SPACE_HEADROOM = 16 * 1024 * 1024
 
@@ -51,6 +58,8 @@ def _remove_quietly(path: str) -> None:
     """Delete ``path`` if present, ignoring races and permission errors."""
     try:
         os.remove(path)
+    # FileNotFoundError means the temp file is already gone — that is the desired
+    # end state; other OSErrors are logged just below.
     except FileNotFoundError:
         pass
     except OSError as exc:  # pragma: no cover - platform/AV dependent
@@ -243,6 +252,16 @@ def build_db_manifest_entry(outbox_dir: str, dest_path: str, metadata: dict) -> 
 def update_manifest(outbox_dir: str, entry: dict) -> None:
     """Insert or replace one artifact ``entry`` in ``<outbox_dir>/manifest.json``.
 
+    Serialised across threads: see ``_MANIFEST_LOCK``. Producers that are separate
+    processes still need their own coordination.
+    """
+    with _MANIFEST_LOCK:
+        _update_manifest_unlocked(outbox_dir, entry)
+
+
+def _update_manifest_unlocked(outbox_dir: str, entry: dict) -> None:
+    """Insert or replace one artifact ``entry`` in ``<outbox_dir>/manifest.json``.
+
     The manifest is ``{"generated_at": <ISO UTC>, "artifacts": [entry, ...]}``,
     where each entry is matched by its ``path`` (relative to the outbox, forward
     slashes). An existing entry with the same ``path`` is replaced in place;
@@ -258,9 +277,8 @@ def update_manifest(outbox_dir: str, entry: dict) -> None:
     ``update_manifest(outbox_dir, {...})`` with a different ``kind``. They do not
     need to know anything about databases.
 
-    Concurrency: this assumes a single writer per artifact kind, and that no two
-    producers write the manifest at the exact same time. If that changes, this
-    function needs a cross-process lock around the read-modify-write.
+    Concurrency is handled by :func:`update_manifest`, which wraps this in
+    ``_MANIFEST_LOCK``; call that, not this.
     """
     os.makedirs(outbox_dir, exist_ok=True)
     manifest_path = os.path.join(outbox_dir, "manifest.json")
