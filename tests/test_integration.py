@@ -138,10 +138,14 @@ def test_database_migration_compatibility(tmp_path):
 
 
 @pytest.mark.integration
-def test_fts5_content_sync_needs_rebuild(db_path):
-    """FTS5 content-sync tables do NOT auto-sync new inserts.
-    Items added after the last rebuild are invisible to MATCH queries.
-    This test documents the expected behavior."""
+def test_fts5_content_sync_tracks_writes(db_path):
+    """Items are searchable as soon as they are written, with no manual rebuild.
+
+    An FTS5 external-content table does not sync itself, which is why migration
+    14->15 installed triggers on workshop_items. This test used to assert the
+    opposite - that inserts were invisible to MATCH until someone ran a rebuild -
+    which is exactly the defect that migration fixed.
+    """
     from src.database import insert_or_update_item, search_items, get_connection
 
     for i in range(1, 20):
@@ -152,20 +156,31 @@ def test_fts5_content_sync_needs_rebuild(db_path):
             "favorited": 10, "views": 1000, "status": 200,
         })
 
-    # Before rebuild: no FTS5 content
+    # No rebuild anywhere in this test: the triggers are what make this work.
     results = search_items(db_path, filters=[
         {"field": "Full Text", "op": "contains", "value": "test item"}])
-    assert len(results) == 0  # confirms FTS5 needs rebuild
+    assert len(results) > 0, "inserts are not reaching the full-text index"
 
-    # After rebuild: items visible
+    # An update must replace the previous tokens rather than add to them.
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "renamed entry"})
+    assert search_items(db_path, filters=[
+        {"field": "Full Text", "op": "contains", "value": "renamed entry"}])
+    titles = {row["title"] for row in search_items(db_path, filters=[
+        {"field": "Full Text", "op": "contains", "value": "renamed entry"}])}
+    assert "renamed entry" in titles
+
+    # The index still holds the untouched rows, so the update was not a wipe.
+    assert search_items(db_path, filters=[
+        {"field": "Full Text", "op": "contains", "value": "test item"}])
+
     conn = get_connection(db_path)
-    conn.execute("INSERT INTO workshop_fts(workshop_fts) VALUES ('rebuild')")
-    conn.commit()
-    conn.close()
+    try:
+        docs = conn.execute("SELECT count(*) FROM workshop_fts_docsize").fetchone()[0]
+        items = conn.execute("SELECT count(*) FROM workshop_items").fetchone()[0]
+    finally:
+        conn.close()
+    assert docs == items, "index drifted from the base table"
 
-    results = search_items(db_path, filters=[
-        {"field": "Full Text", "op": "contains", "value": "test item"}])
-    assert len(results) > 0  # now works after rebuild
 
 
 @pytest.mark.integration
