@@ -98,9 +98,20 @@ Stats are in a single-column vertical layout (`.stat-row`), not the previous two
 ### Userscript Bridge (`userscripts/steam_subscribe.user.js`)
 
 A Tampermonkey/Greasemonkey userscript that bridges the Steam session to the web UI:
-- On `steamcommunity.com`: captures `sessionid` from cookies via `GM_setValue`, shows a toast notification on change
-- On the scraper web UI: stamps `document.body.dataset.userscript = '1'` and `userscriptVer` for detection, pushes the sessionid to `/api/sessionid` every 30 seconds
+- On `steamcommunity.com`: captures `sessionid` and `steamLoginSecure` via `GM_setValue`, shows a toast notification on change
+- On the scraper web UI: stamps `document.body.dataset.userscript = '1'` and `userscriptVer` for detection, pushes both cookies to `/api/sessionid` every 30 seconds
 - Version checking: reads `<meta name="userscript-version">` from the page and compares with `GM_info.script.version` — refuses to operate if outdated
+
+**Reading the login cookie needs `GM_cookie`, and HttpOnly.** Steam marks `steamLoginSecure`
+HttpOnly, so `document.cookie` can never contain it — which is why an earlier version reported
+`login_secure: missing` on every push regardless of how the session was configured. `GM_cookie.list`
+does return HttpOnly cookies, but the vendor's documentation states that support is
+**BETA builds of Tampermonkey only**; on a stable build the script silently falls back to
+`document.cookie` and captures `sessionid` alone. The two cookies differ in more than visibility:
+`sessionid` is a CSRF token, while `steamLoginSecure` is the thing that authenticates the session.
+
+The version literal appears in both this file and `templates/index.html`; nothing links them, so
+`tests/test_userscript_contract.py` asserts they agree.
 
 ### Detection (`_userscriptPresent`)
 
