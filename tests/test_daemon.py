@@ -3,18 +3,25 @@ from unittest.mock import patch, MagicMock, ANY
 import signal
 import json
 from src.daemon import Daemon
-from src.database import get_app_tracking, update_app_tracking
+from src.database import get_app_tracking, initialize_database, update_app_tracking
 
 @pytest.fixture
-def mock_config():
+def mock_config(db_path):
     return {
-        "database": {"path": "test.db"},
+        "database": {"path": db_path},
         "api": {"key": "TEST_KEY"},
         "daemon": {"batch_size": 2, "request_delay_seconds": 0.01, "target_appids": [123]}
     }
 
-def test_daemon_init_defaults():
-    """Test that the Daemon correctly applies fallback defaults for missing config keys."""
+def test_daemon_init_defaults(tmp_path, monkeypatch):
+    """Test that the Daemon correctly applies fallback defaults for missing config keys.
+
+    The default database path is relative, so run this in a temporary directory
+    and initialise that path: the assertion is about the default's *name*, and
+    the constructor reads app_tracking on the way past.
+    """
+    monkeypatch.chdir(tmp_path)
+    initialize_database("workshop.db")
     # Provide minimal valid config (only target_appids is strictly required now)
     minimal_config = {"daemon": {"target_appids": [456]}}
     daemon = Daemon(minimal_config)
@@ -54,9 +61,9 @@ def test_daemon_process_batch_success(mock_sleep, mock_flag_web, mock_insert, mo
     daemon = Daemon(mock_config)
     daemon.process_batch()
 
-    mock_get_items.assert_called_once_with("test.db", limit=2, staleness_days=30)
+    mock_get_items.assert_called_once_with(mock_config["database"]["path"], limit=2, staleness_days=30)
     mock_api.assert_called_once_with(123, "TEST_KEY")
-    mock_flag_web.assert_called_once_with("test.db", 123, 3)
+    mock_flag_web.assert_called_once_with(mock_config["database"]["path"], 123, 3)
 
     inserted_data = mock_insert.call_args[0][1]
     assert inserted_data["workshop_id"] == 123
@@ -406,12 +413,12 @@ def test_process_item_success_moves_both_clocks(db_path, tmp_path):
     assert row["last_fetch_attempted_at"] > 1000
 
 
-def test_merge_remaps_steam_api_time_fields():
+def test_merge_remaps_steam_api_time_fields(db_path):
     """The Steam API still returns time_created/time_updated; the merge must map
     them onto steam_created_at/steam_updated_at rather than discard them."""
     from src.daemon import Daemon
 
-    config = {"database": {"path": "test.db"}, "api": {"key": "K"},
+    config = {"database": {"path": db_path}, "api": {"key": "K"},
               "daemon": {"target_appids": [1]}}
     with patch("src.daemon.save_config"):
         daemon = Daemon(config)

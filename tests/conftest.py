@@ -151,17 +151,17 @@ def deterministic_db(tmp_path_factory):
     return db_path
 
 @pytest.fixture
-def mock_config():
+def mock_config(db_path):
     return {
-        "database": {"path": "test.db"},
+        "database": {"path": db_path},
         "logging": {"level": "INFO"}
     }
 
 @pytest.fixture
-def mock_config_with_api():
+def mock_config_with_api(db_path):
     """Config with API key for daemon tests."""
     return {
-        "database": {"path": "test.db"},
+        "database": {"path": db_path},
         "api": {"key": "TEST_KEY"},
         "daemon": {"batch_size": 2, "request_delay_seconds": 0.01, "target_appids": [123]}
     }
