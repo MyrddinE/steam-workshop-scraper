@@ -28,6 +28,20 @@ def load_config(path: str) -> dict:
 
     return config
 
+def login_secure_value(config: dict) -> str:
+    """The `steamLoginSecure` cookie, normalised from either accepted form.
+
+    The config key takes a raw cookie string or the three pipe-separated
+    components as a YAML list; both mean the same cookie. Everything that sends
+    it must agree on the encoding, so the rule lives here rather than being
+    repeated at each call site.
+    """
+    value = config.get("session", {}).get("login_secure", "")
+    if isinstance(value, list):
+        return "%7C%7C".join(str(part) for part in value)
+    return value or ""
+
+
 def save_config(path: str, config: dict):
     """
     Saves the configuration to a YAML file. To avoid writing secrets to disk, 

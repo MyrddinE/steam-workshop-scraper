@@ -1828,7 +1828,7 @@ class ScraperApp(App):
                 save_config(self.config_path, self.config)
                 logging.info(f"Saved port {self._web_port} to config")
 
-            init_webserver(self.db_path, self.config)
+            init_webserver(self.db_path, self.config, config_path=self.config_path)
 
             def run_server():
                 from waitress import serve
