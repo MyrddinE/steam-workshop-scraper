@@ -14,6 +14,13 @@ Reads a YAML file and applies environment variable overrides. The only two env v
 
 If the config file doesn't exist, `load_config` raises `FileNotFoundError`. Callers handle this by falling back to defaults.
 
+A file that exists but cannot be parsed is a different case: it is a misconfiguration, not an absent
+default, so it is reported to the operator with the file and the position rather than being swallowed.
+Falling back to defaults there would silently discard whatever the operator intended. Windows paths
+are the common way to trip this — inside a double-quoted YAML scalar a backslash starts an escape, so
+`"D:\Temp\dsh"` is a parse error and `"D:\temp"` is worse, parsing without complaint to `D:<TAB>emp`.
+Single quotes leave backslashes alone (`'D:\Temp\dsh'`), as does leaving the value unquoted.
+
 ### `save_config(path, config)` (config)
 
 Deep-merges the in-memory config into the disk file, preserving keys not present in the in-memory dict. Strips environment-derived secrets (API keys that match env var values) before writing to avoid persisting credentials to disk. If the config file doesn't exist, `save_config` returns without writing (a no-op used by the TUI's port persistence).
