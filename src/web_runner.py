@@ -42,6 +42,8 @@ def main():
     # Wrapped in try/except so a future Waitress API change does not crash the server.
     try:
         import waitress.task
+    # Optional waitress.task instrumentation; without it the server still runs with
+    # the stock queue-depth log.
     except ImportError:
         pass
     else:

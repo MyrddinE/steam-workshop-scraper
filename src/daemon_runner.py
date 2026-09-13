@@ -20,6 +20,8 @@ class _SafeStreamHandler(logging.StreamHandler):
             msg = self.format(record)
             self.stream.write(msg + self.terminator)
             self.flush()
+        # Windows cp1252 console cannot encode CJK; other handlers still write the
+        # record, so only this console copy is dropped.
         except UnicodeEncodeError:
             pass
         except Exception:
@@ -32,11 +34,15 @@ def _fix_windows_encoding():
     try:
         import ctypes
         ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+    # Best-effort code-page probe; the stream reconfigure just below establishes
+    # UTF-8 regardless.
     except Exception:
         pass
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
         sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    # If reconfigure is unavailable, _SafeStreamHandler.emit (above) absorbs any
+    # later UnicodeEncodeError.
     except Exception:
         pass
 

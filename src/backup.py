@@ -58,6 +58,8 @@ def _remove_quietly(path: str) -> None:
     """Delete ``path`` if present, ignoring races and permission errors."""
     try:
         os.remove(path)
+    # FileNotFoundError means the temp file is already gone — that is the desired
+    # end state; other OSErrors are logged just below.
     except FileNotFoundError:
         pass
     except OSError as exc:  # pragma: no cover - platform/AV dependent

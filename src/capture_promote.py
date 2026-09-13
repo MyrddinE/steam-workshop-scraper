@@ -67,11 +67,14 @@ def extension_for(content_type, body: bytes) -> str:
 
 
 def fixture_name(record: dict, record_path: str) -> str:
-    """Stable, human-readable fixture stem derived from the capture."""
-    digest = (record.get("shape") or {}).get("class_digest") or "unknown"
+    """Stable, human-readable fixture stem derived from the capture.
+
+    The sample filename already carries the shape digest and a per-shape sample
+    number (``<digest8>-<n>``), so the stem is unique on its own.
+    """
     stem = os.path.splitext(os.path.basename(record_path))[0]
     kind = re.sub(r"[^a-z0-9]+", "_", str(record.get("kind", "failure")).lower())
-    return f"{kind}_{stem}_{digest[:8]}"
+    return f"{kind}_{stem}"
 
 
 def load_capture(record_path: str, outbox_root: str) -> tuple:

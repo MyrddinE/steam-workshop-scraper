@@ -390,6 +390,8 @@ class DaemonManagerScreen(Screen):
             # Windows: delete PID file — daemon checks it each loop iteration
             try:
                 _os.remove(self.pid_file)
+            # Best-effort stop signal; an absent PID file is the goal, and the
+            # graceful-wait/force-kill path below follows regardless.
             except OSError:
                 pass
         else:
@@ -397,10 +399,14 @@ class DaemonManagerScreen(Screen):
             if pid:
                 try:
                     _os.kill(pid, signal.SIGTERM)
+                # Best-effort graceful signal; if the process is already gone the wait
+                # loop observes it, and SIGKILL is the fallback.
                 except OSError:
                     pass
             try:
                 _os.remove(self.pid_file)
+            # Best-effort fallback after SIGTERM; removing an already-absent PID file
+            # is a no-op success.
             except OSError:
                 pass
 
@@ -426,6 +432,8 @@ class DaemonManagerScreen(Screen):
             except Exception:
                 try:
                     self._daemon_proc.kill()
+                # Last-resort force kill on our own Popen handle; nothing further can
+                # be attempted in-process and the handle is cleared below.
                 except Exception:
                     pass
         elif pid and platform.system() == 'Windows':
@@ -435,11 +443,15 @@ class DaemonManagerScreen(Screen):
                 if handle:
                     ctypes.windll.kernel32.TerminateProcess(handle, 0)
                     ctypes.windll.kernel32.CloseHandle(handle)
+            # Best-effort Windows force-kill of a PID this process does not own; no
+            # further in-process remedy exists.
             except Exception:
                 pass
         elif pid:
             try:
                 _os.kill(pid, signal.SIGKILL)
+            # Final Unix escalation; if SIGKILL is refused there is nothing else the
+            # manager can do for this PID.
             except Exception:
                 pass
 
@@ -462,6 +474,8 @@ class DaemonManagerScreen(Screen):
                 text=True, bufsize=1,
             )
             self.set_interval(0.5, self._poll_tail)
+        # Optional log-tail probe; if `tail` cannot start, the daemon manager works
+        # without the live-log pane.
         except Exception:
             pass
 
@@ -472,6 +486,7 @@ class DaemonManagerScreen(Screen):
             line = self._tail_proc.stdout.readline()
             if line:
                 self.query_one("#dm-log-view", RichLog).write(line.rstrip())
+        # Optional log-tail poll; a read/write failure only stops this cosmetic pane.
         except Exception:
             pass
 
@@ -897,6 +912,8 @@ class SearchRow(Horizontal):
             v = int(float(inp.value))
             v = max(0, min(99, v))
             inp.value = str(v)
+        # Empty or non-numeric user input is left exactly as typed; clamping happens
+        # once it parses.
         except (ValueError, TypeError):
             pass
 
@@ -1288,8 +1305,9 @@ class ScraperApp(App):
                 "selected_workshop_id": selected_id
             }
             save_tui_state(self.state_file, state)
-        except Exception:
+        except Exception as exc:
             pass
+            logging.debug("TUI state save skipped: %s", exc)
 
     def on_mount(self) -> None:
         """Initialize the UI and recover state."""
@@ -1336,6 +1354,7 @@ class ScraperApp(App):
             for child in list_view.children:
                 if hasattr(child, 'item_data') and WorkshopItem._has_pending(child.item_data):
                     await child.refresh_item()
+        # Cosmetic spinner refresh; a failure is retried on the next 0.15 s tick.
         except Exception:
             pass
 

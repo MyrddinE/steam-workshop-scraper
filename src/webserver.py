@@ -111,6 +111,8 @@ def serve_image(filename):
             char1, char2, char3 = get_image_subdirs(wid)
             nested_path = f"{char1}/{char2}/{char3}/{filename}"
             return send_from_directory(_images_dir, nested_path)
+        # Filename stem is not a workshop_id: fall through to the flat image
+        # directory below.
         except ValueError:
             # Not an integer workshop_id, serve flat
             pass
@@ -464,6 +466,8 @@ def api_pause():
 def api_resume():
     try:
         os.remove('.pauselock')
+    # Idempotent resume: an absent pause lock is the desired end state, so the
+    # remove is a no-op success.
     except FileNotFoundError:
         pass
     return jsonify({"ok": True})

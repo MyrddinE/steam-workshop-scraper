@@ -233,6 +233,8 @@ def _load_group(gid) -> dict:
             loaded = json.load(handle)
         if isinstance(loaded, dict):
             group.update(loaded)
+    # No state file yet is the normal first-run case; the group is rebuilt from
+    # the samples on disk below.
     except FileNotFoundError:
         pass
     except (OSError, ValueError) as exc:

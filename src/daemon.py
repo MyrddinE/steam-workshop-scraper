@@ -320,8 +320,9 @@ class Daemon:
             )
             conn.commit()
             conn.close()
-        except Exception:
+        except Exception as exc:
             pass
+            logging.warning("Stale-item promotion failed; housekeeping skipped this sweep: %s", exc)
 
     def _acquire_batch(self):
         """Return the next batch of items, refilling the queue when it is empty.
@@ -508,6 +509,8 @@ class Daemon:
                 summaries = get_player_summaries([creator_id], self.api_key)
                 if creator_id in summaries:
                     insert_or_update_user(self.db_path, self._build_user_record(creator_id, summaries[creator_id].get("personaname")))
+        # Optional creator-persona enrichment; an unparseable creator value is skipped
+        # and the persona is retried on a later cycle.
         except (ValueError, TypeError):
             pass
 
@@ -671,8 +674,12 @@ class Daemon:
             logging.info("Fetch-new trigger file detected — bypassing 24h cooldown")
             try:
                 os.remove('.fetch_new')
-            except OSError:
+            except OSError as exc:
                 pass
+                logging.warning(
+                    "Could not remove .fetch_new (%s); page discovery will keep bypassing the 24h cooldown.",
+                    exc,
+                )
 
         logging.info("Running page-based discovery (sort-by-update-time)...")
         self._last_page_discovery = int(time.time())

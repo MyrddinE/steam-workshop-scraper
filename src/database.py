@@ -797,16 +797,31 @@ def initialize_database(db_path: str):
 
             # Phase 1: collect all unique tag names and bulk-create IDs
             all_tag_names = set()
+            phase1_failures = 0
+            phase1_last_error = None
             for i, row in enumerate(rows):
                 try:
                     tag_names = _json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
                     if isinstance(tag_names, list):
                         for t in tag_names:
                             all_tag_names.add(t.get("tag") if isinstance(t, dict) else str(t))
-                except Exception:
+                # A malformed row is counted and reported once after the loop: capture is
+                # not configured yet this early, so a per-row record would be a no-op.
+                except Exception as exc:
                     pass
+                    phase1_failures += 1
+                    phase1_last_error = exc
                 if (i + 1) % 50000 == 0:
                     logging.debug(f"  tag collection progress: {i + 1}/{len(rows)}")
+            if phase1_failures:
+                # initialize_database runs before failure capture is configured, so a
+                # capture call here would be a no-op; aggregate instead of per-row logs.
+                logging.warning(
+                    "Tags migration 5→6 phase 1 (collect tag names): %d of %d rows "
+                    "could not be parsed; the legacy tags column is dropped later, so "
+                    "those tags are lost (last error: %s)",
+                    phase1_failures, len(rows), phase1_last_error,
+                )
             logging.info(f"  Phase 1: creating IDs for {len(all_tag_names)} unique tag names...")
             _ensure_tag_ids(db_path, list(all_tag_names))
             logging.info("  Tag IDs created.")
@@ -816,6 +831,8 @@ def initialize_database(db_path: str):
             logging.info(f"  Phase 2: inserting associations ({len(rows)} items)...")
             batch_size = 10000
             sub_batch = 1000
+            phase2_failures = 0
+            phase2_last_error = None
             for i, row in enumerate(rows):
                 try:
                     tag_names = _json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
@@ -829,14 +846,27 @@ def initialize_database(db_path: str):
                                 "INSERT OR IGNORE INTO workshop_tags (workshop_id, tag_id) VALUES (?, ?)",
                                 (row["workshop_id"], tid)
                             )
-                except Exception:
+                # A malformed row is counted and reported once after the loop: capture is
+                # not configured yet this early, so a per-row record would be a no-op.
+                except Exception as exc:
                     pass
+                    phase2_failures += 1
+                    phase2_last_error = exc
                 if (i + 1) % sub_batch == 0:
                     logging.debug(f"  tag progress: {i + 1}/{len(rows)}")
                 if (i + 1) % batch_size == 0:
                     conn.commit()
                     logging.info(f"  migrated {i + 1}/{len(rows)} items")
 
+            if phase2_failures:
+                # initialize_database runs before failure capture is configured, so a
+                # capture call here would be a no-op; aggregate instead of per-row logs.
+                logging.warning(
+                    "Tags migration 5→6 phase 2 (insert workshop_tags associations): "
+                    "%d of %d rows failed; the legacy tags column is dropped later, so "
+                    "those associations are lost (last error: %s)",
+                    phase2_failures, len(rows), phase2_last_error,
+                )
             conn.commit()
             logging.info(f"Tags: {cursor.execute('SELECT COUNT(*) FROM tags').fetchone()[0]} unique tags, "
                          f"{cursor.execute('SELECT COUNT(*) FROM workshop_tags').fetchone()[0]} associations")
@@ -1368,15 +1398,24 @@ def insert_or_update_item(db_path: str, item_data: dict) -> bool:
                     parsed = json.loads(tags_raw)
                     if isinstance(parsed, list):
                         tag_names = [t.get("tag") if isinstance(t, dict) else str(t) for t in parsed]
-                except (json.JSONDecodeError, TypeError):
+                except (json.JSONDecodeError, TypeError) as json_exc:
                     # Handle Python-repr strings like "['fruit', 'sweet']"
                     import ast
                     try:
                         parsed = ast.literal_eval(tags_raw)
                         if isinstance(parsed, list):
                             tag_names = [t.get("tag") if isinstance(t, dict) else str(t) for t in parsed]
-                    except (ValueError, SyntaxError):
+                    except (ValueError, SyntaxError) as exc:
                         pass
+                        # Both parses failed: the item is written with no tags, so keep
+                        # the unparseable payload for a regression test. Never raises.
+                        from src import capture
+                        capture.record_failure(
+                            kind="api_unparseable_tags", stage="item_write",
+                            workshop_id=item_data.get("workshop_id"),
+                            body=tags_raw, content_type="application/json",
+                            context={"errors": [f"json: {json_exc}", f"literal_eval: {exc}"]},
+                        )
             if tag_names:
                 tag_ids = _ensure_tag_ids(db_path, tag_names)
                 conn.execute("DELETE FROM workshop_tags WHERE workshop_id = ?", (item_data["workshop_id"],))
