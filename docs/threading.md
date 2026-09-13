@@ -38,10 +38,16 @@ Independent daemon thread. Batch-fetches fields from `translation_queue` (up to 
 **Pacing and failure**: Every API-calling thread is expected to pace itself and to back off when a
 request fails, the way the daemon's dynamic `api_delay` does — see [data-pipeline.md](data-pipeline.md).
 Retrying a failed batch at the normal inter-batch interval turns a transient outage into a tight loop
-against a third-party API, and buries the real message in the log. Failures also differ in kind: a
-transport error or a rate limit can clear on its own, but an API-level rejection — a spend limit, a
-revoked key — cannot be fixed by retrying, so it is surfaced once and the thread waits rather than
-loops. A failed batch leaves its `translation_queue` rows in place, so a backoff costs nothing but time.
+against a third-party API, and buries the real message in the log. A failed batch leaves its
+`translation_queue` rows in place, so a backoff costs nothing but time.
+
+The translator's delay doubles from a base and caps, in one of two shapes, chosen because the failures
+differ in kind. A **service** failure — a transport error, a rate limit, a 5xx — starts at 2 s and caps
+at 5 minutes, because it can clear on its own. An **account-level** rejection — 401, 402 or 403, meaning
+credentials, billing or permissions — starts at 60 s and caps at an hour, because something has to
+change before retrying can work; the thread resumes on its own once it does, and one log line per
+attempt replaces the storm. The streak resets on the first batch that gets through. The wait is served
+in one-second steps so a long backoff cannot hold the daemon's shutdown.
 
 ---
 
