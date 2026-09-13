@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Workshop Scraper — Subscribe Bridge
 // @namespace    https://github.com/MyrddinE/steam-workshop-scraper
-// @version      6
+// @version      7
 // @updateURL    https://raw.githubusercontent.com/MyrddinE/steam-workshop-scraper/main/userscripts/steam_subscribe.user.js
 // @downloadURL  https://raw.githubusercontent.com/MyrddinE/steam-workshop-scraper/main/userscripts/steam_subscribe.user.js
 // @description  Bridges Steam session to the Workshop Scraper web UI for one-click subscribing.
@@ -13,6 +13,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_info
+// @grant        GM_cookie
 // @run-at       document-end
 // ==/UserScript==
 
@@ -33,22 +34,57 @@
       document.body.appendChild(t);
       setTimeout(function(){ t.remove(); }, 6000);
     }
+    // Steam marks steamLoginSecure HttpOnly, so document.cookie can never contain
+    // it — only GM_cookie can, and Tampermonkey supports HttpOnly through that API
+    // on BETA builds. The document.cookie path stays as a fallback, so a stable
+    // build still captures sessionid and behaves exactly as it did before.
+    function cookieApi() {
+      if (typeof GM_cookie !== 'undefined' && GM_cookie && GM_cookie.list) return GM_cookie;
+      if (typeof GM !== 'undefined' && GM && GM.cookie && GM.cookie.list) return GM.cookie;
+      return null;
+    }
+
+    function cookiesFromDocument() {
+      const found = {};
+      const sid = document.cookie.match(/(?:^|;\s*)sessionid=([^;]+)/);
+      if (sid) found.sessionid = sid[1];
+      const login = document.cookie.match(/(?:^|;\s*)steamLoginSecure=([^;]+)/);
+      if (login) found.steamLoginSecure = login[1];
+      return found;
+    }
+
+    function storeSession(found) {
+      const sid = found.sessionid;
+      if (!sid) return;
+      const login = found.steamLoginSecure || '';
+      const prevSid = GM_getValue('steam_sessionid', '');
+      const prevLogin = GM_getValue('steam_login_secure', '');
+      if (sid === prevSid && (!login || login === prevLogin)) return;
+      GM_setValue('steam_sessionid', sid);
+      if (login) GM_setValue('steam_login_secure', login);
+      const short = sid.slice(0, 6) + '...';
+      console.log('[SubscribeBridge] session captured:', short,
+                  login ? '(+ login cookie)' : '(login cookie NOT captured)');
+      showToast('New session captured: ' + short + ' — reload the Scraper web UI');
+    }
+
     function captureSession() {
-      const sidMatch = document.cookie.match(/(?:^|;\s*)sessionid=([0-9a-f]+)/);
-      const loginMatch = document.cookie.match(/(?:^|;\s*)steamLoginSecure=([^;]+)/);
-      if (sidMatch && sidMatch[1]) {
-        const sid = sidMatch[1];
-        const login = loginMatch ? loginMatch[1] : '';
-        const prevSid = GM_getValue('steam_sessionid', '');
-        const prevLogin = GM_getValue('steam_login_secure', '');
-        if (sid !== prevSid || login !== prevLogin) {
-          GM_setValue('steam_sessionid', sid);
-          if (login) GM_setValue('steam_login_secure', login);
-          const short = sid.slice(0, 6) + '...';
-          console.log('[SubscribeBridge] sessionid captured:', short, login ? '(+ login)' : '');
-          showToast('New session captured: ' + short + ' — reload the Scraper web UI');
-        }
+      const api = cookieApi();
+      if (!api) {
+        storeSession(cookiesFromDocument());
+        return;
       }
+      api.list({ url: 'https://steamcommunity.com/' }, function (cookies, error) {
+        if (error || !cookies) {
+          console.warn('[SubscribeBridge] GM_cookie.list failed (' + error +
+                       '); falling back to document.cookie');
+          storeSession(cookiesFromDocument());
+          return;
+        }
+        const found = {};
+        cookies.forEach(function (c) { found[c.name] = c.value; });
+        storeSession(found);
+      });
     }
     captureSession();
     // Re-capture after a few seconds in case the cookie loads late
@@ -185,17 +221,21 @@
   const sid = getSessionId();
   console.log(`[SubscribeBridge] v${CURRENT_VER} active, sessionid ${sid ? sid.slice(0,6)+'...' : '✗'}`);
 
-  // Push sessionid to the backend so the TUI / server can subscribe
+  // Push sessionid and the login cookie to the backend so the TUI / server can
+  // subscribe. login_secure was captured but never sent before, so the server
+  // logged "login_secure: missing" even once it had been read.
   function pushSessionToBackend() {
     const sid = getSessionId();
     if (!sid) return;
+    const login = getLoginSecure();
     GM_xmlhttpRequest({
       method: 'POST',
       url: API_BASE + '/api/sessionid',
       headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ sessionid: sid }),
+      data: JSON.stringify({ sessionid: sid, login_secure: login }),
       onload: function () {
-        console.log('[SubscribeBridge] sessionid pushed to backend');
+        console.log('[SubscribeBridge] sessionid pushed to backend' +
+                    (login ? ' (with login cookie)' : ' (no login cookie)'));
       },
       onerror: function () {
         setTimeout(pushSessionToBackend, 5000);
