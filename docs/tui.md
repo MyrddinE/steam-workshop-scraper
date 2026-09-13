@@ -91,7 +91,7 @@ Displays detailed metadata for the selected item. Shows: formatted title, creato
 
 ### Detail Fetching
 
-When a list item is highlighted, the TUI calls `bump_*_for_detail` functions (priority 10) and sets `detail_pane.workshop_id`. The `DetailsPane` watches this property and loads item data via `get_item_details` when it changes.
+When the detail pane adopts an item, `DetailsPane.watch_workshop_id` calls the `bump_*_for_detail` functions (priority 10) and then loads the item via `get_item_details`. The bump sits on the pane-load path rather than in the list-highlight handler so it fires once per adopted item instead of on every highlight event. The pane's own two-second refresh re-reads the item without re-queuing it.
 
 ---
 
