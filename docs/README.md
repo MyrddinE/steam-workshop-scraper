@@ -46,3 +46,9 @@ reference for the code in `src/`.
 | Document | Covers |
 |---|---|
 | [code-issues.md](code-issues.md) | Known defects, each re-checked against the source, with status and priority. |
+
+## Plans
+
+| Document | Covers |
+|---|---|
+| [future-plans.md](future-plans.md) | Intended changes. Unlike the rest of this directory, nothing here is implemented. |
