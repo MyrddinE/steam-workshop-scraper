@@ -49,8 +49,8 @@ Treat the scale as per-queue. See [data-model.md](data-model.md) for the column 
 
 | Column | Reality |
 |---|---|
-| `language` | **NULL for all 1,725,544 rows.** No code path populates it, yet it is in `WORKSHOP_ITEM_COLUMNS`, the merge allow-list, and the schema. Load-bearing in form, meaningless in practice. |
-| `is_queued_for_subscription` | **`0` for every row.** Nothing sets it. |
+| `language` | **NULL for all 1,725,544 rows.** The API merge would store it if a Steam response included it — none has — yet it is in `WORKSHOP_ITEM_COLUMNS`, the merge allow-list, and the schema. Load-bearing in form, unpopulated in practice. |
+| `is_queued_for_subscription` | **`0` for every row in this snapshot.** That is the resting state, not disuse. The column backs the subscription queue: the TUI and web UI set it, the userscript polls `GET /api/queued` and clears each entry on success or failure. Do not read this snapshot as "the feature is unused". |
 | `status = 206` | **Zero occurrences.** The schema's "web scrape failed but API succeeded" status has never been written. |
 
 ## The version key that used to hold two things

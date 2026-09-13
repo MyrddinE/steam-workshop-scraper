@@ -56,7 +56,7 @@ One row per Steam Workshop item, keyed by `workshop_id` (the Steam `publishedfil
 | `views` | `views` | |
 | `lifetime_subscriptions` | `lifetime_subscriptions` | |
 | `lifetime_favorited` | `lifetime_favorited` | |
-| `language` | `language` | **Dead.** NULL for every row in the live database; no code path populates it. |
+| `language` | `language` | **Never populated.** The merge would store it if a Steam response included it, but none has; NULL for every row in the live database. |
 
 ### Scraped and translated columns
 
@@ -83,7 +83,7 @@ Tags are not a column on `workshop_items`. They live in `tags(tag_id, tag_name)`
 | `scrape_version` | STATE (Steam value) | `steam_updated_at` at the moment the web scraper ran. |
 | `translate_version` | STATE (Steam value) | `steam_updated_at` at the moment the translator ran. |
 | `image_extension` | STATE | Extension of the downloaded preview image, or NULL if not downloaded. |
-| `is_queued_for_subscription` | QUEUE | **Dead.** `0` for every row in the live database; nothing sets it. |
+| `is_queued_for_subscription` | QUEUE | Subscription queue flag. Set by the TUI (`s`) and by `POST /api/toggle_sub/<id>`; cleared by `POST /api/subscribed/<id>` and `POST /api/subscribe_failed/<id>` when the userscript reports an outcome. Transient working state — it reads `0` whenever nothing is queued, which is the normal resting state, not evidence of disuse. |
 
 ### Queue columns
 
@@ -152,7 +152,12 @@ that is not there.
   record `steam_updated_at` at scrape and translation time, but no code compares them against the
   current `steam_updated_at` to trigger a re-scrape or re-translation. The columns are honest
   record-keeping; the decision logic does not exist.
-* **`language` and `is_queued_for_subscription` are dead.** Both are NULL or `0` for every row in
-  the live database, and no code path writes them.
+* **`language` is never populated.** It is in `WORKSHOP_ITEM_COLUMNS` and the merge allow-list, so
+  the API merge would store it if a response included it — none has, and it is NULL for every row
+  in the live database.
+* **`is_queued_for_subscription` is `0` in an idle database, but it is not dead.** It backs a
+  working feature: the TUI (`s`) and the web UI toggle it, the userscript polls
+  `GET /api/queued` and clears each entry once it has subscribed or failed. Because it is
+  transient, an all-zero snapshot only means nothing was queued at that moment.
 * **`status = 206` has never occurred.** The schema and one migration query allow a partial-data
   status, but the production database contains zero rows with it.

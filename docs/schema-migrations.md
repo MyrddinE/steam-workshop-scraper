@@ -37,7 +37,7 @@ Primary key: `workshop_id INTEGER PRIMARY KEY` (aliased from rowid). Columns:
 | needs_web_scrape | INTEGER | Priority for web scraping (10=detail, 5=list, 3=new, 1=backlog, 0=done) |
 | needs_image | INTEGER | Priority for image download (same scale as needs_web_scrape) |
 | image_extension | TEXT | File extension of downloaded image (e.g., "jpg"), NULL if not downloaded |
-| is_queued_for_subscription | INTEGER | Subscription queue flag. Dead: 0 in the live database |
+| is_queued_for_subscription | INTEGER | Subscription queue flag, set by the TUI and web UI and cleared when the userscript reports an outcome. Transient: reads 0 when nothing is queued |
 
 The `CREATE TABLE` statement still declares the historical names (`dt_found`, `dt_updated`,
 `dt_attempted`, `dt_translated`, `time_created`, `time_updated`) and a legacy `tags` column. A fresh
