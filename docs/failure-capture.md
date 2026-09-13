@@ -41,14 +41,23 @@ One JSON record per sample:
 | `workshop_id` | The item being processed |
 | `selector` | The CSS selector that failed, for the web kind |
 | `http_status`, `final_url`, `content_type` | How the response arrived |
-| `body_file`, `body_bytes`, `body_sha256`, `body_truncated` | The raw bytes, capped at `MAX_BODY_BYTES` (64 KB); the hash and length describe the full body |
+| `body_file`, `body_bytes`, `body_sha256` | The retained bytes, and the hash and length of the **full** response, so a re-fetch can be matched against it |
+| `body_truncated` | The 64 KB cap cut the retained content |
+| `body_noise_stripped` | `<script>` and `<style>` bodies were removed before capping |
 | `shape` | `class_digest`, `class_count`, `title_tag` — see below |
 | `captured_at`, `app_version` | When, and which build |
 
-`shape.class_digest` is a hash of the sorted set of CSS class names in the body,
-or of a JSON skeleton when the body has no classes (the API path). Class names
+`shape.class_digest` is a hash of the sorted set of CSS class names in the retained
+content, or of a JSON skeleton when the body has no classes (the API path). Class names
 rather than page text, so rotating text does not change the shape. It is recorded,
 not interpreted: nothing classifies pages by it yet.
+
+Retention removes `<script>` and `<style>` bodies before applying the cap. Capping the
+raw head instead kept whatever loaded first, and a modern Steam page is mostly script:
+on the live capture that prompted this, 64 KB of a 303 KB page was script and stylesheet
+tags, `class_count` was 2, and the artefact contained nothing that identified the page —
+nor did a digest of it describe the document. A body already under the cap strips to the
+same digest as before, so existing variants are not re-keyed.
 
 ## Bounds
 
