@@ -11,7 +11,10 @@ def load_config(path: str) -> dict:
         raise FileNotFoundError(f"Config file not found: {path}")
 
     with open(path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f) or {}
+        try:
+            config = yaml.safe_load(f) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigError(describe_yaml_error(path, exc)) from exc
 
     # Environment variable overrides
     env_key = os.environ.get("STEAM_API_KEY")
@@ -27,6 +30,31 @@ def load_config(path: str) -> dict:
         config["openai"]["api_key"] = openai_env_key
 
     return config
+
+class ConfigError(Exception):
+    """A config file that exists but cannot be used.
+
+    Distinct from FileNotFoundError, which callers answer with defaults. A file
+    that is present and malformed is a misconfiguration, so it is reported
+    rather than swallowed: falling back to defaults would silently discard
+    whatever the operator intended.
+    """
+
+
+_WINDOWS_PATH_HINT = (
+    "If a value is a Windows path, note that inside a double-quoted YAML string a "
+    'backslash starts an escape sequence: double it ("D:\\\\Temp") or use single '
+    "quotes ('D:\\Temp')."
+)
+
+
+def describe_yaml_error(path: str, exc: "yaml.YAMLError") -> str:
+    """A message an operator can act on, naming the file and the position."""
+    mark = getattr(exc, "problem_mark", None)
+    where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+    problem = getattr(exc, "problem", None) or str(exc).splitlines()[0]
+    return f"{path} is not valid YAML: {problem}{where}. {_WINDOWS_PATH_HINT}"
+
 
 def save_config(path: str, config: dict):
     """

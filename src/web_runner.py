@@ -2,7 +2,7 @@
 import sys
 import socket
 import logging
-from src.config import load_config
+from src.config import ConfigError, load_config
 from src.database import initialize_database
 from src.webserver import app, init_webserver
 
@@ -14,7 +14,14 @@ def main():
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
 
-    config = load_config(config_path)
+    try:
+        config = load_config(config_path)
+    except FileNotFoundError as exc:
+        logging.error("%s", exc)
+        sys.exit(1)
+    except ConfigError as exc:
+        logging.error("%s", exc)
+        sys.exit(2)
     db_path = config.get("database", {}).get("path", "workshop.db")
     initialize_database(db_path)
     init_webserver(db_path, config)

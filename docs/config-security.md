@@ -15,7 +15,9 @@ Reads a YAML file and applies environment variable overrides. The only two env v
 If the config file doesn't exist, `load_config` raises `FileNotFoundError`. Callers handle this by falling back to defaults.
 
 A file that exists but cannot be parsed is a different case: it is a misconfiguration, not an absent
-default, so it is reported to the operator with the file and the position rather than being swallowed.
+default, so `load_config` raises `ConfigError` — distinct from `FileNotFoundError` — naming the
+file and the position, and every entry point reports it and exits non-zero rather than starting
+with defaults.
 Falling back to defaults there would silently discard whatever the operator intended. Windows paths
 are the common way to trip this — inside a double-quoted YAML scalar a backslash starts an escape, so
 `"D:\Temp\dsh"` is a parse error and `"D:\temp"` is worse, parsing without complaint to `D:<TAB>emp`.

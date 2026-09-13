@@ -11,7 +11,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll, Center, Gri
 from textual.reactive import reactive
 from src.database import search_items, get_all_authors, initialize_database, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, get_db_stats, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, get_connection, FILTER_SCHEMA, ALL_FILTER_FIELDS, bump_api_priority_for_list, bump_api_priority_for_detail
 from src.analysis import view_window_analysis
-from src.config import load_config, save_config
+from src.config import ConfigError, load_config, save_config
 import os
 import yaml
 import threading
@@ -1267,6 +1267,9 @@ class ScraperApp(App):
             self.config = load_config(config_path)
         except FileNotFoundError:
             self.config = {"database": {"path": "workshop.db"}}
+        except ConfigError as exc:
+            print(f"\n{exc}\n", file=sys.stderr)
+            raise SystemExit(2)
         self.db_path = self.config["database"]["path"]
         initialize_database(self.db_path)
         self._wilson_cutoffs = {}
@@ -1850,6 +1853,9 @@ def main():
         config = load_config(config_path)
     except FileNotFoundError:
         config = {}
+    except ConfigError as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        raise SystemExit(2)
         
     log_config = config.get("logging", {})
     level_str = log_config.get("level", "INFO").upper()
