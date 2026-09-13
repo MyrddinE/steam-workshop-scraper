@@ -36,6 +36,11 @@ Cursor-based discovery using `IPublishedFileService/QueryFiles` with `query_type
 
 This is called when `get_next_items_to_scrape` returns empty — meaning the processing queue is drained and new items need to be discovered.
 
+Discovery is skipped while the daemon already has enough outstanding work: for each target AppID,
+`seed_database` returns early if at least `target_new` (100) items have never been fetched. The guard
+exists so that a healthy backlog is not re-crawled; it is a statement about outstanding work, not
+about discovery position.
+
 ### `_run_page_discovery` (daemon)
 
 A periodic alternative to cursor-based discovery. Enabled when a `.fetch_new` trigger file exists, when `_cursor_exhausted` is True, or when at least 500 items have been scraped (`api_fetched_at IS NOT NULL`). Runs at most once per 24 hours (tracked via `_last_page_discovery`), unless the trigger file bypasses the cooldown.
