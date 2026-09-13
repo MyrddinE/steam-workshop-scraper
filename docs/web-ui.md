@@ -129,7 +129,11 @@ Main search endpoint. Accepts `{filters, sort_by, sort_order, offset, limit}`. S
 
 ### `/api/item/<id>` — GET
 
-Detail endpoint. Server-side bumps web/image/translation at detail priority (10) before fetching. Returns full item data with BBCode-to-HTML converted description.
+Read-only detail fetch. Returns full item data with the BBCode-to-HTML converted description. It applies no priority bumps by design: the detail pane polls this every three seconds while it is open, and applying detail priority here re-armed the fetch queue on every poll, so the daemon re-fetched whatever was on screen indefinitely.
+
+### `/api/item/<id>/open` — POST
+
+The same detail payload, but applies detail-level priority (web, image, translation and API) first. This is the path the UI takes when a pane opens, and the only one that re-queues the item.
 
 ### `/api/items` — POST
 

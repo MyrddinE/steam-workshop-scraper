@@ -771,7 +771,7 @@ def test_migration_14_renames_and_cleans_data(tmp_path):
 
     conn = get_connection(db)
     # The chain runs to the terminal version; this test is about 13->14's effects.
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     cols = {r[1] for r in conn.execute("PRAGMA table_info(workshop_items)")}
     assert {"first_seen_at", "api_fetched_at", "last_fetch_attempted_at",
             "scrape_version", "translate_version", "steam_created_at",

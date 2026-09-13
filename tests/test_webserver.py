@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import lxml.html
 from src.webserver import app, init_webserver
-from src.database import initialize_database, insert_or_update_item, normalize_tags, get_image_subdirs
+from src.database import initialize_database, insert_or_update_item, normalize_tags, get_image_subdirs, get_connection
 
 
 @pytest.fixture
@@ -160,6 +160,60 @@ def test_item_not_found(web_client):
     client, _ = web_client
     resp = client.get('/api/item/99999')
     assert resp.status_code == 404
+
+
+def test_item_detail_is_read_only(web_client):
+    """The detail poll hits this route every 3s; it must not re-arm the queues.
+
+    Regression: applying detail priority here meant the item on screen was
+    fetched, cleared and re-queued on every poll, so the daemon re-fetched it
+    forever and the fetch queue held nothing else.
+    """
+    client, db_path = web_client
+    insert_or_update_item(db_path, {
+        "workshop_id": 99, "title": "Detail Mod", "creator": 111, "status": 200,
+        "api_priority": 0, "needs_web_scrape": 0, "needs_image": 0,
+        "translation_priority": 0,
+    })
+
+    for _ in range(10):  # ten polls, as the 3-second interval would produce
+        assert client.get('/api/item/99').status_code == 200
+
+    conn = get_connection(db_path)
+    row = conn.execute(
+        "SELECT api_priority, needs_web_scrape, needs_image, translation_priority "
+        "FROM workshop_items WHERE workshop_id = 99").fetchone()
+    conn.close()
+    assert row["api_priority"] == 0, "polling must not re-queue the API fetch"
+    assert row["needs_web_scrape"] == 0
+    assert row["needs_image"] == 0
+    assert row["translation_priority"] == 0
+
+
+def test_open_item_applies_detail_priority(web_client):
+    """Opening a pane is the one path that re-queues at detail priority."""
+    client, db_path = web_client
+    insert_or_update_item(db_path, {
+        "workshop_id": 99, "title": "Detail Mod", "creator": 111, "status": 200,
+        "api_priority": 0, "needs_web_scrape": 1, "needs_image": 0,
+        "translation_priority": 0,
+    })
+
+    resp = client.post('/api/item/99/open')
+    assert resp.status_code == 200
+    assert json.loads(resp.data)["title"] == "Detail Mod"
+
+    conn = get_connection(db_path)
+    row = conn.execute(
+        "SELECT api_priority, needs_web_scrape FROM workshop_items WHERE workshop_id = 99").fetchone()
+    conn.close()
+    assert row["api_priority"] == 10, "opening must queue the item for refresh"
+    assert row["needs_web_scrape"] == 10
+
+
+def test_open_item_not_found(web_client):
+    client, _ = web_client
+    assert client.post('/api/item/99999/open').status_code == 404
 
 
 def test_authors(web_client):

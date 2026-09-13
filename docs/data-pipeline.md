@@ -37,9 +37,11 @@ Cursor-based discovery using `IPublishedFileService/QueryFiles` with `query_type
 This is called when `get_next_items_to_scrape` returns empty — meaning the processing queue is drained and new items need to be discovered.
 
 Discovery is skipped while the daemon already has enough outstanding work: for each target AppID,
-`seed_database` returns early if at least `target_new` (100) items have never been fetched. The guard
-exists so that a healthy backlog is not re-crawled; it is a statement about outstanding work, not
-about discovery position.
+`seed_database` returns early when at least `target_new` (100) items are fetchable — queued and not
+dead, the population `get_next_items_to_scrape` selects. The guard exists so that a healthy backlog
+is not re-crawled. It deliberately does not count items that have never been fetched: those may not
+be queued at all, and reading them as outstanding work once suppressed discovery permanently while
+the fetch queue held a single item.
 
 ### `_run_page_discovery` (daemon)
 
@@ -65,7 +67,7 @@ Same API endpoint but with `query_type=21` (last updated) and cursor-based pagin
 
 Calls `ISteamRemoteStorage/GetPublishedFileDetails/v1/` to fetch full metadata for a single `publishedfileid`. Returns a dict containing the API's `title`, `description`, `tags`, `file_size`, `preview_url`, `creator`, `subscriptions`, `favorited`, `views`, `time_created`, `time_updated`, and more (these are the raw API field names; `_merge_and_clean_api_data` renames some of them before storage).
 
-Returns `{status: 500}` on any request failure (network, timeout, or HTTP error) — the caller stamps `last_fetch_attempted_at` and re-queues. Returns `{status: 404}` when the item is not found or `result != 1`.
+Returns `{status: 500}` on any request failure (network, timeout, or HTTP error) — the caller stamps `last_fetch_attempted_at` and applies the failure classification below. Returns `{status: 404}` when the item is not found or `result != 1`.
 
 ### `_merge_and_clean_api_data` (daemon)
 
@@ -74,6 +76,16 @@ Merges API response data into the existing DB row. Applies column-name remapping
 ### `_should_enrich` (daemon)
 
 Checks whether an item passes the enrichment filter for its AppID. Reads `enrichment_filters` from `app_tracking` (a JSON array of filter dicts in the same format as the TUI search builder). Feeds the item dict through `_evaluate_filters`, which uses `_evaluate_single_filter` for each criterion and `_evaluate_tag_filter` for tag-based filters. Returns True if no filters are configured for the AppID (enrich everything).
+
+### Failure classification (daemon)
+
+`_settle_api_failure` turns a non-success outcome into a queue decision. `404` is permanent: the failure is logged, the item is marked dead (`status = -1`) and it leaves the queue. Everything else is temporary — `500`, transport exceptions (which `get_workshop_details_api` reports as `500`), and any status no branch handles. Those keep the item queued at one priority level lower, floored at `1`, because priority `0` means "not queued" and clearing it is what previously stranded transient failures with nothing able to bring them back. Unhandled statuses are captured as evidence and never fall through to the success path.
+
+### Change detection across stages
+
+The API refresh is the change detector. It is the cheapest call and the only stage that goes stale on a timer, so the stages hanging off an item follow it. `_flag_scrape_and_image` compares the pre-fetch `steam_updated_at` against the freshly merged one: when they match it reuses the stored extended description and leaves the image alone, and when they differ it re-queues both. Translation does the equivalent with `translate_version` — see [What queues a field for translation](#what-queues-a-field-for-translation).
+
+A stage is therefore re-queued because its source changed, or because its output is missing — never because time passed. Per-queue staleness sweeps are deliberately not used. An item whose stored revision is unknown (`steam_updated_at` NULL) counts as changed, since no change can be ruled out.
 
 ---
 

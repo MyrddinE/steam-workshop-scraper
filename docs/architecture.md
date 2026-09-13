@@ -60,11 +60,12 @@ For every identified `workshop_id`, the daemon executes a multi-stage enrichment
 
 * **Graceful shutdown**: Signal handling (`SIGINT`, `SIGTERM`) lets batches finish and threads close
   cleanly.
-* **Partial data handling**: A failed API request persists its outcome status and is retried
-  (`500`) or marked dead (`-1`); a failed web scrape leaves the item's `needs_web_scrape` priority
-  in place so it is retried, while the metadata already fetched stays usable. A selector miss is
-  treated as a failure too: the item stays queued, stepped down by one so it sinks below current
-  work.
+* **Partial data handling**: A failed API request is classified once. A permanent failure (404) is
+  recorded, the item is marked dead (`-1`) and it leaves the queue; anything else — `500`, a
+  transport exception, or a status no branch handles — is recorded and the item is re-queued one
+  priority level lower, floored at `1`, so it is retried behind current work rather than dropped. A
+  failed web scrape leaves the item's `needs_web_scrape` priority in place so it is retried, while
+  the metadata already fetched stays usable; a selector miss is stepped down the same way.
 * **Error handling**: A failure is either recovered from or reported. A handler that recovers logs
   the operation and the exception; silence is reserved for failures already represented by a return
   value or a status column — a best-effort cleanup, an optional probe — and each such handler states

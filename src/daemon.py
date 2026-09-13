@@ -9,6 +9,7 @@ from src.database import (
     get_next_items_to_scrape, 
     insert_or_update_item, 
     count_unscraped_items, 
+    count_fetchable_items, 
     insert_or_update_user, 
     get_user, 
     flag_for_translation,
@@ -32,10 +33,15 @@ from src.image_worker import ImageScraperThread
 from src.backup import BackupThread
 from src import capture
 
-# API statuses the fetch path has an explicit branch for. Anything else would
-# fall through to the success path below and be persisted as 200, so it is
-# captured as evidence rather than silently misrecorded.
+# API statuses the fetch path has an explicit branch for. Anything else is
+# captured as evidence and then treated as temporary by _settle_api_failure; it
+# is never silently persisted as a success.
 HANDLED_API_STATUSES = frozenset({200, 404, 500})
+
+# The only API outcome that cannot succeed on retry. Everything else -- 500,
+# transport exceptions (which get_workshop_details_api reports as 500), and any
+# status without its own branch -- is retried at one priority level lower.
+PERMANENT_API_STATUSES = frozenset({404})
 
 
 # --- API merge allow-list ----------------------------------------------------
@@ -394,18 +400,14 @@ class Daemon:
         # at the front of its priority band in a tight loop. get_db_stats also
         # reports fetch recency from this column.
         merged_data["last_fetch_attempted_at"] = now_ts
+        # The pre-fetch priority is what a temporary failure steps down from, so
+        # take it before the queue fields are rewritten below.
+        previous_priority = existing_data.get("api_priority") or 0
         merged_data["api_priority"] = 0
         merged_data["status"] = api_status
 
-        if api_status == 404:
-            logging.warning(f"[A:{item_id}] Item not found (404) via API. Marking as dead (status=-1).")
-            merged_data["status"] = -1
-            insert_or_update_item(self.db_path, merged_data)
-            return
-        if api_status == 500:
-            logging.error(f"[A:{item_id}] API request failed (500). Retrying later.")
-            insert_or_update_item(self.db_path, merged_data)
-            self._record_api_failure()
+        if api_status != 200:
+            self._settle_api_failure(merged_data, item_id, api_status, previous_priority)
             return
 
         # Step 2: Merge, score, and queue follow-up work
@@ -429,6 +431,38 @@ class Daemon:
         logging.info(f"[A:{item_id}] \"{display_title}\"{' — \033[31mignored\033[0m' if not enriched else ''}")
         self._record_api_success()
 
+    def _settle_api_failure(self, merged_data: dict, item_id: int, api_status: int,
+                            previous_priority: int) -> None:
+        """Persist a failed API outcome: dequeue if permanent, step down if not.
+
+        A temporary failure keeps the item queued one priority level lower rather
+        than clearing its priority. Clearing it left the item in no queue at all,
+        and _promote_stale_items promotes only status 200, so a transient 500
+        became permanent. The floor is 1 because priority 0 means "not queued".
+
+        Statuses with no branch of their own reach here too, on purpose: falling
+        through to the success path would persist them as 200 and count them as a
+        success. The evidence is captured by the caller before this runs.
+        """
+        if api_status in PERMANENT_API_STATUSES:
+            logging.warning(
+                f"[A:{item_id}] Item not found ({api_status}) via API. "
+                "Recording the failure and marking it dead (status=-1)."
+            )
+            merged_data["status"] = -1
+            merged_data["api_priority"] = 0
+            insert_or_update_item(self.db_path, merged_data)
+            return
+
+        retry_priority = max(1, previous_priority - 1)
+        merged_data["api_priority"] = retry_priority
+        insert_or_update_item(self.db_path, merged_data)
+        logging.error(
+            f"[A:{item_id}] API request failed ({api_status}). "
+            f"Requeued at priority {retry_priority} to retry after the current queue."
+        )
+        self._record_api_failure()
+
     def _score_wilson(self, merged_data: dict) -> None:
         """Populate the derived Wilson scores from the freshly fetched counts."""
         merged_data["wilson_favorite_score"] = wilson_lower(
@@ -442,20 +476,25 @@ class Daemon:
                                item_id: int, inherited_prio: int) -> bool:
         """Queue web-scrape and image work for this item.
 
-        Returns whether the item was enriched. Note the mixed sources: the
-        unchanged-check compares the pre-fetch record against the merged one, so
-        both must be passed.
+        Returns whether the item was enriched. Both stages are gated on the same
+        revision test, because the API refresh is the change detector: it is the
+        cheapest call and the only stage that goes stale on a timer, so when it
+        observes an unchanged steam_updated_at the dependent work is already
+        current and is not re-queued. Per-queue staleness sweeps are deliberately
+        not used.
+
+        Note the mixed sources: the revision comparison is between the pre-fetch
+        record and the merged one, so both must be passed.
         """
+        old_steam_updated = existing_data.get("steam_updated_at")
+        new_steam_updated = merged_data.get("steam_updated_at")
+        revision_unchanged = (old_steam_updated is not None
+                              and old_steam_updated == new_steam_updated)
+
         appid = merged_data.get("consumer_appid")
         enriched = False
         if self._should_enrich(appid, merged_data):
-            old_steam_updated = existing_data.get("steam_updated_at")
-            new_steam_updated = merged_data.get("steam_updated_at")
-            unchanged = (existing_data.get("extended_description") is not None
-                         and old_steam_updated is not None
-                         and old_steam_updated == new_steam_updated)
-
-            if unchanged:
+            if revision_unchanged and existing_data.get("extended_description") is not None:
                 merged_data["extended_description"] = existing_data["extended_description"]
                 enriched = True
             else:
@@ -464,9 +503,13 @@ class Daemon:
         else:
             flag_for_web_scrape(self.db_path, item_id, max(1, inherited_prio))
 
-        # Flag for image download if preview URL is present
-        if merged_data.get("preview_url"):
-            flag_for_image(self.db_path, item_id, max(3, inherited_prio) if enriched else max(1, inherited_prio))
+        # Image work, on the same revision test. Without it every API fetch
+        # re-flagged the image, so previews that had not changed were downloaded
+        # again on each staleness cycle.
+        if merged_data.get("preview_url") and not (
+                revision_unchanged and existing_data.get("image_extension")):
+            flag_for_image(self.db_path, item_id,
+                           max(3, inherited_prio) if enriched else max(1, inherited_prio))
         return enriched
 
     def _flag_translations(self, merged_data: dict, item_id: int,
@@ -607,8 +650,18 @@ class Daemon:
             return
 
         for appid in self.target_appids:
-            if count_unscraped_items(self.db_path) >= target_new:
-                logging.info(f"Queue appropriately filled (>= {target_new}) for AppID {appid}. Skipping discovery.")
+            # The guard must measure work the fetch queue can actually hand out.
+            # It used to test count_unscraped_items -- items never successfully
+            # fetched -- which is a disjoint population: on production this read
+            # 890 while the fetch queue held 1, so discovery was suppressed
+            # permanently and the queue could never refill.
+            fetchable = count_fetchable_items(self.db_path)
+            if fetchable >= target_new:
+                logging.info(
+                    "Queue appropriately filled (%d fetchable, >= %d) for AppID %s. "
+                    "Skipping discovery. (%d items have never been fetched but are not queued.)",
+                    fetchable, target_new, appid, count_unscraped_items(self.db_path),
+                )
                 continue
 
             app_tracking = get_app_tracking(self.db_path, appid)

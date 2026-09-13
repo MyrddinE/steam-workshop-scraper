@@ -206,24 +206,50 @@ def api_search():
         return jsonify({"error": str(e)}), 500
 
 
+def _detail_payload(workshop_id):
+    """Build the detail response for an item, or None when it does not exist."""
+    item = get_item_details(_db_path, workshop_id)
+    if not item:
+        return None
+
+    desc = item.get("extended_description_en") or item.get("extended_description") or ""
+    item["description_html"] = _bbcode_to_html(desc)
+    item["display_title"] = item.get("title_en") or item.get("title") or "N/A"
+    return item
+
+
 @app.route('/api/item/<int:workshop_id>')
 def api_item(workshop_id):
+    """Read-only detail fetch.
+
+    Deliberately free of side effects. The web UI polls this every three seconds
+    while a pane is open, and applying detail priority here re-armed the fetch
+    queue on every poll: the daemon re-fetched whatever was on screen, forever.
+    Opening a pane goes through api_item_open instead, which is the only route
+    that applies detail priority.
+    """
+    item = _detail_payload(workshop_id)
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(item)
+
+
+@app.route('/api/item/<int:workshop_id>/open', methods=['POST'])
+def api_item_open(workshop_id):
+    """Apply detail-level priority once, then return the detail record.
+
+    Separate from the read-only route so the frequent caller cannot re-queue an
+    item by accident, and so the behaviour is directly testable.
+    """
     bump_web_priority_for_detail(_db_path, workshop_id)
     bump_image_priority_for_detail(_db_path, workshop_id)
     _ensure_image_flagged(workshop_id, 10)
     bump_translation_for_detail(_db_path, workshop_id)
     bump_api_priority_for_detail(_db_path, workshop_id)
 
-    item = get_item_details(_db_path, workshop_id)
-    if not item:
+    item = _detail_payload(workshop_id)
+    if item is None:
         return jsonify({"error": "not found"}), 404
-
-    desc = item.get("extended_description_en") or item.get("extended_description") or ""
-    item["description_html"] = _bbcode_to_html(desc)
-
-    display_title = item.get("title_en") or item.get("title") or "N/A"
-    item["display_title"] = display_title
-
     return jsonify(item)
 
 

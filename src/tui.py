@@ -683,9 +683,20 @@ class DetailsPane(VerticalScroll):
                 self.item_data = fresh_data
 
     async def watch_workshop_id(self, workshop_id: int) -> None:
-        """When ID changes, clear old data and fetch new."""
+        """When the pane adopts an item, apply detail priority once and fetch it.
+
+        The bump lives here rather than in the list-view highlight handler so it
+        fires on pane load, not on every highlight event. The 2-second
+        refresh_data poll below stays read-only on purpose: re-applying detail
+        priority there would re-queue whatever is on screen indefinitely.
+        """
         self.item_data = None
         if workshop_id:
+            db_path = self.app.db_path
+            bump_web_priority_for_detail(db_path, workshop_id)
+            bump_translation_for_detail(db_path, workshop_id)
+            bump_image_priority_for_detail(db_path, workshop_id)
+            bump_api_priority_for_detail(db_path, workshop_id)
             await self.refresh_data()
 
     def watch_item_data(self, item_data: dict) -> None:
@@ -1539,13 +1550,8 @@ class ScraperApp(App):
             if event.item and hasattr(event.item, 'item_data'):
                 item_data = event.item.item_data
                 self.current_item_creator = item_data.get('creator')
-                wid = item_data.get("workshop_id")
-                if wid:
-                    bump_web_priority_for_detail(self.db_path, wid)
-                    bump_translation_for_detail(self.db_path, wid)
-                    bump_image_priority_for_detail(self.db_path, wid)
-                    bump_api_priority_for_detail(self.db_path, wid)
-                
+                # Detail priority is applied by DetailsPane when it adopts the
+                # item, not here: this handler fires on every highlight move.
                 detail_pane = self.query_one("#item-details", DetailsPane)
                 detail_pane.workshop_id = item_data.get("workshop_id")
                 
