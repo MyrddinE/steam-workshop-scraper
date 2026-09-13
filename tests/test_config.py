@@ -123,3 +123,35 @@ def test_save_config_preserves_existing_keys(tmp_path):
         saved = yaml.safe_load(f)
     assert saved["existing_key"] == "value"
     assert saved["new_key"] == "new_value"
+
+
+# ── the shipped example config ───────────────────────────────────────────────
+# Copying config.yaml.example to config.yaml is the documented first step, so the
+# file itself has to parse. It did not: a stray token ended the openai block
+# early and yaml.safe_load raised.
+
+EXAMPLE_CONFIG = os.path.join(os.path.dirname(__file__), os.pardir, "config.yaml.example")
+
+
+def test_example_config_is_valid_yaml():
+    with open(EXAMPLE_CONFIG) as f:
+        parsed = yaml.safe_load(f)
+    assert isinstance(parsed, dict)
+
+
+def test_example_config_has_the_documented_sections():
+    with open(EXAMPLE_CONFIG) as f:
+        parsed = yaml.safe_load(f)
+    for section in ("api", "database", "daemon", "openai", "logging"):
+        assert section in parsed, f"config.yaml.example is missing the '{section}' section"
+
+
+def test_example_config_uses_the_current_delay_key():
+    """The canonical key is api_delay_seconds; the daemon still accepts the old
+    name as an undocumented fallback (code-issues #9), but the example must not
+    advertise it."""
+    with open(EXAMPLE_CONFIG) as f:
+        parsed = yaml.safe_load(f)
+    assert "api_delay_seconds" in parsed["daemon"]
+    assert "request_delay_seconds" not in parsed["daemon"]
+
