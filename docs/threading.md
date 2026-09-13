@@ -35,6 +35,14 @@ Independent daemon thread. Batch-fetches fields from `translation_queue` (up to 
 
 **Shared state**: Reads `translation_queue`. Writes `_en` columns on `workshop_items` and `users`, stamps `translate_version` on items and `translated_at` on users, deletes from `translation_queue`, resets `translation_priority` to 0 when the queue is empty for an item.
 
+**Pacing and failure**: Every API-calling thread is expected to pace itself and to back off when a
+request fails, the way the daemon's dynamic `api_delay` does — see [data-pipeline.md](data-pipeline.md).
+Retrying a failed batch at the normal inter-batch interval turns a transient outage into a tight loop
+against a third-party API, and buries the real message in the log. Failures also differ in kind: a
+transport error or a rate limit can clear on its own, but an API-level rejection — a spend limit, a
+revoked key — cannot be fixed by retrying, so it is surfaced once and the thread waits rather than
+loops. A failed batch leaves its `translation_queue` rows in place, so a backoff costs nothing but time.
+
 ---
 
 ## Thread Safety
