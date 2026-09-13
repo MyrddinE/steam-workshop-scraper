@@ -10,6 +10,11 @@ from src.config import load_config
 _last_web_call = 0.0
 _WEB_DELAY = 5.0
 
+# The selectors scrape_extended_details depends on. Named so a selector miss can
+# be captured against the exact selector that failed.
+DESCRIPTION_SELECTOR = '.workshopItemDescription#highlightContent'
+TAGS_SELECTOR = '.workshopTags a'
+
 
 def set_web_delay(seconds: float):
     global _WEB_DELAY
@@ -85,22 +90,32 @@ def _extract_total_pages(response) -> int:
 def scrape_extended_details(item_url: str) -> dict | None:
     """
     Scrapes the extended description and tags from a Steam Workshop page.
+
+    Returns None when the request itself failed. When the request succeeded but
+    the description selector did not match, returns a dict whose "description" is
+    None - the caller must treat that as a miss, not as a completed scrape, and
+    "body" carries the response so it can be captured as evidence.
     """
     session = HTMLSession()
     _rate_limit()
     try:
         response = session.get(item_url, timeout=10)
         response.raise_for_status()
-        
-        description_element = response.html.find('.workshopItemDescription#highlightContent', first=True)
+
+        description_element = response.html.find(DESCRIPTION_SELECTOR, first=True)
         description = description_element.text if description_element else None
-        
-        tag_elements = response.html.find('.workshopTags a')
+
+        tag_elements = response.html.find(TAGS_SELECTOR)
         tags = [tag.text for tag in tag_elements] if tag_elements else []
-        
+
         return {
             "description": description,
-            "tags": tags
+            "tags": tags,
+            # Retained only on a miss: the caller captures it, and there is no
+            # reason to carry a few hundred KB of HTML around on the happy path.
+            "body": response.text if description is None else None,
+            "http_status": response.status_code,
+            "final_url": str(getattr(response, "url", item_url)),
         }
     except requests.exceptions.RequestException:
         return None

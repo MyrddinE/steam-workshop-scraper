@@ -30,6 +30,12 @@ from src.database import flag_for_web_scrape, flag_field_for_translation, flag_f
 from src.web_worker import WebScraperThread
 from src.image_worker import ImageScraperThread
 from src.backup import BackupThread
+from src import capture
+
+# API statuses the fetch path has an explicit branch for. Anything else would
+# fall through to the success path below and be persisted as 200, so it is
+# captured as evidence rather than silently misrecorded.
+HANDLED_API_STATUSES = frozenset({200, 404, 500})
 
 
 # --- API merge allow-list ----------------------------------------------------
@@ -115,6 +121,10 @@ class Daemon:
             logging.info(
                 "Database backup enabled: outbox=%s interval=%ss",
                 self.outbox_dir, self.backup_interval_seconds)
+
+        # Failure capture rides on the same outbox but needs no interval: it is a
+        # no-op unless an outbox directory is configured, like the backup above.
+        capture.configure(self.outbox_dir)
         
         # State variables for dynamic delay adjustment
         self.api_successes = 0
@@ -360,6 +370,20 @@ class Daemon:
         api_data = get_workshop_details_api(item_id, self.api_key)
         api_status = api_data.get("status", 0)
 
+        if api_status not in HANDLED_API_STATUSES:
+            # No branch below handles this code, so the item would be persisted as
+            # status 200 and counted as a success. Capture the evidence; changing
+            # that flow is a separate decision.
+            capture.record_failure(
+                kind="api_unhandled_status",
+                stage="api_fetch",
+                workshop_id=item_id,
+                http_status=api_status,
+                body=json.dumps(api_data, default=str),
+                content_type="application/json",
+                context={"handled_statuses": sorted(HANDLED_API_STATUSES)},
+            )
+
         merged_data = existing_data.copy()
         # Attempt clock: set unconditionally, before the status branches, so a
         # 404, a 500 and a success all persist it. This is not optional
@@ -560,6 +584,14 @@ class Daemon:
                 self._backup_worker.run_now()
             except Exception as e:
                 logging.error(f"Final database backup failed: {e}")
+
+        # Counters are flushed on a timer during the run; this catches whatever
+        # was recorded since the last flush. Failures are logged, not raised:
+        # shutdown must still complete.
+        try:
+            capture.flush()
+        except Exception as e:
+            logging.error(f"Final failure-capture flush failed: {e}")
 
     def seed_database(self, target_new: int = 100):
         """
