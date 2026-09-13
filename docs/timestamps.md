@@ -99,7 +99,8 @@ The comparison is per **item**, not per field: `translate_version` is one column
 `workshop_items`, so an edit to any Steam-visible field makes every non-ASCII field of that item
 stale and re-queues them together. That is the granularity of the only version stamp that exists.
 
-**Scraping.** `scrape_version` is written by the web scraper and the image worker when they run. The
-daemon's `_flag_scrape_and_image` does not compare it: it decides whether to re-queue the HTML scrape
-from `steam_updated_at` against the pre-fetch record and whether `extended_description` is already
-present. The column remains a record of when the scrape ran rather than the trigger for it.
+**Scraping.** `scrape_version` is written by two workers — the web scraper and the image worker — and
+both store the item's `steam_updated_at`, so it records Steam's revision rather than our clock, and it
+cannot distinguish which stage wrote it last. The daemon's `_flag_scrape_and_image` does not read it:
+it decides whether to re-queue the HTML scrape by comparing `steam_updated_at` against the pre-fetch
+record. The column therefore has no consumer.
