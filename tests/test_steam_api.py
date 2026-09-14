@@ -84,7 +84,10 @@ def test_get_workshop_details_api_success():
     pytest.param(lambda url: responses.add(responses.POST, url, status=404), 500, id="http_404"),
     pytest.param(lambda url: responses.add(responses.POST, url, status=429), 500, id="http_429"),
     pytest.param(lambda url: responses.add(responses.POST, url, body=requests.exceptions.Timeout()), 500, id="timeout"),
-    pytest.param(lambda url: responses.add(responses.POST, url, json={"response": {"result": 1, "resultcount": 0, "publishedfiledetails": []}}, status=200), 404, id="empty_details"),
+    # An empty response is not a deletion: the endpoint answers every requested
+    # id (bad ones with result != 1), so no entry at all means the response did
+    # not arrive whole. 500 requeues the item; 404 would kill it for good.
+    pytest.param(lambda url: responses.add(responses.POST, url, json={"response": {"result": 1, "resultcount": 0, "publishedfiledetails": []}}, status=200), 500, id="empty_details"),
     pytest.param(lambda url: responses.add(responses.POST, url, json={"response": {"result": 1, "resultcount": 1, "publishedfiledetails": [{"publishedfileid": "123", "result": 9}]}}, status=200), 404, id="invalid_item"),
 ])
 def test_get_workshop_details_api_errors(setup_fn, expected_status):
@@ -278,8 +281,12 @@ def test_batch_results_map_back_to_the_right_items_regardless_of_order():
 
     assert result[101]["title"] == "Mod 101"
     assert result[303]["title"] == "Mod 303"
-    # 202 was omitted: an explicit not-found, never a silent skip.
-    assert result[202] == {"status": 404, "publishedfileid": 202}
+    # 202 was omitted from the response. That is reported as a TEMPORARY failure,
+    # not a permanent one: the endpoint answers every requested id (bad ones with
+    # result != 1), so an omission means the response did not arrive whole, and
+    # treating it as not-found would kill the item irreversibly on the strength of
+    # one truncated response. Requeued-and-sunk is the safe direction.
+    assert result[202] == {"status": 500, "publishedfileid": 202}
 
 
 @responses.activate
@@ -297,7 +304,9 @@ def test_batch_ignores_extra_and_duplicate_ids():
 
     assert set(result) == {1, 2}
     assert result[1]["title"] == "first", "a duplicate must not overwrite the first entry"
-    assert result[2] == {"status": 404, "publishedfileid": 2}
+    # 2 was omitted entirely: a temporary failure (see the batch docstring), not
+    # the permanent not-found that result != 1 reports.
+    assert result[2] == {"status": 500, "publishedfileid": 2}
 
 
 @responses.activate

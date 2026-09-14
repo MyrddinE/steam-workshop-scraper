@@ -37,11 +37,12 @@ def get_workshop_details_batch(item_ids: list[int], api_key: str) -> dict[int, d
     """Fetch metadata for many workshop items in a single POST.
 
     Returns a mapping keyed by the requested id. Every requested id is present in
-    the result: an id the API omitted is reported as a synthetic ``404``, the
-    same not-found result the single-item spelling produces. Silently dropping an
-    omitted id would leave that row at the front of the queue forever, which is
-    the failure mode this codebase keeps fixing, so the omission is settled as a
-    permanent not-found instead.
+    the result: one the API omitted is reported as a synthetic ``500``, a
+    temporary failure, so the row is requeued rather than killed. An omission is
+    not evidence of deletion -- the endpoint answers every requested id, with
+    ``result != 1`` marking the ones that are gone -- so it is read as a response
+    that did not arrive whole. See the note at the fill-in below for why the
+    direction matters.
 
     Results are keyed by the ``publishedfileid`` each response entry carries, not
     by its position, so a response that reorders, duplicates or adds ids can never
@@ -116,9 +117,16 @@ def get_workshop_details_batch(item_ids: list[int], api_key: str) -> dict[int, d
             by_id[detail_id] = detail
 
         for item_id in requested:
-            # The bulk endpoint answers one entry per requested id, so an omitted
-            # id is a permanent not-found rather than a request failure.
-            by_id.setdefault(item_id, {"status": 404, "publishedfileid": item_id})
+            # An omitted id is NOT the same as "not found". The bulk endpoint
+            # answers one entry per requested id -- a live probe of 50 ids (10 of
+            # them nonexistent) returned 50 entries, the bad ones carrying
+            # result=9 -- so an omission means the response did not arrive whole,
+            # not that Steam has deleted the item. Reporting it as 404 would mark
+            # every omitted item dead, permanently and irreversibly: a truncated
+            # response is one event, and `status = -1` is never revived by
+            # anything. It is reported as a temporary failure instead, which
+            # requeues the item one priority lower -- it survives, and sinks.
+            by_id.setdefault(item_id, {"status": 500, "publishedfileid": item_id})
         return by_id
 
     except requests.exceptions.RequestException:
