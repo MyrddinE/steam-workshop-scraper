@@ -83,7 +83,26 @@ class WebScraperThread(threading.Thread):
                      item.get("workshop_id"))
         return scrape_extended_details(url) or scrape_data
 
-    def _handle_selector_miss(self, item: dict, url: str, scrape_data: dict) -> None:
+    def _record_web_failure(self) -> None:
+        """Count one request the server did not serve, and grow the delay.
+
+        Shared by a transport failure and a page that was not the item's: the
+        two differ in what happens to the item, not in how fast the scraper may
+        knock, so both move the same counters and the same rule governs the
+        delay. A page that was the item's and simply had no description is
+        neither -- see ``_handle_selector_miss``.
+        """
+        self.web_failures += 1
+        self.web_successes = 0
+        if self.web_failures >= 2 and self.web_had_streak:
+            old = self.web_delay
+            self.web_delay = min(round(self.web_delay * (1.05 ** 10), 3),20)
+            logging.info(f"Multiple consecutive web scrape failures! Increasing web delay from {old} to {self.web_delay}s.")
+            if self._save_cb:
+                self._save_cb("web_delay_seconds", self.web_delay)
+            self.web_had_streak = False
+
+    def _handle_selector_miss(self, item: dict, url: str, scrape_data: dict) -> bool:
         """Handle a page that loaded but whose description selector did not match.
 
         scrape_extended_details returns ``{"description": None, "tags": []}`` on a
@@ -105,10 +124,20 @@ class WebScraperThread(threading.Thread):
           one.
 
         The response is captured as evidence in both cases, since either may be a
-        layout change worth knowing about. The request itself succeeded, so this
-        deliberately does not raise ``api_priority`` and does not touch the
-        network-failure backoff: slowing down would not make a broken selector
-        match.
+        layout change worth knowing about. Neither raises ``api_priority``: the
+        request reached Steam and came back, so this is not a transport failure,
+        and a broken selector is not fixed by fetching the metadata again.
+
+        The two cases are opposites for pacing, which is why the caller is told
+        which one happened. A page that was not the item's is a request the server
+        declined to serve -- the reason to slow down -- so the caller counts it as
+        a failure. The item page with no description is neutral: the request
+        succeeded, so there is nothing to back off from, but it yielded nothing,
+        so it must not count as a success and reset the failure streak either.
+
+        Returns ``True`` when the served body really was the item's page, and
+        ``False`` when it was not. Only the caller updates the pacing counters and
+        sleeps, so both failed outcomes grow the delay through one rule.
         """
         workshop_id = item["workshop_id"]
         capture.record_failure(
@@ -125,9 +154,10 @@ class WebScraperThread(threading.Thread):
         body = scrape_data.get("body") or ""
         if not looks_like_item_page_without_description(body):
             logging.warning(
-                "[W:%s] Selector %s did not match and the item page was not served; "
-                "leaving needs_web_scrape unchanged", workshop_id, DESCRIPTION_SELECTOR)
-            return
+                "[W:%s] Selector %s did not match and the body is not the item's "
+                "page; leaving needs_web_scrape unchanged and backing off",
+                workshop_id, DESCRIPTION_SELECTOR)
+            return False
 
         logging.warning(
             "[W:%s] Item page has no extended description; clearing needs_web_scrape",
@@ -139,6 +169,7 @@ class WebScraperThread(threading.Thread):
         )
         conn.commit()
         conn.close()
+        return True
 
     def run(self):
         logging.info("Web scraper thread started.")
@@ -212,7 +243,13 @@ class WebScraperThread(threading.Thread):
                         workshop_id, RATE_LIMIT_PAUSE_SECONDS)
                     self._wait_out_throttle(RATE_LIMIT_PAUSE_SECONDS)
                     continue
-                self._handle_selector_miss(item, url, scrape_data)
+                if not self._handle_selector_miss(item, url, scrape_data):
+                    # The body was not the item's page: a wall, an error page,
+                    # or a throttle the marker missed. The item stays queued
+                    # because it is not at fault, but the scraper is not being
+                    # served content, so it backs off through the same rule as
+                    # a transport failure rather than knocking on regardless.
+                    self._record_web_failure()
                 time.sleep(self.web_delay)
             else:
                 logging.warning(f"[W:{workshop_id}] Web scrape failed (no data returned)")
@@ -223,15 +260,7 @@ class WebScraperThread(threading.Thread):
                 )
                 conn.commit()
                 conn.close()
-                self.web_failures += 1
-                self.web_successes = 0
-                if self.web_failures >= 2 and self.web_had_streak:
-                    old = self.web_delay
-                    self.web_delay = min(round(self.web_delay * (1.05 ** 10), 3),20)
-                    logging.info(f"Multiple consecutive web scrape failures! Increasing web delay from {old} to {self.web_delay}s.")
-                    if self._save_cb:
-                        self._save_cb("web_delay_seconds", self.web_delay)
-                    self.web_had_streak = False
+                self._record_web_failure()
                 time.sleep(self.web_delay)
 
         if self._save_cb:

@@ -70,7 +70,7 @@ No formal locking protocol exists, but columns have clear ownership:
 
 The `needs_web_scrape`, `needs_image`, and `translation_priority` columns use priority levels (10 = highest, 1 = lowest, 0 = done). Bump functions use `MAX(current, new_priority)` to upgrade without downgrading. This allows the main loop and frontend views to independently bump priority without coordination.
 
-The image thread uses a direct UPDATE to set `needs_image = max(0, current - 1)` on failure, deliberately using a non-MAX path to decrement priority for transient failures. The web scraper does the same for a selector miss, but floors at 1 (`MAX(1, needs_web_scrape - 1)`) so the item stays in its queue, and does not raise `api_priority`, because the request itself succeeded. See [failure-capture.md](failure-capture.md).
+The image thread uses a direct UPDATE to set `needs_image = max(0, current - 1)` on failure, deliberately using a non-MAX path to decrement priority for transient failures. The web scraper does not do the same for a selector miss: it leaves `needs_web_scrape` untouched when the page was not the item's, and clears it when the item page genuinely has no description. It does not raise `api_priority`, because the request itself succeeded. See [failure-capture.md](failure-capture.md).
 
 ### The Outbox Manifest
 
