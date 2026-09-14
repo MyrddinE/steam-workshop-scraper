@@ -12,6 +12,7 @@ from src.analysis import view_window_analysis
 from src import metrics
 from src.config import login_secure_value, save_config
 from src.daemon_control import DaemonController
+from src.web_worker import WEB_DELAY_DEFAULT
 
 app = Flask(__name__, template_folder='../templates')
 app.config['TEMPLATES_AUTO_RELOAD'] = True
@@ -140,7 +141,9 @@ def serve_image(filename):
 
 @app.route('/')
 def index():
-    web_delay = float((_config.get("daemon", {}) or {}).get("web_delay_seconds", 5.0))
+    # The worker owns the default; share its constant so an unset delay does not
+    # display a number the decay rule would immediately raise to the floor.
+    web_delay = float((_config.get("daemon", {}) or {}).get("web_delay_seconds", WEB_DELAY_DEFAULT))
     import json as _json
     return render_template('index.html', web_delay=web_delay,
                            filter_schema_json=_json.dumps(FILTER_SCHEMA))

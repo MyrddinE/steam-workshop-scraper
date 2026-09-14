@@ -2,6 +2,8 @@
 import pytest
 from unittest.mock import patch
 
+from src.web_worker import WEB_DELAY_DEFAULT
+
 
 # ── Web worker ───────────────────────────────────────────────────────────────
 
@@ -41,6 +43,44 @@ def test_web_worker_failure_sets_api_priority(db_path):
     ).fetchone()[0]
     conn.close()
     assert prio == 2
+
+
+# ── Web worker: the delay floor ──────────────────────────────────────────────
+# The floor was raised from 1.0 s to 6.0 s because the same Steam budget is
+# shared with the owner's own browsing: when scrapes fail, the worker has to
+# back off far enough that the Workshop is still usable by hand.
+
+def test_the_default_web_delay_is_not_below_the_floor():
+    """A default under the floor is a delay the decay rule considers too fast."""
+    from src.web_worker import WEB_DELAY_FLOOR, WebScraperThread
+
+    worker = WebScraperThread("test.db", ".pauselock")
+    assert worker.web_delay == WEB_DELAY_DEFAULT
+    assert worker.web_delay >= WEB_DELAY_FLOOR
+
+    # An explicit persisted value above the floor is still honoured: the floor
+    # only binds while decaying, it must not reset a slow installation.
+    configured = WebScraperThread("test.db", ".pauselock", {"web_delay_seconds": 20})
+    assert configured.web_delay == 20.0
+
+
+def test_the_web_delay_floor_is_honoured_during_decay(db_path):
+    """100 successes shrink the delay, but only down to the floor."""
+    from src.database import insert_or_update_item
+    from src.web_worker import WEB_DELAY_FLOOR, WebScraperThread
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+
+    # Just above the floor: one decay step would land under it unfloored.
+    worker = WebScraperThread(db_path, ".pauselock")
+    worker.web_delay = WEB_DELAY_FLOOR + 0.2
+
+    worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
+                             [FOUND] * 100, worker=worker)
+
+    assert worker.web_delay == WEB_DELAY_FLOOR, \
+        "the decay must stop at the floor, not pass through it"
+    assert worker.web_delay >= WEB_DELAY_FLOOR
 
 
 # ── Image worker ─────────────────────────────────────────────────────────────
@@ -97,6 +137,198 @@ def test_image_worker_failure_sets_api_priority(db_path):
     ).fetchone()[0]
     conn.close()
     assert prio == 2
+
+
+# ── Image worker: capture ────────────────────────────────────────────────────
+# The image worker made no capture calls at all, so a failure left no evidence
+# beyond a one-line warning. Failures are now captured whenever an outbox is
+# configured; successes only under the image debug switch. The image bytes are
+# never copied into the outbox — the file the download wrote is the artefact.
+
+class _FakeImageResponse:
+    """Just enough of a requests response to drive the download path."""
+
+    def __init__(self, status_code=200, headers=None, body=b"",
+                 url="http://example.com/img.jpg"):
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.url = url
+        self._body = body
+
+    def iter_content(self, chunk_size):
+        for start in range(0, len(self._body), chunk_size):
+            yield self._body[start:start + chunk_size]
+
+
+def _run_image_worker(db_path, response=None, error=None, images_root=None):
+    """Run exactly one image download, then stop the worker.
+
+    ``response`` is a fake response; ``error`` makes ``requests.get`` raise
+    instead. ``images_root`` redirects the saved file out of the repository's
+    own images directory, which a success test must not pollute.
+    """
+    import os
+    from contextlib import ExitStack
+    from src.image_worker import ImageScraperThread
+
+    worker = ImageScraperThread(db_path, ".pauselock")
+    item = {"workshop_id": 5, "preview_url": "http://example.com/img.jpg",
+            "needs_image": 1, "steam_updated_at": 1}
+    served = [0]
+
+    def next_item(*args, **kwargs):
+        served[0] += 1
+        if served[0] > 1:
+            worker.running = False
+            return None
+        return item
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("src.image_worker.get_next_image_item",
+                                  side_effect=next_item))
+        if error is not None:
+            stack.enter_context(patch("src.image_worker.requests.get",
+                                      side_effect=error))
+        else:
+            stack.enter_context(patch("src.image_worker.requests.get",
+                                      return_value=response))
+        stack.enter_context(patch("src.image_worker.time.sleep"))
+        if images_root is not None:
+            stack.enter_context(patch(
+                "src.image_worker.get_image_path",
+                side_effect=lambda base, wid, ext: os.path.join(
+                    images_root, f"{wid}.{ext}")))
+        worker.start()
+        worker.join(timeout=5)
+    return worker
+
+
+def _image_failure_records(outbox):
+    import json
+
+    from src import capture
+
+    group = capture.group_id("image_download_failed", None, "image_download")
+    group_dir = outbox / "failures" / group
+    return [json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(group_dir.glob("*.json"))
+            if path.name != "_group.json"]
+
+
+def test_an_image_failure_is_captured_with_status_and_headers(db_path, tmp_path):
+    from src import capture
+    from src.database import insert_or_update_item
+
+    outbox = tmp_path / "outbox"
+    capture.configure(str(outbox))
+    try:
+        insert_or_update_item(db_path, {"workshop_id": 5, "needs_image": 1,
+                                        "preview_url": "http://example.com/img.jpg"})
+        _run_image_worker(db_path, response=_FakeImageResponse(
+            status_code=404,
+            headers={"Content-Type": "text/html", "X-Cache": "MISS"},
+            body=b"<html>not found</html>"))
+    finally:
+        capture.configure(None)
+
+    records = _image_failure_records(outbox)
+    assert len(records) == 1
+    record = records[0]
+    assert record["workshop_id"] == 5
+    assert record["http_status"] == 404
+    assert record["headers"]["X-Cache"] == "MISS"
+    assert record["content_type"] == "text/html"
+    assert record["body_file"] is None
+    assert record["error"]
+
+
+def test_an_image_transport_failure_is_captured_with_the_exception(db_path, tmp_path):
+    from src import capture
+    from src.database import insert_or_update_item
+
+    outbox = tmp_path / "outbox"
+    capture.configure(str(outbox))
+    try:
+        insert_or_update_item(db_path, {"workshop_id": 5, "needs_image": 1,
+                                        "preview_url": "http://example.com/img.jpg"})
+        _run_image_worker(db_path, error=Exception("Connection refused"))
+    finally:
+        capture.configure(None)
+
+    records = _image_failure_records(outbox)
+    assert len(records) == 1
+    assert records[0]["http_status"] is None
+    assert records[0]["headers"] == {}
+    assert "Connection refused" in records[0]["error"]
+
+
+def test_an_image_success_is_captured_only_when_the_switch_is_on(db_path, tmp_path):
+    import os
+
+    from src import capture
+    from src.database import insert_or_update_item
+
+    image_bytes = b"\xff\xd8\xff\xe0" + b"jpeg-payload" * 8
+    images_root = tmp_path / "images"
+    outbox = tmp_path / "outbox"
+    insert_or_update_item(db_path, {"workshop_id": 5, "needs_image": 1,
+                                    "preview_url": "http://example.com/img.jpg"})
+    response = _FakeImageResponse(headers={"Content-Type": "image/jpeg"},
+                                  body=image_bytes)
+
+    # Switch off: the image is downloaded but no capture directory appears.
+    capture.configure(str(outbox))
+    try:
+        _run_image_worker(db_path, response=response, images_root=str(images_root))
+    finally:
+        capture.configure(None)
+    assert not (outbox / "image_downloads").exists()
+
+    # Switch on: metadata is recorded and points at the file on disk.
+    capture.configure(str(outbox), image_capture=True)
+    try:
+        _run_image_worker(db_path, response=response, images_root=str(images_root))
+    finally:
+        capture.configure(None)
+
+    import json
+    records = [json.loads(path.read_text(encoding="utf-8"))
+               for path in (outbox / "image_downloads").glob("*.json")]
+    assert len(records) == 1
+    record = records[0]
+    assert record["kind"] == "image_download"
+    assert record["http_status"] == 200
+    assert record["content_type"] == "image/jpeg"
+    assert record["bytes_written"] == len(image_bytes)
+    assert record["body_file"] is None
+    with open(record["saved_path"], "rb") as handle:
+        assert handle.read() == image_bytes, "the captured path must be the artefact"
+
+
+def test_no_image_capture_writes_the_bytes_into_the_outbox(db_path, tmp_path):
+    """Assert on the files written, not on intent: the outbox holds metadata."""
+    from src import capture
+    from src.database import insert_or_update_item
+
+    image_bytes = b"\x89PNG\r\n\x1a\n" + b"UNIQUE-IMAGE-PAYLOAD" * 64
+    outbox = tmp_path / "outbox"
+    insert_or_update_item(db_path, {"workshop_id": 5, "needs_image": 1,
+                                    "preview_url": "http://example.com/img.jpg"})
+
+    capture.configure(str(outbox), image_capture=True)
+    try:
+        _run_image_worker(db_path, response=_FakeImageResponse(
+            headers={"Content-Type": "image/png"}, body=image_bytes),
+            images_root=str(tmp_path / "images"))
+    finally:
+        capture.configure(None)
+
+    written = [path for path in outbox.rglob("*") if path.is_file()]
+    assert written, "the debug capture was on, so the metadata record must exist"
+    for path in written:
+        assert path.suffix == ".json", f"unexpected non-metadata artefact: {path}"
+        assert image_bytes not in path.read_bytes(), f"image bytes copied into {path}"
+    assert not list(outbox.rglob("*.body"))
 
 
 # ── Web worker: selector miss ────────────────────────────────────────────────
@@ -252,6 +484,7 @@ def test_repeated_walls_grow_the_web_delay(db_path):
     """A page that is not the item's is the server declining to serve, so it
     must slow the scraper down exactly like a request failure."""
     from src.database import insert_or_update_item
+    from src.web_worker import WEB_DELAY_DEFAULT
 
     insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
 
@@ -262,7 +495,7 @@ def test_repeated_walls_grow_the_web_delay(db_path):
 
     assert worker.web_had_streak is False, "the walls ended the success streak"
     assert worker.web_failures >= 2
-    assert worker.web_delay > 5.0, "repeated walls must slow the scraper down"
+    assert worker.web_delay > WEB_DELAY_DEFAULT, "repeated walls must slow the scraper down"
 
 
 def test_a_descriptionless_item_is_neutral_for_pacing(db_path):
@@ -270,7 +503,7 @@ def test_a_descriptionless_item_is_neutral_for_pacing(db_path):
     back off from — but it yielded nothing, so it must not count as a success
     and reset a failure streak that is still growing."""
     from src.database import insert_or_update_item
-    from src.web_worker import WebScraperThread
+    from src.web_worker import WEB_DELAY_DEFAULT, WebScraperThread
 
     insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
 
@@ -286,7 +519,7 @@ def test_a_descriptionless_item_is_neutral_for_pacing(db_path):
 
     assert worker.web_failures == 1, "a served page is not a failure"
     assert worker.web_successes == 0, "and it is not a success either"
-    assert worker.web_delay == 5.0, "it does not grow the delay"
+    assert worker.web_delay == WEB_DELAY_DEFAULT, "it does not grow the delay"
 
 
 def test_a_found_description_resets_the_failure_streak(db_path):
@@ -351,7 +584,7 @@ def test_a_404_does_not_grow_the_delay_and_clears_the_queue(db_path):
 
     assert _web_scrape_priority(db_path) == 0, "a gone item must leave the queue"
     assert worker.web_failures == 1, "a 404 is not a failure for the delay rule"
-    assert worker.web_delay == 5.0
+    assert worker.web_delay == WEB_DELAY_DEFAULT
 
 
 def test_steams_missing_item_page_clears_the_queue_despite_http_200(db_path):
@@ -370,7 +603,7 @@ def test_steams_missing_item_page_clears_the_queue_despite_http_200(db_path):
 
     assert _web_scrape_priority(db_path) == 0, "the page says the item is gone"
     assert worker.web_failures == 1
-    assert worker.web_delay == 5.0
+    assert worker.web_delay == WEB_DELAY_DEFAULT
 
 
 def test_a_transport_failure_still_grows_the_delay(db_path):
@@ -384,7 +617,7 @@ def test_a_transport_failure_still_grows_the_delay(db_path):
 
     assert worker.web_had_streak is False, "the transport failures ended the streak"
     assert worker.web_failures >= 2
-    assert worker.web_delay > 5.0, "a transport failure still slows the scraper"
+    assert worker.web_delay > WEB_DELAY_DEFAULT, "a transport failure still slows the scraper"
 
 
 def test_a_rate_limit_pauses_without_growing_the_delay(db_path):
@@ -405,7 +638,7 @@ def test_a_rate_limit_pauses_without_growing_the_delay(db_path):
 
     pause.assert_called_once_with(RATE_LIMIT_PAUSE_SECONDS)
     assert worker.web_failures == 1, "a spent budget is not a scrape failure"
-    assert worker.web_delay == 5.0
+    assert worker.web_delay == WEB_DELAY_DEFAULT
     assert _web_scrape_priority(db_path) == 5, "the item is not at fault"
 
 
@@ -426,7 +659,7 @@ def test_a_gate_does_not_grow_the_delay(db_path):
                              gated, worker=worker)
 
     assert worker.web_failures == 1, "a wall is not a failure for the delay rule"
-    assert worker.web_delay == 5.0
+    assert worker.web_delay == WEB_DELAY_DEFAULT
     assert _web_scrape_priority(db_path) == 5, "the item keeps its queue place"
 
 

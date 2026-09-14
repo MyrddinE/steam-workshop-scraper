@@ -31,6 +31,15 @@ Each file is registered as its own manifest entry (``kind: "failure"``) because
 the puller transfers one file per entry. The counter fields live on the group
 entry, which is the entry that represents the group; a sample file cannot carry
 a group counter that stays true.
+
+Image downloads reuse this machinery, with one hard rule: **the image bytes are
+never copied into the outbox.** A download that succeeded already wrote the image
+into its ``images/`` bucket and that file is the artefact; copying it here would
+store every image twice. ``record_image_download`` therefore has no parameter
+that carries a body — a parameter that does not exist cannot be passed by
+accident. Its records are metadata and headers only, and they live in
+``<outbox>/image_downloads/`` (successes, debug switch only) and the failure tree
+above (failures, whenever capture is enabled).
 """
 
 import hashlib
@@ -73,7 +82,20 @@ _app_version_cache = None
 # its caps and its size limits stay.
 _scrape_capture = False
 
+# Every image download saved while `capture_image_downloads` is set, one
+# metadata-only record each. Separate from `capture_web_scrapes` because that
+# switch keeps whole page bodies unbounded; an owner reviewing images should not
+# have to collect pages to do it.
+_image_capture = False
+
 SCRAPES_DIR_NAME = "scrapes"
+IMAGE_DOWNLOADS_DIR_NAME = "image_downloads"
+
+# Kind and stage for the two image record shapes. The stage is shared because
+# both are the image-download step of the pipeline.
+IMAGE_DOWNLOAD_KIND = "image_download"
+IMAGE_FAILURE_KIND = "image_download_failed"
+IMAGE_STAGE = "image_download"
 
 # Candidate signs of who the page thinks we are, in the header corner. Recorded
 # as a set of flags rather than interpreted, because which one is reliable is
@@ -112,18 +134,23 @@ def _strip_noise(raw: bytes) -> bytes:
 
 # ── configuration ────────────────────────────────────────────────────────────
 
-def configure(outbox_dir, web_scrape_capture=False):
+def configure(outbox_dir, web_scrape_capture=False, image_capture=False):
     """Enable capture under ``<outbox_dir>/failures``. ``None`` disables it.
 
     ``web_scrape_capture`` additionally saves *every* ordinary web scrape, into
     ``<outbox_dir>/scrapes``, success or failure, with the response body kept
     whole. That answers a question the failure capture cannot: what a page looks
     like when a scrape works, which is what identifies the signed-in markup.
+
+    ``image_capture`` additionally saves *every* image download, into
+    ``<outbox_dir>/image_downloads``, as metadata and headers only — never the
+    image bytes, which already live in the images bucket.
     """
-    global _outbox_dir, _scrape_capture
+    global _outbox_dir, _scrape_capture, _image_capture
     with _lock:
         _outbox_dir = outbox_dir or None
         _scrape_capture = bool(web_scrape_capture) and bool(_outbox_dir)
+        _image_capture = bool(image_capture) and bool(_outbox_dir)
         _groups.clear()
         if _outbox_dir:
             logging.info("Failure capture enabled: %s", failures_dir(_outbox_dir))
@@ -131,6 +158,13 @@ def configure(outbox_dir, web_scrape_capture=False):
                 logging.info(
                     "Web-scrape capture enabled: saving every scrape, whole body, to %s. "
                     "This is a debugging switch — turn it off when done.", scrapes_dir(_outbox_dir),
+                )
+            if _image_capture:
+                logging.info(
+                    "Image-download capture enabled: saving every image download's "
+                    "metadata (status, headers, saved path — never the bytes) to %s. "
+                    "This is a debugging switch — turn it off when done.",
+                    image_downloads_dir(_outbox_dir),
                 )
 
 
@@ -146,6 +180,10 @@ def scrapes_dir(outbox_dir) -> str:
     return os.path.join(outbox_dir, SCRAPES_DIR_NAME)
 
 
+def image_downloads_dir(outbox_dir) -> str:
+    return os.path.join(outbox_dir, IMAGE_DOWNLOADS_DIR_NAME)
+
+
 def web_scrape_capture_active() -> bool:
     """Whether ordinary scrapes are being saved. Read before each scrape.
 
@@ -154,6 +192,12 @@ def web_scrape_capture_active() -> bool:
     """
     with _lock:
         return bool(_outbox_dir) and _scrape_capture
+
+
+def image_capture_active() -> bool:
+    """Whether every image download is being saved. Read before each download."""
+    with _lock:
+        return bool(_outbox_dir) and _image_capture
 
 
 def record_web_scrape(workshop_id, url, scrape_data) -> bool:
@@ -220,6 +264,151 @@ def record_web_scrape(workshop_id, url, scrape_data) -> bool:
             "bytes": len(raw), "role": "body",
             "scraped_ok": hit, "workshop_id": workshop_id,
         })
+    return True
+
+
+# ── image downloads ──────────────────────────────────────────────────────────
+
+def record_image_download(workshop_id, url, ok, *, http_status=None, final_url=None,
+                          headers=None, content_type=None, content_length=None,
+                          bytes_written=None, saved_path=None,
+                          error=None, error_type=None) -> bool:
+    """Record one image download: metadata and headers, never the image bytes.
+
+    There is deliberately **no parameter that carries the body**. A successful
+    download already wrote the image into the ``images/`` bucket and that file
+    is the artefact; copying it here would store every image twice. A parameter
+    that does not exist cannot be passed by accident, which is stronger than one
+    that is accepted and ignored.
+
+    Failures are recorded whenever capture is enabled; they are grouped by
+    failure signature (status, content type, exception class) so one 404 loop
+    costs a bounded number of files while the group counters still convey its
+    scale. Successes are recorded only while the debug switch is on, one record
+    each, because the question there is what a good result looks like and the
+    image can then be matched against its file on disk.
+
+    ``bytes_written`` is a count, not data: it is the number of body bytes the
+    download wrote to ``saved_path``. Never raises; a diagnostic that can break
+    the download loop is worse than no diagnostic.
+    """
+    if not is_enabled():
+        return False
+    try:
+        now = _utc_now_iso()
+        if ok:
+            return _record_image_success(
+                workshop_id, url, http_status, final_url, headers, content_type,
+                content_length, bytes_written, saved_path, now)
+        return _record_image_failure(
+            workshop_id, url, http_status, final_url, headers, content_type,
+            content_length, error, error_type, now)
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logging.warning("Image capture failed (download loop unaffected): %s", exc)
+        return False
+
+
+def _image_failure_signature(http_status, content_type, error_type) -> str:
+    """A stable name for one kind of image failure.
+
+    This is digested and counted against the failure caps, so it must not change
+    between retries of the same fault: a rotating URL or an exception message
+    carrying an id must not mint a new shape and defeat the bound. Hence the
+    status, the content type, and the exception *class* — never the message.
+    """
+    return (f"http={http_status}|content_type={content_type or ''}"
+            f"|error={error_type or ''}")
+
+
+def _record_image_failure(workshop_id, url, http_status, final_url, headers,
+                          content_type, content_length, error, error_type, now) -> bool:
+    signature = _image_failure_signature(http_status, content_type, error_type)
+    digest = hashlib.sha256(signature.encode("utf-8", "replace")).hexdigest()
+    gid = group_id(IMAGE_FAILURE_KIND, None, IMAGE_STAGE)
+    with _lock:
+        sample_number = _select_variant(gid, digest, now)
+        if sample_number is None:
+            _flush_group(gid)
+            return False
+        _write_image_failure_sample(
+            gid, digest, sample_number, signature, workshop_id, url, http_status,
+            final_url, headers, content_type, content_length, error, error_type, now)
+        _flush_group(gid)
+    return True
+
+
+def _write_image_failure_sample(gid, digest, sample_number, signature, workshop_id,
+                                url, http_status, final_url, headers, content_type,
+                                content_length, error, error_type, now) -> dict:
+    group_dir = os.path.join(failures_dir(_outbox_dir), gid)
+    stem = f"{digest[:8]}-{sample_number}"
+    record_path = os.path.join(group_dir, stem + ".json")
+
+    record = {
+        "kind": IMAGE_FAILURE_KIND,
+        "stage": IMAGE_STAGE,
+        "workshop_id": workshop_id,
+        "url": url,
+        "final_url": final_url,
+        "http_status": http_status,
+        "headers": dict(headers or {}),
+        "content_type": content_type,
+        "content_length": content_length,
+        "error": error,
+        "error_type": error_type,
+        # No body file. The bytes of a failed download were never a usable
+        # artefact, and writing an empty one would only add noise the puller
+        # has to transfer.
+        "body_file": None,
+        "body_bytes": 0,
+        "signature": signature,
+        "shape": {"class_digest": digest, "class_count": 0, "title_tag": None},
+        "captured_at": now,
+        "app_version": app_version(),
+    }
+    _write_atomic(record_path, json.dumps(record, indent=2, sort_keys=True).encode("utf-8"))
+    update_manifest(_outbox_dir, _manifest_entry(
+        _outbox_dir, record_path, role="sample", group=gid, class_digest=digest,
+        workshop_id=workshop_id))
+    return record
+
+
+def _record_image_success(workshop_id, url, http_status, final_url, headers,
+                          content_type, content_length, bytes_written, saved_path,
+                          now) -> bool:
+    with _lock:
+        if not _outbox_dir or not _image_capture:
+            return False
+        outbox = _outbox_dir
+
+    directory = image_downloads_dir(outbox)
+    os.makedirs(directory, exist_ok=True)
+    stem = f"{now.replace(':', '-')}-{workshop_id}"
+    record_path = os.path.join(directory, stem + ".json")
+    record = {
+        "kind": IMAGE_DOWNLOAD_KIND,
+        "stage": IMAGE_STAGE,
+        "workshop_id": workshop_id,
+        "url": url,
+        "final_url": final_url,
+        "http_status": http_status,
+        "headers": dict(headers or {}),
+        "content_type": content_type,
+        "content_length": content_length,
+        "bytes_written": bytes_written,
+        "saved_path": saved_path,
+        # The image itself is the artefact and is already on disk under
+        # `saved_path`; a body_file here would be the same bytes a second time.
+        "body_file": None,
+        "captured_at": now,
+        "app_version": app_version(),
+    }
+    payload = json.dumps(record, indent=2).encode("utf-8")
+    _write_atomic(record_path, payload)
+    update_manifest(outbox, {
+        "path": _relative(outbox, record_path), "kind": IMAGE_DOWNLOAD_KIND,
+        "bytes": len(payload), "role": "record", "workshop_id": workshop_id,
+    })
     return True
 
 
@@ -447,6 +636,44 @@ def _reconstruct_from_samples(gid, group) -> None:
         group["sample_count"] += 1
 
 
+def _select_variant(gid, digest, now):
+    """Pick the sample slot for this shape, counting the miss either way.
+
+    Returns the 1-based sample number to write, or ``None`` when the per-shape
+    or per-group cap has been reached and only the counter moves. Mutates the
+    in-memory group state; the caller flushes it, so the flush happens next to
+    the write whose success it describes.
+
+    Shared by page captures (whose digest comes from the body's shape) and image
+    captures (whose digest comes from the failure signature), so the bounding
+    rules cannot drift apart between the two.
+    """
+    group = _load_group(gid)
+    if group["first_seen"] is None:
+        group["first_seen"] = now
+    group["last_seen"] = now
+    group["total_misses"] += 1
+
+    variant = group["digests"].get(digest)
+    if variant is None:
+        if len(group["digests"]) >= MAX_VARIANTS_PER_GROUP:
+            # Stop capturing new shapes for this group; keep counting.
+            group["variants_truncated"] = True
+            return None
+        variant = {"count": 0, "samples": 0, "first_seen": now, "last_seen": now}
+        group["digests"][digest] = variant
+    elif variant["samples"] >= SAMPLES_PER_DIGEST:
+        variant["count"] += 1
+        variant["last_seen"] = now
+        return None
+
+    variant["count"] += 1
+    variant["last_seen"] = now
+    variant["samples"] += 1
+    group["sample_count"] += 1
+    return variant["samples"]
+
+
 def _flush_group(gid) -> None:
     """Persist a group's counters and register its state file.
 
@@ -526,44 +753,16 @@ def _record_failure(kind, stage, workshop_id, selector, http_status,
     now = _utc_now_iso()
 
     with _lock:
-        group = _load_group(gid)
-        if group["first_seen"] is None:
-            group["first_seen"] = now
-        group["last_seen"] = now
-        group["total_misses"] += 1
-
-        variant = group["digests"].get(digest)
-        if variant is None:
-            if len(group["digests"]) >= MAX_VARIANTS_PER_GROUP:
-                # Stop capturing new shapes for this group; keep counting.
-                group["variants_truncated"] = True
-                variant = None
-                capture = False
-            else:
-                variant = {"count": 0, "samples": 0,
-                           "first_seen": now, "last_seen": now}
-                group["digests"][digest] = variant
-                capture = True
-        else:
-            capture = variant["samples"] < SAMPLES_PER_DIGEST
-            if not capture:
-                variant["count"] += 1
-                variant["last_seen"] = now
-
-        if variant is not None and capture:
-            variant["count"] += 1
-            variant["last_seen"] = now
-            variant["samples"] += 1
-            group["sample_count"] += 1
-            record = _write_sample(
-                gid, digest, variant["samples"], raw, retained, retention, kind, stage,
-                workshop_id, selector, http_status, final_url, content_type,
-                class_count, title_tag, context, now)
+        sample_number = _select_variant(gid, digest, now)
+        if sample_number is None:
             _flush_group(gid)
-            return record
-
+            return None
+        record = _write_sample(
+            gid, digest, sample_number, raw, retained, retention, kind, stage,
+            workshop_id, selector, http_status, final_url, content_type,
+            class_count, title_tag, context, now)
         _flush_group(gid)
-        return None
+        return record
 
 
 def _write_sample(gid, digest, sample_number, raw, retained, retention, kind, stage,

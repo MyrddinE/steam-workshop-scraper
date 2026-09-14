@@ -294,3 +294,154 @@ def test_capture_never_raises_when_the_outbox_cannot_be_written(tmp_path):
 def test_app_version_is_reported(outbox):
     record = capture.record_failure("web_selector_miss", workshop_id=1, body=_html())
     assert record["app_version"]
+
+
+# ── image downloads ──────────────────────────────────────────────────────────
+# Image failures used to leave nothing but a one-line warning. They are now
+# captured whenever the outbox is on, grouped by failure signature so a loop
+# costs a bounded number of files. The image bytes are never captured: the file
+# the download wrote is the artefact, and the API has no body parameter that
+# could pass them by accident.
+
+def _image_failure_records(outbox):
+    group = capture.group_id(capture.IMAGE_FAILURE_KIND, None, capture.IMAGE_STAGE)
+    group_dir = os.path.join(outbox, "failures", group)
+    return group_dir, [n for n in sorted(os.listdir(group_dir))
+                       if n.endswith(".json") and n != "_group.json"]
+
+
+def test_image_capture_has_no_parameter_that_carries_the_bytes():
+    """The guarantee is in the signature: a copy cannot be passed by accident."""
+    import inspect
+
+    params = set(inspect.signature(capture.record_image_download).parameters)
+    for forbidden in ("body", "body_file", "data", "content", "raw",
+                      "image", "image_bytes", "bytes"):
+        assert forbidden not in params, \
+            f"{forbidden!r} would let a caller duplicate the image into the outbox"
+
+
+def test_an_image_failure_is_captured_with_status_and_headers(outbox):
+    assert capture.record_image_download(
+        42, "https://cdn.example.invalid/42.jpg", False,
+        http_status=404,
+        final_url="https://cdn.example.invalid/42.jpg",
+        headers={"Content-Type": "text/html", "X-Cache": "MISS"},
+        content_type="text/html", content_length="123",
+        error="HTTP 404", error_type="Exception") is True
+
+    group_dir, samples = _image_failure_records(outbox)
+    assert len(samples) == 1
+    with open(os.path.join(group_dir, samples[0]), encoding="utf-8") as handle:
+        record = json.load(handle)
+    assert record["workshop_id"] == 42
+    assert record["http_status"] == 404
+    assert record["headers"]["X-Cache"] == "MISS"
+    assert record["content_type"] == "text/html"
+    assert record["content_length"] == "123"
+    assert record["body_file"] is None
+    assert record["body_bytes"] == 0
+
+
+def test_a_transport_failure_is_captured_with_the_exception(outbox):
+    capture.record_image_download(
+        7, "https://cdn.example.invalid/7.jpg", False,
+        headers=None, error="Connection refused", error_type="ConnectionError")
+
+    group_dir, samples = _image_failure_records(outbox)
+    with open(os.path.join(group_dir, samples[0]), encoding="utf-8") as handle:
+        record = json.load(handle)
+    assert record["http_status"] is None
+    assert record["headers"] == {}
+    assert "Connection refused" in record["error"]
+    assert record["error_type"] == "ConnectionError"
+
+
+def test_one_image_failure_loop_costs_a_bounded_number_of_files(outbox):
+    for i in range(capture.SAMPLES_PER_DIGEST + 4):
+        capture.record_image_download(i, "https://cdn.example.invalid/i.jpg", False,
+                                      http_status=404, error="HTTP 404",
+                                      error_type="Exception")
+
+    group_dir, samples = _image_failure_records(outbox)
+    assert len(samples) == capture.SAMPLES_PER_DIGEST, \
+        "a persistent 404 loop must not write one file per retry"
+    state = _group_state(outbox, capture.group_id(
+        capture.IMAGE_FAILURE_KIND, None, capture.IMAGE_STAGE))
+    assert state["total_misses"] == capture.SAMPLES_PER_DIGEST + 4, \
+        "the counters, not the samples, convey the scale"
+
+
+def test_different_image_failures_do_not_collapse_into_one_sample(outbox):
+    capture.record_image_download(1, "u", False, http_status=404,
+                                  error="HTTP 404", error_type="Exception")
+    capture.record_image_download(2, "u", False,
+                                  error="Connection refused", error_type="ConnectionError")
+
+    state = _group_state(outbox, capture.group_id(
+        capture.IMAGE_FAILURE_KIND, None, capture.IMAGE_STAGE))
+    assert len(state["digests"]) == 2, \
+        "a 404 and a transport failure are different evidence"
+
+    # And a changed exception *message* is not a new failure kind, or a loop
+    # whose message carries an id would defeat the bound.
+    capture.record_image_download(3, "u", False, http_status=404,
+                                  error="HTTP 404 for id 3", error_type="Exception")
+    state = _group_state(outbox, capture.group_id(
+        capture.IMAGE_FAILURE_KIND, None, capture.IMAGE_STAGE))
+    assert len(state["digests"]) == 2
+
+
+def test_an_image_success_is_captured_only_with_the_switch_on(outbox):
+    """The switch is the config key `capture_image_downloads`, not the web one."""
+    assert capture.image_capture_active() is False
+
+    assert capture.record_image_download(
+        42, "https://cdn.example.invalid/42.jpg", True, http_status=200,
+        headers={"Content-Type": "image/jpeg"}, content_type="image/jpeg",
+        content_length="2048", bytes_written=2048, saved_path="images/42.jpg") is False
+    assert not os.path.isdir(os.path.join(outbox, "image_downloads"))
+
+    capture.configure(outbox, image_capture=True)
+    try:
+        assert capture.image_capture_active() is True
+        assert capture.record_image_download(
+            42, "https://cdn.example.invalid/42.jpg", True, http_status=200,
+            headers={"Content-Type": "image/jpeg"}, content_type="image/jpeg",
+            content_length="2048", bytes_written=2048,
+            saved_path="images/42.jpg") is True
+    finally:
+        capture.configure(outbox)
+
+    directory = os.path.join(outbox, "image_downloads")
+    records = [json.load(open(os.path.join(directory, name), encoding="utf-8"))
+               for name in sorted(os.listdir(directory)) if name.endswith(".json")]
+    assert len(records) == 1
+    record = records[0]
+    assert record["kind"] == capture.IMAGE_DOWNLOAD_KIND
+    assert record["http_status"] == 200
+    assert record["content_type"] == "image/jpeg"
+    assert record["bytes_written"] == 2048
+    assert record["saved_path"] == "images/42.jpg"
+    assert record["body_file"] is None
+
+
+def test_image_capture_never_writes_a_body_file(outbox):
+    """Assert on the files written: metadata only, success or failure."""
+    capture.configure(outbox, image_capture=True)
+    try:
+        capture.record_image_download(
+            42, "u", True, http_status=200, content_type="image/png",
+            bytes_written=10, saved_path="images/42.png")
+        capture.record_image_download(
+            42, "u", False, http_status=404, error="HTTP 404", error_type="Exception")
+    finally:
+        capture.configure(outbox)
+
+    written = [os.path.join(dirpath, name)
+               for dirpath, _dirs, names in os.walk(outbox) for name in names]
+    assert written
+    for path in written:
+        assert not path.endswith(".body"), f"a body file was written: {path}"
+        if os.path.basename(path) != "manifest.json":
+            assert path.endswith(".json")

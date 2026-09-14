@@ -1,10 +1,12 @@
 # Failure Capture
 
-The scraper meets input it cannot handle in three places: a Workshop page whose
-description selector no longer matches, an API response that is not JSON, and an
-API status code with no branch. Before this existed, each of those collapsed into
-a generic failure — or worse, into a success — and the response body was dropped,
-so no regression test could ever be built from a real break.
+The scraper meets input it cannot handle in four places: a Workshop page whose
+description selector no longer matches, an API response that is not JSON, an API
+status code with no branch, and an image download that fails. Before this
+existed, each of those collapsed into a generic failure — or worse, into a
+success — and the response body was dropped, so no regression test could ever be
+built from a real break. The image case is the same gap with a different shape:
+16,400 failures had nothing but a warning, and no body worth keeping.
 
 Capture writes that evidence to the pull-outbox and registers it in the same
 manifest the database snapshots use. It is described here as behaviour; the
@@ -25,12 +27,42 @@ nothing, so the feature is a deliberate switch and tests stay hermetic.
 | `web_item_missing` | `web_scrape` | The Workshop reports the item is gone (HTTP 404/410, or its item-error wording on an HTTP 200 page) | `web_worker.py` |
 | `api_unparsed_body` | `api_fetch` | The API response body is not JSON | `steam_api.py` |
 | `api_unhandled_status` | `api_fetch` | A status other than 200, 404 or 500 | `daemon.py` |
+| `image_download_failed` | `image_download` | The download returned a non-200 status, raised a transport error, or served a MIME type that could not be classified | `image_worker.py` |
 
-All four are **additive**. The failure site returns or raises exactly as it did
+All five are **additive**. The failure site returns or raises exactly as it did
 before; the capture is recorded on the way past. `api_unparsed_body` re-raises the
 `ValueError`, so the existing handler still reports its 500 — the body is simply
 no longer thrown away. `api_unhandled_status` records the payload but still falls
 through to the success path, because changing that flow is a separate decision.
+
+## Image downloads
+
+Image downloads are the case the capture was added for: 16,400 recorded failures
+previously left nothing but a one-line warning, so the 404 loop in
+[code-issues.md](code-issues.md) could not be reviewed. The rule differs from the
+web capture in one place, because the artefact already exists:
+
+* **Failures are always captured** whenever `daemon.outbox_dir` is set — the HTTP
+  status, the response headers, the URL (requested and final), the content type
+  and length, and the exception text when there was no response.
+* **Successes are captured only under the `daemon.capture_image_downloads` debug
+  switch** — the same metadata, plus the number of bytes written and the path of
+  the saved file, so a good result can be correlated with the image on disk. It
+  is a separate switch from `daemon.capture_web_scrapes`: that one keeps whole
+  page bodies unbounded, and an owner reviewing images should not have to collect
+  pages to do it.
+* **The bytes are never captured.** A successful download already wrote the image
+  into its `images/` bucket and that file is the artefact; copying it into the
+  outbox would store every image twice. `capture.record_image_download` has no
+  parameter that carries a body — a parameter that does not exist cannot be
+  passed by accident. Image capture records therefore contain **no `body_file`**
+  and no `.body` file is ever written for them.
+
+Image failures are grouped by a **failure signature** — the status code, the
+content type and the exception *class*, never the exception message — so a 404
+loop costs a bounded number of files while a genuinely different failure (a 404
+and a transport error, say) still produces its own evidence. The group counters
+carry the scale.
 
 ## What a capture holds
 
@@ -89,6 +121,7 @@ is the file count, not the write count.
 <outbox_dir>/failures/<group>/_group.json     counters, and per-shape state
 <outbox_dir>/failures/<group>/<digest8>-<n>.json   the capture record
 <outbox_dir>/failures/<group>/<digest8>-<n>.body   the raw bytes
+<outbox_dir>/image_downloads/<stamp>-<id>.json     a successful image download (metadata only)
 ```
 
 Every one of those files is registered as its own `manifest.json` entry with
@@ -96,6 +129,13 @@ Every one of those files is registered as its own `manifest.json` entry with
 transfers one file per entry, filters `--only` on `kind`, and only gunzips when
 `compression` is declared — so these plain, uncompressed entries are collected by
 the existing tooling with no changes.
+
+Image failures live in the same `failures/` tree under the
+`image-download-failed--image-download` group and follow the same roles, except
+that they have no `body` entry: there is no body to transfer. Successful image
+downloads live in `<outbox_dir>/image_downloads/`, a sibling of the web capture's
+`<outbox_dir>/scrapes/`, and are registered with `kind: "image_download"` and
+`role: "record"`.
 
 ## Selector misses change the queue
 
@@ -139,7 +179,9 @@ For each capture it writes `tests/fixtures/<area>/<name>.<ext>` plus a
 `.meta.json` sidecar, then regenerates `tests/test_ingest_regressions.py`
 parametrized over every fixture found. Credentials (`key=`, `sessionid`,
 `steamLoginSecure`, `api_key`) are scrubbed on the way in, since a body may carry
-them.
+them. A capture with no `body_file` is skipped rather than promoted: image
+failures are metadata-only by design, and turning one into an empty fixture would
+produce a test that asserts nothing.
 
 The generated assertions are deliberately weak: they prove the input is handled
 gracefully and the payload is preserved, and nothing more. A generated test that

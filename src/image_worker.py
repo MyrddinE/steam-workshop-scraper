@@ -6,6 +6,7 @@ import logging
 import threading
 import requests
 from datetime import datetime, timezone
+from src import capture
 from src.database import get_next_image_item, insert_or_update_item, get_image_path
 
 
@@ -27,6 +28,27 @@ MAGIC_EXT_MAP = {
     ".webp": "webp",
     ".bmp": "bmp",
 }
+
+
+def _response_metadata(resp) -> dict:
+    """The response facts a capture records. Never includes the body.
+
+    ``resp`` is ``None`` for a transport failure, so the caller still gets a
+    complete keyword set and the clear record that there was no response.
+    """
+    if resp is None:
+        return {"http_status": None, "final_url": None, "headers": None,
+                "content_type": None, "content_length": None}
+    headers = dict(resp.headers)
+    return {
+        "http_status": resp.status_code,
+        # Redirects are allowed, so the URL actually downloaded from is worth
+        # recording alongside the preview_url that was requested.
+        "final_url": resp.url,
+        "headers": headers,
+        "content_type": headers.get("Content-Type"),
+        "content_length": headers.get("Content-Length"),
+    }
 
 
 class ImageScraperThread(threading.Thread):
@@ -64,6 +86,9 @@ class ImageScraperThread(threading.Thread):
                 conn.close()
                 continue
 
+            # The response, when there was one, is the evidence a capture needs.
+            # None distinguishes a transport failure from a refused status.
+            resp = None
             try:
                 resp = requests.get(url, allow_redirects=True, timeout=15, stream=True)
                 if resp.status_code != 200:
@@ -89,6 +114,12 @@ class ImageScraperThread(threading.Thread):
 
                 if not ext:
                     logging.warning(f"[I:{wid}] Unknown MIME: {mime}, puremagic guess: {magic_ext or 'none'}")
+                    # A served response we cannot classify is still a failure
+                    # with evidence worth keeping: status and headers explain it.
+                    capture.record_image_download(
+                        wid, url, False, **_response_metadata(resp),
+                        error=f"unknown MIME type {mime!r}",
+                        error_type="UnknownMimeType")
                     conn = self._get_conn()
                     conn.execute("UPDATE workshop_items SET needs_image=0 WHERE workshop_id=?", (wid,))
                     conn.commit()
@@ -98,11 +129,14 @@ class ImageScraperThread(threading.Thread):
 
                 img_path = get_image_path("images", wid, ext)
                 os.makedirs(os.path.dirname(img_path), exist_ok=True)
+                written = 0
                 with open(img_path, "wb") as f:
                     if magic_header:
                         f.write(magic_header)
+                        written += len(magic_header)
                     for chunk in resp.iter_content(8192):
                         f.write(chunk)
+                        written += len(chunk)
 
                 insert_or_update_item(self.db_path, {
                     "workshop_id": wid,
@@ -110,6 +144,12 @@ class ImageScraperThread(threading.Thread):
                     "needs_image": 0,
                     "scrape_version": item.get("steam_updated_at", 0),
                 })
+
+                # Metadata only, and only under the debug switch: the image bytes
+                # are the file just written, never a second copy in the outbox.
+                capture.record_image_download(
+                    wid, url, True, **_response_metadata(resp),
+                    bytes_written=written, saved_path=img_path)
 
                 title = item.get("title_en") or item.get("title") or str(wid)
                 logging.info(f"[I:{wid}] Downloaded preview ({ext}) for \"{title}\"")
@@ -128,6 +168,12 @@ class ImageScraperThread(threading.Thread):
 
             except Exception as e:
                 logging.warning(f"[I:{wid}] Image download failed: {e}")
+                # Failures are always captured when the outbox is on: the status
+                # and headers of the response, or the exception text when there
+                # was none. This is what lets the owner review the 404 loop.
+                capture.record_image_download(
+                    wid, url, False, **_response_metadata(resp),
+                    error=str(e), error_type=type(e).__name__)
                 new_pri = max(0, (item.get("needs_image") or 1) - 1)
                 conn = self._get_conn()
                 conn.execute(
