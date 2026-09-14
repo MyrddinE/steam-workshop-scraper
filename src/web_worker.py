@@ -53,19 +53,29 @@ class WebScraperThread(threading.Thread):
         if not scrape_data or scrape_data.get("description") is not None:
             return scrape_data
         body = scrape_data.get("body") or ""
-        # The primary trigger: the page was served to an anonymous visitor.
-        # `looks_gated` is the backup, for when Steam changes what a withheld
-        # page looks like and the marker goes missing.
-        if looks_rate_limited(body):
-            # A throttle page also lacks the signed-in markers, so without this
-            # it would be mistaken for a stale cookie and retried at once.
-            return scrape_data
-        if not self._session_refresh or not (looks_signed_out(body) or looks_gated(body)):
-            return scrape_data
-        try:
-            changed = self._session_refresh()
-        except Exception as exc:
-            logging.warning("[W:%s] Login cookie refresh failed: %s", item.get("workshop_id"), exc)
+
+        # Both conditions are evaluated, and neither shadows the other. They
+        # overlap by construction -- a throttle page is not the item page, so it
+        # lacks the signed-in markers too -- and reading that overlap as "signed
+        # out" would be a mistake in one direction and skipping the refresh a
+        # mistake in the other.
+        #
+        # The throttle suppresses only the network retry. Refreshing the cookie
+        # is a local file read that spends none of the exhausted budget, and
+        # doing it here means the next request that does go out carries the
+        # freshest credential.
+        throttled = looks_rate_limited(body)
+        signed_out = self._session_refresh and (looks_signed_out(body) or looks_gated(body))
+
+        changed = False
+        if signed_out:
+            try:
+                changed = self._session_refresh()
+            except Exception as exc:
+                logging.warning("[W:%s] Login cookie refresh failed: %s", item.get("workshop_id"), exc)
+
+        if throttled:
+            # Never retry into a budget that is already spent.
             return scrape_data
         if not changed:
             return scrape_data

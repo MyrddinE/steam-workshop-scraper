@@ -134,7 +134,7 @@ def test_a_throttled_page_is_not_mistaken_for_a_stale_cookie():
         WebScraperThread("test.db", "nope.lock", {}, None,
                          lambda: called.append(1) or True)._retry_if_gated(item, "u", throttled)
         assert scrape.call_count == 0, "must not retry against an empty budget"
-        assert called == [], "must not re-read the cookie either"
+        assert called == [1], "but the cookie is still re-read: a local read costs no budget"
 
 
 def test_a_throttled_item_is_not_decayed():
@@ -143,3 +143,33 @@ def test_a_throttled_item_is_not_decayed():
     throttle = src.index("looks_rate_limited(scrape_data.get(\"body\") or \"\")")
     decay = src.index("self._handle_selector_miss(item, url, scrape_data)", throttle)
     assert "continue" in src[throttle:decay], "the throttle branch must skip the decay"
+
+
+def test_a_throttled_page_does_not_shadow_the_auth_check():
+    """They overlap by construction, so both must be evaluated.
+
+    A throttle page is not the item page, so it lacks the signed-in markers too.
+    Reading that as "signed out" would refresh and retry; skipping the refresh
+    leaves the next request carrying an older cookie than it needs to.
+    """
+    from src.web_worker import WebScraperThread
+    calls = []
+    throttled = {"description": None, "body": "<h1>Too many requests</h1>"}
+    with patch("src.web_worker.scrape_extended_details") as scrape:
+        WebScraperThread("test.db", "nope.lock", {}, None,
+                         lambda: calls.append("refresh") or True)._retry_if_gated(
+                             {"workshop_id": 1}, "u", throttled)
+    assert calls == ["refresh"], "the auth reaction still fires"
+    assert scrape.call_count == 0, "the network retry does not"
+
+
+def test_a_signed_out_page_without_throttling_still_retries():
+    """The other direction: no throttle, so the retry is allowed."""
+    from src.web_worker import WebScraperThread
+    page = {"description": None, "body": "<html>no account dropdown here</html>"}
+    with patch("src.web_worker.scrape_extended_details",
+               return_value={"description": "found"}) as scrape:
+        out = WebScraperThread("test.db", "nope.lock", {}, None,
+                               lambda: True)._retry_if_gated({"workshop_id": 1}, "u", page)
+    assert scrape.call_count == 1
+    assert out["description"] == "found"
