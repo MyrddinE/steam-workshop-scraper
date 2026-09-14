@@ -9,6 +9,7 @@ import requests
 from flask import Flask, request, jsonify, render_template, send_from_directory
 from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, get_queued_items, FILTER_SCHEMA, bump_api_priority_for_detail
 from src.analysis import view_window_analysis
+from src import metrics
 from src.config import login_secure_value, save_config
 from src.daemon_control import DaemonController
 
@@ -336,14 +337,62 @@ def api_authors():
 
 @app.route('/api/tags')
 def api_tags():
-    stats = get_db_stats(_db_path)
-    return jsonify(stats.get("tag_counts", {}))
+    # Only the tag metric. This used to compute the entire statistics payload and
+    # return one field of it: about five seconds of work for under 2 KB.
+    return jsonify(
+        metrics.values(metrics.compute(_db_path, ["tag_counts"]))["tag_counts"]
+    )
 
 
 @app.route('/api/stats')
 def api_stats():
+    """Every statistic at once, untiered.
+
+    Kept for completeness and for diagnosing the database directly. The UI
+    fetches `/api/metrics/<tier>` instead, so the cheap numbers are on screen
+    while the expensive ones are still being computed.
+    """
     stats = get_db_stats(_db_path)
     return jsonify(stats)
+
+
+@app.route('/api/metrics')
+def api_metrics_catalogue():
+    """What statistics exist, grouped by tier, cheapest first.
+
+    The client draws its layout from this rather than hard-coding a list, so a
+    metric added on the server appears without a matching front-end change.
+    """
+    return jsonify({
+        "tiers": [
+            {
+                "tier": tier,
+                "metrics": [
+                    {"name": name, "note": metrics.REGISTRY[name].note}
+                    for name in metrics.names_in(tier)
+                ],
+            }
+            for tier in metrics.TIERS
+        ]
+    })
+
+
+@app.route('/api/metrics/<tier>')
+def api_metrics_tier(tier):
+    """One tier's values, with what each cost.
+
+    Tiers are fetched separately so the client can replace its own elements as
+    each lands instead of waiting for the slowest.
+    """
+    if tier not in metrics.TIERS:
+        return jsonify({"error": f"unknown tier {tier!r}"}), 404
+    result = metrics.compute_tier(_db_path, tier)
+    return jsonify({
+        "tier": tier,
+        "values": metrics.values(result),
+        "ms": {name: entry["ms"] for name, entry in result.items()},
+        "total_ms": round(sum(e["ms"] for e in result.values()), 1),
+    })
 
 
 @app.route('/api/analysis')

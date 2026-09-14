@@ -1805,36 +1805,13 @@ def get_all_authors(db_path: str) -> list[str]:
     conn.close()
     return results
 
-def _classify_translation_status(item) -> str:
-    """Classifies an item's translation state into a bucket name."""
-    title = item["title"] or ""
-    short_desc = item["short_description"] or ""
-    ext_desc = item["extended_description"] or ""
-
-    if item["title_en"] or item["short_description_en"] or item["extended_description_en"]:
-        return "Translated"
-    if title.isascii() and short_desc.isascii() and ext_desc.isascii():
-        return "No translation needed (ASCII)"
-    if item["translation_priority"] and item["translation_priority"] > 0:
-        return "Queued"
-    if not title:
-        return "No data (never scraped)"
-    return "Needs Translation (Unicode)"
-
-def _classify_fetch_recency(attempted_at, staleness_days: int = 30) -> str:
-    """Classifies a last_fetch_attempted_at timestamp (Unix epoch integer) as
-    'fresh', 'stale', or 'blank'. This is OUR fetch recency (every attempt),
-    not the age of the Steam content."""
-    if not attempted_at:
-        return "blank"
-    try:
-        threshold = int(time.time()) - staleness_days * 86400
-        return "fresh" if int(attempted_at) >= threshold else "stale"
-    except (ValueError, TypeError):
-        return "blank"
-
 def _compute_tag_frequencies(cursor) -> dict:
-    """Returns a {tag_name: count} frequency dictionary from the junction table."""
+    """Returns a {tag_name: count} frequency dictionary from the junction table.
+
+    The statistics screen gets the same data from the `tag_counts` metric; this
+    stays because `compact_tag_ids` needs frequencies while already holding a
+    cursor, and opening a second connection there would be worse.
+    """
     cursor.execute("""
         SELECT t.tag_name, COUNT(*) as cnt
         FROM workshop_tags wt JOIN tags t USING(tag_id)
@@ -1842,61 +1819,36 @@ def _compute_tag_frequencies(cursor) -> dict:
     """)
     return {row["tag_name"]: row["cnt"] for row in cursor.fetchall()}
 
+_STAT_METRICS = (
+    ("status_counts", "status_counts"),
+    ("translation_status", "translation_status"),
+    ("tag_counts", "tag_counts"),
+    ("fetch_recency_counts", "fetch_recency"),
+    ("highest_api_fetched_at", "high_water"),
+    ("app_stats", "app_tracking"),
+    ("priority_breakdowns", "priority_breakdowns"),
+)
+
+
 def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
-    """Returns comprehensive statistics about the database."""
-    conn = get_connection(db_path)
-    cursor = conn.cursor()
+    """Every statistic in one dict, under the key names its callers already use.
 
-    cursor.execute("SELECT status, COUNT(*) as count FROM workshop_items GROUP BY status")
-    status_counts = [dict(row) for row in cursor.fetchall()]
+    Kept as the single-dict entry point for callers that want the lot. A caller
+    that needs only part of it should use `metrics.compute_tier` instead: this
+    pays for the slow tier every time, which is how the tag endpoint came to
+    spend about five seconds computing a payload it threw away.
+    """
+    # Imported here rather than at module scope: metrics imports this module for
+    # its connection helper, so a top-level import would be circular.
+    from src import metrics
 
-    cursor.execute("""
-        SELECT last_fetch_attempted_at, translate_version, title, short_description, extended_description,
-               translation_priority, title_en, short_description_en, extended_description_en
-        FROM workshop_items
-    """)
-    all_items = cursor.fetchall()
+    result = metrics.compute(
+        db_path,
+        [metric_name for _, metric_name in _STAT_METRICS],
+        {"staleness_days": staleness_days},
+    )
+    return {key: result[metric_name]["value"] for key, metric_name in _STAT_METRICS}
 
-    translation_status = {
-        "No translation needed (ASCII)": 0,
-        "Needs Translation (Unicode)": 0,
-        "Queued": 0, "Translated": 0,
-        "No data (never scraped)": 0,
-    }
-    fetch_recency_counts = {"fresh": 0, "stale": 0, "blank": 0}
-
-    for item in all_items:
-        translation_status[_classify_translation_status(item)] += 1
-        fetch_recency_counts[_classify_fetch_recency(item["last_fetch_attempted_at"], staleness_days)] += 1
-
-    cursor.execute("SELECT MAX(api_fetched_at) FROM workshop_items")
-    highest_api_fetched_at = cursor.fetchone()[0]
-
-    cursor.execute("SELECT appid, last_page_scanned, last_cursor FROM app_tracking")
-    app_stats = [dict(row) for row in cursor.fetchall()]
-
-    tag_counts = _compute_tag_frequencies(cursor)
-
-    priority_queries = {
-        "translation_priority": "SELECT translation_priority as prio, COUNT(*) as cnt FROM workshop_items WHERE translation_priority > 0 GROUP BY translation_priority ORDER BY prio DESC",
-        "needs_image": "SELECT needs_image as prio, COUNT(*) as cnt FROM workshop_items WHERE needs_image > 0 GROUP BY needs_image ORDER BY prio DESC",
-        "needs_web_scrape": "SELECT needs_web_scrape as prio, COUNT(*) as cnt FROM workshop_items WHERE needs_web_scrape > 0 GROUP BY needs_web_scrape ORDER BY prio DESC",
-    }
-    priority_breakdowns = {}
-    for key, sql in priority_queries.items():
-        cursor.execute(sql)
-        priority_breakdowns[key] = [dict(r) for r in cursor.fetchall()]
-
-    conn.close()
-    return {
-        "status_counts": status_counts,
-        "translation_status": translation_status,
-        "tag_counts": tag_counts,
-        "fetch_recency_counts": fetch_recency_counts,
-        "highest_api_fetched_at": highest_api_fetched_at,
-        "app_stats": app_stats,
-        "priority_breakdowns": priority_breakdowns,
-    }
 
 def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None) -> dict:
     """Returns percentile cutoff scores for Wilson metrics across items matching filters.
