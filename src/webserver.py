@@ -243,6 +243,12 @@ def _detail_payload(workshop_id):
     # string: an item can have a translated field that is identical to the
     # original, and `translate_version` is what actually marks it as translated.
     item["has_translation"] = bool(item.get("translate_version"))
+    # The creator ID is a SteamID64 — seventeen digits, beyond the range a
+    # JavaScript number represents exactly. It travels as a string so the
+    # client's jump-to-author filter can name the same account it displays;
+    # a numeric field would round silently in JSON.parse.
+    if item.get("creator") is not None:
+        item["creator_id"] = str(item["creator"])
     return item
 
 
