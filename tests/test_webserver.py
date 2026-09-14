@@ -257,35 +257,36 @@ def test_stats(web_client):
 # --------------------------------------------------------------------------
 
 
-def test_metrics_catalogue_lists_tiers_cheapest_first(web_client):
+def test_metrics_catalogue_lists_every_metric_in_seed_order(web_client):
     """The panel draws its layout from this, so order and names must match."""
     client, _ = web_client
     resp = client.get('/api/metrics')
     assert resp.status_code == 200
     data = resp.get_json()
-    assert [t["tier"] for t in data["tiers"]] == list(metrics.TIERS)
-    for entry in data["tiers"]:
-        assert [m["name"] for m in entry["metrics"]] == metrics.names_in(entry["tier"])
-        assert all(m["note"] for m in entry["metrics"]), \
-            "a metric reached the client with no note"
+    assert data["default_order"] == metrics.all_names()
+    assert [m["name"] for m in data["metrics"]] == metrics.all_names()
+    for entry in data["metrics"]:
+        assert entry["note"], "a metric reached the client with no note"
+        assert entry["seed_ms"] == metrics.REGISTRY[entry["name"]].seed_ms
+    assert "tiers" not in data, "the response must not group metrics into tiers"
 
 
-def test_metrics_tier_returns_values_and_per_metric_costs(web_client):
+def test_metric_endpoint_returns_value_and_measured_cost(web_client):
     client, db_path = web_client
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "x", "status": 200})
 
-    resp = client.get('/api/metrics/fast')
+    resp = client.get('/api/metrics/coverage')
     assert resp.status_code == 200
     data = resp.get_json()
-    assert data["tier"] == metrics.FAST
-    assert set(data["values"]) == set(metrics.names_in(metrics.FAST))
-    assert set(data["ms"]) == set(metrics.names_in(metrics.FAST))
-    assert data["total_ms"] == round(sum(data["ms"].values()), 1)
-    assert data["values"]["coverage"]["total"] == 1
+    assert data["name"] == "coverage"
+    assert data["value"]["total"] == 1
+    assert data["ms"] >= 0.0
+    assert data["note"] == metrics.REGISTRY["coverage"].note
+    assert data["seed_ms"] == metrics.REGISTRY["coverage"].seed_ms
 
 
-def test_metrics_instant_tier_does_not_run_slow_metrics(web_client, monkeypatch):
-    """The point of the split: asking for the cheap tier must not pay for tags."""
+def test_metric_endpoint_runs_only_the_requested_metric(web_client, monkeypatch):
+    """One request is one metric: asking for totals must not pay for tags."""
     client, _ = web_client
     ran = []
 
@@ -295,16 +296,16 @@ def test_metrics_instant_tier_does_not_run_slow_metrics(web_client, monkeypatch)
 
     monkeypatch.setitem(
         metrics.REGISTRY, "tag_counts",
-        metrics.Metric(name="tag_counts", tier=metrics.SLOW, note="spy", run=spy),
+        metrics.Metric(name="tag_counts", seed_ms=358.0, note="spy", run=spy),
     )
 
-    resp = client.get('/api/metrics/instant')
+    resp = client.get('/api/metrics/totals')
     assert resp.status_code == 200
-    assert set(resp.get_json()["values"]) == set(metrics.names_in(metrics.INSTANT))
-    assert ran == [], "the instant tier ran a slow metric"
+    assert resp.get_json()["name"] == "totals"
+    assert ran == [], "the totals request ran the tag metric"
 
 
-def test_metrics_unknown_tier_is_a_404(web_client):
+def test_metrics_unknown_metric_is_a_404(web_client):
     client, _ = web_client
     resp = client.get('/api/metrics/banana')
     assert resp.status_code == 404
@@ -314,7 +315,8 @@ def test_metrics_unknown_tier_is_a_404(web_client):
 def test_stats_button_opens_a_panel_instead_of_navigating(web_client):
     """The affordance keeps its id and place, but it is no longer a link to JSON."""
     client, _ = web_client
-    doc = lxml.html.fromstring(client.get('/').data.decode())
+    body = client.get('/').data.decode()
+    doc = lxml.html.fromstring(body)
 
     buttons = doc.xpath('//*[@id="btn-stats"]')
     assert len(buttons) == 1, "expected exactly one #btn-stats"
@@ -323,10 +325,18 @@ def test_stats_button_opens_a_panel_instead_of_navigating(web_client):
 
     overlay = doc.xpath('//*[@id="stats-overlay"]')
     assert overlay, "missing #stats-overlay"
-    assert doc.xpath('//*[@id="stats-tiers"]')[0] in overlay[0].iterdescendants(), \
-        "#stats-tiers must live inside the overlay"
+    assert doc.xpath('//*[@id="stats-metrics"]')[0] in overlay[0].iterdescendants(), \
+        "#stats-metrics must live inside the overlay"
     assert doc.xpath('//*[@id="stats-close"]')[0] in overlay[0].iterdescendants(), \
         "the panel needs a close control"
+
+    # The sections are built at runtime from the catalogue, so the per-metric
+    # container is a contract of the served script rather than the static markup:
+    # it must build one [data-metric] section per metric, and no tier sections.
+    scripts = "\n".join(s.text or "" for s in doc.xpath('//script[not(@src)]'))
+    assert 'data-metric="' in scripts, "the panel must build one container per metric"
+    assert "stats-tier" not in scripts and "data-tier" not in scripts, \
+        "the tier grouping must be gone from the statistics panel"
 
 
 def test_analysis(web_client):

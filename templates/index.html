@@ -136,7 +136,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
   <div style="max-width:900px;margin:0 auto">
     <h2>Statistics</h2>
     <button id="stats-close" class="secondary" style="width:auto;margin-bottom:.75rem">Close</button>
-    <div id="stats-tiers"></div>
+    <div id="stats-metrics"></div>
   </div>
 </div>
 
@@ -153,17 +153,15 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .sub-queue-item.failed::before { content:'\2717 '; color:#ff4444; flex-shrink:0; }
 @keyframes spin { to { transform:rotate(360deg); } }
 .translation-notice { color:var(--pico-muted-color);font-style:italic;font-size:.9em;margin:.4em 0; }
-.stats-tier { margin-bottom:1.25rem; }
-.stats-tier h3 { margin-bottom:.35rem; }
-.stats-tier-ms { color:var(--pico-muted-color);font-size:.75em;font-weight:normal; }
-.stats-metric { margin-bottom:.85rem; }
-.stats-metric-label { font-weight:bold; }
-.stats-metric-note { color:var(--pico-muted-color);font-size:.8em;margin-left:.4em; }
-.stats-metric-value { margin-top:.2rem; }
+.stats-chunk { margin-bottom:1.25rem; }
+.stats-chunk h3 { margin-bottom:.35rem; }
+.stats-chunk-ms { color:var(--pico-muted-color);font-size:.75em;font-weight:normal; }
+.stats-chunk-note { color:var(--pico-muted-color);font-size:.8em;margin-left:.4em;font-weight:normal; }
+.stats-chunk-body { margin-top:.2rem; }
 .stats-stuck { color:#ff6347;font-weight:bold;margin:.2rem 0; }
 .stats-stuck ul { margin:.2rem 0 0 1rem; }
-.stats-metric-value ul { margin:.2rem 0 0 1rem; }
-.stats-metric-value progress { margin:0; }
+.stats-chunk-body ul { margin:.2rem 0 0 1rem; }
+.stats-chunk-body progress { margin:0; }
 .stats-table td, .stats-table th { padding:.15rem .5rem .15rem 0; }
 </style>
 
@@ -1029,9 +1027,14 @@ document.getElementById('daemon-restart').onclick = async () => {
 };
 
 // ── Statistics panel ──────────────────────────────────────────────────────
-// The server splits its statistics into tiers; the panel asks for the catalogue
-// first, then draws each tier into its own section as that tier lands, so the
-// cheap numbers are readable while the expensive query is still running.
+// Every metric is an independent chunk: the panel asks the server for the
+// catalogue, then requests each metric separately and fills its own section the
+// moment that response lands. Nothing is grouped or classified by cost, and no
+// request waits on another. The *request order* is the seed order on the first
+// ever open; after that it follows the durations measured on the previous open,
+// persisted in localStorage, so the order tracks the data rather than the seed
+// table. Refresh is per metric too: each chunk re-requests itself after a delay
+// derived from its own last duration, so a slow metric cannot hold up a fast one.
 const STATS_LABELS = {
   totals: 'Totals',
   high_water: 'Last successful API fetch',
@@ -1045,8 +1048,16 @@ const STATS_LABELS = {
   tag_counts: 'Tags',
 };
 
-let _statsCatalogue = [];
-let _statsPollIv = null;
+// The stored order is deliberately tiny and versioned, so a stale or corrupt
+// entry from an older build can never break the panel: it is simply ignored.
+const STATS_ORDER_KEY = 'stats.metric-order.v1';
+const STATS_ORDER_VERSION = 1;
+const STATS_REFRESH_FACTOR = 50;    // 50 x the metric's own measured duration
+const STATS_MIN_REFRESH_MS = 2000;  // ...but never more often than every 2 s
+
+let _statsCatalogue = [];   // [{name, note, seed_ms}] as served
+let _statsTimers = {};      // metric -> setTimeout id, one per chunk
+let _statsMeasured = {};    // metric -> ms, loaded from storage, updated live
 let _statsToken = 0;
 
 function _statLabel(name) {
@@ -1153,7 +1164,7 @@ function _renderAppTracking(apps) {
     + '<tbody>' + rows + '</tbody></table>';
 }
 
-function _renderMetricValue(name, value) {
+function _renderMetricBody(name, value) {
   if (value === null || value === undefined) return '<span class="stat-label">failed</span>';
   if (name === 'totals') return _renderTotals(value);
   if (name === 'high_water') return '<p>' + _fmtTimestamp(value) + '</p>';
@@ -1168,72 +1179,118 @@ function _renderMetricValue(name, value) {
   return '<pre style="white-space:pre-wrap;margin:0">' + JSON.stringify(value) + '</pre>';
 }
 
-function _renderMetric(meta, value) {
-  return '<div class="stats-metric" data-metric="' + meta.name + '">'
-    + '<span class="stats-metric-label">' + _statLabel(meta.name) + '</span>'
-    + '<span class="stats-metric-note">' + (meta.note || '') + '</span>'
-    + '<div class="stats-metric-value">' + _renderMetricValue(meta.name, value) + '</div>'
-    + '</div>';
+function _intervalFor(ms) {
+  return Math.max(STATS_MIN_REFRESH_MS, ms * STATS_REFRESH_FACTOR);
 }
 
-async function _renderStatsTier(tier, token) {
-  const body = document.querySelector('[data-tier-body="' + tier.tier + '"]');
-  if (!body) return;
+function _loadStatsOrder() {
   try {
-    const resp = await fetch('/api/metrics/' + tier.tier);
-    const data = await resp.json();
-    if (token !== _statsToken) return;  // panel closed or reopened while in flight
-    const msEl = document.querySelector('[data-tier-ms="' + tier.tier + '"]');
-    if (msEl) msEl.textContent = 'computed in ' + data.total_ms + ' ms';
-    body.innerHTML = tier.metrics.map(function(m) {
-      return _renderMetric(m, data.values[m.name]);
-    }).join('') || '<p class="stat-label">(no metrics)</p>';
-  } catch(e) {
-    if (token !== _statsToken) return;
-    body.innerHTML = '<p class="stat-label">Failed to load tier: ' + e.message + '</p>';
+    const raw = localStorage.getItem(STATS_ORDER_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.v !== STATS_ORDER_VERSION
+        || typeof parsed.ms !== 'object' || parsed.ms === null) return {};
+    const clean = {};
+    Object.keys(parsed.ms).forEach(function(name) {
+      const ms = parsed.ms[name];
+      if (typeof ms === 'number' && isFinite(ms) && ms >= 0) clean[name] = ms;
+    });
+    return clean;
+  } catch (e) {
+    // A corrupt or unreadable store is not worth failing the panel over.
+    console.debug('stats order load failed', e);
+    return {};
   }
 }
 
-async function _openStatsPanel() {
+function _saveStatsOrder() {
+  try {
+    localStorage.setItem(STATS_ORDER_KEY, JSON.stringify({v: STATS_ORDER_VERSION, ms: _statsMeasured}));
+  } catch (e) {
+    console.debug('stats order save failed', e);
+  }
+}
+
+function _statsOrder() {
+  // Seed cost until a duration is known, then the measured cost. The catalogue
+  // already arrives in seed order, so unmeasured ties keep that order.
+  return _statsCatalogue.slice().sort(function(a, b) {
+    const am = (_statsMeasured[a.name] != null) ? _statsMeasured[a.name] : a.seed_ms;
+    const bm = (_statsMeasured[b.name] != null) ? _statsMeasured[b.name] : b.seed_ms;
+    if (am !== bm) return am - bm;
+    return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
+  });
+}
+
+function _loadMetric(name, token) {
+  fetch('/api/metrics/' + encodeURIComponent(name)).then(function(resp) {
+    return resp.json();
+  }).then(function(data) {
+    if (token !== _statsToken) return;  // panel closed or reopened while in flight
+    const body = document.querySelector('[data-metric-body="' + name + '"]');
+    if (body) body.innerHTML = _renderMetricBody(name, data.value);
+    const msEl = document.querySelector('[data-metric-ms="' + name + '"]');
+    if (msEl) msEl.textContent = (data.ms != null ? data.ms + ' ms' : '');
+    if (typeof data.ms === 'number') {
+      _statsMeasured[name] = data.ms;
+      _saveStatsOrder();
+    }
+    // setTimeout rather than setInterval: the next request is armed only once
+    // this one has landed, so a metric still computing is never started again.
+    _statsTimers[name] = setTimeout(function() {
+      if (token !== _statsToken) return;
+      _loadMetric(name, token);
+    }, _intervalFor(data.ms || 0));
+  }).catch(function(e) {
+    if (token !== _statsToken) return;
+    const body = document.querySelector('[data-metric-body="' + name + '"]');
+    if (body) body.innerHTML = '<p class="stat-label">Failed: ' + e.message + '</p>';
+    _statsTimers[name] = setTimeout(function() {
+      if (token !== _statsToken) return;
+      _loadMetric(name, token);
+    }, STATS_MIN_REFRESH_MS);
+  });
+}
+
+function _openStatsPanel() {
   const overlay = document.getElementById('stats-overlay');
-  const host = document.getElementById('stats-tiers');
+  const host = document.getElementById('stats-metrics');
   overlay.style.display = 'block';
   host.innerHTML = '<p>Loading…</p>';
   _statsToken += 1;
   const token = _statsToken;
-  try {
-    const resp = await fetch('/api/metrics');
-    const cat = await resp.json();
+  Object.keys(_statsTimers).forEach(function(name) { clearTimeout(_statsTimers[name]); });
+  _statsTimers = {};
+  _statsMeasured = _loadStatsOrder();
+  fetch('/api/metrics').then(function(resp) {
+    return resp.json();
+  }).then(function(cat) {
     if (token !== _statsToken) return;
-    _statsCatalogue = cat.tiers || [];
-    host.innerHTML = _statsCatalogue.map(function(t) {
-      return '<section class="stats-tier" data-tier="' + t.tier + '">'
-        + '<h3 style="text-transform:capitalize">' + t.tier
-        + ' <small class="stats-tier-ms" data-tier-ms="' + t.tier + '"></small></h3>'
-        + '<div class="stats-tier-body" data-tier-body="' + t.tier + '"><p class="stat-label">Computing…</p></div>'
+    _statsCatalogue = cat.metrics || [];
+    // One section per metric, each with its own body element to fill.
+    host.innerHTML = _statsOrder().map(function(meta) {
+      return '<section class="stats-chunk" data-metric="' + meta.name + '">'
+        + '<h3>' + _statLabel(meta.name)
+        + ' <small class="stats-chunk-ms" data-metric-ms="' + meta.name + '"></small>'
+        + '<span class="stats-chunk-note">' + (meta.note || '') + '</span></h3>'
+        + '<div class="stats-chunk-body" data-metric-body="' + meta.name + '">'
+        + '<p class="stat-label">Computing…</p></div>'
         + '</section>';
     }).join('');
-    // Parallel fetches: each tier draws itself as it lands instead of waiting
-    // for the slow tier to finish.
-    await Promise.all(_statsCatalogue.map(function(t) { return _renderStatsTier(t, token); }));
-    if (!_statsPollIv && token === _statsToken) {
-      _statsPollIv = setInterval(_refreshInstantTier, 3000);
-    }
-  } catch(e) {
+    // Independent requests, deliberately not Promise.all: each chunk draws and
+    // arms its own refresh timer as it lands, with no waiting for the slowest.
+    _statsCatalogue.forEach(function(meta) { _loadMetric(meta.name, token); });
+  }).catch(function(e) {
     if (token !== _statsToken) return;
     host.innerHTML = '<p>Failed to load statistics: ' + e.message + '</p>';
-  }
-}
-
-async function _refreshInstantTier() {
-  const tier = _statsCatalogue.filter(function(t) { return t.tier === 'instant'; })[0];
-  if (!tier) return;
-  await _renderStatsTier(tier, _statsToken);
+  });
 }
 
 function _closeStatsPanel() {
-  _statsToken += 1;  // discard any tier response still in flight
-  if (_statsPollIv) { clearInterval(_statsPollIv); _statsPollIv = null; }
+  _statsToken += 1;  // discard every response still in flight
+  Object.keys(_statsTimers).forEach(function(name) { clearTimeout(_statsTimers[name]); });
+  _statsTimers = {};
+  _saveStatsOrder();
   document.getElementById('stats-overlay').style.display = 'none';
 }
 
