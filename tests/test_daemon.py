@@ -391,6 +391,37 @@ def test_process_item_404_records_attempt_but_not_fetch(db_path, tmp_path):
     assert row["last_fetch_attempted_at"] > 1000
 
 
+def test_process_item_404_clears_every_queue_flag(db_path, tmp_path):
+    """Marking an item dead must remove it from every queue.
+
+    The web, image and translation polls select on their own flag alone with no
+    dead-item guard, so a flag left set here keeps the item in a queue that can
+    never drain and spends requests on a page that no longer exists.
+    """
+    from src.database import insert_or_update_item, get_connection
+
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "status": 200, "api_priority": 5,
+        "needs_web_scrape": 5, "needs_image": 10, "translation_priority": 3,
+    })
+    daemon = _real_db_daemon(db_path, tmp_path)
+    existing = {"workshop_id": 1, "status": 200, "api_priority": 5,
+                "needs_web_scrape": 5, "needs_image": 10,
+                "translation_priority": 3}
+
+    with patch("src.daemon.get_workshop_details_api", return_value={"status": 404}):
+        daemon._process_item(existing)
+
+    conn = get_connection(db_path)
+    row = dict(conn.execute("SELECT * FROM workshop_items WHERE workshop_id=1").fetchone())
+    conn.close()
+    assert row["status"] == -1
+    assert row["api_priority"] == 0
+    assert row["needs_web_scrape"] == 0
+    assert row["needs_image"] == 0
+    assert row["translation_priority"] == 0
+
+
 def test_process_item_success_moves_both_clocks(db_path, tmp_path):
     from src.database import insert_or_update_item, get_connection
 

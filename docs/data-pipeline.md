@@ -20,7 +20,7 @@ The main loop entry point called repeatedly by `run()`. Each invocation:
 8. For enriched items, flags `title` and `short_description` for translation via `flag_field_for_translation` at `max(3, inherited_prio)`. That function inserts into `translation_queue` and also raises the parent row's `translation_priority` (using `MAX`, so it never downgrades); the translator clears it to 0 when the item has no queue entries left. Users with non-ASCII names get `translation_priority = 1` set via `_build_user_record`.
 9. Also fetches the creator's profile via `get_player_summaries` if the user record is stale (exceeds `user_staleness_days`).
 
-**Error handling**: `get_workshop_details_api` returns `404` when the item is absent or `result != 1` (permission errors, deleted items), and `500` on any `RequestException` — timeouts and HTTP errors such as 429 included. The daemon maps a `404` to `status = -1` (dead) and persists a `500` as `status = 500` for a later attempt. Both paths stamp `last_fetch_attempted_at`; the `500` path leaves `api_fetched_at` untouched.
+**Error handling**: `get_workshop_details_api` returns `404` when the item is absent or `result != 1` (permission errors, deleted items), and `500` on any `RequestException` — timeouts and HTTP errors such as 429 included. The daemon maps a `404` to `status = -1` (dead), clears every queue flag so the item is in no queue, and persists a `500` as `status = 500` for a later attempt. Both paths stamp `last_fetch_attempted_at`; the `500` path leaves `api_fetched_at` untouched.
 
 **Dynamic delay**: `api_delay` adjusts via a compounding mechanism. 100 consecutive successes reduce delay by 5% (minimum 0.01s). 2 consecutive failures after a streak increase it by `1.05^10 ≈ 63%`. The adjusted value is persisted to config.
 
@@ -79,7 +79,7 @@ Checks whether an item passes the enrichment filter for its AppID. Reads `enrich
 
 ### Failure classification (daemon)
 
-`_settle_api_failure` turns a non-success outcome into a queue decision. `404` is permanent: the failure is logged, the item is marked dead (`status = -1`) and it leaves the queue. Everything else is temporary — `500`, transport exceptions (which `get_workshop_details_api` reports as `500`), and any status no branch handles. Those keep the item queued at one priority level lower, floored at `1`, because priority `0` means "not queued" and clearing it is what previously stranded transient failures with nothing able to bring them back. Unhandled statuses are captured as evidence and never fall through to the success path.
+`_settle_api_failure` turns a non-success outcome into a queue decision. `404` is permanent: the failure is logged, the item is marked dead (`status = -1`) and it is removed from **every** queue — `api_priority`, `needs_web_scrape`, `needs_image` and `translation_priority` are all cleared, because a dead item can never complete and a queue flag left set would strand it in a queue that never drains. Everything else is temporary — `500`, transport exceptions (which `get_workshop_details_api` reports as `500`), and any status no branch handles. Those keep the item queued at one priority level lower, floored at `1`, because priority `0` means "not queued" and clearing it is what previously stranded transient failures with nothing able to bring them back. Unhandled statuses are captured as evidence and never fall through to the success path.
 
 ### Change detection across stages
 

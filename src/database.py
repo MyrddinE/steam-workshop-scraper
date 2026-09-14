@@ -643,7 +643,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 16
+    EXPECTED_VERSION = 17
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -1345,6 +1345,32 @@ def initialize_database(db_path: str):
         logging.info(
             "Migration 15->16 complete. Requeued %d transient failures and %d never-attempted items.",
             stranded_failures, stranded_unattempted,
+        )
+
+    if db_version < 17:
+        logging.info("Running migration 16->17: removing dead items from the work queues...")
+
+        # A dead item (status -1) can never complete, but the permanent-failure
+        # path only cleared api_priority. needs_web_scrape, needs_image and
+        # translation_priority were left set, and those queues select on their
+        # flag alone with no dead-item guard, so the rows were retried forever
+        # and the queues could never drain. About ten thousand rows on the
+        # production database. api_priority is deliberately not touched here:
+        # the 404 path already zeroes it, and a dead row still holding an API
+        # priority is a separate defect.
+        cursor.execute(
+            "UPDATE workshop_items "
+            "SET needs_web_scrape = 0, needs_image = 0, translation_priority = 0 "
+            "WHERE status = -1"
+        )
+        dequeued_dead = cursor.rowcount
+
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 17")
+        conn.commit()
+        logging.info(
+            "Migration 16->17 complete. Removed %d dead items from the work queues.",
+            dequeued_dead,
         )
 
     # Create indexes for faster querying
