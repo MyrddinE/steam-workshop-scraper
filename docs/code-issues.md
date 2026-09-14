@@ -3,7 +3,7 @@
 Known defects in the current source. Each entry was re-checked against the code rather than carried
 forward from an earlier list, and resolved entries are deleted rather than marked as fixed.
 
-* **Checked against source**: `608a220`.
+* **Checked against source**: `6b7b94c`.
 * **Snapshot, not a tracker**: re-read the code before acting on an entry.
 * **Priorities** are judgement calls about impact, not measurements.
 * **Status**: `Open` (a defect), `Unverified` (a claim not yet tested), `Informational` (true and
@@ -24,6 +24,13 @@ the production database on 2026-09-12.
 | 7 | `scrape_version` is written by two workers and read by nobody | Open | Low | The web scraper (`src/web_worker.py:154`) and the image worker (`src/image_worker.py:111`) both write the item's `steam_updated_at` into this one column, so it cannot distinguish which stage wrote it last, and no code reads it. It is not a completion timestamp either — it holds Steam's revision, not our clock. [timestamps.md](timestamps.md). |
 | 8 | Migration chain still references the dropped `tags` column | Informational | Info | `CREATE TABLE` keeps the historical `tags` name because migrations 1→2 and 5→6 read it (`src/database.py:687`), and a later migration drops it defensively while logging the skip. Fresh databases must therefore replay the old shape. [schema-migrations.md](schema-migrations.md). |
 | 9 | `status = 206` is never written | Informational | Info | The schema and one migration query allow a partial-data status (`src/database.py:704`), but no code writes it and the live database contains zero such rows. [data-model.md](data-model.md#known-gaps). |
+| 10 | The TUI daemon log pane never receives a line | Open | Low | The `RichLog` is built (`src/tui.py:310`) but the method that feeds it is never called — its only call site is commented out (`src/tui.py:316`, "too slow") — so the pane renders empty and the daemon's output is only visible in a separate console. The tailing method itself exists and is otherwise complete (`src/tui.py:461`). [tui.md](tui.md). |
+| 11 | `btn-request-translation` is a dead handler for a button that no longer exists | Open | Low | The event branch is still compared (`src/tui.py:1627`) and calls `self.action_request_translation()` (`src/tui.py:1628`), but no `compose()` creates that button and no such method exists; the button was removed in `3cbe326` and the handler was left behind. It cannot be reached today, and would raise `AttributeError` if it were. |
+| 12 | Single-creator mode cannot be exited | Open | Medium | "Jump to author" sets `is_single_creator_mode = True` (`src/tui.py:1602`) and hides the save button (`src/tui.py:1603`), but nothing ever resets it. `btn-return` is created (`src/tui.py:1384`) and shown as the way back (`src/tui.py:1604`) yet has no handler in any `on_button_pressed`, so the flag stays set, the filter cannot be saved again, and restored state stops applying (`src/tui.py:1298`) until the app is restarted. [tui.md](tui.md). |
+| 13 | `action_update_visible` can re-queue dead items | Open | Low | The TUI's bulk update queues every visible id (`src/tui.py:1734`) without the `status != -1` guard the web route carries (`src/webserver.py:513`), so items already known to be dead are put back in the API fetch queue. [data-pipeline.md](data-pipeline.md). |
+| 14 | The web UI reports a filter save that failed | Open | Low | `/api/save_filter` answers **400** with "No target AppID configured" (`src/webserver.py:339`), and the client ignores the response and alerts success regardless (`templates/index.html:634`), so a rejected save is indistinguishable from a stored one. [web-ui.md](web-ui.md). |
+| 15 | `btn-close-sub-queue` is created by two screens | Informational | Info | `StatsScreen` (`src/tui.py:126`) and `SubscriptionQueueScreen` (`src/tui.py:548`) use the same button id, with the handler duplicated (`src/tui.py:129`, `src/tui.py:551`). Textual scopes queries per screen so both work, but the id is not unique in the app. |
+| 16 | `#port-display` is never populated | Informational | Info | The element is declared and styled (`templates/index.html:51`, `templates/index.html:62`) and no script ever writes to it, so the web header renders an empty span where the embedded server's port was meant to appear. |
 
 ## Recently closed
 

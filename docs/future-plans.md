@@ -15,7 +15,10 @@ Absolute timings are hardware-dependent; the ratios are the point.
 
 ## UI enhancements: web parity, queue-state statistics, page performance
 
-**Status: Deferred.**
+**Status: Planned.** Work has started on the three gaps the owner named — daemon control, the
+statistics surface, and the translation toggle. The schema-dependent parts below (per-queue
+completion timestamps, and the queue indexes) stay deferred and take their own migration, so the
+metrics split can land without waiting on them.
 
 Bring the web UI to parity with the TUI, rebuild the statistics surface in both so it reports the
 state of the work queues rather than raw column values, and remove the stalls that make the page slow
@@ -44,11 +47,15 @@ reading markup — the distinction proved to matter, because three endpoints exi
 | Analysis screen (`ctrl+?`) | Not present | The endpoint returns data, but the client never calls it. |
 | Tag statistics | Not present | Same — endpoint only, no client reference. |
 | Author list and jump-to-author | Not present | Same. No author affordance exists in the web UI at all. |
-| Daemon start/stop/restart (`ctrl+d`) | Partial | The web UI exposes pause and resume only. |
-| Translation toggle (`ctrl+w`) | Partial | The server prefers the translated field and offers no way back to the original (`src/webserver.py`). |
-| Subscription queue (`s`, `l`) | Present | Genuine parity: toggle, indicator, and queued list. |
-| Save filter for the scraper (`ctrl+s`) | Present | Genuine parity; verified working. |
-| View state persistence | Partial | The web UI reads the TUI's saved state but never writes it, so anything done in the browser is lost on navigation or reload. |
+| Daemon start/stop/restart (`ctrl+d`) | Partial | The web UI exposes pause and resume only. Start, stop, restart and the running status/PID all live in `DaemonManagerScreen` with no route behind them. |
+| Daemon log view | Partial | The TUI pane exists but is inert — the tail call is commented out (`src/tui.py:316`), recorded as issue 10 in [code-issues.md](code-issues.md). A web endpoint would give the log a working consumer and could be reused to repair the TUI pane. |
+| Translation toggle (`ctrl+w`) | Partial | The server prefers the translated field and offers no way back to the original (`src/webserver.py`). The queueing half is already at parity: opening an item bumps translation priority in both UIs. |
+| Translation-queued notice | Not present | The TUI says when a translation is requested and still pending (`src/tui.py:796`); the web shows the raw `translation_priority` number in a debug tooltip. |
+| Subscription queue (`s`, `l`) | Present | Genuine parity: toggle, indicator, and queued list. The web queue additionally drains itself. |
+| Detail-pane queue/unqueue buttons | Not present | The TUI has both (`src/tui.py:642`); the web only supports the `s` key while a grid cell holds focus. |
+| Clear Pending Database | Not present | A TUI command-palette action (`src/tui.py:1697`) with no route or element. |
+| Save filter for the scraper (`ctrl+s`) | Partial | The happy path works, but `/api/save_filter` answers 400 when no target AppID is set and the client reports success regardless — issue 14 in [code-issues.md](code-issues.md). |
+| View state persistence | Partial | The web UI reads the TUI's saved state but never writes it, so anything done in the browser is lost on navigation or reload. It also restores neither the selected item nor the scroll position. |
 
 ### Statistics: from raw columns to queue state
 
