@@ -99,9 +99,9 @@ A daemon thread that picks up items from `get_next_web_scrape_item`, ordered by 
 2. If the description was found, updates `extended_description`, sets `needs_web_scrape = 0`, and records `scrape_version = steam_updated_at`. The tags the scraper returns are not persisted; tags in the database come from the API.
 3. Flags non-ASCII `extended_description` for translation at priority 3, unless its translation is already current (see [What queues a field for translation](#what-queues-a-field-for-translation)).
 4. If the request failed, raises `api_priority` to 2 so the item is retried (that value has no other source); nothing is cleared, so the item stays in the scrape queue.
-5. If the page loaded but the description selector did **not** match, the response is captured as evidence and the markup decides what the queue learns. If the body carried neither the item template (`workshopItem`) nor the description element (`highlightContent`), the item page was never served — a wall, an error page, or a throttle page whose wording the marker missed — so the item is not at fault and `needs_web_scrape` is left exactly as it was. If the item template is present but the description element is not, the page really is the item's and it genuinely has no extended description: no retry can change that, so `needs_web_scrape` is cleared and the item leaves the queue, which is what lets the queue drain. See [failure-capture.md](failure-capture.md).
+5. If the page loaded but the description selector did **not** match, the response is captured as evidence and the markup decides what the queue learns. If the body carried neither the item template (`workshopItem`) nor the description element (`highlightContent`), the page was not the item's — a wall, an error page, or a throttle page whose wording the marker missed — so the item is not at fault and `needs_web_scrape` is left exactly as it was; the request does count as a failure for pacing, because the server declined to serve content. If the item template is present but the description element is not, the page really is the item's and it genuinely has no extended description: no retry can change that, so `needs_web_scrape` is cleared and the item leaves the queue, which is what lets the queue drain; that outcome is neutral for pacing. See [failure-capture.md](failure-capture.md).
 
-**Dynamic delay**: Same 100-success / 2-failure compounding pattern as the daemon, but with its own `web_delay_seconds` config key. A selector miss does not participate: the request succeeded, so slowing down would not help.
+**Dynamic delay**: Same 100-success / 2-failure compounding pattern as the daemon, but with its own `web_delay_seconds` config key. A request the server did not serve — a transport failure or a page that was not the item's — counts as a failure and grows the delay. A found description counts as a success and resets the failure streak. The item page with no description moves neither counter: the request succeeded, so there is nothing to back off from, but it yielded nothing, so it must not reset the failure streak either — counting it as a success would let the delay fall again while walls continued.
 
 **Throttling**: Steam answers many requests with **HTTP 200** and its ordinary Workshop shell
 carrying "too many requests", so the status code proves nothing and the page is otherwise
@@ -137,7 +137,9 @@ request that does go out carries the freshest credential.
 throttled page is paused and never read as a genuine absence. Otherwise a miss is neither a blanket
 failure nor an empty success: returning to a description-less page clears the item only when the page
 was really the item's, and a page that was not — an error page, a wall, a throttle the marker missed
-— leaves the item's queue priority untouched. Migration 17→18 requeues the rows the old
+— leaves the item's queue priority untouched. The two are opposites for pacing, too: a page that was
+not the item's counts as a failure, while a description-less item page is neutral, as
+[Dynamic delay](#web-scraping-phase) describes. Migration 17→18 requeues the rows the old
 "truthy dict is success" test stranded with `extended_description = NULL` and
 `needs_web_scrape = 0`; see [schema-migrations.md](schema-migrations.md).
 

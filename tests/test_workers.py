@@ -107,16 +107,48 @@ def test_image_worker_failure_sets_api_priority(db_path):
 # that was never the item's (left queued) from the item page with no description
 # (a permanent absence, so the item leaves the queue).
 
-def _run_web_worker(db_path, item, scrape_data):
+def _run_web_worker(db_path, item, scrape_data, iterations=None, worker=None):
+    """Run the worker through exactly ``iterations`` items, then stop it.
+
+    A thread cannot be asked for a fixed number of iterations, so the item
+    source is exhausted instead: after the requested count it clears
+    ``running`` and returns None, and the loop's own check ends the run. That
+    makes the pacing counters deterministic, which a start-then-stop race is
+    not. Pass a list of responses to give each iteration its own page; the
+    count defaults to the list's length. ``worker`` allows pacing state to be
+    seeded before the single run; it is never restarted.
+    """
     from src.web_worker import WebScraperThread
 
-    worker = WebScraperThread(db_path, ".pauselock")
-    with patch("src.web_worker.get_next_web_scrape_item", return_value=item), \
-         patch("src.web_worker.scrape_extended_details", return_value=scrape_data), \
-         patch("time.sleep"):
+    if worker is None:
+        worker = WebScraperThread(db_path, ".pauselock")
+    if isinstance(scrape_data, list):
+        responses = list(scrape_data)
+        if iterations is None:
+            iterations = len(responses)
+        scrape_patch = patch("src.web_worker.scrape_extended_details",
+                             side_effect=responses)
+    else:
+        if iterations is None:
+            iterations = 1
+        scrape_patch = patch("src.web_worker.scrape_extended_details",
+                             return_value=scrape_data)
+
+    served = 0
+
+    def next_item(*args, **kwargs):
+        nonlocal served
+        served += 1
+        if served > iterations:
+            worker.running = False
+            return None
+        return item
+
+    with patch("src.web_worker.get_next_web_scrape_item", side_effect=next_item), \
+         scrape_patch, patch("time.sleep"):
         worker.start()
-        worker.running = False
         worker.join(timeout=5)
+    return worker
 
 
 def _web_scrape_priority(db_path, workshop_id=1):
@@ -132,6 +164,11 @@ def _web_scrape_priority(db_path, workshop_id=1):
 
 MISS = {"description": None, "tags": [], "body": "<html>no selector</html>",
         "http_status": 200, "final_url": "https://example.invalid/?id=1"}
+
+# The description selector matched and the item was stored: the one outcome that
+# is unambiguously a success.
+FOUND = {"description": "scraped text", "tags": [], "body": None,
+         "http_status": 200, "final_url": "https://example.invalid/?id=1"}
 
 # The item template is present but the description element is not: the page really
 # is the item's, and it simply has no extended description.
@@ -201,6 +238,59 @@ def test_selector_miss_does_not_touch_api_priority(db_path):
     finally:
         conn.close()
     assert prio == 0
+
+
+def test_repeated_walls_grow_the_web_delay(db_path):
+    """A page that is not the item's is the server declining to serve, so it
+    must slow the scraper down exactly like a request failure."""
+    from src.database import insert_or_update_item
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+
+    # A healthy run first: the delay rule compounds off a streak, and the walls
+    # are what should end it.
+    worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
+                             [FOUND] * 5 + [MISS] * 2)
+
+    assert worker.web_had_streak is False, "the walls ended the success streak"
+    assert worker.web_failures >= 2
+    assert worker.web_delay > 5.0, "repeated walls must slow the scraper down"
+
+
+def test_a_descriptionless_item_is_neutral_for_pacing(db_path):
+    """The page was served and the item is finished with, so there is nothing to
+    back off from — but it yielded nothing, so it must not count as a success
+    and reset a failure streak that is still growing."""
+    from src.database import insert_or_update_item
+    from src.web_worker import WebScraperThread
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+
+    # A streak is in progress: one wall has just landed and the next wall would
+    # grow the delay. The description-less page must leave all of that alone.
+    worker = WebScraperThread(db_path, ".pauselock")
+    worker.web_had_streak = True
+    worker.web_failures = 1
+    worker.web_successes = 0
+
+    worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
+                             ITEM_PAGE_WITHOUT_DESCRIPTION, worker=worker)
+
+    assert worker.web_failures == 1, "a served page is not a failure"
+    assert worker.web_successes == 0, "and it is not a success either"
+    assert worker.web_delay == 5.0, "it does not grow the delay"
+
+
+def test_a_found_description_resets_the_failure_streak(db_path):
+    from src.database import insert_or_update_item
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+
+    worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
+                             [MISS] * 7 + [FOUND])
+
+    assert worker.web_failures == 0, "a found description clears the streak"
+    assert worker.web_successes >= 1
 
 
 def test_selector_miss_is_captured(db_path, tmp_path):
