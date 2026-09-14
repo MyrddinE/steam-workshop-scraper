@@ -61,6 +61,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
   <h1 style="margin:0;font-size:1.2rem">Workshop Scraper</h1>
   <span style="display:flex;align-items:center;gap:.5rem">
     <button id="btn-daemon" style="padding:.2rem .6rem;font-size:.8rem;width:auto;margin:0">&#x2699; Daemon</button>
+    <button id="btn-analysis" style="padding:.2rem .6rem;font-size:.8rem;width:auto;margin:0" title="View window analysis">&#x1F4C8; Analysis</button>
     <span id="port-display"></span>
   </span>
 </header>
@@ -140,6 +141,21 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
   </div>
 </div>
 
+<div id="analysis-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;overflow-y:auto;padding:2rem">
+  <div style="max-width:900px;margin:0 auto">
+    <h2>View Window Analysis</h2>
+    <div class="analysis-controls">
+      <label for="analysis-bucket-days">Bucket size (days)
+        <input id="analysis-bucket-days" type="number" min="1" step="1" value="7">
+      </label>
+      <button id="analysis-recalc" style="width:auto;margin:0">Recalculate</button>
+      <button id="analysis-close" class="secondary" style="width:auto;margin:0">Close</button>
+    </div>
+    <div id="analysis-summary"></div>
+    <div id="analysis-table-host"></div>
+  </div>
+</div>
+
 <style>
 .sub-queue-item { display:flex;align-items:center;gap:.5em;padding:.5em;border-bottom:1px solid var(--pico-muted-border-color); }
 .sub-queue-item .spinner { width:1em;height:1em;border:2px solid var(--pico-muted-border-color);border-top-color:#44aa44;border-radius:50%;animation:spin .6s linear infinite;flex-shrink:0; }
@@ -163,6 +179,14 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .stats-chunk-body ul { margin:.2rem 0 0 1rem; }
 .stats-chunk-body progress { margin:0; }
 .stats-table td, .stats-table th { padding:.15rem .5rem .15rem 0; }
+.analysis-controls { display:flex;gap:.5rem;align-items:flex-end;margin-bottom:.75rem;flex-wrap:wrap; }
+.analysis-controls label { margin:0; }
+.analysis-controls input { width:6rem;margin:0; }
+/* The bar is the point of the table: it makes the median comparable at a
+   glance across buckets whose absolute values differ by orders of magnitude. */
+.analysis-table td, .analysis-table th { padding:.15rem .5rem .15rem 0;white-space:nowrap; }
+.analysis-bar-track { background:var(--pico-muted-border-color);border-radius:3px;height:.9rem;min-width:120px; }
+.analysis-bar { background:#44aa44;height:100%;border-radius:3px; }
 </style>
 
 <script>
@@ -1333,6 +1357,120 @@ function _closeStatsPanel() {
 
 document.getElementById('btn-stats').onclick = _openStatsPanel;
 document.getElementById('stats-close').onclick = _closeStatsPanel;
+
+// ── View window analysis panel ────────────────────────────────────────────
+// The web half of the TUI's ctrl+? screen: age-bucketed views, with the knee —
+// the first bucket whose median falls below a quarter of the early peak —
+// reported as the estimated view window. One request per open or recalculate;
+// no polling, because the query is expensive and the data moves slowly.
+let _analysisToken = 0;
+
+// The TUI reads its bucket box the same way: fall back to 7 for anything that
+// is not an integer and clamp the rest to at least one day, so a typo can never
+// reach the endpoint as a zero bucket width.
+function _analysisBucketDays(raw) {
+  const n = Number(raw);
+  if (!Number.isInteger(n)) return 7;
+  return Math.max(1, n);
+}
+
+function _renderAnalysisSummary(data) {
+  const items = fmtCount(data.items_analyzed || 0);
+  const buckets = fmtCount((data.buckets || []).length);
+  if (data.estimated_window_days == null) {
+    // A null knee is not a zero-day window: the curve never fell to a quarter
+    // of its early peak, so there is nothing to estimate. Say that rather than
+    // printing "~0 days", which would read as a real answer.
+    return '<p>Insufficient data to estimate a view window. '
+      + '<span class="stat-label">(' + items + ' items analyzed, ' + buckets
+      + ' buckets)</span></p>';
+  }
+  return '<p><b>Estimated view window: ~' + fmtCount(data.estimated_window_days)
+    + ' days</b> <span class="stat-label">(' + items + ' items analyzed, '
+    + buckets + ' buckets)</span></p>';
+}
+
+function _renderAnalysisTable(data) {
+  const buckets = data.buckets || [];
+  if (!buckets.length) {
+    return '<p class="stat-label">No items with recorded views to analyze.</p>';
+  }
+  let maxMedian = 0;
+  buckets.forEach(function(b) { if (b.median > maxMedian) maxMedian = b.median; });
+  // A bar is a share of the peak, so the divisor must never be zero even when
+  // every bucket's median is.
+  if (maxMedian < 1) maxMedian = 1;
+  const rows = buckets.map(function(b) {
+    const width = (b.median / maxMedian * 100).toFixed(1);
+    return '<tr>'
+      + '<td>' + b.age_start + '\u2013' + b.age_end + 'd</td>'
+      + '<td>' + fmtCount(b.count) + '</td>'
+      + '<td>' + fmtCount(b.median) + '</td>'
+      + '<td>' + fmtCount(b.p10) + '</td>'
+      + '<td>' + fmtCount(b.p90) + '</td>'
+      + '<td><div class="analysis-bar-track"><div class="analysis-bar" style="width:' + width + '%"></div></div></td>'
+      + '</tr>';
+  }).join('');
+  return '<table class="stats-table analysis-table"><thead><tr>'
+    + '<th>Age range</th><th>Items</th><th>Median views</th><th>P10</th><th>P90</th><th>Relative median</th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+function _drawAnalysis(data) {
+  const summary = document.getElementById('analysis-summary');
+  if (summary) summary.innerHTML = _renderAnalysisSummary(data);
+  const host = document.getElementById('analysis-table-host');
+  if (host) host.innerHTML = _renderAnalysisTable(data);
+}
+
+function _loadAnalysis(token) {
+  const input = document.getElementById('analysis-bucket-days');
+  const bucketDays = _analysisBucketDays(input ? input.value : '');
+  return fetch('/api/analysis?bucket_days=' + bucketDays).then(function(resp) {
+    return resp.json();
+  }).then(function(data) {
+    // A stale token means the panel closed or recalculated while this request
+    // was in flight; drawing now would repaint something the user has left.
+    if (token !== _analysisToken) return;
+    _drawAnalysis(data);
+  }).catch(function(e) {
+    if (token !== _analysisToken) return;
+    const summary = document.getElementById('analysis-summary');
+    if (summary) summary.innerHTML = '<p class="stat-label">Failed: ' + e.message + '</p>';
+    const host = document.getElementById('analysis-table-host');
+    if (host) host.innerHTML = '';
+  });
+}
+
+function _runAnalysis() {
+  _analysisToken += 1;  // supersede any request still in flight
+  const token = _analysisToken;
+  const summary = document.getElementById('analysis-summary');
+  if (summary) summary.innerHTML = '<p>Loading…</p>';
+  const host = document.getElementById('analysis-table-host');
+  if (host) host.innerHTML = '';
+  _loadAnalysis(token);
+}
+
+function _openAnalysisPanel() {
+  const overlay = document.getElementById('analysis-overlay');
+  if (!overlay) return;
+  const input = document.getElementById('analysis-bucket-days');
+  // The TUI mounts a fresh screen at 7 days; so does this panel.
+  if (input) input.value = '7';
+  overlay.style.display = 'block';
+  _runAnalysis();
+}
+
+function _closeAnalysisPanel() {
+  _analysisToken += 1;  // discard every response still in flight
+  const overlay = document.getElementById('analysis-overlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
+document.getElementById('btn-analysis').onclick = _openAnalysisPanel;
+document.getElementById('analysis-close').onclick = _closeAnalysisPanel;
+document.getElementById('analysis-recalc').onclick = _runAnalysis;
 
 loadState();
 </script>

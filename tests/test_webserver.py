@@ -358,6 +358,108 @@ def test_analysis(web_client):
     assert len(data["buckets"]) > 0
 
 
+def test_analysis_panel_dom_contract(web_client):
+    """The toolbar opens a panel modelled on the daemon and stats overlays.
+
+    The endpoint existed with no client for it. This pins the static half of the
+    contract: the button the page wires up, the bucket box defaulting to the
+    TUI's seven days, and the elements the render code writes into.
+    """
+    client, _ = web_client
+    doc = lxml.html.fromstring(client.get('/').data.decode())
+
+    buttons = doc.xpath('//*[@id="btn-analysis"]')
+    assert len(buttons) == 1, "expected exactly one #btn-analysis"
+    assert buttons[0].tag == "button", "the analysis affordance must not navigate away"
+    assert not buttons[0].get("href"), "the analysis button must not be a link"
+
+    overlay = doc.xpath('//*[@id="analysis-overlay"]')
+    assert overlay, "missing #analysis-overlay"
+    for el_id in ('analysis-bucket-days', 'analysis-recalc', 'analysis-close',
+                  'analysis-summary', 'analysis-table-host'):
+        nodes = doc.xpath(f'//*[@id="{el_id}"]')
+        assert nodes, f"missing #{el_id}"
+        assert nodes[0] in overlay[0].iterdescendants(), \
+            f"#{el_id} must live inside the overlay"
+
+    bucket = doc.xpath('//*[@id="analysis-bucket-days"]')[0]
+    assert bucket.get("value") == "7", "the bucket box must default to the TUI's 7 days"
+
+
+def test_analysis_bucket_days_parameter_sets_the_bucket_width(web_client):
+    client, db_path = web_client
+    import time
+    now = int(time.time())
+    for i in range(30):
+        insert_or_update_item(db_path, {
+            "workshop_id": i + 1,
+            "steam_created_at": now - i * 86400,
+            "views": 100 + i,
+        })
+
+    one = client.get('/api/analysis?bucket_days=1').get_json()
+    week = client.get('/api/analysis?bucket_days=7').get_json()
+
+    assert one["items_analyzed"] == 30
+    assert all(b["age_end"] - b["age_start"] == 1 for b in one["buckets"])
+    assert all(b["age_end"] - b["age_start"] == 7 for b in week["buckets"])
+    assert len(one["buckets"]) > len(week["buckets"]), \
+        "a smaller bucket must split the same items into more buckets"
+
+
+def test_analysis_reports_a_null_window_honestly(web_client):
+    """Too few populated buckets leaves the knee unknown rather than zero.
+
+    The panel keys its summary off null, so the endpoint must preserve the
+    distinction between "no estimate" and "an estimate of zero days" instead of
+    collapsing both to 0.
+    """
+    client, db_path = web_client
+    import time
+    now = int(time.time())
+    for i in range(3):
+        insert_or_update_item(db_path, {
+            "workshop_id": i + 1,
+            "steam_created_at": now,
+            "views": 50,
+        })
+
+    resp = client.get('/api/analysis?bucket_days=7')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["items_analyzed"] == 3
+    assert "estimated_window_days" in data
+    assert data["estimated_window_days"] is None
+
+
+def test_analysis_with_no_data_reports_a_null_window(web_client):
+    client, _ = web_client
+    data = client.get('/api/analysis').get_json()
+    assert data == {"buckets": [], "estimated_window_days": None, "items_analyzed": 0}
+
+
+def test_analysis_clamps_a_nonpositive_bucket_width(web_client):
+    """A hand-made request with a zero width must not divide by zero.
+
+    The TUI clamps its bucket box to at least one day; this endpoint takes the
+    parameter from the query string, so it needs the same floor. A missing or
+    unparsable value keeps the seven-day default.
+    """
+    client, db_path = web_client
+    import time
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "steam_created_at": int(time.time()), "views": 5,
+    })
+
+    zero = client.get('/api/analysis?bucket_days=0')
+    assert zero.status_code == 200
+    assert all(b["age_end"] - b["age_start"] == 1 for b in zero.get_json()["buckets"])
+
+    bad = client.get('/api/analysis?bucket_days=abc')
+    assert bad.status_code == 200
+    assert all(b["age_end"] - b["age_start"] == 7 for b in bad.get_json()["buckets"])
+
+
 def test_save_filter(web_client):
     client, _ = web_client
     resp = client.post('/api/save_filter', json={
@@ -908,3 +1010,158 @@ def test_header_port_display_is_filled_from_the_pages_own_location(web_client, t
     # The function only helps if the page actually calls it on load.
     assert re.search(r'^showServerPort\(\);$', script, re.M), \
         "the page never calls showServerPort()"
+
+
+# ── the view window analysis panel ───────────────────────────────────────────
+#
+# The panel's render functions are pure string builders and its in-flight guard
+# is a token comparison, so both can be exercised in node against tiny stubs
+# rather than asserting that certain words merely appear in the served script.
+
+
+ANALYSIS_RENDER_DRIVER = """
+__FMT__
+__SUMMARY__
+__TABLE__
+const cases = __CASES__;
+console.log(JSON.stringify(cases.map(function(d) {
+  return {summary: _renderAnalysisSummary(d), table: _renderAnalysisTable(d)};
+})));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_analysis_render_shows_the_knee_and_scales_the_bars(web_client, tmp_path):
+    """The summary names the knee, and each bar is a share of the peak median.
+
+    A text-presence check on the served script would pass with the knee branch
+    inverted or the bar divisor wrong; this runs the real render functions.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+
+    kneed = {
+        "buckets": [
+            {"age_start": 0, "age_end": 7, "count": 120, "median": 300, "p10": 3, "p90": 900},
+            {"age_start": 7, "age_end": 14, "count": 80, "median": 150, "p10": 2, "p90": 400},
+            {"age_start": 14, "age_end": 21, "count": 40, "median": 60, "p10": 1, "p90": 100},
+            {"age_start": 21, "age_end": 28, "count": 10, "median": 5, "p10": 1, "p90": 20},
+        ],
+        "estimated_window_days": 21,
+        "items_analyzed": 1725544,
+    }
+    no_knee = {"buckets": [], "estimated_window_days": None, "items_analyzed": 1725544}
+
+    driver = (ANALYSIS_RENDER_DRIVER
+              .replace("__FMT__", _extract_function(script, "fmtCount"))
+              .replace("__SUMMARY__", _extract_function(script, "_renderAnalysisSummary"))
+              .replace("__TABLE__", _extract_function(script, "_renderAnalysisTable"))
+              .replace("__CASES__", json.dumps([kneed, no_knee])))
+    results = _run_node(driver, tmp_path)
+
+    summary = results[0]["summary"]
+    assert "Estimated view window: ~21 days" in summary
+    assert "1.73M items analyzed" in summary, "a large item count must be readable"
+    assert "4 buckets" in summary
+
+    table = results[0]["table"]
+    assert table.count("<tr>") == 5, "one heading row plus four buckets"
+    assert "0\u20137d" in table and "21\u201328d" in table
+    assert "<td>120</td>" in table and "<td>300</td>" in table
+    # Bars are proportional to the peak median (300): 100%, 50%, 20%, ~1.7%.
+    assert "width:100.0%" in table
+    assert "width:50.0%" in table
+    assert "width:20.0%" in table
+    assert "width:1.7%" in table
+
+    null_summary = results[1]["summary"]
+    assert "Insufficient data to estimate a view window." in null_summary
+    assert "~0 days" not in null_summary, "a null knee must not be shown as a zero-day window"
+    assert "0 buckets" in null_summary
+    assert "No items with recorded views" in results[1]["table"]
+
+
+ANALYSIS_DISCARD_DRIVER = """
+__FN__
+
+const events = [];
+const els = {};
+function el(id) { return els[id] || (els[id] = {value: '7', innerHTML: ''}); }
+global.document = {getElementById: el};
+let _analysisToken = 0;
+function _analysisBucketDays() { return 7; }
+function _drawAnalysis() { events.push('draw'); }
+function response(data) { return {json: async function() { return data; }}; }
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise(function(res, rej) { resolve = res; reject = rej; });
+  return {promise: promise, resolve: resolve, reject: reject};
+}
+
+(async function() {
+  // A request that lands while the panel is open draws.
+  _analysisToken = 1;
+  let d = deferred();
+  global.fetch = function() { return d.promise; };
+  let pending = _loadAnalysis(1);
+  d.resolve(response({items_analyzed: 1}));
+  await pending;
+  const drawsWhenCurrent = events.length;
+
+  // The panel closes with a request in flight: its response is discarded.
+  _analysisToken = 1;
+  d = deferred();
+  global.fetch = function() { return d.promise; };
+  pending = _loadAnalysis(1);
+  _analysisToken = 99;  // _closeAnalysisPanel() bumps the token
+  d.resolve(response({items_analyzed: 2}));
+  await pending;
+  const drawsAfterClose = events.length;
+
+  // A failing request that lands after close must not write an error either.
+  _analysisToken = 1;
+  d = deferred();
+  global.fetch = function() { return d.promise; };
+  pending = _loadAnalysis(1);
+  _analysisToken = 99;
+  d.reject(new Error('down'));
+  await pending;
+  const stale = els['analysis-summary'];
+  const summaryAfterStaleFailure = stale ? stale.innerHTML : '';
+
+  // A failure with the current token is still reported in the open panel.
+  _analysisToken = 5;
+  d = deferred();
+  global.fetch = function() { return d.promise; };
+  pending = _loadAnalysis(5);
+  d.reject(new Error('down'));
+  await pending;
+  console.log(JSON.stringify({
+    drawsWhenCurrent: drawsWhenCurrent,
+    drawsAfterClose: drawsAfterClose,
+    summaryAfterStaleFailure: summaryAfterStaleFailure,
+    summaryAfterCurrentFailure: els['analysis-summary'].innerHTML
+  }));
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_analysis_panel_discards_responses_after_close(web_client, tmp_path):
+    """Closing mid-request must not repaint the panel, matching `_statsToken`.
+
+    The token is bumped on close and again on every recalculate, so a response
+    that lands later is dropped. Asserting the script contains `_analysisToken`
+    would pass even if the comparison were never made; this drives the real
+    `_loadAnalysis` with a deferred fetch and observes what it draws.
+    """
+    client, _ = web_client
+    fn = _extract_function(_served_inline_script(client), "_loadAnalysis")
+    result = _run_node(ANALYSIS_DISCARD_DRIVER.replace("__FN__", fn), tmp_path)
+
+    assert result["drawsWhenCurrent"] == 1, "an open panel must render its response"
+    assert result["drawsAfterClose"] == 1, "a response landing after close must be discarded"
+    assert result["summaryAfterStaleFailure"] == "", \
+        "a failure landing after close must not write into the closed panel"
+    assert "Failed: down" in result["summaryAfterCurrentFailure"], \
+        "an open panel must report a failed request"

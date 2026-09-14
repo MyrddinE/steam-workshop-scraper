@@ -393,7 +393,10 @@ def api_metric(name):
 
 @app.route('/api/analysis')
 def api_analysis():
-    bucket = request.args.get('bucket_days', 7, type=int)
+    # The TUI clamps its bucket box to at least one day; the endpoint must too,
+    # because a zero width divides by zero and a negative one indexes a negative
+    # bucket, so either would answer 500 to a hand-made request.
+    bucket = max(1, request.args.get('bucket_days', 7, type=int))
     result = view_window_analysis(_db_path, bucket_days=bucket)
     return jsonify(result)
 
