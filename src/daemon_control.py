@@ -17,6 +17,68 @@ import time
 # How long a graceful stop waits before escalating to a forced kill.
 STOP_TIMEOUT_SECONDS = 15.0
 
+# Constants for the Windows liveness probe.
+_SYNCHRONIZE = 0x00100000
+_PROCESS_TERMINATE = 0x0001
+_WAIT_TIMEOUT = 0x00000102
+_ERROR_ACCESS_DENIED = 5
+
+
+def _kernel32():
+    """Windows kernel32 with prototypes set.
+
+    Isolated in a function so the probe below can be exercised on a machine that
+    is not Windows, and so the handle-returning calls get a real return type:
+    ctypes assumes ``c_int`` otherwise, which truncates a 64-bit HANDLE.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    k = ctypes.windll.kernel32
+    k.OpenProcess.restype = wintypes.HANDLE
+    k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k.WaitForSingleObject.restype = wintypes.DWORD
+    k.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    k.TerminateProcess.restype = wintypes.BOOL
+    k.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    k.CloseHandle.restype = wintypes.BOOL
+    k.CloseHandle.argtypes = [wintypes.HANDLE]
+    k.GetLastError.restype = wintypes.DWORD
+    return k
+
+
+def _windows_pid_alive(pid: int) -> bool | None:
+    """Whether a PID is alive on Windows, or None when Windows will not say.
+
+    Deliberately not ``os.kill(pid, 0)``. On Windows any signal other than the
+    two console events is handed to ``TerminateProcess``, so a signal-0 "probe"
+    *kills* the process it was asked about and then reports success -- turning a
+    status poll into a daemon shutdown. A process handle stays signalled once
+    its process has exited, so a zero-timeout wait answers the question without
+    touching it.
+    """
+    kernel32 = _kernel32()
+    handle = kernel32.OpenProcess(_SYNCHRONIZE, False, pid)
+    if not handle:
+        # Access denied means the process exists but is not ours to inspect;
+        # anything else means there is no process with that id.
+        return True if kernel32.GetLastError() == _ERROR_ACCESS_DENIED else False
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == _WAIT_TIMEOUT
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _pid_alive(pid: int) -> bool | None:
+    """Whether a PID is alive, or None when the platform cannot determine it."""
+    if sys.platform == "win32":
+        return _windows_pid_alive(pid)
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
 
 class DaemonController:
     """Owns the detached daemon's process handle and PID-file protocol.
@@ -69,13 +131,12 @@ class DaemonController:
         pid = self.read_pid()
         if pid is None:
             return False
-        try:
-            os.kill(pid, 0)
+        alive = _pid_alive(pid)
+        if alive is None:
+            # The platform will not say. A PID file is the only evidence there
+            # is, so a live one is taken at face value.
             return True
-        except OSError:
-            # Signal 0 cannot probe a detached Windows process reliably, so a
-            # live PID file is taken at face value there.
-            return sys.platform == 'win32'
+        return alive
 
     def status(self) -> dict:
         if self.is_running():
@@ -144,9 +205,7 @@ class DaemonController:
                 self._proc = None
                 return True, "Daemon stopped"
             if pid:
-                try:
-                    os.kill(pid, 0)
-                except OSError:
+                if _pid_alive(pid) is False:
                     self._proc = None
                     return True, "Daemon stopped"
             time.sleep(0.5)
@@ -165,11 +224,13 @@ class DaemonController:
                     pass
         elif pid and platform.system() == 'Windows':
             try:
-                import ctypes
-                handle = ctypes.windll.kernel32.OpenProcess(1, False, pid)
+                kernel32 = _kernel32()
+                handle = kernel32.OpenProcess(_PROCESS_TERMINATE, False, pid)
                 if handle:
-                    ctypes.windll.kernel32.TerminateProcess(handle, 0)
-                    ctypes.windll.kernel32.CloseHandle(handle)
+                    try:
+                        kernel32.TerminateProcess(handle, 0)
+                    finally:
+                        kernel32.CloseHandle(handle)
             # Best-effort Windows force-kill of a PID this process does not own;
             # no further in-process remedy exists.
             except Exception:

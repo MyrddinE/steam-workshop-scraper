@@ -92,21 +92,115 @@ def test_is_running_true_from_live_pid_file(tmp_path, monkeypatch):
     assert controller.is_running() is True
 
 
-def test_is_running_windows_trusts_pid_file_when_probe_fails(tmp_path, monkeypatch):
+def test_is_running_windows_never_signals_the_process(tmp_path, monkeypatch):
+    """Regression: a status poll used to be able to kill the daemon.
+
+    On Windows ``os.kill(pid, 0)`` is not a probe -- any signal other than the
+    two console events is passed to ``TerminateProcess``, so the old liveness
+    check terminated the process it was asked about and then reported it as
+    running. The web UI polls status every two seconds, which would have made
+    that fatal rather than merely wrong.
+    """
     pid_file = _pid_file(tmp_path)
     with open(pid_file, "w") as f:
         f.write("321")
     controller = DaemonController(pid_file=pid_file)
 
+    def forbidden(pid, sig):
+        raise AssertionError(f"os.kill({pid}, {sig}) must not be used as a Windows probe")
+
+    monkeypatch.setattr(daemon_control.os, "kill", forbidden)
+    monkeypatch.setattr(daemon_control.sys, "platform", "win32")
+    monkeypatch.setattr(daemon_control, "_windows_pid_alive", lambda pid: True)
+    assert controller.is_running() is True
+
+    monkeypatch.setattr(daemon_control, "_windows_pid_alive", lambda pid: False)
+    assert controller.is_running() is False
+
+
+def test_is_running_trusts_the_pid_file_when_windows_will_not_say(tmp_path, monkeypatch):
+    """Access denied is not evidence the process is gone."""
+    pid_file = _pid_file(tmp_path)
+    with open(pid_file, "w") as f:
+        f.write("321")
+    controller = DaemonController(pid_file=pid_file)
+    monkeypatch.setattr(daemon_control.sys, "platform", "win32")
+    monkeypatch.setattr(daemon_control, "_windows_pid_alive", lambda pid: None)
+    assert controller.is_running() is True
+
+
+def test_is_running_on_unix_still_uses_the_signal_probe(tmp_path, monkeypatch):
+    """The Unix path is unchanged: signal 0 is a real probe there."""
+    pid_file = _pid_file(tmp_path)
+    with open(pid_file, "w") as f:
+        f.write("321")
+    controller = DaemonController(pid_file=pid_file)
+    monkeypatch.setattr(daemon_control.sys, "platform", "linux")
+    monkeypatch.setattr(daemon_control.os, "kill", lambda pid, sig: None)
+    assert controller.is_running() is True
+
     def dead(pid, sig):
         raise OSError("no such process")
 
     monkeypatch.setattr(daemon_control.os, "kill", dead)
-    monkeypatch.setattr(daemon_control.sys, "platform", "win32")
-    assert controller.is_running() is True
-    # The same failed probe on Unix means the process is gone.
-    monkeypatch.setattr(daemon_control.sys, "platform", "linux")
     assert controller.is_running() is False
+
+
+class FakeKernel32:
+    """Stand-in for kernel32, so the Windows probe is testable off Windows."""
+
+    def __init__(self, handle=1234, wait_result=None, last_error=0):
+        self._handle = handle
+        self._wait_result = wait_result
+        self.last_error = last_error
+        self.terminated = []
+        self.closed = []
+        self.opened = []
+
+    def OpenProcess(self, access, inherit, pid):
+        self.opened.append((access, inherit, pid))
+        return self._handle
+
+    def WaitForSingleObject(self, handle, timeout):
+        return self._wait_result
+
+    def TerminateProcess(self, handle, code):
+        self.terminated.append((handle, code))
+        return 1
+
+    def CloseHandle(self, handle):
+        self.closed.append(handle)
+        return 1
+
+    def GetLastError(self):
+        return self.last_error
+
+
+def test_windows_probe_reports_a_running_process(monkeypatch):
+    fake = FakeKernel32(wait_result=daemon_control._WAIT_TIMEOUT)
+    monkeypatch.setattr(daemon_control, "_kernel32", lambda: fake)
+    assert daemon_control._windows_pid_alive(4321) is True
+    assert fake.closed == [1234], "the process handle must always be closed"
+
+
+def test_windows_probe_reports_an_exited_process(monkeypatch):
+    fake = FakeKernel32(wait_result=0x00000000)  # WAIT_OBJECT_0: already signalled
+    monkeypatch.setattr(daemon_control, "_kernel32", lambda: fake)
+    assert daemon_control._windows_pid_alive(4321) is False
+    assert fake.closed == [1234]
+
+
+def test_windows_probe_treats_access_denied_as_alive(monkeypatch):
+    fake = FakeKernel32(handle=0, last_error=daemon_control._ERROR_ACCESS_DENIED)
+    monkeypatch.setattr(daemon_control, "_kernel32", lambda: fake)
+    assert daemon_control._windows_pid_alive(4321) is True
+    assert fake.closed == [], "there is no handle to close when OpenProcess failed"
+
+
+def test_windows_probe_treats_other_errors_as_gone(monkeypatch):
+    fake = FakeKernel32(handle=0, last_error=87)  # ERROR_INVALID_PARAMETER
+    monkeypatch.setattr(daemon_control, "_kernel32", lambda: fake)
+    assert daemon_control._windows_pid_alive(4321) is False
 
 
 def test_is_running_uses_proc_handle_before_pid_file(tmp_path):
