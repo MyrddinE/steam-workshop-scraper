@@ -1,13 +1,17 @@
-"""Database statistics as named metrics, each costed and tiered on its own.
+"""Database statistics as named metrics, each an independent chunk.
 
-One monolithic function used to compute every statistic for every caller, so the
-cheapest consumer paid for the most expensive one: the tag endpoint ran the whole
-payload — including a full-table scan classified in Python — to return one field.
+The statistics are computed and delivered one metric at a time, so a front end
+can draw each chunk the moment it is ready instead of waiting for the slowest.
+Nothing here decides which metrics are "fast" or "slow".
 
-Splitting the statistics into named metrics lets each tier be requested and
-delivered separately, so a caller that only needs the item counts does not wait
-for the tag join, and the front ends can draw the cheap numbers while the
-expensive ones are still being computed.
+`seed_ms` exists only to break the tie on the very first run, when nothing has
+been measured yet. It is a hint, not a classification: it came from one database
+on one machine, and a metric's real cost depends on the data — how many rows are
+queued, how large the tag junction is, whether a suitable index exists. A front
+end is expected to replace it with what the metric actually took last time it
+ran, so the order follows the data rather than this table. If `tag_counts` gets
+cheap, or `status_counts` gets expensive, the display reorders itself and no code
+changes.
 
 Two rules keep this honest:
 
@@ -17,17 +21,6 @@ Two rules keep this honest:
   `get_db_stats` returned before it existed. Only how they are computed and
   delivered is different — moving the per-item classification into SQL changes
   the cost, not the answer.
-
-Tiers are named for their measured cost on a 1.7M-item database, not for how
-they feel:
-
-===========  ==============  ==========================================
-Tier         Cost            Members
-===========  ==============  ==========================================
-``instant``  under 10 ms     totals, high-water mark, app tracking
-``fast``     50-80 ms        status counts, fetch recency, coverage, stuck work
-``slow``     hundreds of ms  translation status, priority mix, tags
-===========  ==============  ==========================================
 """
 
 from __future__ import annotations
@@ -35,26 +28,20 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from src.database import get_connection
 
-INSTANT = "instant"
-FAST = "fast"
-SLOW = "slow"
-
-#: Ordered cheapest first, which is the order a front end should draw them in.
-TIERS = (INSTANT, FAST, SLOW)
-
-STALENESS_DAYS = 30
+#: Used when a caller wants every metric and has no measurements of its own.
+DEFAULT_STALENESS_DAYS = 30
 
 
 @dataclass(frozen=True)
 class Metric:
-    """One named statistic: how to compute it, and what it costs to ask."""
+    """One named statistic: how to compute it, and roughly what it costs."""
 
     name: str
-    tier: str
+    seed_ms: float
     note: str
     run: Callable[[Any, dict], Any]
 
@@ -62,40 +49,114 @@ class Metric:
 REGISTRY: dict[str, Metric] = {}
 
 
-def metric(name: str, tier: str, note: str):
+def metric(name: str, seed_ms: float, note: str):
     """Register a function as a named metric.
 
     Every metric is called as ``fn(conn, params)``. Most ignore ``params``; it
     carries the few knobs that would otherwise have to be module globals.
     """
-    if tier not in TIERS:
-        raise ValueError(f"{name}: unknown tier {tier!r}, expected one of {TIERS}")
-
     def decorate(fn):
         if name in REGISTRY:
             raise ValueError(f"duplicate metric {name!r}")
-        REGISTRY[name] = Metric(name=name, tier=tier, note=note, run=fn)
+        REGISTRY[name] = Metric(name=name, seed_ms=seed_ms, note=note, run=fn)
         return fn
 
     return decorate
 
 
-def names_in(tier: str) -> list[str]:
-    """Metric names belonging to one tier, in registration order."""
-    return [m.name for m in REGISTRY.values() if m.tier == tier]
-
-
 def all_names() -> list[str]:
-    """Every metric name, cheapest tier first."""
-    return [name for tier in TIERS for name in names_in(tier)]
+    """Every metric name, in the order `seed_ms` suggests running them.
+
+    Cheapest-predicted first, so the first chunks to arrive are the ones most
+    likely to arrive quickly. A caller with its own measurements should sort by
+    those instead.
+    """
+    return sorted(REGISTRY, key=lambda name: (REGISTRY[name].seed_ms, name))
+
+
+def catalogue() -> list[dict]:
+    """What statistics exist, with the seed hint, for a front end to lay out."""
+    return [
+        {"name": name, "note": REGISTRY[name].note, "seed_ms": REGISTRY[name].seed_ms}
+        for name in all_names()
+    ]
+
+
+def _resolve(names: list[str] | None) -> list[str]:
+    wanted = list(names) if names is not None else all_names()
+    unknown = [n for n in wanted if n not in REGISTRY]
+    if unknown:
+        raise KeyError(f"unknown metric(s): {', '.join(sorted(unknown))}")
+    return wanted
+
+
+def _run_one(conn, name: str, params: dict) -> dict:
+    spec = REGISTRY[name]
+    started = time.monotonic()
+    try:
+        value = spec.run(conn, params)
+    except Exception as exc:
+        # One broken metric must not take the whole screen down with it; the
+        # front ends render each chunk independently.
+        logging.warning("[metrics] %s failed: %s", name, exc)
+        value = None
+    return {
+        "value": value,
+        "ms": round((time.monotonic() - started) * 1000, 1),
+        "note": spec.note,
+        "seed_ms": spec.seed_ms,
+    }
+
+
+def iter_metrics(db_path: str, names: list[str] | None = None,
+                 params: dict | None = None) -> Iterator[tuple[str, dict]]:
+    """Yield ``(name, entry)`` as each metric finishes.
+
+    One connection serves the whole run: opening one per metric would cost more
+    than the fastest metrics do. This is a generator so a caller can render each
+    chunk as it lands rather than holding everything until the last one is done.
+    """
+    ctx = dict(params or {})
+    conn = get_connection(db_path)
+    try:
+        for name in _resolve(names):
+            yield name, _run_one(conn, name, ctx)
+    finally:
+        conn.close()
+
+
+def compute(db_path: str, names: list[str] | None = None, params: dict | None = None) -> dict:
+    """Every requested metric at once, as ``{name: entry}``."""
+    return dict(iter_metrics(db_path, names, params))
+
+
+def values(result: dict) -> dict:
+    """Strip the timing wrapper, leaving ``{name: value}``."""
+    return {name: entry["value"] for name, entry in result.items()}
+
+
+if __name__ == "__main__":  # pragma: no cover - manual cost check
+    import sys
+
+    target = sys.argv[1] if len(sys.argv) > 1 else "workshop.db"
+    total = 0.0
+    for _name, _r in iter_metrics(target):
+        total += _r["ms"]
+        print(f"{_r['ms']:>8.1f} ms  {_name:<22} (seeded {_r['seed_ms']})")
+    print(f"{total:>8.1f} ms  total")
 
 
 # --------------------------------------------------------------------------
-# instant
+# cheap by nature: one row, or one small table
 # --------------------------------------------------------------------------
 
 
-@metric("totals", INSTANT, "Item counts, split by whether the item is still alive.")
+@metric("high_water", 1, "The most recent successful API fetch.")
+def _high_water(conn, params):
+    return conn.execute("SELECT MAX(api_fetched_at) AS v FROM workshop_items").fetchone()["v"]
+
+
+@metric("totals", 2, "Item counts, split by whether the item is still alive.")
 def _totals(conn, params) -> dict:
     row = conn.execute(
         "SELECT COUNT(*) AS total, "
@@ -107,12 +168,7 @@ def _totals(conn, params) -> dict:
     return {"total": total, "dead": dead, "alive": total - dead}
 
 
-@metric("high_water", INSTANT, "The most recent successful API fetch.")
-def _high_water(conn, params):
-    return conn.execute("SELECT MAX(api_fetched_at) AS v FROM workshop_items").fetchone()["v"]
-
-
-@metric("app_tracking", INSTANT, "Discovery position per application.")
+@metric("app_tracking", 3, "Discovery position per application.")
 def _app_tracking(conn, params) -> list[dict]:
     return [
         dict(r)
@@ -123,11 +179,11 @@ def _app_tracking(conn, params) -> list[dict]:
 
 
 # --------------------------------------------------------------------------
-# fast
+# one pass over workshop_items
 # --------------------------------------------------------------------------
 
 
-@metric("status_counts", FAST, "Rows grouped by Steam's status code.")
+@metric("status_counts", 57, "Rows grouped by Steam's status code.")
 def _status_counts(conn, params) -> list[dict]:
     return [
         dict(r)
@@ -137,47 +193,15 @@ def _status_counts(conn, params) -> list[dict]:
     ]
 
 
-@metric("coverage", FAST, "How much of the live library each stage has reached.")
-def _coverage(conn, params) -> dict:
-    """Processing coverage over live items.
-
-    This is the progress view: outstanding depth says how much is queued, but
-    only coverage says how far along the library actually is. Dead items are
-    excluded because they will never be covered, and counting them would make
-    coverage fall as the library is cleaned up.
-    """
-    row = conn.execute(
-        """
-        SELECT COUNT(*) AS total,
-               COALESCE(SUM(CASE WHEN api_fetched_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS api_fetched,
-               COALESCE(SUM(CASE WHEN COALESCE(extended_description, '') <> '' THEN 1 ELSE 0 END), 0) AS described,
-               COALESCE(SUM(CASE WHEN COALESCE(image_extension, '') <> '' THEN 1 ELSE 0 END), 0) AS imaged,
-               COALESCE(SUM(CASE WHEN translate_version IS NOT NULL THEN 1 ELSE 0 END), 0) AS translated,
-               COALESCE(SUM(CASE WHEN COALESCE(creator, '') <> '' THEN 1 ELSE 0 END), 0) AS attributed
-        FROM workshop_items
-        WHERE status IS NULL OR status <> -1
-        """
-    ).fetchone()
-    total = row["total"] or 0
-    return {
-        "total": total,
-        "api_fetched": row["api_fetched"],
-        "described": row["described"],
-        "imaged": row["imaged"],
-        "translated": row["translated"],
-        "attributed": row["attributed"],
-    }
-
-
-@metric("stuck_work", FAST, "Dead items still sitting in a work queue.")
+@metric("stuck_work", 60, "Dead items still sitting in a work queue.")
 def _stuck_work(conn, params) -> dict:
     """Work queued against items that are already known to be gone.
 
-    A dead item is marked by clearing `api_priority`, but the other queue flags
-    are left set, and the web and image polls select on those flags without a
-    dead-item guard. Those rows can never complete, so the queue never drains.
-    Reporting them is how that stays visible instead of being quietly excluded
-    from the backlog count.
+    An item marked dead should be in no queue, so this is expected to read zero.
+    It is kept because the queues used to strand these rows: the daemon now
+    clears the flags when it marks an item dead, and migration 16->17 cleared the
+    rows already stranded. A non-zero reading means that cause has come back,
+    which is more useful than a button that would hide the symptom.
     """
     row = conn.execute(
         """
@@ -192,9 +216,9 @@ def _stuck_work(conn, params) -> dict:
     return {k: row[k] for k in ("web", "image", "translation", "api")}
 
 
-@metric("fetch_recency", FAST, "Our fetch recency, by last_fetch_attempted_at.")
+@metric("fetch_recency", 79, "Our fetch recency, by last_fetch_attempted_at.")
 def _fetch_recency(conn, params) -> dict:
-    staleness_days = int(params.get("staleness_days", STALENESS_DAYS))
+    staleness_days = int(params.get("staleness_days", DEFAULT_STALENESS_DAYS))
     threshold = int(time.time()) - staleness_days * 86400
     counts = {"fresh": 0, "stale": 0, "blank": 0}
     rows = conn.execute(
@@ -216,8 +240,39 @@ def _fetch_recency(conn, params) -> dict:
     return counts
 
 
+@metric("coverage", 80, "How much of the live library each stage has reached.")
+def _coverage(conn, params) -> dict:
+    """Processing coverage over live items.
+
+    This is the progress view: outstanding depth says how much is queued, but
+    only coverage says how far along the library actually is. Dead items are
+    excluded because they will never be covered, and counting them would make
+    coverage fall as the library is cleaned up.
+    """
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(CASE WHEN api_fetched_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS api_fetched,
+               COALESCE(SUM(CASE WHEN COALESCE(extended_description, '') <> '' THEN 1 ELSE 0 END), 0) AS described,
+               COALESCE(SUM(CASE WHEN COALESCE(image_extension, '') <> '' THEN 1 ELSE 0 END), 0) AS imaged,
+               COALESCE(SUM(CASE WHEN translate_version IS NOT NULL THEN 1 ELSE 0 END), 0) AS translated,
+               COALESCE(SUM(CASE WHEN COALESCE(creator, '') <> '' THEN 1 ELSE 0 END), 0) AS attributed
+        FROM workshop_items
+        WHERE status IS NULL OR status <> -1
+        """
+    ).fetchone()
+    return {
+        "total": row["total"] or 0,
+        "api_fetched": row["api_fetched"],
+        "described": row["described"],
+        "imaged": row["imaged"],
+        "translated": row["translated"],
+        "attributed": row["attributed"],
+    }
+
+
 # --------------------------------------------------------------------------
-# slow
+# the expensive ones
 # --------------------------------------------------------------------------
 
 # `length(CAST(x AS BLOB))` counts UTF-8 bytes and `length(x)` counts characters,
@@ -227,7 +282,7 @@ def _fetch_recency(conn, params) -> dict:
 _IS_ASCII = "length(CAST(COALESCE({c}, '') AS BLOB)) = length(COALESCE({c}, ''))"
 
 
-@metric("translation_status", SLOW, "Translation state, classified in SQL rather than per row in Python.")
+@metric("translation_status", 255, "Translation state, classified in SQL rather than per row in Python.")
 def _translation_status(conn, params) -> dict:
     all_ascii = " AND ".join(
         _IS_ASCII.format(c=c)
@@ -261,13 +316,25 @@ def _translation_status(conn, params) -> dict:
     return counts
 
 
-@metric("priority_breakdowns", SLOW, "Fetchable work per queue, by priority.")
+@metric("tag_counts", 358, "Tag frequencies from the junction table.")
+def _tag_counts(conn, params) -> dict:
+    return {
+        row["tag_name"]: row["cnt"]
+        for row in conn.execute(
+            "SELECT t.tag_name, COUNT(*) AS cnt "
+            "FROM workshop_tags wt JOIN tags t USING(tag_id) "
+            "GROUP BY t.tag_name ORDER BY cnt DESC"
+        )
+    }
+
+
+@metric("priority_breakdowns", 875, "Fetchable work per queue, by priority.")
 def _priority_breakdowns(conn, params) -> dict:
     """Outstanding depth and priority mix, excluding items that cannot complete.
 
-    Dead items are left flagged by `src/daemon.py`, so counting them here
-    reported a backlog that no worker could ever drain. They are counted by
-    `stuck_work` instead, where the number means what it says.
+    Dead items used to be left flagged, so counting them here reported a backlog
+    that no worker could ever drain. They are counted by `stuck_work` instead,
+    where the number means what it says.
     """
     out = {}
     for column in ("translation_priority", "needs_image", "needs_web_scrape"):
@@ -280,76 +347,3 @@ def _priority_breakdowns(conn, params) -> dict:
             )
         ]
     return out
-
-
-@metric("tag_counts", SLOW, "Tag frequencies from the junction table.")
-def _tag_counts(conn, params) -> dict:
-    return {
-        row["tag_name"]: row["cnt"]
-        for row in conn.execute(
-            "SELECT t.tag_name, COUNT(*) AS cnt "
-            "FROM workshop_tags wt JOIN tags t USING(tag_id) "
-            "GROUP BY t.tag_name ORDER BY cnt DESC"
-        )
-    }
-
-
-# --------------------------------------------------------------------------
-# computation
-# --------------------------------------------------------------------------
-
-
-def compute(db_path: str, names: list[str] | None = None, params: dict | None = None) -> dict:
-    """Run metrics and return ``{name: {"value": ..., "ms": ...}}``.
-
-    Each metric is timed separately so the front ends can report what each one
-    cost, and so a slow metric is blamed on itself rather than on the payload.
-    One connection serves them all: opening a connection per metric would cost
-    more than the whole instant tier.
-    """
-    wanted = list(names) if names is not None else all_names()
-    unknown = [n for n in wanted if n not in REGISTRY]
-    if unknown:
-        raise KeyError(f"unknown metric(s): {', '.join(sorted(unknown))}")
-
-    ctx = dict(params or {})
-    conn = get_connection(db_path)
-    try:
-        results = {}
-        for name in wanted:
-            spec = REGISTRY[name]
-            started = time.monotonic()
-            try:
-                value = spec.run(conn, ctx)
-            except Exception as exc:
-                # One broken metric must not take the whole screen down with it;
-                # the front ends render each tier independently.
-                logging.warning("[metrics] %s failed: %s", name, exc)
-                value = None
-            results[name] = {
-                "value": value,
-                "ms": round((time.monotonic() - started) * 1000, 1),
-                "tier": spec.tier,
-                "note": spec.note,
-            }
-        return results
-    finally:
-        conn.close()
-
-
-def compute_tier(db_path: str, tier: str, params: dict | None = None) -> dict:
-    """Run every metric in one tier."""
-    return compute(db_path, names_in(tier), params)
-
-
-def values(result: dict) -> dict:
-    """Strip the timing wrapper, leaving ``{name: value}``."""
-    return {name: entry["value"] for name, entry in result.items()}
-
-
-if __name__ == "__main__":  # pragma: no cover - manual cost check
-    import sys
-
-    target = sys.argv[1] if len(sys.argv) > 1 else "workshop.db"
-    for _name, _r in compute(target).items():
-        print(f"{_r['tier']:>7}  {_r['ms']:>8.1f} ms  {_name}")
