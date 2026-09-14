@@ -611,3 +611,89 @@ def test_detail_translation_flag_follows_translate_version(web_client):
     })
     assert client.get('/api/item/81').get_json()["has_translation"] is True
 
+
+# ── the userscript bridge's session push ─────────────────────────────────────
+#
+# The bridge re-pushes on a timer, so this handler is on a hot path: an open
+# Steam tab calls it every thirty seconds whether or not anything has changed.
+
+
+@pytest.fixture
+def session_client(tmp_path, monkeypatch):
+    """A client with a real config path, and save_config counted."""
+    import src.webserver as ws
+
+    db_path = str(tmp_path / "test_session.db")
+    initialize_database(db_path)
+    config_path = str(tmp_path / "config.yaml")
+    config = {"database": {"path": db_path}, "daemon": {"target_appids": [1]}}
+
+    saves = []
+    monkeypatch.setattr(ws, "save_config", lambda path, cfg: saves.append(path))
+    # _sessionid is module state and would otherwise leak between tests.
+    monkeypatch.setattr(ws, "_sessionid", "")
+
+    init_webserver(db_path, config, config_path=config_path)
+    return app.test_client(), ws, saves, config_path
+
+
+def test_sessionid_push_stores_the_login_cookie(session_client):
+    client, ws, saves, config_path = session_client
+
+    resp = client.post('/api/sessionid', json={"sessionid": "abc123", "login_secure": "cookie-1"})
+
+    assert resp.get_json() == {"ok": True}
+    assert ws._sessionid == "abc123"
+    assert ws._config["session"]["login_secure"] == "cookie-1"
+    assert saves == [config_path], "a changed cookie must be persisted for the daemon"
+
+
+def test_sessionid_push_does_not_rewrite_an_unchanged_cookie(session_client):
+    """Regression: this rewrote config.yaml every thirty seconds.
+
+    The bridge re-pushes on a timer and a cookie is valid for days, so an
+    unchanged value cost a YAML serialisation and a file write per open Steam
+    tab, forever.
+    """
+    client, _ws, saves, _ = session_client
+
+    client.post('/api/sessionid', json={"sessionid": "abc", "login_secure": "same"})
+    assert len(saves) == 1
+
+    client.post('/api/sessionid', json={"sessionid": "abc", "login_secure": "same"})
+    assert len(saves) == 1, "an unchanged cookie must not rewrite the config"
+
+    client.post('/api/sessionid', json={"sessionid": "abc", "login_secure": "different"})
+    assert len(saves) == 2, "a changed cookie must still be persisted"
+
+
+def test_sessionid_push_updates_the_token_even_when_the_cookie_is_unchanged(session_client):
+    """The CSRF token lives in memory and is stored, not compared."""
+    client, ws, _saves, _ = session_client
+
+    client.post('/api/sessionid', json={"sessionid": "first", "login_secure": "same"})
+    client.post('/api/sessionid', json={"sessionid": "second", "login_secure": "same"})
+
+    assert ws._sessionid == "second"
+
+
+def test_sessionid_push_without_a_cookie_does_not_persist(session_client):
+    """No cookie to store is not a reason to write the config file."""
+    client, ws, saves, _ = session_client
+
+    resp = client.post('/api/sessionid', json={"sessionid": "abc"})
+
+    assert resp.get_json() == {"ok": True}
+    assert ws._sessionid == "abc"
+    assert saves == []
+
+
+def test_sessionid_push_without_a_sessionid_is_rejected(session_client):
+    client, _ws, saves, _ = session_client
+
+    resp = client.post('/api/sessionid', json={"login_secure": "cookie"})
+
+    assert resp.status_code == 400
+    assert resp.get_json()["ok"] is False
+    assert saves == []
+

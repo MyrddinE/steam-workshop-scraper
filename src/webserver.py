@@ -439,24 +439,36 @@ def api_sessionid():
     data = request.get_json(silent=True) or {}
     sid = data.get("sessionid", "").strip()
     login_secure = data.get("login_secure", "").strip()
-    if sid:
-        _sessionid = sid
-        if login_secure:
-            _config.setdefault("session", {})["login_secure"] = login_secure
-            # Persist it so the daemon sees it. The daemon is a separate process
-            # from this web server, and the web scraper re-reads config.yaml for
-            # each request, so this is what makes a refreshed login cookie take
-            # effect without restarting anything.
-            try:
-                save_config(_config_path, _config)
-                state = "set and persisted"
-            except Exception as exc:
-                state = f"set but not persisted ({exc})"
-        else:
-            state = "missing"
-        logging.info(f"SessionID updated from userscript (login_secure: {state})")
-        return jsonify({"ok": True})
-    return jsonify({"ok": False, "message": "No sessionid provided."}), 400
+    if not sid:
+        return jsonify({"ok": False, "message": "No sessionid provided."}), 400
+
+    _sessionid = sid
+    # Only the login cookie is persisted; the CSRF token stays in memory. The
+    # bridge re-pushes on a timer, and a cookie is valid for days, so a push that
+    # carries the value already on disk must not rewrite the config file. That
+    # rewrite is the expensive half of the old handler: YAML serialisation and a
+    # file write every thirty seconds, per open Steam tab, for no change.
+    changed = bool(login_secure) and login_secure_value(_config) != login_secure
+    if not login_secure:
+        state = "missing"
+    elif not changed:
+        state = "unchanged"
+    else:
+        _config.setdefault("session", {})["login_secure"] = login_secure
+        # Persist it so the daemon sees it. The daemon is a separate process
+        # from this web server, and the web scraper re-reads config.yaml for
+        # each request, so this is what makes a refreshed login cookie take
+        # effect without restarting anything.
+        try:
+            save_config(_config_path, _config)
+            state = "set and persisted"
+        except Exception as exc:
+            state = f"set but not persisted ({exc})"
+
+    # A push that changed nothing is worth a debug line, not an info one.
+    log = logging.info if changed else logging.debug
+    log("SessionID updated from userscript (login_secure: %s)", state)
+    return jsonify({"ok": True})
 
 
 @app.route('/api/toggle_sub/<int:workshop_id>', methods=['POST'])

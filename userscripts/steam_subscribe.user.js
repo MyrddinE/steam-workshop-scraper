@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Workshop Scraper — Subscribe Bridge
 // @namespace    https://github.com/MyrddinE/steam-workshop-scraper
-// @version      8
+// @version      9
 // @updateURL    https://raw.githubusercontent.com/MyrddinE/steam-workshop-scraper/main/userscripts/steam_subscribe.user.js
 // @downloadURL  https://raw.githubusercontent.com/MyrddinE/steam-workshop-scraper/main/userscripts/steam_subscribe.user.js
 // @description  Bridges Steam session to the Workshop Scraper web UI for one-click subscribing.
@@ -263,18 +263,33 @@
   // Push sessionid and the login cookie to the backend so the TUI / server can
   // subscribe. login_secure was captured but never sent before, so the server
   // logged "login_secure: missing" even once it had been read.
+  //
+  // Sent on load, then re-checked every 30s but only when the values differ from
+  // the last successful push. A cookie is valid for days, so re-sending an
+  // unchanged one was rewriting config.yaml and logging a line every half minute
+  // per open Steam tab, for nothing. The slow re-push below is the one case that
+  // does need it: a backend that restarted has lost its in-memory session, and
+  // this is what re-syncs it without waiting for the user to reload the UI.
+  const REPUSH_AFTER_MS = 10 * 60 * 1000;
+  let lastPushed = null;
+  let lastPushedAt = 0;
+
   function pushSessionToBackend() {
     const sid = getSessionId();
     if (!sid) return;
     const login = getLoginSecure();
+    const payload = sid + '\n' + login;
+    if (payload === lastPushed && Date.now() - lastPushedAt < REPUSH_AFTER_MS) return;
     GM_xmlhttpRequest({
       method: 'POST',
       url: API_BASE + '/api/sessionid',
       headers: { 'Content-Type': 'application/json' },
       data: JSON.stringify({ sessionid: sid, login_secure: login }),
       onload: function () {
-        console.log('[SubscribeBridge] sessionid pushed to backend' +
-                    (login ? ' (with login cookie)' : ' (no login cookie)'));
+        lastPushed = payload;
+        lastPushedAt = Date.now();
+        console.debug('[SubscribeBridge] sessionid pushed to backend' +
+                      (login ? ' (with login cookie)' : ' (no login cookie)'));
       },
       onerror: function () {
         setTimeout(pushSessionToBackend, 5000);

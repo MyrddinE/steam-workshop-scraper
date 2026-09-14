@@ -121,7 +121,7 @@ While the panel is open, `_refreshDaemonStatus` polls `/api/daemon` and `_pollDa
 
 A Tampermonkey/Greasemonkey userscript that bridges the Steam session to the web UI:
 - On `steamcommunity.com`: captures `sessionid` and `steamLoginSecure` via `GM_setValue`, shows a toast notification on change
-- On the scraper web UI: stamps `document.body.dataset.userscript = '1'` and `userscriptVer` for detection, pushes both cookies to `/api/sessionid` every 30 seconds
+- On the scraper web UI: stamps `document.body.dataset.userscript = '1'` and `userscriptVer` for detection, and pushes both cookies to `/api/sessionid` — on load, then re-checked every 30 seconds but sent only when a value has actually changed, with a slow re-push as the safety net for a backend that restarted and lost its in-memory session
 - Version checking: reads `<meta name="userscript-version">` from the page and compares with `GM_info.script.version` — refuses to operate if outdated
 
 **Reading the login cookie needs `GM_cookie`, and HttpOnly.** Steam marks `steamLoginSecure`
@@ -200,7 +200,9 @@ Proxies a Steam Workshop subscribe request using stored session credentials.
 
 ### `/api/sessionid` — POST
 
-Accepts sessionid from the userscript. Stores it in the `_sessionid` global (for server-side subscribe); if the payload also carries a `login_secure` value, that is written to `_config["session"]["login_secure"]` (for the Steam cookie). The TUI subscribe action also calls through the server endpoint.
+Accepts sessionid from the userscript. Stores it in the `_sessionid` global (for server-side subscribe); if the payload also carries a `login_secure` value that differs from the configured one, that is written to `_config["session"]["login_secure"]` (for the Steam cookie) and persisted so the daemon picks it up. The TUI subscribe action also calls through the server endpoint.
+
+A push whose `login_secure` matches what is already configured writes nothing. The bridge re-pushes on a timer, so without that guard an open Steam tab rewrote `config.yaml` — a YAML serialisation and a file write — every thirty seconds with a value that had not moved. The CSRF token is still taken from every push, because it lives only in memory.
 
 ### `/api/stats`, `/api/tags`, `/api/authors`, `/api/analysis`
 

@@ -3,7 +3,7 @@
 Known defects in the current source. Each entry was re-checked against the code rather than carried
 forward from an earlier list, and resolved entries are deleted rather than marked as fixed.
 
-* **Checked against source**: `8be93d7`.
+* **Checked against source**: `39a4d3d`.
 * **Snapshot, not a tracker**: re-read the code before acting on an entry.
 * **Priorities** are judgement calls about impact, not measurements.
 * **Status**: `Open` (a defect), `Unverified` (a claim not yet tested), `Informational` (true and
@@ -32,6 +32,7 @@ the production database on 2026-09-12.
 | 15 | `btn-close-sub-queue` is created by two screens | Informational | Info | `StatsScreen` (`src/tui.py:126`) and `SubscriptionQueueScreen` (`src/tui.py:548`) use the same button id, with the handler duplicated (`src/tui.py:129`, `src/tui.py:551`). Textual scopes queries per screen so both work, but the id is not unique in the app. |
 | 16 | `#port-display` is never populated | Informational | Info | The element is declared and styled (`templates/index.html:51`, `templates/index.html:62`) and no script ever writes to it, so the web header renders an empty span where the embedded server's port was meant to appear. |
 | 17 | Dead items are never removed from the scrape and image queues | Open | Medium | Marking an item dead sets `status = -1` and clears `api_priority` (`src/daemon.py:477`) but leaves `needs_web_scrape` and `needs_image` untouched, and the two worker polls select on those columns alone with no dead-item guard (`src/database.py:2002`, `src/database.py:2051`). A dead item that was queued before it 404'd therefore stays in both queues indefinitely: the web worker decays it to the floor of 1 and it never leaves, so the queue cannot drain and the scraper spends requests on pages that no longer exist. [data-pipeline.md](data-pipeline.md). |
+| 18 | The bridge retries a dead backend every five seconds, forever | Open | Low | `pushSessionToBackend` schedules itself again five seconds after any failure (`userscripts/steam_subscribe.user.js`), with no attempt limit and no backoff. A backend that is down or unreachable is therefore polled every five seconds for as long as a Steam tab stays open, in addition to the thirty-second interval, and nothing gives up. [web-ui.md](web-ui.md). |
 
 ## Recently closed
 
@@ -40,6 +41,7 @@ behaviour, or covered by a test:
 
 | Was | Now |
 |---|---|
+| The bridge rewrote `config.yaml` every thirty seconds | The periodic push carried an unchanged cookie, and every push persisted it — a YAML serialisation and a file write per open Steam tab, plus an info line. The push is still relevant (`session.read_firefox_cookies` defaults to off, and the CSRF token feeds server-side subscribe), so it stays; it is now sent on load and whenever a value actually changes, with a slow re-push as the safety net for a restarted backend, and logged at debug — [web-ui.md](web-ui.md) |
 | The Windows daemon liveness check killed the daemon it was checking | `os.kill(pid, 0)` is not a probe on Windows — any signal other than the two console events goes to `TerminateProcess`, so the check terminated the process and returned True, leaving the `win32` fallback beneath it unreachable. The TUI mostly escaped it by short-circuiting on its own Popen handle, but the web panel polls status every two seconds and would have shut down an externally started daemon on the first poll. `DaemonController` now probes with `OpenProcess(SYNCHRONIZE)` and a zero-timeout wait, and a guard test fails if `os.kill` is ever used as a Windows probe again — [cross-platform.md](cross-platform.md) |
 | Failure captures truncated before the region that would explain them | Script and style bodies are removed before the cap, so the byte budget is spent on markup and the digest describes the document — [failure-capture.md](failure-capture.md) |
 | `request_delay_seconds` was accepted without deprecation | Honoured, but logs a warning naming the replacement — [config-security.md](config-security.md) |
