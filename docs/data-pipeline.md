@@ -103,6 +103,10 @@ A daemon thread that picks up items from `get_next_web_scrape_item`, ordered by 
 
 **Dynamic delay**: Same 100-success / 2-failure compounding pattern as the daemon, but with its own `web_delay_seconds` config key. A selector miss does not participate: the request succeeded, so slowing down would not help.
 
+**Gated pages**: A miss whose body carries no item markup but does look like an error page, an age
+check or a sign-in wall is retried once — and only if the login cookie actually changed, which is what
+`session.read_firefox_cookies` refreshes. A merely broken page therefore cannot double the request rate.
+
 ### `scrape_extended_details` (web_scraper)
 
 Fetches the HTML page `steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}`. Parses the DOM using `requests-html` to extract:

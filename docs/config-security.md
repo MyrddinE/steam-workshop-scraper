@@ -58,6 +58,7 @@ Deep-merges the in-memory config into the disk file, preserving keys not present
 | `daemon.user_staleness_days` | int | 90 | Days before a user profile is re-fetched from Steam. |
 | `daemon.outbox_dir` | string | None | Directory a separate machine pulls artefacts from. Enables [failure capture](failure-capture.md) on its own, and database backups together with `backup_interval_seconds` below. The daemon and the puller must not run as the same OS user unless the outbox is writable by both. `daemon.backup_dir` is an accepted legacy alias. |
 | `daemon.backup_interval_seconds` | float | 0 (off) | Seconds between verified database snapshots into `<outbox_dir>/db/`. Backups are **off** unless this is positive *and* `outbox_dir` is set, so enabling backups on the live instance is a deliberate switch. |
+| `daemon.capture_web_scrapes` | bool | false | **Debugging switch.** Save *every* web scrape — successes as well as failures — to `<outbox_dir>/scrapes`, body kept whole. The failure capture only ever holds misses, so it cannot show what a working, signed-in page looks like; this exists to identify that markup, which is a more direct signal that the session is still good than a failed scrape is. Deliberately unbounded and unstripped: it is on for a session or two, and thinning a sample before anyone has looked at it only means collecting the evidence twice. Each record carries an `auth_markers` map of candidate marker strings and the `g_steamID` value, recorded rather than interpreted. Turn it off when done. |
 
 ### `web`
 
@@ -85,6 +86,7 @@ Deep-merges the in-memory config into the disk file, preserving keys not present
 |---|---|---|---|
 | `session.id` | string | None | Steam `sessionid` cookie value. Used by the server-side subscribe endpoint as the CSRF token. Also used by `web_scraper._build_workshop_cookies`. Pushed from the userscript via `/api/sessionid`. |
 | `session.login_secure` | string or list | None | Steam `steamLoginSecure` cookie. Can be a raw string or a YAML list of its 3 pipe-separated components. When a list, joined with `%7C%7C` at runtime. Required for server-side subscribe (web UI subscribe uses the userscript bridge which doesn't need this). |
+| `session.read_firefox_cookies` | bool | false | Take `steamLoginSecure` **and** `sessionid` from the local Firefox profile, in preference to the values above. The store holds both — `sessionid` is not HttpOnly, which is why the userscript could always supply it — and reading them together means the credential and the CSRF token cannot come from different sessions. Profiles are discovered, never named. Off by default. Presence of a configured value is **not** evidence of a working session: a stale `login_secure` shadowed a good browser cookie and made every scrape anonymous, so the configured value is only a fallback and the response itself decides whether authentication is still good. |
 
 ---
 

@@ -6,21 +6,53 @@ import logging
 import threading
 from datetime import datetime, timezone
 from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, flag_field_for_translation, translation_is_current
-from src.web_scraper import scrape_extended_details, DESCRIPTION_SELECTOR
+from src.web_scraper import looks_gated, looks_signed_out, scrape_extended_details, DESCRIPTION_SELECTOR
 from src import capture
 
 
 class WebScraperThread(threading.Thread):
-    def __init__(self, db_path: str, pause_lock_file: str, daemon_config: dict = None, save_callback = None):
+    def __init__(self, db_path: str, pause_lock_file: str, daemon_config: dict = None,
+                 save_callback=None, session_refresh=None):
         super().__init__(daemon=True)
         self.db_path = db_path
         self.pause_lock_file = pause_lock_file
         self._save_cb = save_callback
+        # Returns True when the login cookie changed, meaning a gated scrape
+        # is worth retrying. None when no browser source is configured.
+        self._session_refresh = session_refresh
         self.running = True
         self.web_delay = float((daemon_config or {}).get("web_delay_seconds") or 5.0)
         self.web_successes = 0
         self.web_failures = 0
         self.web_had_streak = False
+
+    def _retry_if_gated(self, item: dict, url: str, scrape_data: dict | None) -> dict | None:
+        """Retry once when a failed scrape looks like Steam withholding the page.
+
+        A gated page and a changed layout are indistinguishable from the selector
+        alone, but only one of them can be fixed by a fresher login cookie. The
+        cookie is valid for days, so it is not polled on a clock; this is the
+        evidence that it has gone stale. Nothing is retried unless the cookie
+        actually changed, so a merely broken page cannot double the request rate.
+        """
+        if not scrape_data or scrape_data.get("description") is not None:
+            return scrape_data
+        body = scrape_data.get("body") or ""
+        # The primary trigger: the page was served to an anonymous visitor.
+        # `looks_gated` is the backup, for when Steam changes what a withheld
+        # page looks like and the marker goes missing.
+        if not self._session_refresh or not (looks_signed_out(body) or looks_gated(body)):
+            return scrape_data
+        try:
+            changed = self._session_refresh()
+        except Exception as exc:
+            logging.warning("[W:%s] Login cookie refresh failed: %s", item.get("workshop_id"), exc)
+            return scrape_data
+        if not changed:
+            return scrape_data
+        logging.info("[W:%s] Scrape looked gated; retrying with the refreshed login cookie",
+                     item.get("workshop_id"))
+        return scrape_extended_details(url) or scrape_data
 
     def _handle_selector_miss(self, item: dict, url: str, scrape_data: dict) -> None:
         """Handle a page that loaded but whose description selector did not match.
@@ -77,7 +109,13 @@ class WebScraperThread(threading.Thread):
 
             workshop_id = item["workshop_id"]
             url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}"
-            scrape_data = scrape_extended_details(url)
+            # When scrape capture is on, ask for the body even on success: the
+            # whole point is to see what a working, signed-in page looks like.
+            keeping = capture.web_scrape_capture_active()
+            scrape_data = scrape_extended_details(url, keep_body=keeping)
+            scrape_data = self._retry_if_gated(item, url, scrape_data)
+            if keeping:
+                capture.record_web_scrape(workshop_id, url, scrape_data)
 
             if scrape_data and scrape_data.get("description") is not None:
                 update = {

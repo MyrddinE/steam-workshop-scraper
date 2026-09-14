@@ -26,8 +26,9 @@ from src.database import (
 )
 from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries, query_workshop_files, set_api_delay, query_workshop_page_updated
 from src.translator import TranslatorThread, is_ascii
-from src.config import save_config
+from src.config import login_secure_value, save_config
 from src.database import flag_for_web_scrape, flag_field_for_translation, flag_for_image, translation_is_current
+from src.firefox_cookies import steam_login_secure
 from src.web_worker import WebScraperThread
 from src.image_worker import ImageScraperThread
 from src.backup import BackupThread
@@ -124,6 +125,8 @@ class Daemon:
         # positive `backup_interval_seconds` are configured, so turning it on for
         # the live instance is a deliberate switch.
         self.outbox_dir = daemon_config.get("outbox_dir") or daemon_config.get("backup_dir")
+        # A debugging switch, not a permanent one: on means keep everything.
+        self.capture_web_scrapes = bool(daemon_config.get("capture_web_scrapes", False))
         self.backup_interval_seconds = float(daemon_config.get("backup_interval_seconds") or 0)
         self._backup_worker = None
         if self.outbox_dir and self.backup_interval_seconds > 0:
@@ -135,7 +138,7 @@ class Daemon:
 
         # Failure capture rides on the same outbox but needs no interval: it is a
         # no-op unless an outbox directory is configured, like the backup above.
-        capture.configure(self.outbox_dir)
+        capture.configure(self.outbox_dir, self.capture_web_scrapes)
         
         # State variables for dynamic delay adjustment
         self.api_successes = 0
@@ -165,6 +168,25 @@ class Daemon:
             self.config["daemon"] = {}
         self.config["daemon"][key] = value
         save_config(self.config_path, self.config)
+
+    def _refresh_login_cookie(self) -> bool:
+        """Re-read the login cookie from the browser, persisting it if it moved.
+
+        Returns True only when the value actually changed, which is what makes a
+        retry worthwhile. The config holds the cookie between refreshes rather
+        than re-reading the browser on a timer: it is valid for days, and a gate
+        shaped scrape failure is the evidence that it has gone stale.
+        """
+        if not self.config.get("session", {}).get("read_firefox_cookies"):
+            return False
+        current = login_secure_value(self.config)
+        fresh = steam_login_secure(refresh=True)
+        if not fresh or fresh == current:
+            return False
+        self.config.setdefault("session", {})["login_secure"] = fresh
+        save_config(self.config_path, self.config)
+        logging.info("Login cookie refreshed from the browser and saved to the config.")
+        return True
 
     def _build_user_record(self, steamid: int, personaname: str) -> dict:
         """Builds a user record dict for upsert, flagging for translation if non-ASCII."""
@@ -605,7 +627,8 @@ class Daemon:
         """Main loop that continuously queries and scrapes."""
         logging.info("Starting daemon loop...")
         self.translator.start()
-        self._web_worker = WebScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value)
+        self._web_worker = WebScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value,
+                                              session_refresh=self._refresh_login_cookie)
         self._web_worker.start()
         self._image_worker = ImageScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value)
         self._image_worker.start()

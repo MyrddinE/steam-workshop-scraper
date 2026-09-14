@@ -6,6 +6,7 @@ import time
 import requests.utils
 import logging
 from src.config import load_config, login_secure_value
+from src.firefox_cookies import browser_cookies
 
 _last_web_call = 0.0
 _WEB_DELAY = 5.0
@@ -13,6 +14,16 @@ _WEB_DELAY = 5.0
 # The selectors scrape_extended_details depends on. Named so a selector miss can
 # be captured against the exact selector that failed.
 DESCRIPTION_SELECTOR = '.workshopItemDescription#highlightContent'
+
+# Markers of a page Steam withheld rather than one whose layout changed: an error
+# page, an age check, or a sign-in wall. Used only for a body that has already
+# failed to yield the item template, so the "Sign In" link every normal page
+# carries cannot trigger it.
+_GATE_MARKERS = (
+    "Steam Community :: Error",
+    "AgeCheck", "agecheck", "age_gate",
+    "apphub_Login", "Please sign in",
+)
 TAGS_SELECTOR = '.workshopTags a'
 
 
@@ -29,21 +40,87 @@ def _rate_limit():
     _last_web_call = time.time()
 
 
+def looks_signed_out(body: str) -> bool:
+    """Whether the page was served to an anonymous visitor.
+
+    The header carries an account dropdown once Steam recognises a session, so
+    its absence is the most direct sign that the request was anonymous — which is
+    what a stale login cookie produces, and what the captured pages showed:
+    present in every signed-in capture, absent in all of the anonymous ones.
+    `g_steamID` is the cross-check, since it is `false` when signed out.
+    """
+    if not body:
+        return False
+    if "account_pulldown" in body:
+        return False
+    match = re.search(r"g_steamID\s*=\s*\"?([^\";\s]+)", body, re.IGNORECASE)
+    return match is None or match.group(1).lower() == "false"
+
+
+def looks_gated(body: str) -> bool:
+    """Whether a failed scrape looks like Steam withholding the page.
+
+    A gated page and a changed layout both present as "the selector did not
+    match", but only one of them can be fixed by a fresher login cookie. This is
+    a heuristic on purpose: it decides whether re-reading the cookie is worth a
+    file copy, not whether the answer is right.
+    """
+    if not body:
+        return False
+    if "workshopItem" in body or "highlightContent" in body:
+        return False
+    return any(marker in body for marker in _GATE_MARKERS)
+
+
+def _session_id(config: dict) -> str:
+    """The CSRF token, from the browser when that source is enabled.
+
+    Taken from the same read as the login cookie on purpose: a sessionid from a
+    different session than the credential is worse than none, because Steam
+    rejects the mismatch in a way that looks like an ordinary failure.
+    """
+    if config.get("session", {}).get("read_firefox_cookies"):
+        value = browser_cookies().get("sessionid")
+        if value:
+            return value
+    return config.get("session", {}).get("id", "") or ""
+
+
+def _resolve_login_secure(config: dict) -> str:
+    """The login cookie: the browser's own store when enabled, else the config.
+
+    Firefox keeps `steamLoginSecure` in plaintext and the daemon runs as the user
+    who owns that profile, so the browser is both authoritative and
+    self-updating — it is the copy the operator is actually using. The configured
+    value is the fallback: it goes stale and nothing refreshes it.
+
+    Reading another application's credential store is a deliberate choice, so it
+    happens only when `session.read_firefox_cookies` is set. When it is enabled
+    and nothing is found, the configured value still applies, and the lookup
+    logs why it came up empty.
+    """
+    if config.get("session", {}).get("read_firefox_cookies"):
+        cookie = browser_cookies().get("steamLoginSecure")
+        if cookie:
+            return cookie
+    return login_secure_value(config)
+
+
 def _build_workshop_cookies(config: dict) -> dict:
     """Cookies for Steam Workshop requests, including the login cookie.
 
     `steamLoginSecure` is the one that authenticates the session — `sessionid`
-    is a CSRF token and does nothing on its own. Without it every request is
+    is a CSRF token and does nothing on its own, which the captures confirmed: a
+    current sessionid beside a dead credential still fetched anonymously. Without it every request is
     anonymous, so items Steam only serves to signed-in users come back as an
     error page or an age check rather than the item. It is omitted entirely
     when unset, so an anonymous configuration sends exactly what it did before.
     """
-    session_id = config.get("session", {}).get("id", "")
     cookies = {
         'workshop_preferences_v2': '%7B%22bOptedIn%22%3Atrue%7D',
-        'sessionid': session_id,
+        'sessionid': _session_id(config),
     }
-    login_secure = login_secure_value(config)
+    login_secure = _resolve_login_secure(config)
     if login_secure:
         cookies['steamLoginSecure'] = login_secure
     return cookies
@@ -114,7 +191,7 @@ def _workshop_cookies_or_empty() -> dict:
         return {}
 
 
-def scrape_extended_details(item_url: str) -> dict | None:
+def scrape_extended_details(item_url: str, keep_body: bool = False) -> dict | None:
     """
     Scrapes the extended description and tags from a Steam Workshop page.
 
@@ -140,7 +217,9 @@ def scrape_extended_details(item_url: str) -> dict | None:
             "tags": tags,
             # Retained only on a miss: the caller captures it, and there is no
             # reason to carry a few hundred KB of HTML around on the happy path.
-            "body": response.text if description is None else None,
+            # Kept on a miss, and on demand: the scrape capture needs the page
+            # even when it worked, to see the signed-in markup in the header.
+            "body": response.text if (description is None or keep_body) else None,
             "http_status": response.status_code,
             "final_url": str(getattr(response, "url", item_url)),
         }

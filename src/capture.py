@@ -62,6 +62,31 @@ _outbox_dir = None
 _groups = {}
 _app_version_cache = None
 
+# Ordinary web scrapes saved while `capture_web_scrapes` is set. Not failures:
+# this is evidence about what a working page looks like, to identify the
+# signed-in markup that tells us the session is still good.
+#
+# Unbounded, and the body is kept whole. This is a debugging switch that is on
+# for a session or two, so the cost is accepted in exchange for not having to
+# collect the evidence twice because a sample was thinned before anyone looked
+# at it. The failure capture above is the opposite case: it runs for weeks, so
+# its caps and its size limits stay.
+_scrape_capture = False
+
+SCRAPES_DIR_NAME = "scrapes"
+
+# Candidate signs of who the page thinks we are, in the header corner. Recorded
+# as a set of flags rather than interpreted, because which one is reliable is
+# exactly what the captured pages are for.
+_AUTH_MARKER_CANDIDATES = (
+    "account_pulldown",       # account dropdown, present when signed in
+    "global_action_menu",     # the header container both states use
+    "Sign In",                # signed out
+    "sign in",
+    "store.steampowered.com/login",  # the signed-out sign-in link target
+    "g_steamID",
+)
+
 _CLASS_RE = re.compile(rb"""class\s*=\s*["']([^"']*)["']""", re.IGNORECASE)
 _TITLE_RE = re.compile(rb"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
@@ -87,14 +112,26 @@ def _strip_noise(raw: bytes) -> bytes:
 
 # ── configuration ────────────────────────────────────────────────────────────
 
-def configure(outbox_dir):
-    """Enable capture under ``<outbox_dir>/failures``. ``None`` disables it."""
-    global _outbox_dir
+def configure(outbox_dir, web_scrape_capture=False):
+    """Enable capture under ``<outbox_dir>/failures``. ``None`` disables it.
+
+    ``web_scrape_capture`` additionally saves *every* ordinary web scrape, into
+    ``<outbox_dir>/scrapes``, success or failure, with the response body kept
+    whole. That answers a question the failure capture cannot: what a page looks
+    like when a scrape works, which is what identifies the signed-in markup.
+    """
+    global _outbox_dir, _scrape_capture
     with _lock:
         _outbox_dir = outbox_dir or None
+        _scrape_capture = bool(web_scrape_capture) and bool(_outbox_dir)
         _groups.clear()
         if _outbox_dir:
             logging.info("Failure capture enabled: %s", failures_dir(_outbox_dir))
+            if _scrape_capture:
+                logging.info(
+                    "Web-scrape capture enabled: saving every scrape, whole body, to %s. "
+                    "This is a debugging switch — turn it off when done.", scrapes_dir(_outbox_dir),
+                )
 
 
 def is_enabled() -> bool:
@@ -103,6 +140,121 @@ def is_enabled() -> bool:
 
 def failures_dir(outbox_dir) -> str:
     return os.path.join(outbox_dir, "failures")
+
+
+def scrapes_dir(outbox_dir) -> str:
+    return os.path.join(outbox_dir, SCRAPES_DIR_NAME)
+
+
+def web_scrape_capture_active() -> bool:
+    """Whether ordinary scrapes are being saved. Read before each scrape.
+
+    Also decides whether the scrape asks for its body: a successful scrape
+    discards it by default, and there is nothing to capture without it.
+    """
+    with _lock:
+        return bool(_outbox_dir) and _scrape_capture
+
+
+def record_web_scrape(workshop_id, url, scrape_data) -> bool:
+    """Save one web scrape, success or failure, while the budget lasts.
+
+    Deliberately not deduplicated: the question is what a *working* page looks
+    like, and one sample of that is worth more than several of the same failure.
+    Both states are needed to tell the two apart, which is why the successes are
+    saved too — the failure capture by definition only ever holds misses.
+    """
+    global _scrape_capture
+    if not scrape_data:
+        return False
+    with _lock:
+        if not _outbox_dir or not _scrape_capture:
+            return False
+        outbox = _outbox_dir
+
+    body = scrape_data.get("body")
+    hit = scrape_data.get("description") is not None
+    stamp = _utc_now_iso().replace(":", "-")
+    stem = f"{stamp}-{workshop_id}"
+    directory = scrapes_dir(outbox)
+    os.makedirs(directory, exist_ok=True)
+    body_path = os.path.join(directory, stem + ".body")
+    record_path = os.path.join(directory, stem + ".json")
+
+    raw = b""
+    if body is not None:
+        raw = body.encode("utf-8", "replace") if isinstance(body, str) else bytes(body)
+        # Whole and unstripped, deliberately: a debugging capture that drops the
+        # <script> blocks also drops g_steamID, which is the most direct answer
+        # to "is this page signed in?".
+        _write_atomic(body_path, raw)
+
+    record = {
+        "kind": "web_scrape",
+        "stage": "web_scrape",
+        "workshop_id": workshop_id,
+        "url": url,
+        "scraped_ok": hit,
+        "http_status": scrape_data.get("http_status"),
+        "final_url": scrape_data.get("final_url"),
+        "body_file": _relative(outbox, body_path) if raw else None,
+        "body_bytes": len(raw),
+        "body_complete": True,
+        "body_sha256": hashlib.sha256(raw).hexdigest() if raw else None,
+        "auth_markers": auth_markers(body),
+        "g_steamID": steam_id_from(body),
+        "captured_at": _utc_now_iso(),
+        "app_version": app_version(),
+    }
+    _write_atomic(record_path, json.dumps(record, indent=2).encode("utf-8"))
+    update_manifest(outbox, {
+        "path": _relative(outbox, record_path), "kind": "scrape",
+        "bytes": len(json.dumps(record)), "role": "record",
+        "scraped_ok": hit, "workshop_id": workshop_id,
+    })
+    if raw:
+        # The body has to be registered too, or the puller never sees it — the
+        # record used to arrive without the page it describes.
+        update_manifest(outbox, {
+            "path": _relative(outbox, body_path), "kind": "scrape",
+            "bytes": len(raw), "role": "body",
+            "scraped_ok": hit, "workshop_id": workshop_id,
+        })
+    return True
+
+
+_G_STEAMID_RE = re.compile(r"g_steamID\s*=\s*\"?([^\";\s]+)", re.IGNORECASE)
+
+
+def steam_id_from(body) -> str | None:
+    """The value assigned to `g_steamID`, or None.
+
+    `false` when signed out, a SteamID64 when signed in, so it separates the two
+    states far more decisively than any markup does — the markup is the user's
+    chosen route because it is stable, and this is here so the same capture can
+    confirm which marker actually tracks it.
+    """
+    if body is None:
+        return None
+    text = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
+    match = _G_STEAMID_RE.search(text)
+    return match.group(1) if match else None
+
+
+def auth_markers(body) -> dict:
+    """Which of the candidate header markers a body contains.
+
+    Purely observational: the point is to compare a known signed-in page against
+    a known signed-out one and pick the marker that actually separates them,
+    rather than assuming which one it is.
+    """
+    if body is None:
+        return {}
+    if isinstance(body, bytes):
+        text = body.decode("utf-8", "replace")
+    else:
+        text = str(body)
+    return {marker: (marker in text) for marker in _AUTH_MARKER_CANDIDATES}
 
 
 def app_version() -> str:
