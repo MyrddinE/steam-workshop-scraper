@@ -43,14 +43,14 @@ reading markup — the distinction proved to matter, because three endpoints exi
 
 | TUI feature | Web UI | Evidence |
 |---|---|---|
-| Statistics screen (`ctrl+r`) | Not present | The only affordance is a bare link to the raw JSON endpoint (`templates/index.html:95`). Clicking it leaves the single-page app for an unstyled JSON document, with no way back, and the web UI does not save view state. |
+| Statistics screen (`ctrl+r`) | In progress | Was a bare link to the raw JSON endpoint (`templates/index.html:95`). The statistics are now named, tiered metrics served by `/api/metrics/<tier>`, and both front ends draw the cheap tiers while the expensive ones are still computing. |
 | Analysis screen (`ctrl+?`) | Not present | The endpoint returns data, but the client never calls it. |
-| Tag statistics | Not present | Same — endpoint only, no client reference. |
+| Tag statistics | Present | Served by `/api/tags` and drawn in the statistics panel. It is the most expensive single statistic (a 9.2M-row join) and the least actionable; its fate is an open decision below. |
 | Author list and jump-to-author | Not present | Same. No author affordance exists in the web UI at all. |
-| Daemon start/stop/restart (`ctrl+d`) | Partial | The web UI exposes pause and resume only. Start, stop, restart and the running status/PID all live in `DaemonManagerScreen` with no route behind them. |
-| Daemon log view | Partial | The TUI pane exists but is inert — the tail call is commented out (`src/tui.py:316`), recorded as issue 10 in [code-issues.md](code-issues.md). A web endpoint would give the log a working consumer and could be reused to repair the TUI pane. |
-| Translation toggle (`ctrl+w`) | Partial | The server prefers the translated field and offers no way back to the original (`src/webserver.py`). The queueing half is already at parity: opening an item bumps translation priority in both UIs. |
-| Translation-queued notice | Not present | The TUI says when a translation is requested and still pending (`src/tui.py:796`); the web shows the raw `translation_priority` number in a debug tooltip. |
+| Daemon start/stop/restart (`ctrl+d`) | Present | Both UIs drive one shared `DaemonController`. Routes: `/api/daemon`, `/api/daemon/start`, `/stop`, `/restart`, `/log`. |
+| Daemon log view | Web only so far | The web panel polls `/api/daemon/log` incrementally. The TUI pane is still inert — its tail call remains commented out (`src/tui.py`) and its subprocess-based `_start_tail` is dead code, recorded as issue 10 in [code-issues.md](code-issues.md). `DaemonController.tail_log` now exists and is tested, so repairing the TUI pane no longer needs a subprocess. |
+| Translation toggle (`ctrl+w`) | Present | Both language variants ship in the detail payload, so switching costs no request. The toggle appears only when `translate_version` is set, as in the TUI. |
+| Translation-queued notice | Present | Shown above the description while `translation_priority > 0` and no translation is stored, matching the TUI. |
 | Subscription queue (`s`, `l`) | Present | Genuine parity: toggle, indicator, and queued list. The web queue additionally drains itself. |
 | Detail-pane queue/unqueue buttons | Not present | The TUI has both (`src/tui.py:642`); the web only supports the `s` key while a grid cell holds focus. |
 | Clear Pending Database | Not present | A TUI command-palette action (`src/tui.py:1697`) with no route or element. |
@@ -200,7 +200,12 @@ one, so each can be deployed and reverted on its own.
 
 ### Open decisions
 
-* Build UI for the three unused endpoints, or delete them.
+* Whether `tag_counts` belongs on the statistics screen at all. It is the most expensive single
+  statistic (a 9.2M-row join, roughly 358 ms) and the least actionable: it describes the reference
+  data, not the progress of any queue. The tag *filter* needs frequencies, but it is the only
+  consumer that does, so the screen may be paying for something it does not use.
+* Whether `/api/analysis`, `/api/authors` and the untiered `/api/stats` should get UI or be deleted.
+  `/api/analysis` in particular has a complete TUI screen behind it and no web equivalent at all.
 * Whether coverage should be expressed against discovered items only, or whether discovery progress
   should be presented as a separate "still exploring" indicator.
 * Whether ETA should be shown for queues whose completion timestamps are newly added, before there is
