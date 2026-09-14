@@ -3,7 +3,7 @@
 Known defects in the current source. Each entry was re-checked against the code rather than carried
 forward from an earlier list, and resolved entries are deleted rather than marked as fixed.
 
-* **Checked against source**: `39a4d3d`.
+* **Checked against source**: `c27b422`.
 * **Snapshot, not a tracker**: re-read the code before acting on an entry.
 * **Priorities** are judgement calls about impact, not measurements.
 * **Status**: `Open` (a defect), `Unverified` (a claim not yet tested), `Informational` (true and
@@ -33,6 +33,7 @@ the production database on 2026-09-12.
 | 16 | `#port-display` is never populated | Informational | Info | The element is declared and styled (`templates/index.html:51`, `templates/index.html:62`) and no script ever writes to it, so the web header renders an empty span where the embedded server's port was meant to appear. |
 | 17 | Dead items are never removed from the scrape and image queues | Open | Medium | Marking an item dead sets `status = -1` and clears `api_priority` (`src/daemon.py:477`) but leaves `needs_web_scrape` and `needs_image` untouched, and the two worker polls select on those columns alone with no dead-item guard (`src/database.py:2002`, `src/database.py:2051`). A dead item that was queued before it 404'd therefore stays in both queues indefinitely: the web worker decays it to the floor of 1 and it never leaves, so the queue cannot drain and the scraper spends requests on pages that no longer exist. [data-pipeline.md](data-pipeline.md). |
 | 18 | The bridge retries a dead backend every five seconds, forever | Open | Low | `pushSessionToBackend` schedules itself again five seconds after any failure (`userscripts/steam_subscribe.user.js`), with no attempt limit and no backoff. A backend that is down or unreachable is therefore polled every five seconds for as long as a Steam tab stays open, in addition to the thirty-second interval, and nothing gives up. [web-ui.md](web-ui.md). |
+| 19 | A page without the description was recorded as a successful scrape and dequeued | Open | **High** | Until `17894f7` the worker tested the *dict* the scraper returned rather than the description inside it. A page whose selector did not match comes back as a truthy dict with `description: None`, so the worker wrote `extended_description = NULL`, set `needs_web_scrape = 0`, logged "Scraped", and counted a success — permanently removing the item from the queue with nothing to show for it. *Measured on the 2026-09-12 snapshot*: 70,378 items were marked done, and **63,229 of them (90%) hold no description at all**, against 33,966 items (2.0%) that hold one. This is why web-scrape coverage is a tiny fraction of the library, and it long predates the throttling work — the handler that steps an item down instead of clearing it exists only because of this. The 63,229 rows are still stranded at `needs_web_scrape = 0` and need requeueing. [data-pipeline.md](data-pipeline.md#web-scraping-phase). |
 
 ## Recently closed
 
