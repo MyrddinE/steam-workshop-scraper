@@ -28,11 +28,28 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 #right-pane { flex: 0 0 360px; display: flex; flex-direction: column; overflow: hidden; border-left: 1px solid var(--pico-muted-border-color); padding-left: .5rem; }
 #search-builder { flex-shrink: 0; margin-bottom: .5rem; }
 .filter-row { display: flex; gap: .25rem; align-items: center; margin-bottom: .25rem; }
-.filter-row select, .filter-row input { padding: 2px 4px; }
+/* One height for every control in the builder, on the short end. Pico gives
+   inputs, selects and buttons different intrinsic heights, so a row came out
+   ragged -- the text box noticeably taller than the menus beside it, and the
+   stats button taller than the sort menus. The tall ones come down to meet the
+   short ones rather than the reverse. Overriding only the vertical box model
+   leaves Pico's select chevron, which is drawn with horizontal padding. */
+#search-builder select,
+#search-builder input,
+#search-builder button {
+  height: 2.1rem;
+  min-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  margin-top: 0;
+  margin-bottom: 0;
+  box-sizing: border-box;
+}
+.filter-row select, .filter-row input { padding-left: 4px; padding-right: 4px; }
 .filter-row select.field-select { flex: 2; }
 .filter-row select.op-select { flex: 2; }
 .filter-row input.value-input { flex: 3; }
-.filter-row button { padding: 2px 6px; min-width: 2rem; }
+.filter-row button { padding: 0 6px; min-width: 2rem; }
 #detail-pane { flex: 1; overflow-y: auto; min-height: 0; }
 #detail-buttons { flex-shrink: 0; border-top: 1px solid var(--pico-muted-border-color); padding: .35rem 0 0 0; display: flex; gap: .25rem; }
 .stat-row { margin-bottom: .25rem; }
@@ -1271,6 +1288,46 @@ async function _refreshDaemonStatus() {
   } catch(e) { console.debug('Daemon status poll error', e); /* keep polling */ }
 }
 
+// The daemon writes SGR colour escapes into its log file -- the "ignored"
+// marker on a rejected discovery is red. A plain text node cannot show them, so
+// the pane used to render the escape as a replacement glyph and the code itself
+// as literal "[31m" text. Decode them here instead. Only SGR is handled because
+// only SGR is written; anything else is left as text rather than swallowed.
+const ANSI_SGR = {
+  30: '#6b7280', 31: '#e06c75', 32: '#98c379', 33: '#e5c07b',
+  34: '#61afef', 35: '#c678dd', 36: '#56b6c2', 37: '#d7dae0',
+  90: '#6b7280', 91: '#e06c75', 92: '#98c379', 93: '#e5c07b',
+  94: '#61afef', 95: '#c678dd', 96: '#56b6c2', 97: '#ffffff',
+};
+
+function _escapeHtml(text) {
+  return text.replace(/[&<>]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]));
+}
+
+function _ansiToHtml(line) {
+  const parts = line.split(/\x1b\[([0-9;]*)m/);
+  let html = '';
+  let open = false;
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 0) { html += _escapeHtml(parts[i]); continue; }
+    const codes = parts[i].split(';').filter(c => c !== '').map(Number);
+    if (open) { html += '</span>'; open = false; }
+    // A bare "0", or any reset in the group, returns to the default style.
+    if (codes.length === 0 || codes.includes(0)) continue;
+    const style = [];
+    const colour = codes.map(c => ANSI_SGR[c]).find(Boolean);
+    if (colour) style.push('color:' + colour);
+    if (codes.includes(1)) style.push('font-weight:600');
+    if (style.length) { html += '<span style="' + style.join(';') + '">'; open = true; }
+  }
+  if (open) html += '</span>';
+  return html;
+}
+
+// Raw lines, kept so the 500-line cap can be applied to lines rather than to
+// rendered HTML -- splitting markup on newlines would cut spans in half.
+let _daemonLogLines = [];
+
 async function _pollDaemonLog() {
   const pre = document.getElementById('daemon-log');
   if (!pre) return;
@@ -1282,12 +1339,12 @@ async function _pollDaemonLog() {
       // truncation, or this poll falling further behind than it will send — so
       // nothing on screen continues the new lines. Drop them and resume from the
       // server's offset below.
-      pre.textContent = '';
+      _daemonLogLines = [];
+      pre.innerHTML = '';
     }
     if (data.lines && data.lines.length) {
-      pre.textContent += data.lines.join('\n') + '\n';
-      const kept = pre.textContent.split('\n');
-      if (kept.length > 500) pre.textContent = kept.slice(-500).join('\n');
+      _daemonLogLines = _daemonLogLines.concat(data.lines).slice(-500);
+      pre.innerHTML = _daemonLogLines.map(_ansiToHtml).join('\n') + '\n';
       pre.scrollTop = pre.scrollHeight;
     }
     if (typeof data.offset === 'number') _daemonLogOffset = data.offset;
@@ -1297,8 +1354,9 @@ async function _pollDaemonLog() {
 function _openDaemonPanel() {
   document.getElementById('daemon-overlay').style.display = 'block';
   _daemonLogOffset = 0;
+  _daemonLogLines = [];
   const pre = document.getElementById('daemon-log');
-  if (pre) pre.textContent = '';
+  if (pre) pre.innerHTML = '';
   _refreshDaemonStatus();
   _pollDaemonLog();
   if (!_daemonPollIv) {

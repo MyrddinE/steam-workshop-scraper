@@ -1789,3 +1789,67 @@ def test_toggle_queue_reflects_the_databases_state_and_rerenders(web_client, tmp
     assert result["cellAfterFirst"] is True, "the grid star follows the pane"
     assert result["cellAfterExternalQueued"] is False
     assert result["afterServerError"] == 0, "a rejected toggle must not change the pane"
+
+
+# ── the daemon log pane decodes the colour escapes ────────────────────────────
+#
+# The daemon writes SGR escapes into its log file (the "ignored" marker on a
+# rejected discovery is red). A text node renders the escape as a replacement
+# glyph and the code itself as literal "[31m" text, so the pane showed neither
+# the colour nor a readable line.
+
+ANSI_LOG_DRIVER = """
+const ANSI_SGR = __SGR__;
+const _escapeHtml = (__ESC__);
+const _ansiToHtml = (__ANSI__);
+const E = '\\u001b';
+console.log(JSON.stringify({
+  plain: _ansiToHtml('no codes here'),
+  red: _ansiToHtml('x ' + E + '[31mignored' + E + '[0m'),
+  unterminated: _ansiToHtml('x ' + E + '[31mred to the end'),
+  html: _ansiToHtml('<b>&</b> ' + E + '[32mok' + E + '[0m'),
+  bold: _ansiToHtml(E + '[1mheading' + E + '[0m'),
+}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_daemon_log_decodes_colour_instead_of_showing_the_escape(web_client, tmp_path):
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = (ANSI_LOG_DRIVER
+              .replace("__SGR__", _extract_const(script, "ANSI_SGR"))
+              .replace("__ESC__", _extract_function(script, "_escapeHtml"))
+              .replace("__ANSI__", _extract_function(script, "_ansiToHtml")))
+    out = _run_node(driver, tmp_path)
+
+    assert out["plain"] == "no codes here", "a line without codes is passed through"
+    assert "[31m" not in out["red"], "the escape code must not survive as visible text"
+    assert "\u001b" not in out["red"], "the raw escape must not reach the page"
+    assert "ignored" in out["red"]
+    assert "color:#e06c75" in out["red"], "the red it was given must be applied"
+    assert out["red"].count("<span") == 1, "one run of colour, one span"
+    assert out["red"].endswith("</span>"), "the span must be closed"
+
+    # An unterminated run must still close, or every later line inherits the
+    # colour and the pane goes monochrome.
+    assert out["unterminated"].endswith("</span>")
+
+    # Log text is data: markup in it must be escaped, not interpreted.
+    assert "&lt;b&gt;" in out["html"] and "<b>" not in out["html"]
+
+    assert "font-weight:600" in out["bold"], "bold is honoured too"
+
+
+def test_the_log_pane_keeps_raw_lines_so_the_cap_counts_lines(web_client):
+    """The 500-line cap must apply to lines, not to rendered markup.
+
+    Slicing rendered HTML on newlines would cut a span in half and leak colour
+    into the rest of the pane, so the raw lines are kept alongside.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    assert re.search(r'^let\s+_daemonLogLines\s*=\s*\[\];', script, re.M), \
+        "the pane must keep the raw lines it renders"
+    assert "_daemonLogLines.map(_ansiToHtml)" in script, \
+        "the pane must render from the raw lines"
