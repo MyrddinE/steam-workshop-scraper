@@ -142,11 +142,16 @@ requested it:
 With the metrics split, `/api/tags` now computes only `tag_counts` and each front end requests one
 metric at a time. Two further problems compounded this:
 
-1. **A second stall sits on the search path.** The search flow awaits the percentile-cutoff query
-   *after* clearing the results grid and *before* fetching any items, so every fresh search or filter
-   change blanks the pane for roughly five seconds. The cutoff-dependent colouring already degrades
-   gracefully to an unknown marker when cutoffs are absent, so it does not need to be awaited at all.
-   *(Still open.)*
+1. **A second stall sat on the search path.** *(Fixed.)* The search flow awaited the percentile-cutoff
+   query *after* clearing the results grid and *before* fetching any items, so every fresh search or
+   filter change blanked the pane for as long as that query took — measured at 8+ seconds in the
+   browser. It was assumed this needed nothing more than removing the `await`, because the colouring
+   was believed to "degrade gracefully to an unknown marker". It did not: with no cutoffs the three
+   thresholds were all `0`, so every score matched `p99` and rendered gold with `!` markers. An
+   uncoloured state had to be added first, and a search now also clears the previous set's cutoffs
+   rather than colouring one filter set with another's percentiles. With that in place the query is
+   started and left to land, and the rows already on screen are re-coloured from the score kept on
+   each span.
 2. **The refresh throttle is global.** *(Fixed for the statistics screen.)* Statistics refreshed no
    more often than 50× the previous duration, so a five-second query yielded a refresh interval of
    about four minutes. The 50× rule now applies per metric against that metric's own measured
@@ -171,7 +176,8 @@ metric at a time. Two further problems compounded this:
 4. **Throttle per metric,** not globally. *(Landed: both front ends derive each metric's interval
    from that metric's own measured duration, so a slow query cannot stretch a fast one's refresh.)*
 5. **Get the cutoff query off the critical path.** Render results first; apply score colouring when
-   cutoffs arrive. *(Still open.)*
+   cutoffs arrive. *(Landed for the web UI. It needed an uncoloured state as well as the removed
+   `await` — see the note under "Measured cost".)*
 6. **Take the tag-compaction write off the render path.** Opening a statistics screen should not
    perform database maintenance, even when that maintenance is idempotent. *(Still open: it now runs
    once per tag-metric arrival rather than on every screen update.)*
