@@ -72,7 +72,7 @@ The project uses relative paths for database, config, images, PID file, and paus
 
 ## `tail -f` for Log Viewing
 
-The TUI's `DaemonManagerScreen` had a `_start_tail` method that spawned `tail -f <logfile>` on Unix and piped output to a RichLog widget. This is commented out because it was too slow for large log files. On Windows, `tail -f` doesn't exist natively (available in WSL or Git Bash but not guaranteed). No replacement has been implemented.
+The TUI's `DaemonManagerScreen` used to spawn `tail -f <logfile>` and pipe it into a RichLog; it was disabled as too slow for large logs, and `tail -f` does not exist on Windows natively (WSL or Git Bash only). The pane now polls `DaemonController.tail_log` in-process every two seconds (`src/tui.py:593`), which reads a bounded 64 KiB window on every platform and needs no external utility.
 
 ---
 

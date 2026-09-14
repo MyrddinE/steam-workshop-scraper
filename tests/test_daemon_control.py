@@ -6,6 +6,7 @@ probes ("is this PID alive?") are answered by a fake ``os.kill``.
 
 import os
 import signal
+import time
 
 import pytest
 
@@ -383,10 +384,148 @@ def test_tail_log_waits_for_a_complete_line(tmp_path):
     assert first["lines"] == ["one"]
     assert first["offset"] == len("one\n")
 
+    # The line is still half-written: the offset must not move, so the partial
+    # text is not returned a second time when it is finally complete.
+    still_partial = controller.tail_log(first["offset"])
+    assert still_partial["lines"] == []
+    assert still_partial["offset"] == first["offset"]
+
     log.write_text("one\npartial\n")
     second = controller.tail_log(first["offset"])
     assert second["lines"] == ["partial"]
     assert second["reset"] is False
+
+
+def test_tail_log_first_call_on_a_small_file_returns_everything(tmp_path):
+    """A log that fits in the window is not truncated and is not a gap."""
+    log = tmp_path / "daemon.log"
+    log.write_text("one\ntwo\nthree\n")
+    controller = DaemonController(config={"logging": {"file": str(log)}})
+
+    result = controller.tail_log(0)
+
+    assert result == {
+        "lines": ["one", "two", "three"],
+        "offset": log.stat().st_size,
+        "reset": False,
+    }
+
+
+class _ReadRecorder:
+    """Binary-file stand-in that records the arguments of every ``read`` call."""
+
+    def __init__(self, handle, reads):
+        self._handle = handle
+        self._reads = reads
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return self._handle.__exit__(*exc)
+
+    def seek(self, *args):
+        return self._handle.seek(*args)
+
+    def read(self, *args):
+        self._reads.append(args)
+        return self._handle.read(*args)
+
+
+def test_tail_log_first_call_reads_only_the_tail_of_a_large_file(tmp_path, monkeypatch):
+    """Regression guard: the first call must never read the whole log.
+
+    The old ``f.read()`` pulled hundreds of megabytes of production log through
+    memory and JSON before the UI trimmed the display. This file is several
+    megabytes, so a reintroduced unbounded read is caught two ways: the recorded
+    ``read`` call has no bound, and the elapsed time blows past the poll budget.
+    """
+    log = tmp_path / "daemon.log"
+    lines = ["first-line-must-not-appear"] + [f"filler-{i:06d}" for i in range(400_000)]
+    log.write_text("\n".join(lines) + "\n")
+    assert log.stat().st_size > 4 * 1024 * 1024
+
+    reads = []
+    real_open = open
+
+    def recording_open(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        if os.fspath(path) == str(log):
+            return _ReadRecorder(handle, reads)
+        return handle
+
+    monkeypatch.setattr(daemon_control, "open", recording_open, raising=False)
+    controller = DaemonController(config={"logging": {"file": str(log)}})
+
+    started = time.monotonic()
+    result = controller.tail_log(0)
+    elapsed = time.monotonic() - started
+
+    assert reads == [(daemon_control.TAIL_BYTES + 1,)], \
+        "tail_log must issue one bounded read, never an unbounded f.read()"
+    assert elapsed < 1.0, f"first call took {elapsed:.3f}s; the read is not bounded"
+    assert result["reset"] is True
+    assert len(result["lines"]) == daemon_control.TAIL_LINES
+    assert lines[0] not in result["lines"], "the file's beginning was returned"
+    assert result["lines"][-1] == lines[-1]
+    assert result["offset"] == log.stat().st_size
+
+
+def test_tail_log_resets_when_the_caller_fell_behind(tmp_path):
+    log = tmp_path / "daemon.log"
+    controller = DaemonController(config={"logging": {"file": str(log)}})
+    log.write_text("head\n")
+    first = controller.tail_log(0)
+    assert first["offset"] == len("head\n")
+
+    with open(log, "a") as f:
+        for i in range(2000):
+            f.write(f"line-{i:06d}\n")
+
+    result = controller.tail_log(first["offset"], max_bytes=1024, max_lines=10)
+
+    assert result["reset"] is True
+    assert len(result["lines"]) == 10
+    assert result["lines"][-1] == f"line-{1999:06d}"
+    assert result["offset"] == log.stat().st_size
+
+
+def test_tail_log_max_lines_keeps_the_most_recent(tmp_path):
+    log = tmp_path / "daemon.log"
+    log.write_text("".join(f"line-{i}\n" for i in range(100)))
+    controller = DaemonController(config={"logging": {"file": str(log)}})
+
+    result = controller.tail_log(0, max_lines=5)
+
+    assert result["lines"] == [f"line-{i}" for i in range(95, 100)]
+
+
+def test_tail_log_resume_keeps_its_first_line(tmp_path):
+    """A resume from a real offset lands on a line boundary, so it drops nothing."""
+    log = tmp_path / "daemon.log"
+    log.write_text("one\ntwo\n")
+    controller = DaemonController(config={"logging": {"file": str(log)}})
+    first = controller.tail_log(0)
+
+    with open(log, "a") as f:
+        f.write("three\nfour\n")
+
+    result = controller.tail_log(first["offset"])
+
+    assert result["reset"] is False
+    assert result["lines"] == ["three", "four"]
+    assert result["offset"] == log.stat().st_size
+
+
+def test_tail_log_replaces_invalid_utf8(tmp_path):
+    log = tmp_path / "daemon.log"
+    log.write_bytes(b"ok\n\xff\xfe\n")
+    controller = DaemonController(config={"logging": {"file": str(log)}})
+
+    result = controller.tail_log(0)
+
+    assert result["lines"][0] == "ok"
+    assert "\ufffd" in result["lines"][1]
 
 
 def test_tail_log_resets_after_truncation(tmp_path):

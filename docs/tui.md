@@ -163,17 +163,17 @@ every screen update.
 
 ## Daemon Management
 
-### `DaemonController` (`src/daemon_control.py:21`)
+### `DaemonController` (`src/daemon_control.py:89`)
 
 Owns the daemon process for both UIs: `start`, `stop`, `restart`, `status`, `read_pid`, `is_running` and `tail_log`. It launches `python -m src.daemon_runner <config> --daemon` detached (`DETACHED_PROCESS` on Windows, `DEVNULL` stdio elsewhere) and keeps the Popen handle (`DaemonController.proc`) for liveness and forced shutdown.
 
 The PID-file protocol is unchanged. On Unix, stop sends SIGTERM then deletes `.daemon.pid`; on Windows it deletes the file. Either way it waits up to 15 s for exit, then escalates (Popen terminate/kill, `TerminateProcess` via ctypes on Windows, SIGKILL on Unix). `start` while running and `stop` while stopped are idempotent no-ops.
 
-### `DaemonManagerScreen` (`src/tui.py:479`)
+### `DaemonManagerScreen` (`src/tui.py:528`)
 
 Allows starting, stopping, and restarting the daemon process from within the TUI. It no longer holds the process logic; every button delegates to the app's single `DaemonController` (`src/tui.py:1353`), which is the same instance handed to the embedded web server, so a start or stop from either UI is visible to the other. The status text and `PID: n` display read through `DaemonController.status()`.
 
-The screen previously had a live log tail (via `tail -f` on Unix), but it's disabled due to performance issues with large log files. The web UI's daemon panel reads the same log incrementally through `/api/daemon/log`.
+The screen's log pane (`RichLog`, `src/tui.py:551`) is fed by `_poll_tail` (`src/tui.py:593`) on a two-second timer: it calls `DaemonController.tail_log` with the byte offset of the last line shown, writes the returned lines, and clears the pane when the response sets `reset`. That call is the same bounded preview the web UI's daemon panel reads through `/api/daemon/log` — at most 64 KiB and 500 lines per poll — so the pane never scans the whole log. The screen previously spawned `tail -f` for this and the pane was disabled as too slow; that subprocess is gone, and the timer is stopped in `on_unmount`.
 
 ---
 

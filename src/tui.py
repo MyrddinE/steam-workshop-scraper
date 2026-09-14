@@ -531,7 +531,10 @@ class DaemonManagerScreen(Screen):
     def __init__(self, controller: DaemonController):
         super().__init__()
         self.controller = controller
-        self._tail_proc = None
+        # Byte offset of the last line shown; each poll resumes here so it only
+        # asks for what has appeared since.
+        self._log_offset = 0
+        self._log_timer = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -551,12 +554,18 @@ class DaemonManagerScreen(Screen):
     def on_mount(self) -> None:
         self.query_one("#dm-controls").styles.width = 20
         self._update_status()
-        # self._start_tail()  # commented out: too slow
+        # Fill the pane on first paint, then keep polling. The old `tail -f`
+        # subprocess is gone: it read the log a line at a time, which is too slow
+        # for a production log. `tail_log` reads at most TAIL_BYTES per call, the
+        # same bounded call the web panel makes.
+        self._poll_tail()
+        self._log_timer = self.set_interval(2.0, self._poll_tail)
 
     def on_unmount(self) -> None:
-        if self._tail_proc:
-            self._tail_proc.terminate()
-            self._tail_proc = None
+        # The screen is gone; stop asking the controller for log lines.
+        if self._log_timer is not None:
+            self._log_timer.stop()
+            self._log_timer = None
 
     def _daemon_is_running(self) -> bool:
         return self.controller.is_running()
@@ -581,33 +590,25 @@ class DaemonManagerScreen(Screen):
         self.controller.stop()
         return True
 
-    def _start_tail(self):
-        import subprocess
-        log_file = self.controller.log_file()
-        if not log_file:
-            return
+    def _poll_tail(self) -> None:
+        """Write a bounded preview of the daemon log into the pane."""
         try:
-            self._tail_proc = subprocess.Popen(
-                ["tail", "-f", log_file],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                text=True, bufsize=1,
-            )
-            self.set_interval(0.5, self._poll_tail)
-        # Optional log-tail probe; if `tail` cannot start, the daemon manager works
-        # without the live-log pane.
-        except Exception:
-            pass
-
-    def _poll_tail(self):
-        if not self._tail_proc or self._tail_proc.poll() is not None:
+            result = self.controller.tail_log(self._log_offset)
+        # A poll failure must not take the whole manager screen down; the next
+        # tick tries again.
+        except Exception as exc:
+            logging.debug("Daemon log poll failed: %s", exc)
             return
-        try:
-            line = self._tail_proc.stdout.readline()
-            if line:
-                self.query_one("#dm-log-view", RichLog).write(line.rstrip())
-        # Optional log-tail poll; a read/write failure only stops this cosmetic pane.
-        except Exception:
-            pass
+        view = self.query_one("#dm-log-view", RichLog)
+        if result.get("reset"):
+            # The controller jumped to the tail (first poll, rotation/truncation,
+            # or this pane fell further behind than it is willing to send), so the
+            # new lines do not join up with what is on screen. Drop the stale text
+            # rather than rendering a view with an invisible gap in it.
+            view.clear()
+        for line in result.get("lines", []):
+            view.write(line)
+        self._log_offset = result.get("offset", self._log_offset)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "dm-start":

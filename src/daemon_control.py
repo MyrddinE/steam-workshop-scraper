@@ -17,6 +17,12 @@ import time
 # How long a graceful stop waits before escalating to a forced kill.
 STOP_TIMEOUT_SECONDS = 15.0
 
+# The log view is a preview, not an export. The production log runs to hundreds
+# of megabytes, so every read is bounded and the caller is told when its view has
+# a gap rather than being handed the difference.
+TAIL_BYTES = 64 * 1024
+TAIL_LINES = 500
+
 # Constants for the Windows liveness probe.
 _SYNCHRONIZE = 0x00100000
 _PROCESS_TERMINATE = 0x0001
@@ -250,39 +256,68 @@ class DaemonController:
         self.stop()
         return self.start()
 
-    def tail_log(self, since: int = 0) -> dict:
-        """Return log lines written after the caller's byte offset.
+    def tail_log(self, since: int = 0, max_bytes: int = TAIL_BYTES,
+                 max_lines: int = TAIL_LINES) -> dict:
+        """Return a bounded preview of the log, and the offset to resume from.
 
         Reads in binary so ``since`` and the returned ``offset`` are real byte
         positions, and stops at the last newline so a half-written line is
         returned once rather than duplicated on the next poll.
+
+        No read is ever larger than ``max_bytes``. On a first call (``since`` at
+        or below zero) that means the *tail* of the file rather than the whole of
+        it: this is a preview pane, and the production log is hundreds of
+        megabytes, so returning all of it would cost more memory than the process
+        has to spare and take longer than the poll interval. A caller that has
+        fallen further behind than ``max_bytes`` is likewise given the tail and
+        told ``reset``, so it knows its view has a gap in it rather than silently
+        believing it saw everything.
         """
+        floor = max(0, since)
         log_file = self.log_file()
         if not log_file:
-            return {"lines": [], "offset": since, "reset": False}
+            return {"lines": [], "offset": floor, "reset": False}
         try:
             size = os.path.getsize(log_file)
         # Missing or unreadable log is not an error for a poller.
         except OSError:
-            return {"lines": [], "offset": since, "reset": False}
+            return {"lines": [], "offset": floor, "reset": False}
 
-        reset = False
-        start = max(0, since)
-        if size < start:
-            # The file was rotated or truncated; restart from the top.
+        if since <= 0:
+            # First look: a preview of the end, not the whole archive.
+            start = max(0, size - max_bytes)
+            reset = start > 0
+        elif size < since:
+            # Rotated or truncated under us.
+            start = max(0, size - max_bytes)
             reset = True
-            start = 0
+        elif size - since > max_bytes:
+            # The caller fell further behind than we are willing to send.
+            start = max(0, size - max_bytes)
+            reset = True
+        else:
+            start = since
+            reset = False
 
         try:
             with open(log_file, "rb") as f:
                 f.seek(start)
-                data = f.read()
+                data = f.read(max_bytes + 1)
         # Unreadable between stat and open; report nothing and let the caller retry.
         except OSError:
-            return {"lines": [], "offset": since, "reset": False}
+            return {"lines": [], "offset": floor, "reset": False}
 
         consumed = data.rfind(b"\n")
         if consumed == -1:
+            # No complete line in what was read; leave the offset where it was.
             return {"lines": [], "offset": start, "reset": reset}
+
         lines = data[:consumed].decode("utf-8", errors="replace").splitlines()
+        if start > 0 and start != since:
+            # We jumped backwards to the tail, so the first line is the tail end
+            # of a line whose beginning we never read. Resuming from a real
+            # offset always lands on a line boundary, so it is only dropped here.
+            lines = lines[1:]
+        if len(lines) > max_lines:
+            lines = lines[-max_lines:]
         return {"lines": lines, "offset": start + consumed + 1, "reset": reset}
