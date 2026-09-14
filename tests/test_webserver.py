@@ -380,6 +380,45 @@ def test_save_filter_no_appid(web_client):
     assert resp.status_code == 400
 
 
+# ── clear pending database ───────────────────────────────────────────────────
+#
+# The route is a thin wrapper over clear_pending_items, so the predicate is the
+# contract worth pinning: the rows it removes and, just as importantly, the rows
+# it leaves alone.
+
+
+def test_clear_pending_route_deletes_only_the_pending_rows(web_client):
+    client, db_path = web_client
+    # Removed: never successfully fetched, with no status or a 404.
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": None, "api_fetched_at": None})
+    insert_or_update_item(db_path, {"workshop_id": 2, "status": 404, "api_fetched_at": None})
+    # Kept: a real status, or a recorded successful fetch, or both.
+    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "api_fetched_at": None})
+    insert_or_update_item(db_path, {"workshop_id": 4, "status": None, "api_fetched_at": 1672531200})
+    insert_or_update_item(db_path, {"workshop_id": 5, "status": 404, "api_fetched_at": 1672531200})
+
+    resp = client.post('/api/clear_pending')
+    assert resp.status_code == 200
+    assert resp.get_json() == {"ok": True, "deleted": 2}
+
+    conn = get_connection(db_path)
+    ids = [r["workshop_id"] for r in conn.execute(
+        "SELECT workshop_id FROM workshop_items ORDER BY workshop_id")]
+    conn.close()
+    assert ids == [3, 4, 5], "the predicate removed a row it must not touch"
+
+
+def test_clear_pending_route_reports_zero_and_is_post_only(web_client):
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "api_fetched_at": 1672531200})
+
+    assert client.get('/api/clear_pending').status_code == 405
+    resp = client.post('/api/clear_pending')
+    assert resp.status_code == 200
+    assert resp.get_json() == {"ok": True, "deleted": 0}, \
+        "an empty delete must still report the count the UI shows"
+
+
 def test_image_serve_missing(web_client):
     client, _ = web_client
     resp = client.get('/images/nonexistent.jpg')
@@ -821,6 +860,17 @@ def _extract_function(script: str, name: str) -> str:
     raise AssertionError(f"unterminated function {name}")
 
 
+def _extract_const(script: str, name: str) -> str:
+    """Return the literal value of a top-level `const name = ...;` declaration.
+
+    Tests inject the page's real constants rather than restating them, so a
+    changed version or cap cannot silently diverge from what the driver checks.
+    """
+    match = re.search(r'^const\s+' + re.escape(name) + r'\s*=\s*([^;]+);', script, re.M)
+    assert match, f"no const {name} in the served script"
+    return match.group(1).strip()
+
+
 def _run_node(driver: str, tmp_path):
     path = tmp_path / "driver.js"
     path.write_text(driver, encoding="utf-8")
@@ -908,3 +958,334 @@ def test_header_port_display_is_filled_from_the_pages_own_location(web_client, t
     # The function only helps if the page actually calls it on load.
     assert re.search(r'^showServerPort\(\);$', script, re.M), \
         "the page never calls showServerPort()"
+
+
+# ── clear pending: the confirmation and the report ────────────────────────────
+#
+# The route is destructive, so the client's half of the contract is that the
+# confirmation is asked first and names what will go, and that the count the
+# route returns is what the user is told. A browser would be needed to click it
+# end to end, so the handler runs in node against stubbed confirm/fetch/alert.
+
+CLEAR_PENDING_DRIVER = """
+const fn = (__FN__);
+const out = {prompts: [], urls: [], methods: [], alerts: [], searches: 0};
+global.doSearch = () => { out.searches += 1; };
+global.alert = (m) => out.alerts.push(m);
+let answer = false;
+global.confirm = (m) => { out.prompts.push(m); return answer; };
+let response = {ok: true, status: 200, statusText: 'OK', json: async () => ({ok: true, deleted: 2})};
+let throwError = null;
+global.fetch = async (url, opts) => {
+  out.urls.push(url);
+  out.methods.push(opts && opts.method);
+  if (throwError) throw throwError;
+  return response;
+};
+(async () => {
+  await fn();                       // declined: nothing is sent
+  answer = true;
+  await fn();                       // accepted: the delete happens and is reported
+  response = {ok: false, status: 500, statusText: 'INTERNAL SERVER ERROR', json: async () => ({})};
+  await fn();                       // server rejected the delete
+  throwError = new Error('backend down');
+  await fn();                       // the backend is unreachable
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_clear_pending_confirms_before_deleting_and_reports_the_count(web_client, tmp_path):
+    client, _ = web_client
+    doc = lxml.html.fromstring(client.get('/').data.decode())
+    buttons = doc.xpath('//*[@id="btn-clear-pending"]')
+    assert len(buttons) == 1, "expected exactly one #btn-clear-pending"
+    assert buttons[0].tag == "button", "the affordance must be a button, not a link"
+    assert "doClearPending" in (buttons[0].get("onclick") or ""), \
+        "the button must call the confirming handler, not the route directly"
+
+    fn = _extract_function(_served_inline_script(client), "doClearPending")
+    out = _run_node(CLEAR_PENDING_DRIVER.replace("__FN__", fn), tmp_path)
+
+    assert len(out["prompts"]) == 4, "every invocation must ask before deleting"
+    for prompt in out["prompts"]:
+        lowered = prompt.lower()
+        assert "pending" in lowered and "cannot be undone" in lowered, \
+            f"the confirmation must state what is deleted, not a generic warning: {prompt!r}"
+    assert out["urls"] == ["/api/clear_pending"] * 3, \
+        "declining must send nothing; accepting must call the route"
+    assert out["methods"] == ["POST"] * 3
+    assert out["alerts"] == [
+        "Removed 2 pending item(s).",
+        "Clear pending failed: 500 INTERNAL SERVER ERROR",
+        "Clear pending failed: backend down",
+    ]
+    assert out["searches"] == 1, "only a successful clear re-runs the search"
+
+
+# ── view state persistence ────────────────────────────────────────────────────
+#
+# The stored view is browser-only state, so its whole contract is the shape it
+# writes and the guard it reads it back through. These run the real functions
+# from the served script in node against a localStorage stub.
+
+VIEW_STATE_DRIVER = """
+const loadFn = (__LOAD__);
+const saveFn = (__SAVE__);
+const key = __KEY__;
+const version = __VER__;
+global.VIEW_STATE_KEY = key;
+global.VIEW_STATE_VERSION = version;
+global.ALL_FIELDS = ['Title', 'Subs'];
+global._restoringView = false;
+global._selectedWid = 42;
+const store = {};
+global.localStorage = {
+  getItem: (k) => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
+  setItem: (k, v) => { store[k] = String(v); },
+};
+const emit = console.log.bind(console);
+global.console = {debug: () => {}, warn: () => {}, error: () => {}, log: emit};
+global.getFilters = () => ([{field: 'Subs', op: 'gte', value: '100'}]);
+const values = {
+  'results-grid': {scrollTop: 777},
+  'sort-by': {value: 'subscriptions'},
+  'sort-order': {value: 'DESC'},
+};
+global.document = {getElementById: (id) => values[id]};
+const out = {};
+saveFn();
+out.stored = JSON.parse(store[key]);
+out.loaded = loadFn();
+
+store[key] = JSON.stringify({v: 999, filters: []});
+out.staleVersion = loadFn();
+store[key] = 'not json';
+out.malformed = loadFn();
+store[key] = JSON.stringify({v: version, filters: 'nope'});
+out.badFilters = loadFn();
+store[key] = JSON.stringify({
+  v: version,
+  filters: [
+    {field: 'Nope', op: 'contains', value: 'x'},
+    {field: 'Title', op: 'contains', value: 5},
+  ],
+  sort_by: 'title', sort_order: 'ASC', selected: 7, scroll: -3,
+});
+out.filtered = loadFn();
+
+// While the page is restoring, nothing may write the state back early.
+delete store[key];
+global._restoringView = true;
+saveFn();
+out.wroteWhileRestoring = Object.prototype.hasOwnProperty.call(store, key);
+emit(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_view_state_round_trips_and_rejects_stale_or_malformed_entries(web_client, tmp_path):
+    """The stored view is versioned and shape-checked like the stats ordering.
+
+    A browser's saved view is the source of truth for the next load, so a
+    corrupt record must read back as "no state" (fall back to the TUI) rather
+    than reach the filter builder as a half-built shape.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = (VIEW_STATE_DRIVER
+              .replace("__LOAD__", _extract_function(script, "_loadViewState"))
+              .replace("__SAVE__", _extract_function(script, "_saveViewState"))
+              .replace("__KEY__", _extract_const(script, "VIEW_STATE_KEY"))
+              .replace("__VER__", _extract_const(script, "VIEW_STATE_VERSION")))
+    out = _run_node(driver, tmp_path)
+
+    expected = {
+        "v": 1,
+        "filters": [{"field": "Subs", "op": "gte", "value": "100"}],
+        "sort_by": "subscriptions",
+        "sort_order": "DESC",
+        "selected": 42,
+        "scroll": 777,
+    }
+    assert out["stored"] == expected, "the saved shape must carry every restored field"
+    # The loaded view is the validated set of fields; the guard's own version
+    # marker is consumed on the way in rather than handed to the caller.
+    assert out["loaded"] == {k: v for k, v in expected.items() if k != "v"}, \
+        "a saved view must load back unchanged"
+
+    assert out["staleVersion"] is None, "an entry from another version must be ignored"
+    assert out["malformed"] is None, "unparseable storage must be ignored"
+    assert out["badFilters"] is None, "a non-list filters field must be ignored"
+
+    # Unknown fields are dropped and the value is coerced to the string the
+    # text input holds; a negative scroll is not a position.
+    assert out["filtered"]["filters"] == [{"field": "Title", "op": "contains", "value": "5"}]
+    assert out["filtered"]["selected"] == 7
+    assert out["filtered"]["scroll"] == 0
+    assert out["wroteWhileRestoring"] is False, \
+        "a restore in progress must not overwrite the state it is reading"
+
+
+LOAD_STATE_DRIVER = """
+const fn = (__FN__);
+let local = __LOCAL__;
+const out = {};
+const filterRows = {innerHTML: '', children: {length: 0}};
+const sortBy = {value: ''};
+const sortOrder = {value: ''};
+global._loadViewState = () => local;
+global._applyFilters = (f) => { out.applied = f; filterRows.children.length = f.length; };
+global.addRow = () => { out.addedRow = (out.addedRow || 0) + 1; };
+global.doSearch = async () => { out.searches = (out.searches || 0) + 1; };
+global._restoreView = async (s) => { out.restored = s; };
+const emit = console.log.bind(console);
+global.console = {debug: () => {}, warn: () => {}, error: () => {}, log: emit};
+const fetches = [];
+global.fetch = async (url) => {
+  fetches.push(url);
+  return {json: async () => ({
+    filters: [{field: 'Subs', op: 'gte', value: '9'}],
+    sort_by: 'views', sort_order: 'ASC',
+  })};
+};
+global.document = {getElementById: (id) => {
+  if (id === 'filter-rows') return filterRows;
+  if (id === 'sort-by') return sortBy;
+  if (id === 'sort-order') return sortOrder;
+  return null;
+}};
+(async () => {
+  await fn();
+  out.local = {applied: out.applied, sort_by: sortBy.value, sort_order: sortOrder.value,
+               fetches: fetches.slice(), searches: out.searches, restored: out.restored,
+               addedRow: out.addedRow || 0};
+  local = null;
+  out.applied = null; out.searches = 0; out.restored = null; out.addedRow = 0;
+  fetches.length = 0; sortBy.value = ''; sortOrder.value = ''; filterRows.children.length = 0;
+  await fn();
+  out.tui = {applied: out.applied, sort_by: sortBy.value, sort_order: sortOrder.value,
+             fetches: fetches.slice(), searches: out.searches, restored: out.restored,
+             addedRow: out.addedRow || 0};
+  emit(JSON.stringify(out));
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_browser_state_wins_over_the_tui_seed_on_load(web_client, tmp_path):
+    """A browser that has state of its own does not ask the TUI for a seed.
+
+    The two sources exist side by side, so the rule has to be one of them
+    outright: local state wins, and `/api/state` is consulted only on a first
+    visit (no entry, or one the guard rejected).
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    local = {
+        "filters": [{"field": "Title", "op": "contains", "value": "x"}],
+        "sort_by": "title", "sort_order": "DESC", "selected": 5, "scroll": 120,
+    }
+    driver = (LOAD_STATE_DRIVER
+              .replace("__FN__", _extract_function(script, "loadState"))
+              .replace("__LOCAL__", json.dumps(local)))
+    out = _run_node(driver, tmp_path)
+
+    assert out["local"]["fetches"] == [], \
+        "local state is the source of truth; the TUI file must not be read"
+    assert out["local"]["applied"] == local["filters"]
+    assert out["local"]["sort_by"] == "title"
+    assert out["local"]["sort_order"] == "DESC"
+    assert out["local"]["restored"] == local, "the saved view drives the restore"
+    assert out["local"]["searches"] == 1
+
+    assert out["tui"]["fetches"] == ["/api/state"], \
+        "a first visit must still seed from the TUI's saved state"
+    assert out["tui"]["applied"] == [{"field": "Subs", "op": "gte", "value": "9"}]
+    assert out["tui"]["sort_by"] == "views"
+    assert out["tui"]["sort_order"] == "ASC"
+    assert out["tui"]["restored"] is None, "there is nothing of the browser's own to restore"
+    assert out["tui"]["searches"] == 1
+
+
+RESTORE_DRIVER = """
+const restoreFn = (__FN__);
+global._loadUntil = (__LOADUNTIL__);
+globalThis.MAX_RESTORE_BATCHES = __MAX__;
+const out = {};
+function makeGrid() {
+  return {
+    scrollTop: 0, clientHeight: 500, scrollHeight: 500,
+    cell: false, cellOnHeight: null,
+    querySelector: function(sel) {
+      if (sel.indexOf('data-wid') !== -1 && this.cell) return {wid: 77};
+      return null;
+    },
+  };
+}
+function install(grid, perBatch, stopAfter) {
+  globalThis.hasMore = true;
+  globalThis.currentOffset = 0;
+  let batches = 0;
+  globalThis.doSearch = async function() {
+    if (!globalThis.hasMore) return;
+    batches += 1;
+    globalThis.currentOffset += 50;
+    grid.scrollHeight += perBatch;
+    if (grid.cellOnHeight != null && grid.scrollHeight >= grid.cellOnHeight) grid.cell = true;
+    if (stopAfter != null && batches >= stopAfter) globalThis.hasMore = false;
+  };
+  globalThis.document = {getElementById: function() { return grid; }};
+  globalThis.showDetail = async function() {
+    out.showDetailCalls = (out.showDetailCalls || 0) + 1;
+    grid.scrollTop = 5;   // a focus-style jump the restore has to override
+  };
+  return function() { return batches; };
+}
+(async () => {
+  let grid = makeGrid();
+  grid.cellOnHeight = 900;
+  let count = install(grid, 400, 4);
+  await restoreFn({scroll: 1500, selected: 77});
+  out.restore = {scrollTop: grid.scrollTop, batches: count(),
+                 showDetailCalls: out.showDetailCalls || 0};
+
+  grid = makeGrid();
+  count = install(grid, 1, null);
+  await restoreFn({scroll: 100000, selected: null});
+  out.cap = {batches: count()};
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_restore_pages_to_the_saved_position_and_scroll_wins_at_the_end(web_client, tmp_path):
+    """Restoring a deep view asks doSearch for pages; it never re-implements them.
+
+    The saved position may sit past the first 50-item batch, so `_restoreView`
+    keeps calling `doSearch(false)` — the function that owns `currentOffset`
+    and the sentinel — until the grid is tall enough, re-opens the selected
+    item, and then applies the saved scroll last because focusing that item
+    moves the grid. The paging is bounded so a deleted selection cannot walk the
+    whole result set.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = (RESTORE_DRIVER
+              .replace("__FN__", _extract_function(script, "_restoreView"))
+              .replace("__LOADUNTIL__", _extract_function(script, "_loadUntil"))
+              .replace("__MAX__", _extract_const(script, "MAX_RESTORE_BATCHES")))
+    out = _run_node(driver, tmp_path)
+
+    assert out["restore"]["batches"] == 4, "must page until the grid can hold the saved scroll"
+    assert out["restore"]["showDetailCalls"] == 1, "the selected item must be re-opened"
+    assert out["restore"]["scrollTop"] == 1500, \
+        "the saved scroll must be applied after focus moves the grid"
+
+    max_batches = int(_extract_const(script, "MAX_RESTORE_BATCHES"))
+    assert max_batches == 40
+    assert out["cap"]["batches"] == max_batches, \
+        "restoring an unreachable position must stop at the batch cap"
+

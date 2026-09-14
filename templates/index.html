@@ -104,6 +104,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
     <div id="detail-buttons">
       <button onclick="fetch('/api/fetch_new',{method:'POST'}).then(()=>alert('Fetch-new triggered!'))">Fetch New</button>
       <button onclick="doUpdateVisible()">Update Visible</button>
+      <button id="btn-clear-pending" onclick="doClearPending()" title="Delete items that were never successfully scraped">Clear Pending</button>
     </div>
   </div>
 </main>
@@ -303,7 +304,10 @@ function sizeClass(bytes) {
 async function doSearch(reset = true) {
   if (loading) return;
   loading = true;
-  if (reset) { _stopListPoll(); currentOffset = 0; hasMore = true; document.getElementById('results-grid').innerHTML = ''; await loadCutoffs(); }
+  // A reset search starts a new result set, so an item selected in the old one
+  // is not a selection any more; keeping it would send restore hunting for a
+  // row that is no longer there.
+  if (reset) { _stopListPoll(); currentOffset = 0; hasMore = true; _selectedWid = null; document.getElementById('results-grid').innerHTML = ''; await loadCutoffs(); }
 
   const filters = getFilters();
   const resp = await fetch('/api/search', {
@@ -354,6 +358,9 @@ async function doSearch(reset = true) {
     _startListPoll(filters, document.getElementById('sort-by').value, document.getElementById('sort-order').value);
   }
   _placeSentinel();
+  // A reset re-establishes the committed filter/sort view; save it once the
+  // result set it describes is on screen.
+  if (reset) _saveViewState();
 }
 
 function _placeSentinel() {
@@ -608,7 +615,9 @@ async function showDetail(wid) {
   document.querySelectorAll('#results-grid .grid-cell').forEach(el => el.classList.remove('selected'));
   const cell = document.querySelector(`#results-grid .grid-cell[data-wid="${wid}"]`);
   if (cell) { cell.classList.add('selected'); cell.focus(); }
+  _selectedWid = wid;
   _startDetailPoll(wid, item);
+  _saveViewState();
   } catch(e) { pane.innerHTML = '<p>Error loading detail: ' + e.message + '</p>'; }
 }
 
@@ -637,6 +646,33 @@ async function doUpdateVisible() {
     items.push({workshop_id: wid, translation_priority: 0, needs_image: 0, needs_web_scrape: 0, api_priority: 10});
   });
   _startListPoll([], '', '');
+}
+
+
+async function doClearPending() {
+  // Destructive and irreversible, so the prompt names the rows the server will
+  // delete -- the same predicate as the TUI's action: no status (or 404) and no
+  // successful API fetch -- rather than a generic "are you sure".
+  const ok = confirm(
+    'Delete every item that was never successfully scraped?\n\n' +
+    'This removes all pending rows from the database: items with no status or a ' +
+    '404 status that have never been fetched from the API. It cannot be undone.'
+  );
+  if (!ok) return;
+  let resp;
+  try {
+    resp = await fetch('/api/clear_pending', {method: 'POST'});
+  } catch (e) {
+    alert('Clear pending failed: ' + e.message);
+    return;
+  }
+  if (!resp.ok) {
+    alert('Clear pending failed: ' + resp.status + ' ' + resp.statusText);
+    return;
+  }
+  const data = await resp.json();
+  alert('Removed ' + data.deleted + ' pending item(s).');
+  doSearch(true);
 }
 
 
@@ -677,34 +713,160 @@ async function doSubscribe(wid, appid) {
   if (w) { w.blur(); window.focus(); }
 }
 
-async function loadState() {
+// ── View state persistence ────────────────────────────────────────────────
+// The browser's own view -- filter rows, sort, the open item, the scroll
+// position -- is per-browser layout, not scraper configuration. `.tui_state.yaml`
+// has a different shape and is rewritten by the TUI on its own schedule, so
+// sharing the file would have each front end overwrite fields the other does
+// not understand. Browser storage is the natural home. The stored entry is
+// versioned and shape-checked exactly like the statistics panel's ordering
+// entry, so a stale build's record is ignored rather than trusted.
+const VIEW_STATE_KEY = 'view.state.v1';
+const VIEW_STATE_VERSION = 1;
+// Restoration pages through the result set to reach a saved scroll position,
+// but only this far: an item thousands of rows down is not worth a page load's
+// worth of requests just to re-open its pane.
+const MAX_RESTORE_BATCHES = 40;
+
+let _selectedWid = null;    // workshop_id whose detail pane is open
+let _viewSaveTimer = null;  // throttles the scroll listener's writes
+let _restoringView = false; // suppresses saves while loadState restores
+
+function _loadViewState() {
   try {
-    const resp = await fetch('/api/state');
-    const state = await resp.json();
-    if (state.filters && state.filters.length) {
-      document.getElementById('filter-rows').innerHTML = '';
-      state.filters.forEach((f,i) => {
-        const container = document.getElementById('filter-rows');
-        const div = document.createElement('div');
-        div.className = 'filter-row';
-        if (i > 0 && f.logic) div.dataset.logic = f.logic;
-        div.innerHTML = `
-          <select class="field-select" onchange="updateOps(this.parentElement)">${ALL_FIELDS.map(fn => `<option value="${fn}" ${fn===f.field?'selected':''}>${fn}</option>`).join('')}</select>
-          <select class="op-select"></select>
-          <input class="value-input" type="text" value="${f.value||''}" placeholder="value">
-          <button onclick="removeRow(this.parentElement)">&#x2715;</button>
-        `;
-        container.appendChild(div);
-        updateOps(div);
-        if (f.op) div.querySelector('.op-select').value = f.op;
-      });
-    }
-    if (!document.getElementById('filter-rows').children.length) addRow();
-    if (state.sort_by) document.getElementById('sort-by').value = state.sort_by;
-    if (state.sort_order) document.getElementById('sort-order').value = state.sort_order;
-  } catch(e) { console.warn('loadState fetch failed', e); }
-  doSearch(true);
+    const raw = localStorage.getItem(VIEW_STATE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.v !== VIEW_STATE_VERSION || !Array.isArray(parsed.filters)) return null;
+    const filters = [];
+    parsed.filters.forEach(function(f) {
+      if (!f || typeof f.field !== 'string' || typeof f.op !== 'string') return;
+      // A field the schema no longer has would render as a blank dropdown;
+      // drop it rather than show a filter that cannot be edited.
+      if (ALL_FIELDS.indexOf(f.field) === -1) return;
+      const entry = {field: f.field, op: f.op, value: f.value == null ? '' : String(f.value)};
+      if (typeof f.logic === 'string') entry.logic = f.logic;
+      filters.push(entry);
+    });
+    return {
+      filters: filters,
+      sort_by: typeof parsed.sort_by === 'string' ? parsed.sort_by : '',
+      sort_order: typeof parsed.sort_order === 'string' ? parsed.sort_order : '',
+      selected: (typeof parsed.selected === 'number' && isFinite(parsed.selected)) ? parsed.selected : null,
+      scroll: (typeof parsed.scroll === 'number' && isFinite(parsed.scroll) && parsed.scroll > 0) ? parsed.scroll : 0,
+    };
+  } catch (e) {
+    // A corrupt entry is not worth failing the page over.
+    console.debug('view state load failed', e);
+    return null;
+  }
 }
+
+function _saveViewState() {
+  if (_restoringView) return;
+  try {
+    const grid = document.getElementById('results-grid');
+    localStorage.setItem(VIEW_STATE_KEY, JSON.stringify({
+      v: VIEW_STATE_VERSION,
+      filters: getFilters(),
+      sort_by: document.getElementById('sort-by').value,
+      sort_order: document.getElementById('sort-order').value,
+      selected: _selectedWid,
+      scroll: grid ? grid.scrollTop : 0,
+    }));
+  } catch (e) {
+    console.debug('view state save failed', e);
+  }
+}
+
+function _applyFilters(filters) {
+  const container = document.getElementById('filter-rows');
+  container.innerHTML = '';
+  filters.forEach((f, i) => {
+    const div = document.createElement('div');
+    div.className = 'filter-row';
+    if (i > 0 && f.logic) div.dataset.logic = f.logic;
+    div.innerHTML = `
+      <select class="field-select" onchange="updateOps(this.parentElement)">${ALL_FIELDS.map(fn => `<option value="${fn}" ${fn===f.field?'selected':''}>${fn}</option>`).join('')}</select>
+      <select class="op-select"></select>
+      <input class="value-input" type="text" value="${f.value||''}" placeholder="value">
+      <button onclick="removeRow(this.parentElement)">&#x2715;</button>
+    `;
+    container.appendChild(div);
+    updateOps(div);
+    if (f.op) div.querySelector('.op-select').value = f.op;
+  });
+}
+
+// Ask doSearch for the next page until `done` holds, exactly as scrolling to
+// the bottom would. doSearch owns currentOffset and the sentinel, so this never
+// touches either; a page that moves no offset means there is nothing left.
+async function _loadUntil(done, maxBatches) {
+  let batches = 0;
+  while (hasMore && !done() && batches < maxBatches) {
+    const before = currentOffset;
+    await doSearch(false);
+    if (currentOffset === before) break;
+    batches += 1;
+  }
+}
+
+async function _restoreView(state) {
+  const grid = document.getElementById('results-grid');
+  await _loadUntil(function() {
+    return state.scroll <= 0 || grid.scrollHeight >= state.scroll + grid.clientHeight;
+  }, MAX_RESTORE_BATCHES);
+  if (state.selected != null) {
+    await _loadUntil(function() {
+      return !!grid.querySelector('.grid-cell[data-wid="' + state.selected + '"]');
+    }, MAX_RESTORE_BATCHES);
+    if (grid.querySelector('.grid-cell[data-wid="' + state.selected + '"]')) {
+      await showDetail(state.selected);
+    }
+  }
+  // Scroll last: showDetail focuses the cell, and focus can move the grid, so
+  // the saved position has to be the final word.
+  if (state.scroll > 0) grid.scrollTop = state.scroll;
+}
+
+async function loadState() {
+  // Precedence is deliberately simple: a browser that has been to this page
+  // before has its own saved view and that wins. Only a first visit (or one
+  // with cleared storage) falls back to the TUI's saved filters.
+  const local = _loadViewState();
+  try {
+    if (local) {
+      _applyFilters(local.filters);
+      if (local.sort_by) document.getElementById('sort-by').value = local.sort_by;
+      if (local.sort_order) document.getElementById('sort-order').value = local.sort_order;
+    } else {
+      const resp = await fetch('/api/state');
+      const state = await resp.json();
+      if (state.filters && state.filters.length) _applyFilters(state.filters);
+      if (state.sort_by) document.getElementById('sort-by').value = state.sort_by;
+      if (state.sort_order) document.getElementById('sort-order').value = state.sort_order;
+    }
+  } catch(e) { console.warn('loadState fetch failed', e); }
+  if (!document.getElementById('filter-rows').children.length) addRow();
+  _restoringView = true;
+  try {
+    await doSearch(true);
+    if (local) await _restoreView(local);
+  } finally {
+    _restoringView = false;
+  }
+}
+
+// Scroll fires per frame; the value is only read on the next load, so a short
+// settle delay is enough and keeps the write off the scroll path.
+document.getElementById('results-grid').addEventListener('scroll', function() {
+  if (_viewSaveTimer) return;
+  _viewSaveTimer = setTimeout(function() {
+    _viewSaveTimer = null;
+    _saveViewState();
+  }, 250);
+}, {passive: true});
+window.addEventListener('pagehide', _saveViewState);
 
 document.getElementById('sort-by').onchange = () => doSearch(true);
 document.getElementById('sort-order').onchange = () => doSearch(true);
