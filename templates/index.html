@@ -978,9 +978,11 @@ async function _pollDaemonLog() {
     const resp = await fetch('/api/daemon/log?since=' + _daemonLogOffset);
     const data = await resp.json();
     if (data.reset) {
-      // The log was rotated or truncated: drop what we had and start over.
+      // The server jumped to the tail — first poll of a large log, rotation or
+      // truncation, or this poll falling further behind than it will send — so
+      // nothing on screen continues the new lines. Drop them and resume from the
+      // server's offset below.
       pre.textContent = '';
-      _daemonLogOffset = 0;
     }
     if (data.lines && data.lines.length) {
       pre.textContent += data.lines.join('\n') + '\n';

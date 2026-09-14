@@ -111,7 +111,7 @@ translation has been stored yet, matching the TUI's notice.
 
 The header toolbar's **Daemon** button (`#btn-daemon`) opens `#daemon-overlay`, a modal panel with the running status and PID, Start / Stop / Restart buttons, and a live log view (`#daemon-log`).
 
-While the panel is open, `_refreshDaemonStatus` polls `/api/daemon` and `_pollDaemonLog` polls `/api/daemon/log?since=<byte-offset>` every 2 seconds. The offset is the byte position returned by the previous response, so each poll transfers only new lines; a `reset: true` response means the log was rotated or truncated and the view restarts from the top. `_closeDaemonPanel` clears the interval, so nothing polls while the panel is hidden.
+While the panel is open, `_refreshDaemonStatus` polls `/api/daemon` and `_pollDaemonLog` polls `/api/daemon/log?since=<byte-offset>` every 2 seconds. The offset is the byte position returned by the previous response, so each poll transfers only new lines. The view is a bounded preview: the server reads at most 64 KiB and returns at most 500 lines, so a first poll against a large log shows its tail rather than the whole file. A `reset: true` response means the returned lines do not continue the caller's view — a first call that had to seek to the tail, a rotation or truncation, or the client having fallen more than one window behind — and `_pollDaemonLog` clears the pane before showing them, so a gap is never rendered as if it were continuous. `_closeDaemonPanel` clears the interval, so nothing polls while the panel is hidden.
 
 ---
 
@@ -246,7 +246,7 @@ Drive the background daemon through the shared `DaemonController`. Each returns 
 
 ### `/api/daemon/log` — GET
 
-Incremental log tail. Accepts `since=<byte-offset>` and returns `{lines, offset, reset}`. `offset` is the byte position to pass as `since` on the next poll. `reset` is true when the file shrank (rotation or truncation), in which case `lines` starts from the beginning. A missing or unreadable log returns an empty list rather than an error.
+Incremental log tail and bounded preview. Accepts `since=<byte-offset>` and returns `{lines, offset, reset}`. At most 64 KiB is read (`DaemonController.TAIL_BYTES`, `src/daemon_control.py:23`) and at most 500 lines are returned (`TAIL_LINES`, `src/daemon_control.py:24`), so a first call (`since <= 0`) returns the tail of the file rather than the whole of it. `offset` is the byte position to pass as `since` on the next poll. `reset` is true when the returned lines do not continue from `since` — the first call against a file larger than the window, a rotation or truncation, or the caller having fallen more than `max_bytes` behind — so the client knows its view has a gap and starts over. A missing or unreadable log returns an empty list rather than an error.
 
 ### `/userscript/<file>` — dynamic script injection
 
