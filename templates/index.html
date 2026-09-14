@@ -144,6 +144,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .sub-queue-item.failed .countdown { display:none; }
 .sub-queue-item.failed::before { content:'\2717 '; color:#ff4444; flex-shrink:0; }
 @keyframes spin { to { transform:rotate(360deg); } }
+.translation-notice { color:var(--pico-muted-color);font-style:italic;font-size:.9em;margin:.4em 0; }
 </style>
 
 <script>
@@ -428,10 +429,26 @@ function _stopListPoll() {
   }
 }
 
+let _showTranslated = true;   // mirrors DetailsPane.show_translated in the TUI
+let _currentDetail = null;    // cached so the toggle re-renders without a refetch
+
+function toggleTranslation() {
+  _showTranslated = !_showTranslated;
+  if (_currentDetail) renderDetail(_currentDetail);
+}
+
 function renderDetail(item) {
+  _currentDetail = item;
   const pane = document.getElementById('detail-pane');
-  const title = item.display_title || 'N/A';
-  const creator = item.personaname_en || item.personaname || item.creator || 'N/A';
+  // Only an item that actually has a stored translation can be shown either
+  // way; otherwise the original is the only text there is.
+  const translated = _showTranslated && !!item.has_translation;
+  const title = translated
+    ? (item.display_title || 'N/A')
+    : (item.display_title_original || 'N/A');
+  const creator = translated
+    ? (item.personaname_en || item.personaname || item.creator || 'N/A')
+    : (item.personaname || item.creator || 'N/A');
   const url = `https://steamcommunity.com/sharedfiles/filedetails/?id=${item.workshop_id}`;
 
   const wfs = item.wilson_favorite_score != null ? (item.wilson_favorite_score*100).toFixed(1) : null;
@@ -475,10 +492,26 @@ function renderDetail(item) {
     `hcontent_preview: ${item.hcontent_preview || 'N/A'}`,
   ].join('&#10;');
 
-  let desc = item.description_html || '';
-  if (!desc && (item.short_description_en || item.short_description)) {
-    desc = '<p>' + (item.short_description_en || item.short_description) + '</p>';
+  // The original view falls back to the untranslated short description, so a
+  // missing extended description never leaks translated text into it.
+  let desc, fallback;
+  if (translated) {
+    desc = item.description_html || '';
+    fallback = item.short_description_en || item.short_description;
+  } else {
+    desc = item.description_html_original || '';
+    fallback = item.short_description;
   }
+  if (!desc && fallback) desc = '<p>' + fallback + '</p>';
+
+  const toggle = item.has_translation
+    ? `<button onclick="toggleTranslation();return false;">${_showTranslated ? 'Show Original' : 'Show Translation'}</button>`
+    : '';
+  // Matches the TUI, which notes a pending translation only while there is no
+  // stored one yet.
+  const notice = ((item.translation_priority || 0) > 0 && !item.translate_version)
+    ? '<p class="translation-notice">Translation requested, currently in queue&hellip;</p>'
+    : '';
 
   pane.innerHTML = `
     <h2><a href="${url}" target="_blank" title="${tooltip}">${title}</a></h2>
@@ -491,7 +524,8 @@ function renderDetail(item) {
     <div class="stat-row"><span class="stat-label">Subs:</span> ${fmtCount(subs)} / ${fmtCount(lsubs)}</div>
     <div class="stat-row"><span class="stat-label">Favs:</span> ${fmtCount(favs)} / ${fmtCount(lfavs)}</div>
     <div class="stat-row"><span class="stat-label">Tags:</span> <small>${tags}</small></div>
-    <p><button onclick="doSubscribe(${item.workshop_id}, ${item.consumer_appid || 0});return false;">Subscribe</button></p>
+    <p><button onclick="doSubscribe(${item.workshop_id}, ${item.consumer_appid || 0});return false;">Subscribe</button> ${toggle}</p>
+    ${notice}
     ${desc ? '<div style="border-left:3px solid var(--pico-muted-border-color);padding-left:.5rem;margin-top:.5rem">'+desc+'</div>' : ''}
   `;
 }

@@ -91,6 +91,20 @@ Builds the detail view HTML inline. Shows: title (linked to Steam), creator, wor
 
 Stats are in a single-column vertical layout (`.stat-row`), not the previous two-column grid.
 
+### Translated and original text
+
+The pane can show either language, mirroring the TUI's `ctrl+w` toggle. `_showTranslated` is the
+equivalent of the TUI's `show_translated` reactive: it defaults to showing the translation, persists
+for the session rather than per item, and switching it re-renders from the cached payload
+(`_currentDetail`) without another request.
+
+The toggle appears only when the server reports `has_translation`, which is `translate_version` being
+set — the same test the TUI uses. An item can hold translated text that happens to match the
+original, so the presence of the field is not a reliable signal. When an item has no translation the
+two variants are identical rather than one being empty, so the pane has something to render either
+way. A pending translation is noted above the description while `translation_priority > 0` and no
+translation has been stored yet, matching the TUI's notice.
+
 ---
 
 ## Daemon Panel
@@ -157,6 +171,8 @@ Main search endpoint. Accepts `{filters, sort_by, sort_order, offset, limit}`. S
 ### `/api/item/<id>` — GET
 
 Read-only detail fetch. Returns full item data with the BBCode-to-HTML converted description. It applies no priority bumps by design: the detail pane polls this every three seconds while it is open, and applying detail priority here re-armed the fetch queue on every poll, so the daemon re-fetched whatever was on screen indefinitely.
+
+Both language variants are returned — `description_html` beside `description_html_original`, and `display_title` beside `display_title_original` — so the client's toggle costs no request. The payload also carries `has_translation` (whether `translate_version` is set) so the client does not have to infer it from the text.
 
 ### `/api/item/<id>/open` — POST
 
