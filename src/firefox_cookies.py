@@ -15,6 +15,7 @@ and a machine may hold several. The newest store that actually contains a
 
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -28,8 +29,15 @@ from pathlib import Path
 _SIDECARS = ("", "-wal", "-shm")
 
 COOKIE_STORE_NAME = "cookies.sqlite"
+COMPATIBILITY_FILE = "compatibility.ini"
 STEAM_HOST = "%steamcommunity.com"
 LOGIN_COOKIE = "steamLoginSecure"
+
+# Firefox writes `LastVersion` as `<version>_<buildid>`; a User-Agent carries the
+# dotted version only, so the build id after the first `_` is dropped. The
+# build id is not always 14 digits, so the version is matched rather than the
+# suffix split on a fixed offset.
+_LAST_VERSION_RE = re.compile(r"^LastVersion\s*=\s*(\d+(?:\.\d+)*)", re.MULTILINE)
 
 # There is no refresh timer. The cookie is valid for days, so the config holds a
 # copy and the browser is consulted when there is no copy yet, or when a scrape
@@ -77,6 +85,32 @@ def find_cookie_store(profiles_root: Path | None = None) -> Path | None:
         return None
     candidates.sort(key=lambda pair: pair[0])
     return candidates[-1][1]
+
+
+def firefox_version(profiles_root: Path | None = None) -> str | None:
+    """The Firefox version recorded by the profile in use, or None.
+
+    `compatibility.ini` in the profile directory carries `LastVersion`, the
+    version that last used that profile. The directory name holds only a random
+    salt and no version, so this file is the one local source for the version a
+    scraped request should claim. The profile is located with the same discovery
+    the cookie read uses, so the version and the cookies describe the same
+    browser.
+
+    Returns None rather than raising when there is no profile or no readable
+    file: the caller falls back to a constant, and a missing profile is an
+    ordinary anonymous configuration, not an error.
+    """
+    store = find_cookie_store(profiles_root)
+    if store is None:
+        return None
+    compatibility = Path(store).parent / COMPATIBILITY_FILE
+    try:
+        text = compatibility.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = _LAST_VERSION_RE.search(text)
+    return match.group(1) if match else None
 
 
 def _copy_store(store: Path, dest_dir: Path) -> Path:

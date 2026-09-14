@@ -103,12 +103,18 @@ A daemon thread that picks up items from `get_next_web_scrape_item`, ordered by 
 
 **Dynamic delay**: Same 100-success / 2-failure compounding pattern as the daemon, but with its own `web_delay_seconds` config key. A selector miss does not participate: the request succeeded, so slowing down would not help.
 
-**Throttling**: Steam answers an over-budget request with **HTTP 200** and its ordinary Workshop
-shell carrying "too many requests", so the status code proves nothing and the page is otherwise
+**Throttling**: Steam answers many requests with **HTTP 200** and its ordinary Workshop shell
+carrying "too many requests", so the status code proves nothing and the page is otherwise
 indistinguishable from a content miss. It is detected separately and treated as a spent request
 budget rather than a bad item: the item's priority is left alone, no retry is attempted, and the
-worker pauses for minutes instead of seconds. The budget is per account or address and refills
-over minutes, so retrying immediately spends a budget that is already empty.
+worker pauses for minutes instead of seconds.
+
+The owner's hypothesis is that this page is **bot deterrence** — a reply that *says* "throttled"
+to discourage automated clients — rather than a genuine per-account budget that refills over
+minutes. That suspicion is **not proven**, and it is why the HTTP request is now shaped like a
+real browser (see `scrape_extended_details` below). It changes nothing about the handling: whatever
+the cause, the reply is not the item, so it stays "no content" rather than a bad item, and no retry
+is made into a reply that may be reporting a spent budget.
 
 The throttle page is served as a **bare anonymous shell even when the request carried a valid
 session** — *measured*, across one run in which the same cookie produced 4 item pages carrying the
@@ -122,10 +128,10 @@ check or a sign-in wall is retried once — and only if the login cookie actuall
 
 The two checks are evaluated **independently**, and neither shadows the other. They overlap by
 construction: a throttle page is not the item page, so it lacks the signed-in markers too, and
-reading that overlap as "signed out" would refresh and then spend a budget that is already empty.
-Only the network retry is suppressed by throttling. The cookie is still re-read, because that is a
-local file copy that spends none of the exhausted budget, and it means the next request that does
-go out carries the freshest credential.
+reading that overlap as "signed out" would refresh and then retry into a reply that may be
+reporting a spent budget. Only the network retry is suppressed by throttling. The cookie is still
+re-read, because that is a local file copy that spends no network budget, and it means the next
+request that does go out carries the freshest credential.
 
 ### `scrape_extended_details` (web_scraper)
 
@@ -134,6 +140,20 @@ Fetches the HTML page `steamcommunity.com/sharedfiles/filedetails/?id={workshop_
 - `tags`: the tag names from `TAGS_SELECTOR`, `.workshopTags a`
 
 Returns a dict, or `None` on any request failure. A successful request whose description selector did not match returns `description: None` — truthy, so the caller must test the description and not the dict. On that miss the dict also carries the response `body`, `http_status` and `final_url` so the caller can capture it; on a successful parse `body` is `None`, since there is no reason to retain a few hundred KB of HTML on the happy path. The caller stores only `description`; the `tags` key is discarded.
+
+**Browser-faithful requests.** The HTTP request is deliberately shaped to match a real Firefox top-level navigation, measured from a HAR capture of a signed-in item load. Both request sites (`scrape_extended_details` and `discover_items_by_date_html`) send one shared header mapping:
+
+- `Accept`/`Accept-Language`: a navigation asks for HTML in a human language. `requests` defaults `Accept` to `*/*`, which no browser navigation sends — it reads as a client that does not care what it gets, and it is the single clearest giveaway that a request is a script.
+- `Sec-Fetch-*` fetch metadata: Firefox attaches these to every request, so their complete absence is a strong non-browser signal. `Sec-Fetch-Site` is `none`, not the capture's `cross-site`, because the scraper fetches the URL directly rather than following a link from another origin; `Referer` is likewise omitted rather than invented, because a direct fetch has no referring page.
+- `Upgrade-Insecure-Requests`, `Priority`, `Connection: keep-alive`, and a Firefox `User-Agent`.
+
+`Accept-Encoding` advertises `br`/`zstd` only when this interpreter can actually decode them (a `brotli`/`brotlicffi` or `zstandard` module is importable); otherwise it advertises `gzip, deflate`. Offering a codec nothing here can decode would leave compressed bytes in the body and look like a broken page for an unrelated reason.
+
+The `User-Agent` version is read from the Firefox profile's `compatibility.ini` (`LastVersion`) using the same profile discovery that supplies the cookies, so the claimed version matches the browser actually signed in; it falls back to a constant Firefox string when no profile is readable. A single `requests-html` session is created lazily and shared by both request sites, so the TCP connection and its TLS handshake are reused the way a browser reuses them instead of a fresh handshake per call.
+
+The cookies are the profile's whole `steamcommunity.com` set when `session.read_firefox_cookies` is enabled — the ten names a real navigation sends, not two hand-picked ones plus a hardcoded third — and nothing is invented for a name the profile does not have. When the setting is off, the configured `sessionid`/`login_secure` pair is sent exactly as before, and the login cookie is omitted when unset.
+
+This browser shape was prompted by the "too many requests" page described above: the suspicion is that it may be bot deterrence rather than genuine throttling. That suspicion is **not proven**, and it changes nothing about detection or the pause — the reply is still not the item, so the worker still treats it as "no content" and still leaves the item untouched.
 
 ---
 
