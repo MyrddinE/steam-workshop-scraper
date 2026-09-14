@@ -229,3 +229,66 @@ one, so each can be deployed and reverted on its own.
   discovered live items as its denominator.)
 * Whether ETA should be shown for queues whose completion timestamps are newly added, before there is
   enough history for a stable rate.
+
+---
+
+## Stage handoffs: prove the next stage can see what the last one left
+
+**Status: Planned.**
+
+Three defects found in quick succession turned out to be one shape. In each, a stage finished with an
+item, wrote the item's new state, and reported success — and the state it wrote was one the next
+stage's query could not see. Nothing errored, nothing logged a failure, and the loss showed up only
+much later as work that mysteriously never happened.
+
+| Issue | What the producing stage wrote | Why the consuming stage could not see it |
+|---|---|---|
+| 17 | `status = -1` and `api_priority = 0` | `needs_web_scrape` and `needs_image` were left set, so the worker polls kept selecting a dead item forever |
+| 19 | `extended_description = NULL`, `needs_web_scrape = 0` | The consumer requires a description; the item was recorded as done and never retried |
+| 20 | `api_priority` left to the column default | On a migrated database that default is `0` and the fetch queue requires `> 0`, so a discovered item was queued nowhere |
+
+The common cause is that each stage's exit condition is written down only in the stage that performs
+it, while the next stage's entry condition lives in a different function. Nothing states the contract
+between them, so nothing can test it.
+
+### The invariant to state and test
+
+Every item is, at all times, in **exactly one** of these states:
+
+* queued for the API fetch (`api_priority > 0`), or
+* queued for a web scrape (`needs_web_scrape > 0`), or
+* queued for an image (`needs_image > 0`), or
+* queued for translation (`translation_priority > 0`), or
+* complete for the stage that owns it, or
+* deliberately dead (`status = -1`) and therefore in **no** queue.
+
+Never in none of them by accident, and never in a queue the owning stage has finished with. Issue 19
+violates the first kind — recorded as complete while storing nothing; issue 20 is the same violation;
+issue 17 is the second — dead, yet still queued.
+
+### Approach
+
+1. **Enumerate the handoffs.** Discovery → API fetch; API fetch → web scrape; API fetch → image;
+   API fetch and web scrape → translation; and the terminal one, any stage → dead. Record each pair
+   with the column the producer writes and the predicate the consumer selects on.
+2. **Extract each consumer's predicate into one named function**, so the worker poll and the test ask
+   the same question. A test that re-writes the SQL it is checking proves nothing.
+3. **Test the contract, not the stage.** For each handoff, take an item the producer has just finished
+   with and assert the consumer's own predicate agrees: either it is selected because the work is
+   genuinely outstanding, or it is not selected *and* the stage's output is present. A third outcome —
+   not selected, and nothing stored — is the bug being looked for.
+4. **Add the invariant as a database-level check**, not only as a unit test: one query counting items
+   that are queued nowhere and not complete, another counting items that are dead yet still queued.
+   Both should read zero, and both are cheap enough to sit in the statistics beside `stuck_work`. A
+   number that is meant to be zero is a better detector than a log line nobody reads.
+5. **Make the exit explicit at every call site.** Where a stage completes an item, pass every queue
+   flag it intends to change instead of relying on a column default. Issue 20 existed only because a
+   `CREATE TABLE` default of `3` and an `ALTER TABLE` default of `0` disagreed and the insert leaned
+   on whichever it happened to get.
+
+### What this would have caught
+
+All three, at the moment they were introduced: 19 and 20 by the "queued nowhere and not complete"
+count, 17 by the "dead but still queued" count. Both are single statements. They survived as long as
+they did because every stage reported success, so the only signal was a coverage figure drifting
+downwards over weeks.
