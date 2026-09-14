@@ -129,3 +129,28 @@ def test_sessionid_endpoint_does_not_persist_when_the_cookie_is_absent(tmp_path)
 
     assert response.status_code == 200
     save.assert_not_called()
+
+
+# --- the User-Agent trap ---------------------------------------------------
+
+def test_the_scrape_does_not_use_the_requests_html_default_ua():
+    """Steam serves the anonymous shell to it, cookie or no cookie.
+
+    requests_html ships a macOS Safari string from around 2017; with it, the same
+    URL and a valid login cookie returned a ~325 KB generic page with no item
+    markup. Measured against a HAR of a signed-in load.
+    """
+    from requests_html import HTMLSession
+    from src.web_scraper import USER_AGENT
+    assert HTMLSession().headers.get("User-Agent") != USER_AGENT
+    assert "Chrome" in USER_AGENT or "Firefox" in USER_AGENT
+
+
+def test_both_scrape_paths_send_the_browser_ua():
+    with patch("src.web_scraper.HTMLSession") as session_cls, \
+         patch("src.web_scraper.load_config", return_value={"session": {"id": "x"}}):
+        session_cls.return_value.get.return_value = _fake_response()
+        scrape_extended_details(ITEM_URL)
+        _, kwargs = session_cls.return_value.get.call_args
+        assert kwargs["headers"]["User-Agent"] == __import__(
+            "src.web_scraper", fromlist=["USER_AGENT"]).USER_AGENT

@@ -15,6 +15,18 @@ _WEB_DELAY = 5.0
 # be captured against the exact selector that failed.
 DESCRIPTION_SELECTOR = '.workshopItemDescription#highlightContent'
 
+# requests_html ships a macOS Safari string from around 2017. Steam serves the
+# anonymous shell to it even when a valid login cookie is present, so every
+# scrape came back as a ~325 KB generic page with no item markup.
+#
+# Measured against a HAR of a signed-in load: the same URL and the same cookie
+# return the real item page with a browser User-Agent and the generic page
+# without one. The cookie was never the problem.
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
 # Markers of a page Steam withheld rather than one whose layout changed: an error
 # page, an age check, or a sign-in wall. Used only for a body that has already
 # failed to yield the item template, so the "Sign In" link every normal page
@@ -38,6 +50,24 @@ def _rate_limit():
     if 0 < elapsed < _WEB_DELAY:
         time.sleep(_WEB_DELAY - elapsed)
     _last_web_call = time.time()
+
+
+# Steam answers an over-budget request with HTTP 200 and its ordinary Workshop
+# shell carrying this wording, so the status code cannot be trusted and the
+# request looks exactly like a content miss.
+_RATE_LIMIT_MARKERS = ("too many requests", "you have made too many requests")
+
+
+def looks_rate_limited(body: str) -> bool:
+    """Whether Steam served its throttle page rather than the item.
+
+    Worth separating from a miss: the item is fine and only the budget is spent,
+    so decaying the item is wrong and retrying immediately is worse.
+    """
+    if not body:
+        return False
+    lowered = body.lower()
+    return any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
 
 
 def looks_signed_out(body: str) -> bool:
@@ -203,7 +233,8 @@ def scrape_extended_details(item_url: str, keep_body: bool = False) -> dict | No
     session = HTMLSession()
     _rate_limit()
     try:
-        response = session.get(item_url, timeout=10, cookies=_workshop_cookies_or_empty())
+        response = session.get(item_url, timeout=10, cookies=_workshop_cookies_or_empty(),
+                               headers={'User-Agent': USER_AGENT})
         response.raise_for_status()
 
         description_element = response.html.find(DESCRIPTION_SELECTOR, first=True)
@@ -246,7 +277,8 @@ def discover_items_by_date_html(appid: int, start_date: int, end_date: int, page
 
     session = HTMLSession()
     try:
-        response = session.get(url, cookies=cookies, timeout=15)
+        response = session.get(url, cookies=cookies, timeout=15,
+                               headers={'User-Agent': USER_AGENT})
         response.raise_for_status()
         ids = _extract_item_ids_from_page(response)
         total_pages = _extract_total_pages(response)

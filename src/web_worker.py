@@ -6,8 +6,14 @@ import logging
 import threading
 from datetime import datetime, timezone
 from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, flag_field_for_translation, translation_is_current
-from src.web_scraper import looks_gated, looks_signed_out, scrape_extended_details, DESCRIPTION_SELECTOR
+from src.web_scraper import (DESCRIPTION_SELECTOR, looks_gated, looks_rate_limited,
+                             looks_signed_out, scrape_extended_details)
 from src import capture
+
+# Steam's per-account request budget refills over minutes, so the useful
+# response to its throttle page is a pause measured in minutes, not the
+# seconds used for ordinary pacing.
+RATE_LIMIT_PAUSE_SECONDS = 300.0
 
 
 class WebScraperThread(threading.Thread):
@@ -26,6 +32,15 @@ class WebScraperThread(threading.Thread):
         self.web_failures = 0
         self.web_had_streak = False
 
+    def _wait_out_throttle(self, seconds: float) -> None:
+        """Sleep in one-second steps so a pause cannot hold shutdown hostage."""
+        deadline = time.monotonic() + seconds
+        while self.running:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(1.0, remaining))
+
     def _retry_if_gated(self, item: dict, url: str, scrape_data: dict | None) -> dict | None:
         """Retry once when a failed scrape looks like Steam withholding the page.
 
@@ -41,6 +56,10 @@ class WebScraperThread(threading.Thread):
         # The primary trigger: the page was served to an anonymous visitor.
         # `looks_gated` is the backup, for when Steam changes what a withheld
         # page looks like and the marker goes missing.
+        if looks_rate_limited(body):
+            # A throttle page also lacks the signed-in markers, so without this
+            # it would be mistaken for a stale cookie and retried at once.
+            return scrape_data
         if not self._session_refresh or not (looks_signed_out(body) or looks_gated(body)):
             return scrape_data
         try:
@@ -153,6 +172,15 @@ class WebScraperThread(threading.Thread):
                     self.web_successes = 0
                 time.sleep(self.web_delay)
             elif scrape_data is not None:
+                if looks_rate_limited(scrape_data.get("body") or ""):
+                    # Not a bad item and not a stale cookie: the request budget is
+                    # spent. Decaying the item would blame the wrong thing, and a
+                    # retry would spend more of a budget that is already empty.
+                    logging.warning(
+                        "[W:%s] Steam returned its rate-limit page; pausing %.0fs and "
+                        "leaving the item untouched.", workshop_id, RATE_LIMIT_PAUSE_SECONDS)
+                    self._wait_out_throttle(RATE_LIMIT_PAUSE_SECONDS)
+                    continue
                 self._handle_selector_miss(item, url, scrape_data)
                 time.sleep(self.web_delay)
             else:

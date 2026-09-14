@@ -103,6 +103,13 @@ A daemon thread that picks up items from `get_next_web_scrape_item`, ordered by 
 
 **Dynamic delay**: Same 100-success / 2-failure compounding pattern as the daemon, but with its own `web_delay_seconds` config key. A selector miss does not participate: the request succeeded, so slowing down would not help.
 
+**Throttling**: Steam answers an over-budget request with **HTTP 200** and its ordinary Workshop
+shell carrying "too many requests", so the status code proves nothing and the page is otherwise
+indistinguishable from a content miss. It is detected separately and treated as a spent request
+budget rather than a bad item: the item's priority is left alone, no retry is attempted, and the
+worker pauses for minutes instead of seconds. The budget is per account or address and refills
+over minutes, so retrying immediately spends a budget that is already empty.
+
 **Gated pages**: A miss whose body carries no item markup but does look like an error page, an age
 check or a sign-in wall is retried once — and only if the login cookie actually changed, which is what
 `session.read_firefox_cookies` refreshes. A merely broken page therefore cannot double the request rate.

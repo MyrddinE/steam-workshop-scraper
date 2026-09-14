@@ -9,6 +9,7 @@ opposite case — it runs for weeks, so its caps stay.
 
 import json
 import os
+from unittest.mock import patch
 
 import pytest
 
@@ -108,3 +109,37 @@ def test_markers_are_recorded_not_interpreted(tmp_path):
         assert markers["Sign In"] is False
     finally:
         capture.configure(None)
+
+
+# --- the throttle page ------------------------------------------------------
+
+@pytest.mark.parametrize("body,expected", [
+    ("<h1>You have made too many requests</h1>", True),
+    ("<p>Too Many Requests</p>", True),
+    ("<div class='workshopItemDescription' id='highlightContent'>x</div>", False),
+    ("", False),
+])
+def test_looks_rate_limited(body, expected):
+    from src.web_scraper import looks_rate_limited
+    assert looks_rate_limited(body) is expected
+
+
+def test_a_throttled_page_is_not_mistaken_for_a_stale_cookie():
+    """It also lacks the signed-in markers, so the order of the checks matters."""
+    from src.web_worker import WebScraperThread
+    item = {"workshop_id": 1}
+    throttled = {"description": None, "body": "<h1>Too many requests</h1>"}
+    called = []
+    with patch("src.web_worker.scrape_extended_details") as scrape:
+        WebScraperThread("test.db", "nope.lock", {}, None,
+                         lambda: called.append(1) or True)._retry_if_gated(item, "u", throttled)
+        assert scrape.call_count == 0, "must not retry against an empty budget"
+        assert called == [], "must not re-read the cookie either"
+
+
+def test_a_throttled_item_is_not_decayed():
+    """The item is fine; only the budget is spent."""
+    src = __import__("pathlib").Path("src/web_worker.py").read_text(encoding="utf-8")
+    throttle = src.index("looks_rate_limited(scrape_data.get(\"body\") or \"\")")
+    decay = src.index("self._handle_selector_miss(item, url, scrape_data)", throttle)
+    assert "continue" in src[throttle:decay], "the throttle branch must skip the decay"
