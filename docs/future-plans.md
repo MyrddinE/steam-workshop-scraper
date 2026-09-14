@@ -57,9 +57,9 @@ reading markup — the distinction proved to matter, because three endpoints exi
 | Translation-queued notice | Present | Shown above the description while `translation_priority > 0` and no translation is stored, matching the TUI. |
 | Subscription queue (`s`, `l`) | Present | Genuine parity: toggle, indicator, and queued list. The web queue additionally drains itself. |
 | Detail-pane queue/unqueue buttons | Not present | The TUI has both (`src/tui.py:702`); the web only supports the `s` key while a grid cell holds focus. |
-| Clear Pending Database | Not present | A TUI command-palette action (`src/tui.py:1764`) with no route or element. |
+| Clear Pending Database | Present | The `#btn-clear-pending` affordance confirms first, naming the exact set the TUI deletes (no status/404 and no successful fetch), then calls `POST /api/clear_pending`, a thin wrapper over the same `clear_pending_items`. The route reports the row count and the UI shows it; there is no dry-run, matching the TUI. |
 | Save filter for the scraper (`ctrl+s`) | Partial | The happy path works, but `/api/save_filter` answers 400 when no target AppID is set and the client reports success regardless — issue 14 in [code-issues.md](code-issues.md). |
-| View state persistence | Partial | The web UI reads the TUI's saved state but never writes it, so anything done in the browser is lost on navigation or reload. It also restores neither the selected item nor the scroll position. |
+| View state persistence | Present | The browser keeps its own view (filter rows, sort, open item, scroll position) in `localStorage` under the versioned `view.state.v1` entry, restored by `_restoreView` with bounded paging. Local state wins outright; `/api/state` is the first-visit seed only. It deliberately does not write `.tui_state.yaml`, whose shape belongs to the TUI. |
 
 ### Statistics: from raw columns to queue state
 

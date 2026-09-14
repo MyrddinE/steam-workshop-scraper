@@ -35,7 +35,13 @@ Two layers of validation: a capture-phase `blur` event listener on the document 
 
 ### State Persistence
 
-The TUI saves filter/sort state to `.tui_state.yaml`. The web UI reads it via `/api/state` on load and restores the builder. Filter changes in the web UI must originate from the TUI (or be manually applied) — the web UI doesn't save state directly.
+The TUI saves filter/sort state to `.tui_state.yaml`, which the web UI reads through `GET /api/state`. That file is the TUI's: it has the TUI's shape (`scroll_y`, `selected_workshop_id`) and is rewritten on the TUI's schedule, so writing the browser's view back into it would have the two front ends overwriting fields the other does not understand. The browser therefore keeps its own view in `localStorage` under `view.state.v1` — filter rows, `sort_by`, `sort_order`, the open item and the grid's scroll position.
+
+The entry is versioned and shape-checked like the statistics panel's ordering entry (`_loadViewState`): a wrong `v`, a non-list `filters`, or an unreadable value reads back as "no state" rather than reaching the builder. Fields the current schema no longer has are dropped, and a stored value is coerced to the string the text input holds.
+
+**Precedence is one-sided.** A browser that has been to the page before has its own record of what the user was doing, so local state wins outright and `/api/state` is not even fetched. Only when there is no usable entry — a first visit, cleared storage, or a rejected shape — does the page seed from the TUI's saved state.
+
+**Restoring a deep view.** After the first search, `_restoreView` keeps calling `doSearch(false)` — the function that owns `currentOffset` and the sentinel — until the grid is tall enough for the saved scroll position and the selected item is present, re-opens that item, then applies the scroll last: `showDetail` focuses the cell and focus can move the grid, so the saved position has to be the final word. Paging is capped at `MAX_RESTORE_BATCHES` so a selection that no longer matches the filters cannot walk the whole result set, and a reset `doSearch` clears the selection because a new result set may not contain it. Writes are suppressed while a restore runs (`_restoringView`), so the page cannot overwrite the state it is reading. Saves happen on a throttled `#results-grid` `scroll` listener, at the end of a reset `doSearch`, when a detail pane opens (`showDetail`), and on `pagehide`.
 
 ### Wilson Cutoffs
 
@@ -104,6 +110,14 @@ original, so the presence of the field is not a reliable signal. When an item ha
 two variants are identical rather than one being empty, so the pane has something to render either
 way. A pending translation is noted above the description while `translation_priority > 0` and no
 translation has been stored yet, matching the TUI's notice.
+
+---
+
+## Maintenance Actions
+
+The row under the detail pane (`#detail-buttons`) holds the queue and database actions: **Fetch New**, **Update Visible**, and **Clear Pending**.
+
+**Clear Pending** (`#btn-clear-pending`, `doClearPending`) mirrors the TUI's command-palette action. `confirm()` names the exact set before anything is sent — items with no status or a 404 status whose API data was never fetched — because the delete is destructive and irreversible; declining sends no request at all. On a 2xx it reports the count returned by the route and re-runs the search, on a rejected response it shows the status, and on a dead backend it shows the error, so a failed clear is never presented as a successful one.
 
 ---
 
@@ -218,7 +232,11 @@ Wilson score percentile thresholds. Accepts `{filters}` (excluding percentile fi
 
 ### `/api/state` — GET
 
-Reads `.tui_state.yaml` for filter/sort state restoration.
+Reads `.tui_state.yaml` for filter/sort state restoration. The client uses this as the **first-visit seed only**: once the browser has its own `view.state.v1` entry, this route is not called at all.
+
+### `/api/clear_pending` — POST
+
+Deletes every pending item — those with no status or a 404 status and no successful API fetch (`clear_pending_items`, `src/database.py:2354`) — and returns `{ok, deleted}` with the number of rows removed. This is the same predicate and the same delete as the TUI's `action_clear_pending`; there is deliberately no dry-run mode. The UI asks for confirmation first, naming what will be deleted.
 
 ### `/api/save_filter` — POST
 
