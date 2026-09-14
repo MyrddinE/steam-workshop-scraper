@@ -110,9 +110,22 @@ budget rather than a bad item: the item's priority is left alone, no retry is at
 worker pauses for minutes instead of seconds. The budget is per account or address and refills
 over minutes, so retrying immediately spends a budget that is already empty.
 
+The throttle page is served as a **bare anonymous shell even when the request carried a valid
+session** — *measured*, across one run in which the same cookie produced 4 item pages carrying the
+account dropdown and a real `g_steamID`, and 27 throttled pages carrying neither. The absence of
+the signed-in markers is therefore caused by the throttling, not by a bad cookie, and a throttle
+page must not be read as evidence that the session has lapsed.
+
 **Gated pages**: A miss whose body carries no item markup but does look like an error page, an age
 check or a sign-in wall is retried once — and only if the login cookie actually changed, which is what
 `session.read_firefox_cookies` refreshes. A merely broken page therefore cannot double the request rate.
+
+The two checks are evaluated **independently**, and neither shadows the other. They overlap by
+construction: a throttle page is not the item page, so it lacks the signed-in markers too, and
+reading that overlap as "signed out" would refresh and then spend a budget that is already empty.
+Only the network retry is suppressed by throttling. The cookie is still re-read, because that is a
+local file copy that spends none of the exhausted budget, and it means the next request that does
+go out carries the freshest credential.
 
 ### `scrape_extended_details` (web_scraper)
 
