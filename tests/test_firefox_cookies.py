@@ -15,6 +15,7 @@ from src import firefox_cookies
 from src.firefox_cookies import (
     clear_cache,
     find_cookie_store,
+    firefox_version,
     read_steam_cookies,
     steam_login_secure,
 )
@@ -76,6 +77,49 @@ def test_a_profile_without_a_store_is_skipped(tmp_path):
 def test_no_profiles_at_all_is_not_an_error(tmp_path):
     assert find_cookie_store(tmp_path) is None
     assert find_cookie_store(tmp_path / "does-not-exist") is None
+
+
+# --- the version the request should claim ----------------------------------
+
+def test_reads_the_firefox_version_from_the_profile(tmp_path):
+    """The UA version is taken from the profile that supplies the cookies.
+
+    `compatibility.ini` writes `LastVersion` as `<version>_<buildid>`; the UA
+    carries the dotted version only.
+    """
+    profile = tmp_path / "abc.default-release"
+    profile.mkdir()
+    _make_store(profile / "cookies.sqlite", [])
+    (profile / "compatibility.ini").write_text(
+        "[Compatibility]\n"
+        "LastVersion=141.0.3_20251001120000/20251001120000\n"
+        "LastOSABI=Linux_x86_64-gcc3\n",
+        encoding="utf-8",
+    )
+
+    assert firefox_version(tmp_path) == "141.0.3"
+
+
+def test_no_compatibility_file_yields_none(tmp_path):
+    profile = tmp_path / "abc.default-release"
+    profile.mkdir()
+    _make_store(profile / "cookies.sqlite", [])
+
+    assert firefox_version(tmp_path) is None
+
+
+def test_an_unparseable_last_version_yields_none(tmp_path):
+    profile = tmp_path / "abc.default-release"
+    profile.mkdir()
+    _make_store(profile / "cookies.sqlite", [])
+    (profile / "compatibility.ini").write_text(
+        "[Compatibility]\nLastVersion=unknown\n", encoding="utf-8")
+
+    assert firefox_version(tmp_path) is None
+
+
+def test_no_profile_yields_none(tmp_path):
+    assert firefox_version(tmp_path) is None
 
 
 # --- reading ---------------------------------------------------------------

@@ -199,12 +199,17 @@ class WebScraperThread(threading.Thread):
                 time.sleep(self.web_delay)
             elif scrape_data is not None:
                 if looks_rate_limited(scrape_data.get("body") or ""):
-                    # Not a bad item and not a stale cookie: the request budget is
-                    # spent. Decaying the item would blame the wrong thing, and a
-                    # retry would spend more of a budget that is already empty.
+                    # Not a bad item and not necessarily a stale cookie: the
+                    # page itself reports too many requests, and that is the
+                    # only thing that has actually been observed. Acting on it
+                    # is right either way -- the reply is not the item -- so the
+                    # cause is left unnamed. Decaying the item would blame the
+                    # wrong thing, and a retry would spend more of whatever the
+                    # budget is.
                     logging.warning(
-                        "[W:%s] Steam returned its rate-limit page; pausing %.0fs and "
-                        "leaving the item untouched.", workshop_id, RATE_LIMIT_PAUSE_SECONDS)
+                        "[W:%s] Steam returned a page reporting too many requests; "
+                        "pausing %.0fs and leaving the item untouched.",
+                        workshop_id, RATE_LIMIT_PAUSE_SECONDS)
                     self._wait_out_throttle(RATE_LIMIT_PAUSE_SECONDS)
                     continue
                 self._handle_selector_miss(item, url, scrape_data)
