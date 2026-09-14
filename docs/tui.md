@@ -117,6 +117,12 @@ metrics and what each section renders:
 | `tag_counts` | the tag table |
 | `priority_breakdowns` | per-queue waiting counts by priority |
 
+**Layout.** The screen is two columns. The metrics scroll down the left; `tag_counts` is the
+exception and gets the right-hand column to itself, filling the screen height and scrolling within
+it. Tags are the one metric that is a long list rather than a handful of numbers, so drawing it in
+the same column pushed every section below it off the screen. Where a chunk is drawn has nothing to
+do with when it is requested: the ordering below is unaffected.
+
 Coverage (`_format_coverage`, `src/tui.py:396`) is drawn as a labelled progress bar per
 stage — API data, description, image, translation, creator — against the number of live
 items, with dead items excluded because they can never be covered. `stuck_work`
