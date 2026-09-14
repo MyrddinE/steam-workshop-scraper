@@ -97,22 +97,49 @@ When the detail pane adopts an item, `DetailsPane.watch_workshop_id` calls the `
 
 ## Stats Screen
 
-### `StatsScreen`
+### `StatsScreen` (`src/tui.py:104`)
 
-Opened by Ctrl+R. Displays:
-- **General Statistics**: status code distribution, `last_fetch_attempted_at` recency (fresh/stale/blank), highest `api_fetched_at`
-- **Translation Status**: classification by translation state (Translated, ASCII, Queued, Needs Translation, No data)
-- **Priority Breakdowns**: counts by priority level for `translation_priority`, `needs_image`, and `needs_web_scrape`
-- **App Tracking**: per-AppID tracking data
-- **Tag Statistics**: tag frequency table from `_compute_tag_frequencies`
+Opened by Ctrl+R. The screen asks `src.metrics` for one tier at a time and draws each tier
+into its own widgets, so the cheap numbers are on screen while the expensive queries are
+still running. General layout and what each tier fills in:
 
-### Adaptive Refresh
+| Tier | Metrics | Rendered as |
+|---|---|---|
+| instant | `totals`, `high_water`, `app_tracking` | live/dead item counts, the last successful API fetch, and the per-AppID tracking table |
+| fast | `coverage`, `stuck_work`, `status_counts`, `fetch_recency` | coverage bars over live items, the stuck-work callout, the status distribution, and fetch recency |
+| slow | `translation_status`, `priority_breakdowns`, `tag_counts` | the translation classification, per-queue waiting counts by priority, and the tag table |
 
-Stats refresh every 2 seconds via `set_interval`, but `update_stats` checks `now - _last_update < 50 * _last_duration` and returns early if the moratorium hasn't elapsed. So if the last update took 200ms, updates are throttled to once per 10 seconds. On first mount, it runs immediately.
+Coverage (`_format_coverage`, `src/tui.py:353`) is drawn as a labelled progress bar per
+stage — API data, description, image, translation, creator — against the number of live
+items, with dead items excluded because they can never be covered. `stuck_work`
+(`_format_stuck`, `src/tui.py:375`) names any dead items still flagged in a queue and says
+the queues will not drain until they are cleared; a zero value shows an all-clear. The
+priority section reads as queue state — "Translation queue: N waiting" followed by the
+priority mix — rather than a raw column dump.
+
+`#tier-costs` (`_render_tier_costs`, `src/tui.py:395`) lists each tier's total and each
+metric's own `ms`, so the slow tier's cost is visible directly on the screen.
+
+### Tiered refresh
+
+Each tier runs in its own thread worker (`self.run_worker(..., thread=True)`,
+`src/tui.py:186`; the worker body is `_compute_tier`, `src/tui.py:198`) and its result is
+applied back on the UI thread from `on_worker_state_changed` (`src/tui.py:237`). The first
+pass runs strictly instant → fast → slow, so the cheap numbers cannot be beaten to the
+screen by the expensive ones.
+
+Refresh is throttled per tier, not globally. A tier's interval is
+`max(2 s, 50 × its own measured duration)` (`_interval_for`, `src/tui.py:182`), and a
+one-second timer starts any tier whose own interval has elapsed
+(`_refresh_due_tiers`, `src/tui.py:213`). A slow tier therefore no longer stretches the
+instant tier's refresh out to minutes; the pre-rework screen used one `50 ×` rule for the
+whole payload.
 
 ### `compact_tag_ids` Integration
 
-After populating tag stats, `compact_tag_ids` is called with the frequency data to reorder tag IDs for space efficiency (top 127 most frequent tags in 1-byte varint range).
+The tag-frequency compaction still runs, but in the slow tier's worker thread and once per
+slow-tier arrival, rather than on the UI thread on every screen update
+(`src/tui.py:209`).
 
 ---
 
@@ -124,9 +151,9 @@ Owns the daemon process for both UIs: `start`, `stop`, `restart`, `status`, `rea
 
 The PID-file protocol is unchanged. On Unix, stop sends SIGTERM then deletes `.daemon.pid`; on Windows it deletes the file. Either way it waits up to 15 s for exit, then escalates (Popen terminate/kill, `TerminateProcess` via ctypes on Windows, SIGKILL on Unix). `start` while running and `stop` while stopped are idempotent no-ops.
 
-### `DaemonManagerScreen` (`src/tui.py:282`)
+### `DaemonManagerScreen` (`src/tui.py:479`)
 
-Allows starting, stopping, and restarting the daemon process from within the TUI. It no longer holds the process logic; every button delegates to the app's single `DaemonController` (`src/tui.py:1152`), which is the same instance handed to the embedded web server, so a start or stop from either UI is visible to the other. The status text and `PID: n` display read through `DaemonController.status()`.
+Allows starting, stopping, and restarting the daemon process from within the TUI. It no longer holds the process logic; every button delegates to the app's single `DaemonController` (`src/tui.py:1353`), which is the same instance handed to the embedded web server, so a start or stop from either UI is visible to the other. The status text and `PID: n` display read through `DaemonController.status()`.
 
 The screen previously had a live log tail (via `tail -f` on Unix), but it's disabled due to performance issues with large log files. The web UI's daemon panel reads the same log incrementally through `/api/daemon/log`.
 

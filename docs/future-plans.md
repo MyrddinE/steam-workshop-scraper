@@ -1,11 +1,12 @@
 # Future Plans
 
 Changes we intend to make, kept separate from the documents that describe how the system works
-today. Nothing here is implemented. Defects in the current code live in
+today. The statistics rework in the workstream below has landed; whatever is still marked
+deferred or planned is not implemented. Defects in the current code live in
 [code-issues.md](code-issues.md); this file is for enhancements, not repairs.
 
 Status values: **Deferred** (agreed direction, deliberately parked), **Under discussion** (open
-questions remain), **Planned** (agreed and ready to start).
+questions remain), **Planned** (agreed and ready to start), **Landed** (implemented).
 
 Findings recorded here were measured or exercised against a copy of the production snapshot
 described in [live-data-profile.md](live-data-profile.md) — 1,725,544 items, roughly 1.9 GB.
@@ -15,10 +16,13 @@ Absolute timings are hardware-dependent; the ratios are the point.
 
 ## UI enhancements: web parity, queue-state statistics, page performance
 
-**Status: Planned.** Work has started on the three gaps the owner named — daemon control, the
-statistics surface, and the translation toggle. The schema-dependent parts below (per-queue
-completion timestamps, and the queue indexes) stay deferred and take their own migration, so the
-metrics split can land without waiting on them.
+**Status: Partly landed.** The statistics rework is implemented: the monolithic payload is
+split into named, tiered metrics in `src/metrics.py`, both front ends stream
+instant → fast → slow, and refresh is throttled per tier ([tui.md](tui.md),
+[web-ui.md](web-ui.md)). What remains is the schema-dependent half — per-queue completion
+timestamps for throughput/ETA, and the queue indexes — plus the open parity gaps in the table
+below (analysis, authors, view-state persistence).
+
 
 Bring the web UI to parity with the TUI, rebuild the statistics surface in both so it reports the
 state of the work queues rather than raw column values, and remove the stalls that make the page slow
@@ -43,26 +47,28 @@ reading markup — the distinction proved to matter, because three endpoints exi
 
 | TUI feature | Web UI | Evidence |
 |---|---|---|
-| Statistics screen (`ctrl+r`) | In progress | Was a bare link to the raw JSON endpoint (`templates/index.html:95`). The statistics are now named, tiered metrics served by `/api/metrics/<tier>`, and both front ends draw the cheap tiers while the expensive ones are still computing. |
+| Statistics screen (`ctrl+r`) | Present | Both front ends stream the tiered metrics: the TUI `StatsScreen` and the web `#stats-overlay` panel. The bare link to the raw JSON endpoint is gone, and the cheap tiers are on screen while the expensive ones are still computing. |
 | Analysis screen (`ctrl+?`) | Not present | The endpoint returns data, but the client never calls it. |
-| Tag statistics | Present | Served by `/api/tags` and drawn in the statistics panel. It is the most expensive single statistic (a 9.2M-row join) and the least actionable; its fate is an open decision below. |
+| Tag statistics | Present | The panel renders a tag summary from the `tag_counts` metric. It is the most expensive single statistic (a 9.2M-row join) and the least actionable; its fate is an open decision below. |
 | Author list and jump-to-author | Not present | Same. No author affordance exists in the web UI at all. |
 | Daemon start/stop/restart (`ctrl+d`) | Present | Both UIs drive one shared `DaemonController`. Routes: `/api/daemon`, `/api/daemon/start`, `/stop`, `/restart`, `/log`. |
-| Daemon log view | Web only so far | The web panel polls `/api/daemon/log` incrementally. The TUI pane is still inert — its tail call remains commented out (`src/tui.py`) and its subprocess-based `_start_tail` is dead code, recorded as issue 10 in [code-issues.md](code-issues.md). `DaemonController.tail_log` now exists and is tested, so repairing the TUI pane no longer needs a subprocess. |
+| Daemon log view | Web only so far | The web panel polls `/api/daemon/log` incrementally. The TUI pane is still inert — its tail call remains commented out and its subprocess-based `_start_tail` is dead code, recorded as issue 10 in [code-issues.md](code-issues.md). `DaemonController.tail_log` now exists and is tested, so repairing the TUI pane no longer needs a subprocess. |
 | Translation toggle (`ctrl+w`) | Present | Both language variants ship in the detail payload, so switching costs no request. The toggle appears only when `translate_version` is set, as in the TUI. |
 | Translation-queued notice | Present | Shown above the description while `translation_priority > 0` and no translation is stored, matching the TUI. |
 | Subscription queue (`s`, `l`) | Present | Genuine parity: toggle, indicator, and queued list. The web queue additionally drains itself. |
-| Detail-pane queue/unqueue buttons | Not present | The TUI has both (`src/tui.py:642`); the web only supports the `s` key while a grid cell holds focus. |
-| Clear Pending Database | Not present | A TUI command-palette action (`src/tui.py:1697`) with no route or element. |
+| Detail-pane queue/unqueue buttons | Not present | The TUI has both (`src/tui.py:702`); the web only supports the `s` key while a grid cell holds focus. |
+| Clear Pending Database | Not present | A TUI command-palette action (`src/tui.py:1764`) with no route or element. |
 | Save filter for the scraper (`ctrl+s`) | Partial | The happy path works, but `/api/save_filter` answers 400 when no target AppID is set and the client reports success regardless — issue 14 in [code-issues.md](code-issues.md). |
 | View state persistence | Partial | The web UI reads the TUI's saved state but never writes it, so anything done in the browser is lost on navigation or reload. It also restores neither the selected item nor the scroll position. |
 
 ### Statistics: from raw columns to queue state
 
-The current screen reports raw column values — status distribution, fetch recency, a translation
+The screen used to report only raw column values — status distribution, fetch recency, a translation
 classification, per-level priority counts, app tracking, and tag frequencies. Those describe storage,
 not progress. The useful question is the state of the backlog: what is outstanding, how fast it is
-draining, and how long it will take.
+draining, and how long it will take. The presentation half of that has landed: the queue signals
+below that do not need new history are now metrics, and both front ends render them
+(`coverage`, `stuck_work`, `priority_breakdowns`, `totals`).
 
 For each of the four work queues — API fetch, web scrape, image download, translation — the signals
 that answer that are:
@@ -122,40 +128,46 @@ On the snapshot above:
 | Translation classification | 1,709 ms | full table scan with the classification done in Python |
 | The same classification done in SQL | 255 ms | 6.7× faster |
 
-The whole statistics payload takes roughly **5.4 seconds**, and three separate endpoints request it:
+The monolithic statistics payload took roughly **5.4 seconds**, and three separate endpoints
+requested it:
 
-* The statistics endpoint computes all of it to return all of it.
-* The tag endpoint computes all of it and returns one field — about 5 seconds of work for under 2 KB.
+* The statistics endpoint computed all of it to return all of it.
+* The tag endpoint computed all of it and returned one field — about 5 seconds of work for under 2 KB.
 * The analysis endpoint runs a separate expensive query.
 
-Two further problems compound this:
+With the metrics split, `/api/tags` now computes only `tag_counts` and the front ends request one
+tier at a time. Two further problems compounded this:
 
 1. **A second stall sits on the search path.** The search flow awaits the percentile-cutoff query
    *after* clearing the results grid and *before* fetching any items, so every fresh search or filter
    change blanks the pane for roughly five seconds. The cutoff-dependent colouring already degrades
    gracefully to an unknown marker when cutoffs are absent, so it does not need to be awaited at all.
-2. **The refresh throttle is global.** Statistics refresh no more often than 50× the previous
-   duration, so a five-second query yields a refresh interval of about four minutes. That rule is
-   reasonable per metric and wrong for the screen as a whole.
+   *(Still open.)*
+2. **The refresh throttle is global.** *(Fixed for the statistics screen.)* Statistics refreshed no
+   more often than 50× the previous duration, so a five-second query yielded a refresh interval of
+   about four minutes. The 50× rule now applies per tier against that tier's own measured duration.
 
 ### Approach
 
-1. **Split the monolith into named metrics.** One function per statistic, each with its own cost and
-   its own cache lifetime, so a cheap metric is never priced at the cost of an expensive one and the
-   tag endpoint stops paying for everything else.
-2. **Move the per-item classification into SQL.** The 1.7-second Python loop answers a question
-   SQLite can answer in 255 ms.
-3. **Tier and stream.** Draw the instant metrics (<10 ms) immediately, then the fast tier
+1. **Split the monolith into named metrics.** *(Landed: `src/metrics.py`, commit "refactor(stats):
+   compute statistics as named, tiered metrics".)* One function per statistic, each with its own cost
+   and its own cache lifetime, so a cheap metric is never priced at the cost of an expensive one and
+   the tag endpoint stops paying for everything else.
+2. **Move the per-item classification into SQL.** *(Landed.)* The 1.7-second Python loop answers a
+   question SQLite can answer in 255 ms.
+3. **Tier and stream.** *(Landed.)* Draw the instant metrics (<10 ms) immediately, then the fast tier
    (50–80 ms), then the slow tier, each replacing its own element as it lands. Both front ends
-   consume the same metric definitions.
-4. **Throttle per metric,** not globally.
+   consume the same metric definitions ([tui.md](tui.md), [web-ui.md](web-ui.md)).
+4. **Throttle per metric,** not globally. *(Landed: the TUI throttles each tier from its own measured
+   duration; the web panel re-fetches only the instant tier on a timer.)*
 5. **Get the cutoff query off the critical path.** Render results first; apply score colouring when
-   cutoffs arrive.
+   cutoffs arrive. *(Still open.)*
 6. **Take the tag-compaction write off the render path.** Opening a statistics screen should not
-   perform database maintenance, even when that maintenance is idempotent.
+   perform database maintenance, even when that maintenance is idempotent. *(Still open: it now runs
+   once per slow-tier arrival rather than on every screen update.)*
 7. **Decide the fate of the three unused endpoints.** Build the missing UI for them, or delete them.
-   Leaving an endpoint able to emit a multi-megabyte response to no caller is worse than either
-   option.
+   *(Partly done: the web statistics panel now consumes the tag metric; the analysis and author
+   endpoints still have no client.)*
 
 ### Queue indexes
 
@@ -202,11 +214,13 @@ one, so each can be deployed and reverted on its own.
 
 * Whether `tag_counts` belongs on the statistics screen at all. It is the most expensive single
   statistic (a 9.2M-row join, roughly 358 ms) and the least actionable: it describes the reference
-  data, not the progress of any queue. The tag *filter* needs frequencies, but it is the only
-  consumer that does, so the screen may be paying for something it does not use.
+  data, not the progress of any queue. It now has a consumer — the statistics panel renders a tag
+  summary — but the tag *filter* is the only part that needs frequencies, so the screen may still be
+  paying for something it does not use.
 * Whether `/api/analysis`, `/api/authors` and the untiered `/api/stats` should get UI or be deleted.
   `/api/analysis` in particular has a complete TUI screen behind it and no web equivalent at all.
 * Whether coverage should be expressed against discovered items only, or whether discovery progress
-  should be presented as a separate "still exploring" indicator.
+  should be presented as a separate "still exploring" indicator. (The landed coverage metric uses
+  discovered live items as its denominator.)
 * Whether ETA should be shown for queues whose completion timestamps are newly added, before there is
   enough history for a stable rate.

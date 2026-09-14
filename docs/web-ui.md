@@ -115,6 +115,24 @@ While the panel is open, `_refreshDaemonStatus` polls `/api/daemon` and `_pollDa
 
 ---
 
+## Statistics Panel
+
+The 📊 button (`#btn-stats`, `templates/index.html:98`) opens `#stats-overlay` (`templates/index.html:135`), a modal panel modelled on the daemon overlay. It keeps the button's id and position; clicking it no longer navigates to the raw `/api/stats` JSON.
+
+`_openStatsPanel` (`templates/index.html:1197`) fetches `/api/metrics` for the catalogue of tiers, their metrics and their notes, builds one `<section>` per tier in server order, then fetches `/api/metrics/<tier>` for each in parallel and fills that section as the response lands. Tiers therefore draw independently: the instant numbers appear while the slow query is still running. Each tier heading carries the tier's `total_ms`, and every metric shows a human label, its note, and a value rendered to suit it:
+
+* **coverage** — a progress bar per stage (API data, description, image, translation, creator) with the count and the live-item total.
+* **totals** — alive and dead counts with the overall total.
+* **stuck_work** — flagged in red when non-zero: the number of dead items still sitting in a queue, broken down per queue. A zero value renders as an all-clear.
+* **priority_breakdowns** — one "queue: N waiting" block per queue with the priority mix.
+* **translation_status**, **status_counts**, **fetch_recency** — labelled count lists.
+* **tag_counts** — a summary: distinct-tag count and the most-used tags.
+* **high_water**, **app_tracking** — a formatted timestamp and a per-AppID table.
+
+While the panel is open, a 3-second interval re-fetches only the instant tier so the live counts stay current without re-running the slow queries. `_closeStatsPanel` (`templates/index.html:1234`) clears that interval and bumps `_statsToken`, so a tier response still in flight is discarded rather than written into the closed panel.
+
+---
+
 ## Subscribe Feature
 
 ### Userscript Bridge (`userscripts/steam_subscribe.user.js`)
@@ -206,7 +224,15 @@ A push whose `login_secure` matches what is already configured writes nothing. T
 
 ### `/api/stats`, `/api/tags`, `/api/authors`, `/api/analysis`
 
-Read-only endpoints returning database statistics.
+Read-only endpoints returning database statistics. `/api/stats` still returns the old flat payload; the statistics panel uses the tiered endpoints below instead.
+
+### `/api/metrics` — GET
+
+The metric catalogue: `{tiers: [{tier, metrics: [{name, note}]}]}` in cheapest-first order. The panel draws its layout from this rather than hard-coding metric names, so a metric added on the server appears without a client change (`src/webserver.py:360`).
+
+### `/api/metrics/<tier>` — GET
+
+One tier's values: `{tier, values, ms, total_ms}`, where `values` is `{name: value}`, `ms` is `{name: milliseconds}`, and `total_ms` is their sum. `instant`, `fast` and `slow` are the valid tiers; anything else returns a 404 with `{error}` (`src/webserver.py:381`). Tiers are fetched separately so the client can draw each as it lands, and each metric is timed on its own so a slow metric is blamed on itself rather than on the payload.
 
 ### `/api/daemon` — GET
 

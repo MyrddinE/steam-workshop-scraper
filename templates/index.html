@@ -95,7 +95,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
           <option value="ASC">ASC</option>
           <option value="DESC">DESC</option>
         </select>
-        <a href="/api/stats" id="btn-stats" style="flex:0.5">&#x1F4CA;</a>
+        <button id="btn-stats" style="flex:0.5;width:auto;margin:0" title="Statistics">&#x1F4CA;</button>
       </div>
     </div>
     <div id="detail-pane">
@@ -132,6 +132,14 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
   </div>
 </div>
 
+<div id="stats-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;overflow-y:auto;padding:2rem">
+  <div style="max-width:900px;margin:0 auto">
+    <h2>Statistics</h2>
+    <button id="stats-close" class="secondary" style="width:auto;margin-bottom:.75rem">Close</button>
+    <div id="stats-tiers"></div>
+  </div>
+</div>
+
 <style>
 .sub-queue-item { display:flex;align-items:center;gap:.5em;padding:.5em;border-bottom:1px solid var(--pico-muted-border-color); }
 .sub-queue-item .spinner { width:1em;height:1em;border:2px solid var(--pico-muted-border-color);border-top-color:#44aa44;border-radius:50%;animation:spin .6s linear infinite;flex-shrink:0; }
@@ -145,6 +153,18 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .sub-queue-item.failed::before { content:'\2717 '; color:#ff4444; flex-shrink:0; }
 @keyframes spin { to { transform:rotate(360deg); } }
 .translation-notice { color:var(--pico-muted-color);font-style:italic;font-size:.9em;margin:.4em 0; }
+.stats-tier { margin-bottom:1.25rem; }
+.stats-tier h3 { margin-bottom:.35rem; }
+.stats-tier-ms { color:var(--pico-muted-color);font-size:.75em;font-weight:normal; }
+.stats-metric { margin-bottom:.85rem; }
+.stats-metric-label { font-weight:bold; }
+.stats-metric-note { color:var(--pico-muted-color);font-size:.8em;margin-left:.4em; }
+.stats-metric-value { margin-top:.2rem; }
+.stats-stuck { color:#ff6347;font-weight:bold;margin:.2rem 0; }
+.stats-stuck ul { margin:.2rem 0 0 1rem; }
+.stats-metric-value ul { margin:.2rem 0 0 1rem; }
+.stats-metric-value progress { margin:0; }
+.stats-table td, .stats-table th { padding:.15rem .5rem .15rem 0; }
 </style>
 
 <script>
@@ -1007,6 +1027,218 @@ document.getElementById('daemon-restart').onclick = async () => {
   await fetch('/api/daemon/restart', {method:'POST'});
   _refreshDaemonStatus();
 };
+
+// ── Statistics panel ──────────────────────────────────────────────────────
+// The server splits its statistics into tiers; the panel asks for the catalogue
+// first, then draws each tier into its own section as that tier lands, so the
+// cheap numbers are readable while the expensive query is still running.
+const STATS_LABELS = {
+  totals: 'Totals',
+  high_water: 'Last successful API fetch',
+  app_tracking: 'App tracking',
+  status_counts: 'Status counts',
+  coverage: 'Coverage',
+  stuck_work: 'Stuck work',
+  fetch_recency: 'Fetch recency',
+  translation_status: 'Translation status',
+  priority_breakdowns: 'Queue priorities',
+  tag_counts: 'Tags',
+};
+
+let _statsCatalogue = [];
+let _statsPollIv = null;
+let _statsToken = 0;
+
+function _statLabel(name) {
+  return STATS_LABELS[name] || name.replace(/_/g, ' ');
+}
+
+function _fmtTimestamp(ts) {
+  return ts ? new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ') : 'never';
+}
+
+function _renderCoverage(cov) {
+  const total = cov.total || 0;
+  if (!total) return '<p class="stat-label">No live items to cover.</p>';
+  const stages = [
+    ['api_fetched', 'API data'],
+    ['described', 'Description'],
+    ['imaged', 'Image'],
+    ['translated', 'Translation'],
+    ['attributed', 'Creator'],
+  ];
+  const rows = stages.map(function(stage) {
+    const done = cov[stage[0]] || 0;
+    const pct = done / total * 100;
+    return '<tr><td>' + stage[1] + '</td>'
+      + '<td style="white-space:nowrap">' + fmtCount(done) + ' / ' + fmtCount(total) + '</td>'
+      + '<td style="width:45%"><progress value="' + pct.toFixed(1) + '" max="100"></progress></td>'
+      + '<td>' + pct.toFixed(1) + '%</td></tr>';
+  }).join('');
+  return '<p class="stat-label">Progress over ' + fmtCount(total) + ' live items (dead items excluded).</p>'
+    + '<table class="stats-table"><tbody>' + rows + '</tbody></table>';
+}
+
+function _renderStuck(stuck) {
+  const queues = [['web', 'Web scrape'], ['image', 'Image'], ['translation', 'Translation'], ['api', 'API fetch']];
+  let total = 0;
+  queues.forEach(function(q) { total += stuck[q[0]] || 0; });
+  if (!total) return '<p style="color:#44aa44">No dead items are still sitting in a queue.</p>';
+  const items = queues.map(function(q) {
+    return '<li>' + q[1] + ': ' + fmtCount(stuck[q[0]] || 0) + '</li>';
+  }).join('');
+  return '<p class="stats-stuck">&#x26A0; ' + fmtCount(total)
+    + ' dead item(s) are still flagged in a work queue</p>'
+    + '<ul>' + items + '</ul>'
+    + '<p class="stat-label">These rows can never complete; the queues will not drain until they are cleared.</p>';
+}
+
+function _renderTotals(t) {
+  return '<p><b>Alive:</b> ' + fmtCount(t.alive || 0)
+    + ' &nbsp; <b>Dead:</b> ' + fmtCount(t.dead || 0)
+    + ' &nbsp; <span class="stat-label">Total: ' + fmtCount(t.total || 0) + '</span></p>';
+}
+
+function _renderPriority(b) {
+  const queues = [['translation_priority', 'Translation'], ['needs_image', 'Image'], ['needs_web_scrape', 'Web scrape']];
+  return queues.map(function(q) {
+    const rows = b[q[0]] || [];
+    let total = 0;
+    rows.forEach(function(r) { total += r.cnt || 0; });
+    const detail = rows.map(function(r) {
+      return '<li>priority ' + r.prio + ': ' + fmtCount(r.cnt) + '</li>';
+    }).join('');
+    return '<div class="stat-row"><b>' + q[1] + ' queue:</b> ' + fmtCount(total) + ' waiting'
+      + (detail ? '<ul>' + detail + '</ul>' : '') + '</div>';
+  }).join('');
+}
+
+function _renderStatusCounts(rows) {
+  if (!rows || !rows.length) return '<p class="stat-label">(none)</p>';
+  return '<ul>' + rows.map(function(r) {
+    return '<li>Status ' + r.status + ': ' + fmtCount(r.count) + '</li>';
+  }).join('') + '</ul>';
+}
+
+function _renderRecency(r) {
+  return '<ul><li>Fresh: ' + fmtCount(r.fresh || 0) + '</li>'
+    + '<li>Stale: ' + fmtCount(r.stale || 0) + '</li>'
+    + '<li>Never attempted: ' + fmtCount(r.blank || 0) + '</li></ul>';
+}
+
+function _renderTranslation(t) {
+  return '<ul>' + Object.keys(t).map(function(k) {
+    return '<li>' + k + ': ' + fmtCount(t[k]) + '</li>';
+  }).join('') + '</ul>';
+}
+
+function _renderTags(tags) {
+  const names = Object.keys(tags);
+  if (!names.length) return '<p class="stat-label">No tags recorded.</p>';
+  const sorted = names.sort(function(a, b) { return tags[b] - tags[a]; });
+  const top = sorted.slice(0, 15).map(function(name) {
+    return name + ' (' + fmtCount(tags[name]) + ')';
+  }).join(', ');
+  return '<p>' + fmtCount(names.length) + ' distinct tags</p>'
+    + '<p class="stat-label">Most used: ' + top + (sorted.length > 15 ? ', …' : '') + '</p>';
+}
+
+function _renderAppTracking(apps) {
+  if (!apps || !apps.length) return '<p class="stat-label">No tracked applications.</p>';
+  const rows = apps.map(function(a) {
+    return '<tr><td>' + a.appid + '</td><td>' + (a.last_page_scanned || 0) + '</td>'
+      + '<td>' + (a.last_cursor || '') + '</td></tr>';
+  }).join('');
+  return '<table class="stats-table"><thead><tr><th>AppID</th><th>Last page</th><th>Last cursor</th></tr></thead>'
+    + '<tbody>' + rows + '</tbody></table>';
+}
+
+function _renderMetricValue(name, value) {
+  if (value === null || value === undefined) return '<span class="stat-label">failed</span>';
+  if (name === 'totals') return _renderTotals(value);
+  if (name === 'high_water') return '<p>' + _fmtTimestamp(value) + '</p>';
+  if (name === 'coverage') return _renderCoverage(value);
+  if (name === 'stuck_work') return _renderStuck(value);
+  if (name === 'status_counts') return _renderStatusCounts(value);
+  if (name === 'fetch_recency') return _renderRecency(value);
+  if (name === 'translation_status') return _renderTranslation(value);
+  if (name === 'priority_breakdowns') return _renderPriority(value);
+  if (name === 'tag_counts') return _renderTags(value);
+  if (name === 'app_tracking') return _renderAppTracking(value);
+  return '<pre style="white-space:pre-wrap;margin:0">' + JSON.stringify(value) + '</pre>';
+}
+
+function _renderMetric(meta, value) {
+  return '<div class="stats-metric" data-metric="' + meta.name + '">'
+    + '<span class="stats-metric-label">' + _statLabel(meta.name) + '</span>'
+    + '<span class="stats-metric-note">' + (meta.note || '') + '</span>'
+    + '<div class="stats-metric-value">' + _renderMetricValue(meta.name, value) + '</div>'
+    + '</div>';
+}
+
+async function _renderStatsTier(tier, token) {
+  const body = document.querySelector('[data-tier-body="' + tier.tier + '"]');
+  if (!body) return;
+  try {
+    const resp = await fetch('/api/metrics/' + tier.tier);
+    const data = await resp.json();
+    if (token !== _statsToken) return;  // panel closed or reopened while in flight
+    const msEl = document.querySelector('[data-tier-ms="' + tier.tier + '"]');
+    if (msEl) msEl.textContent = 'computed in ' + data.total_ms + ' ms';
+    body.innerHTML = tier.metrics.map(function(m) {
+      return _renderMetric(m, data.values[m.name]);
+    }).join('') || '<p class="stat-label">(no metrics)</p>';
+  } catch(e) {
+    if (token !== _statsToken) return;
+    body.innerHTML = '<p class="stat-label">Failed to load tier: ' + e.message + '</p>';
+  }
+}
+
+async function _openStatsPanel() {
+  const overlay = document.getElementById('stats-overlay');
+  const host = document.getElementById('stats-tiers');
+  overlay.style.display = 'block';
+  host.innerHTML = '<p>Loading…</p>';
+  _statsToken += 1;
+  const token = _statsToken;
+  try {
+    const resp = await fetch('/api/metrics');
+    const cat = await resp.json();
+    if (token !== _statsToken) return;
+    _statsCatalogue = cat.tiers || [];
+    host.innerHTML = _statsCatalogue.map(function(t) {
+      return '<section class="stats-tier" data-tier="' + t.tier + '">'
+        + '<h3 style="text-transform:capitalize">' + t.tier
+        + ' <small class="stats-tier-ms" data-tier-ms="' + t.tier + '"></small></h3>'
+        + '<div class="stats-tier-body" data-tier-body="' + t.tier + '"><p class="stat-label">Computing…</p></div>'
+        + '</section>';
+    }).join('');
+    // Parallel fetches: each tier draws itself as it lands instead of waiting
+    // for the slow tier to finish.
+    await Promise.all(_statsCatalogue.map(function(t) { return _renderStatsTier(t, token); }));
+    if (!_statsPollIv && token === _statsToken) {
+      _statsPollIv = setInterval(_refreshInstantTier, 3000);
+    }
+  } catch(e) {
+    if (token !== _statsToken) return;
+    host.innerHTML = '<p>Failed to load statistics: ' + e.message + '</p>';
+  }
+}
+
+async function _refreshInstantTier() {
+  const tier = _statsCatalogue.filter(function(t) { return t.tier === 'instant'; })[0];
+  if (!tier) return;
+  await _renderStatsTier(tier, _statsToken);
+}
+
+function _closeStatsPanel() {
+  _statsToken += 1;  // discard any tier response still in flight
+  if (_statsPollIv) { clearInterval(_statsPollIv); _statsPollIv = null; }
+  document.getElementById('stats-overlay').style.display = 'none';
+}
+
+document.getElementById('btn-stats').onclick = _openStatsPanel;
+document.getElementById('stats-close').onclick = _closeStatsPanel;
 
 loadState();
 </script>

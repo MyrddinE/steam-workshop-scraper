@@ -1,9 +1,11 @@
 import pytest
-from textual.widgets import Input, ListItem, Static, ListView, Select, Button
+from textual.widgets import Input, ListItem, Static, ListView, Select, Button, DataTable
 from textual.containers import VerticalScroll
 from tests.conftest import ASYNC_PAUSE
-from src.tui import ScraperApp
+from src.tui import ScraperApp, StatsScreen
+from src import metrics
 from unittest.mock import patch, MagicMock
+import time
 
 @pytest.fixture
 def mock_results():
@@ -474,5 +476,113 @@ async def test_tui_detail_priority_applied_once_per_pane_load(mock_config, mock_
             await pilot.pause(ASYNC_PAUSE)
 
             assert mock_api_bump.call_count == 1, "the refresh poll must not re-queue the item"
+
+
+# --------------------------------------------------------------------------
+# stats screen: tiered streaming and per-tier throttle
+# --------------------------------------------------------------------------
+
+#: One fake payload per tier, shaped exactly as `metrics.compute_tier` returns,
+#: so the screen's renderers run for real.
+_FAKE_TIER_VALUES = {
+    metrics.INSTANT: {
+        "totals": {"total": 3, "alive": 2, "dead": 1},
+        "high_water": 1_700_000_000,
+        "app_tracking": [{"appid": 294100, "last_page_scanned": 7, "last_cursor": "abc"}],
+    },
+    metrics.FAST: {
+        "status_counts": [{"status": 200, "count": 2}, {"status": -1, "count": 1}],
+        "coverage": {
+            "total": 2, "api_fetched": 2, "described": 1,
+            "imaged": 1, "translated": 0, "attributed": 1,
+        },
+        "stuck_work": {"web": 1, "image": 0, "translation": 0, "api": 0},
+        "fetch_recency": {"fresh": 1, "stale": 0, "blank": 1},
+    },
+    metrics.SLOW: {
+        "translation_status": {"Translated": 1, "Queued": 1},
+        "priority_breakdowns": {
+            "translation_priority": [{"prio": 5, "cnt": 2}],
+            "needs_image": [],
+            "needs_web_scrape": [{"prio": 10, "cnt": 1}],
+        },
+        "tag_counts": {"Alpha": 2, "Beta": 1},
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_stats_screen_streams_tiers_cheapest_first(mock_config):
+    """Each tier lands in its own widgets, cheapest first, without wiping the rest."""
+    calls = []
+
+    def fake_compute_tier(db_path, tier, params=None):
+        calls.append(tier)
+        return {
+            name: {"value": _FAKE_TIER_VALUES[tier][name], "ms": 1.0, "tier": tier, "note": "fake"}
+            for name in metrics.names_in(tier)
+        }
+
+    with patch('src.tui.load_config', return_value=mock_config), \
+         patch('src.tui.metrics.compute_tier', side_effect=fake_compute_tier):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+            app.push_screen(StatsScreen(app.db_path))
+            await pilot.pause(ASYNC_PAUSE)
+            screen = app.screen
+
+            for _ in range(100):
+                await pilot.pause(0.02)
+                if metrics.SLOW in screen._tier_cost:
+                    break
+
+            assert calls[:3] == [metrics.INSTANT, metrics.FAST, metrics.SLOW], \
+                "tiers must be computed cheapest first"
+
+            # The instant and fast sections survive the slow tier's arrival.
+            totals = str(screen.query_one("#totals-content", Static).render())
+            assert "Live items" in totals and "2" in totals
+            coverage = str(screen.query_one("#coverage-content", Static).render())
+            assert "API data" in coverage and "100.0%" in coverage
+            stuck = str(screen.query_one("#stuck-content", Static).render())
+            assert "dead item(s) are still flagged" in stuck
+            assert "Web scrape" in stuck
+            translation = str(screen.query_one("#translation-stats-content", Static).render())
+            assert "Translated" in translation
+            priority = str(screen.query_one("#priority-stats-content", Static).render())
+            assert "Translation queue" in priority and "waiting" in priority
+
+            costs = str(screen.query_one("#tier-costs", Static).render())
+            assert metrics.SLOW in costs and "ms" in costs, \
+                "the screen must report what the slow tier cost"
+
+            assert screen.query_one("#app-stats-table", DataTable).row_count == 1
+            assert screen.query_one("#tag-stats-table", DataTable).row_count == 2
+
+
+def test_stats_refresh_is_per_tier_not_global(monkeypatch):
+    """A slow tier's long interval must not hold back a cheap, overdue tier."""
+    screen = StatsScreen("unused.db")
+    started = []
+    monkeypatch.setattr(screen, "_start_tier", lambda tier: started.append(tier))
+    now = time.monotonic()
+    screen._tier_interval = {metrics.INSTANT: 2.0, metrics.FAST: 2.0, metrics.SLOW: 600.0}
+    screen._tier_last = {
+        metrics.INSTANT: now - 3.0,  # due on its own 2 s interval
+        metrics.FAST: now,           # not due
+        metrics.SLOW: now - 3.0,     # overdue by wall clock, but its own interval is 10 min
+    }
+
+    screen._refresh_due_tiers()
+
+    assert started == [metrics.INSTANT]
+
+
+def test_tier_interval_scales_with_that_tiers_own_cost():
+    screen = StatsScreen("unused.db")
+    assert screen._interval_for(10) == screen.MIN_REFRESH_SECONDS
+    assert screen._interval_for(100) == pytest.approx(5.0)     # 100 ms x 50
+    assert screen._interval_for(2000) == pytest.approx(100.0)  # 2 s x 50
 
 

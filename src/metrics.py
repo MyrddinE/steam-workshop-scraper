@@ -25,7 +25,7 @@ they feel:
 Tier         Cost            Members
 ===========  ==============  ==========================================
 ``instant``  under 10 ms     totals, high-water mark, app tracking
-``fast``     50-80 ms        status counts, fetch recency
+``fast``     50-80 ms        status counts, fetch recency, coverage, stuck work
 ``slow``     hundreds of ms  translation status, priority mix, tags
 ===========  ==============  ==========================================
 """

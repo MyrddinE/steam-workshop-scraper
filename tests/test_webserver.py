@@ -6,6 +6,7 @@ import subprocess
 import lxml.html
 from src.webserver import app, init_webserver
 from src.database import initialize_database, insert_or_update_item, normalize_tags, get_image_subdirs, get_connection
+from src import metrics
 
 
 @pytest.fixture
@@ -249,6 +250,83 @@ def test_stats(web_client):
     data = json.loads(resp.data)
     assert "status_counts" in data
     assert "translation_status" in data
+
+
+# --------------------------------------------------------------------------
+# metrics endpoints and the statistics panel
+# --------------------------------------------------------------------------
+
+
+def test_metrics_catalogue_lists_tiers_cheapest_first(web_client):
+    """The panel draws its layout from this, so order and names must match."""
+    client, _ = web_client
+    resp = client.get('/api/metrics')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert [t["tier"] for t in data["tiers"]] == list(metrics.TIERS)
+    for entry in data["tiers"]:
+        assert [m["name"] for m in entry["metrics"]] == metrics.names_in(entry["tier"])
+        assert all(m["note"] for m in entry["metrics"]), \
+            "a metric reached the client with no note"
+
+
+def test_metrics_tier_returns_values_and_per_metric_costs(web_client):
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "x", "status": 200})
+
+    resp = client.get('/api/metrics/fast')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["tier"] == metrics.FAST
+    assert set(data["values"]) == set(metrics.names_in(metrics.FAST))
+    assert set(data["ms"]) == set(metrics.names_in(metrics.FAST))
+    assert data["total_ms"] == round(sum(data["ms"].values()), 1)
+    assert data["values"]["coverage"]["total"] == 1
+
+
+def test_metrics_instant_tier_does_not_run_slow_metrics(web_client, monkeypatch):
+    """The point of the split: asking for the cheap tier must not pay for tags."""
+    client, _ = web_client
+    ran = []
+
+    def spy(conn, params):
+        ran.append(True)
+        return {}
+
+    monkeypatch.setitem(
+        metrics.REGISTRY, "tag_counts",
+        metrics.Metric(name="tag_counts", tier=metrics.SLOW, note="spy", run=spy),
+    )
+
+    resp = client.get('/api/metrics/instant')
+    assert resp.status_code == 200
+    assert set(resp.get_json()["values"]) == set(metrics.names_in(metrics.INSTANT))
+    assert ran == [], "the instant tier ran a slow metric"
+
+
+def test_metrics_unknown_tier_is_a_404(web_client):
+    client, _ = web_client
+    resp = client.get('/api/metrics/banana')
+    assert resp.status_code == 404
+    assert "banana" in resp.get_json()["error"]
+
+
+def test_stats_button_opens_a_panel_instead_of_navigating(web_client):
+    """The affordance keeps its id and place, but it is no longer a link to JSON."""
+    client, _ = web_client
+    doc = lxml.html.fromstring(client.get('/').data.decode())
+
+    buttons = doc.xpath('//*[@id="btn-stats"]')
+    assert len(buttons) == 1, "expected exactly one #btn-stats"
+    assert buttons[0].tag == "button", "the stats affordance must not navigate away"
+    assert not buttons[0].get("href"), "the stats button still points at /api/stats"
+
+    overlay = doc.xpath('//*[@id="stats-overlay"]')
+    assert overlay, "missing #stats-overlay"
+    assert doc.xpath('//*[@id="stats-tiers"]')[0] in overlay[0].iterdescendants(), \
+        "#stats-tiers must live inside the overlay"
+    assert doc.xpath('//*[@id="stats-close"]')[0] in overlay[0].iterdescendants(), \
+        "the panel needs a close control"
 
 
 def test_analysis(web_client):
