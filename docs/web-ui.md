@@ -93,6 +93,14 @@ Stats are in a single-column vertical layout (`.stat-row`), not the previous two
 
 ---
 
+## Daemon Panel
+
+The header toolbar's **Daemon** button (`#btn-daemon`) opens `#daemon-overlay`, a modal panel with the running status and PID, Start / Stop / Restart buttons, and a live log view (`#daemon-log`).
+
+While the panel is open, `_refreshDaemonStatus` polls `/api/daemon` and `_pollDaemonLog` polls `/api/daemon/log?since=<byte-offset>` every 2 seconds. The offset is the byte position returned by the previous response, so each poll transfers only new lines; a `reset: true` response means the log was rotated or truncated and the view restarts from the top. `_closeDaemonPanel` clears the interval, so nothing polls while the panel is hidden.
+
+---
+
 ## Subscribe Feature
 
 ### Userscript Bridge (`userscripts/steam_subscribe.user.js`)
@@ -181,6 +189,18 @@ Accepts sessionid from the userscript. Stores it in the `_sessionid` global (for
 ### `/api/stats`, `/api/tags`, `/api/authors`, `/api/analysis`
 
 Read-only endpoints returning database statistics.
+
+### `/api/daemon` — GET
+
+Daemon status: `{running, pid, log_file}`, where `log_file` is the configured `logging.file` path or null.
+
+### `/api/daemon/start`, `/api/daemon/stop`, `/api/daemon/restart` — POST
+
+Drive the background daemon through the shared `DaemonController`. Each returns `{ok, changed, message}`; starting a running daemon or stopping a stopped one is an idempotent no-op that still reports success.
+
+### `/api/daemon/log` — GET
+
+Incremental log tail. Accepts `since=<byte-offset>` and returns `{lines, offset, reset}`. `offset` is the byte position to pass as `since` on the next poll. `reset` is true when the file shrank (rotation or truncation), in which case `lines` starts from the beginning. A missing or unreadable log returns an empty list rather than an error.
 
 ### `/userscript/<file>` — dynamic script injection
 

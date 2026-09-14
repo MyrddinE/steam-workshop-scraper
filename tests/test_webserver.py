@@ -440,3 +440,115 @@ def test_api_sub_failures_empty(web_client):
     failures = client.get('/api/sub_failures').get_json()
     assert failures == []
 
+
+# ── Daemon control routes ────────────────────────────────────────────────────
+
+class _FakeDaemonController:
+    """Records route calls without ever touching a real process."""
+
+    def __init__(self, status=None, log_file=None, tail=None):
+        self._status = status or {"running": False, "pid": None}
+        self._log_file = log_file
+        self._tail = tail or {"lines": [], "offset": 0, "reset": False}
+        self.calls = []
+
+    def status(self):
+        return dict(self._status)
+
+    def log_file(self):
+        return self._log_file
+
+    def start(self):
+        self.calls.append("start")
+        return True, "Daemon started (PID: 123)"
+
+    def stop(self):
+        self.calls.append("stop")
+        return True, "Daemon stopped"
+
+    def restart(self):
+        self.calls.append("restart")
+        return True, "Daemon started (PID: 123)"
+
+    def tail_log(self, since=0):
+        self.calls.append(("log", since))
+        return dict(self._tail)
+
+
+@pytest.fixture
+def daemon_client(tmp_path):
+    db_path = str(tmp_path / "test_daemon_web.db")
+    initialize_database(db_path)
+    fake = _FakeDaemonController(status={"running": True, "pid": 123}, log_file="/tmp/daemon.log")
+    init_webserver(db_path, {"database": {"path": db_path}}, daemon_controller=fake)
+    return app.test_client(), fake
+
+
+def test_daemon_panel_and_toolbar_control_are_present(web_client):
+    client, _ = web_client
+    doc = lxml.html.fromstring(client.get('/').data.decode())
+    assert doc.xpath('//*[@id="btn-daemon"]'), "toolbar control for the daemon panel is missing"
+    assert doc.xpath('//*[@id="daemon-overlay"]'), "daemon panel is missing"
+    assert doc.xpath('//*[@id="daemon-status"]'), "daemon status line is missing"
+    assert doc.xpath('//*[@id="daemon-log"]'), "daemon log view is missing"
+
+
+def test_daemon_status_route(daemon_client):
+    client, fake = daemon_client
+    resp = client.get('/api/daemon')
+    assert resp.status_code == 200
+    assert resp.get_json() == {"running": True, "pid": 123, "log_file": "/tmp/daemon.log"}
+
+
+def test_daemon_start_stop_restart_routes(daemon_client):
+    client, fake = daemon_client
+    for route in ('/api/daemon/start', '/api/daemon/stop', '/api/daemon/restart'):
+        resp = client.post(route)
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["ok"] is True
+        assert "message" in body
+    assert fake.calls == ["start", "stop", "restart"]
+
+
+def test_daemon_log_route_passes_offset(daemon_client):
+    client, fake = daemon_client
+    fake._tail = {"lines": ["a line"], "offset": 9, "reset": False}
+    resp = client.get('/api/daemon/log?since=5')
+    assert resp.status_code == 200
+    assert resp.get_json() == {"lines": ["a line"], "offset": 9, "reset": False}
+    assert ("log", 5) in fake.calls
+
+
+def test_daemon_log_route_reads_configured_file_incrementally(tmp_path):
+    db_path = str(tmp_path / "test_daemon_log.db")
+    initialize_database(db_path)
+    log_path = tmp_path / "daemon.log"
+    log_path.write_text("hello\nworld\n")
+    config = {"database": {"path": db_path}, "logging": {"file": str(log_path)}}
+    init_webserver(db_path, config)
+    client = app.test_client()
+
+    first = client.get('/api/daemon/log?since=0').get_json()
+    assert first["lines"] == ["hello", "world"]
+    assert first["reset"] is False
+
+    with open(log_path, "a") as f:
+        f.write("again\n")
+    second = client.get(f"/api/daemon/log?since={first['offset']}").get_json()
+    assert second["lines"] == ["again"]
+    assert second["reset"] is False
+
+
+def test_daemon_log_route_missing_file_returns_empty(tmp_path):
+    db_path = str(tmp_path / "test_daemon_missing_log.db")
+    initialize_database(db_path)
+    config = {"database": {"path": db_path}, "logging": {"file": str(tmp_path / "missing.log")}}
+    init_webserver(db_path, config)
+    client = app.test_client()
+
+    resp = client.get('/api/daemon/log?since=0')
+    assert resp.status_code == 200
+    assert resp.get_json() == {"lines": [], "offset": 0, "reset": False}
+
+

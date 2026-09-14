@@ -10,6 +10,7 @@ from flask import Flask, request, jsonify, render_template, send_from_directory
 from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, get_queued_items, FILTER_SCHEMA, bump_api_priority_for_detail
 from src.analysis import view_window_analysis
 from src.config import login_secure_value, save_config
+from src.daemon_control import DaemonController
 
 app = Flask(__name__, template_folder='../templates')
 app.config['TEMPLATES_AUTO_RELOAD'] = True
@@ -18,14 +19,26 @@ _config = {}
 _images_dir = "images"
 _sessionid = ""
 _config_path = "config.yaml"
+_daemon_controller = None
 
 
-def init_webserver(db_path: str, config: dict, config_path: str = "config.yaml"):
-    global _db_path, _config, _images_dir, _config_path
+def init_webserver(db_path: str, config: dict, config_path: str = "config.yaml",
+                   daemon_controller: DaemonController | None = None):
+    global _db_path, _config, _images_dir, _config_path, _daemon_controller
     _db_path = db_path
     _config = config
     _config_path = config_path
     _images_dir = os.path.join(os.path.dirname(os.path.abspath(db_path)), "images")
+    # A controller passed by the TUI is shared with its daemon manager; used
+    # standalone, this module builds its own from the config path.
+    _daemon_controller = daemon_controller or DaemonController(config_path, config=config)
+
+
+def _get_daemon_controller() -> DaemonController:
+    global _daemon_controller
+    if _daemon_controller is None:
+        _daemon_controller = DaemonController(_config_path, config=_config)
+    return _daemon_controller
 
 
 def _bbcode_to_html(text):
@@ -541,3 +554,35 @@ def api_resume():
     except FileNotFoundError:
         pass
     return jsonify({"ok": True})
+
+
+@app.route('/api/daemon')
+def api_daemon():
+    controller = _get_daemon_controller()
+    status = controller.status()
+    status["log_file"] = controller.log_file()
+    return jsonify(status)
+
+
+@app.route('/api/daemon/start', methods=['POST'])
+def api_daemon_start():
+    changed, message = _get_daemon_controller().start()
+    return jsonify({"ok": True, "changed": changed, "message": message})
+
+
+@app.route('/api/daemon/stop', methods=['POST'])
+def api_daemon_stop():
+    changed, message = _get_daemon_controller().stop()
+    return jsonify({"ok": True, "changed": changed, "message": message})
+
+
+@app.route('/api/daemon/restart', methods=['POST'])
+def api_daemon_restart():
+    changed, message = _get_daemon_controller().restart()
+    return jsonify({"ok": True, "changed": changed, "message": message})
+
+
+@app.route('/api/daemon/log')
+def api_daemon_log():
+    since = request.args.get('since', 0, type=int) or 0
+    return jsonify(_get_daemon_controller().tail_log(since))

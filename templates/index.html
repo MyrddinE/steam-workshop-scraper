@@ -59,7 +59,10 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 <body>
 <header>
   <h1 style="margin:0;font-size:1.2rem">Workshop Scraper</h1>
-  <span id="port-display"></span>
+  <span style="display:flex;align-items:center;gap:.5rem">
+    <button id="btn-daemon" style="padding:.2rem .6rem;font-size:.8rem;width:auto;margin:0">&#x2699; Daemon</button>
+    <span id="port-display"></span>
+  </span>
 </header>
 <main>
   <div id="results-pane">
@@ -104,6 +107,20 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
     </div>
   </div>
 </main>
+
+<div id="daemon-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;overflow-y:auto;padding:2rem">
+  <div style="max-width:700px;margin:0 auto">
+    <h2>Daemon</h2>
+    <p id="daemon-status" style="color:var(--pico-muted-color)">Loading...</p>
+    <div style="display:flex;gap:.5rem;margin-bottom:.75rem">
+      <button id="daemon-start" style="width:auto">Start</button>
+      <button id="daemon-stop" style="width:auto">Stop</button>
+      <button id="daemon-restart" style="width:auto">Restart</button>
+      <button id="daemon-close" class="secondary" style="width:auto">Close</button>
+    </div>
+    <pre id="daemon-log" style="height:50vh;overflow-y:auto;padding:.5rem;border:1px solid var(--pico-muted-border-color);border-radius:4px;font-size:.75rem;white-space:pre-wrap"></pre>
+  </div>
+</div>
 
 <div id="sub-queue-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;overflow-y:auto;padding:2rem">
   <div style="max-width:600px;margin:0 auto">
@@ -885,6 +902,76 @@ document.getElementById('sub-clear-failed').onclick = () => {
     if (wid) fetch('/api/subscribed/' + wid, {method:'POST'});
     row.classList.add('done');
   });
+};
+
+// ── Daemon control ────────────────────────────────────────────────────────
+let _daemonPollIv = null;
+let _daemonLogOffset = 0;
+
+async function _refreshDaemonStatus() {
+  try {
+    const resp = await fetch('/api/daemon');
+    const st = await resp.json();
+    const el = document.getElementById('daemon-status');
+    if (!el) return;
+    const log = st.log_file ? ' — log: ' + st.log_file : '';
+    el.textContent = (st.running ? 'Running (PID: ' + st.pid + ')' : 'Not running') + log;
+  } catch(e) { console.debug('Daemon status poll error', e); /* keep polling */ }
+}
+
+async function _pollDaemonLog() {
+  const pre = document.getElementById('daemon-log');
+  if (!pre) return;
+  try {
+    const resp = await fetch('/api/daemon/log?since=' + _daemonLogOffset);
+    const data = await resp.json();
+    if (data.reset) {
+      // The log was rotated or truncated: drop what we had and start over.
+      pre.textContent = '';
+      _daemonLogOffset = 0;
+    }
+    if (data.lines && data.lines.length) {
+      pre.textContent += data.lines.join('\n') + '\n';
+      const kept = pre.textContent.split('\n');
+      if (kept.length > 500) pre.textContent = kept.slice(-500).join('\n');
+      pre.scrollTop = pre.scrollHeight;
+    }
+    if (typeof data.offset === 'number') _daemonLogOffset = data.offset;
+  } catch(e) { console.debug('Daemon log poll error', e); /* keep polling */ }
+}
+
+function _openDaemonPanel() {
+  document.getElementById('daemon-overlay').style.display = 'block';
+  _daemonLogOffset = 0;
+  const pre = document.getElementById('daemon-log');
+  if (pre) pre.textContent = '';
+  _refreshDaemonStatus();
+  _pollDaemonLog();
+  if (!_daemonPollIv) {
+    _daemonPollIv = setInterval(() => { _refreshDaemonStatus(); _pollDaemonLog(); }, 2000);
+  }
+}
+
+function _closeDaemonPanel() {
+  // Release the poll timer when the panel closes; it is the only thing keeping
+  // the daemon routes hot while the panel is hidden.
+  if (_daemonPollIv) { clearInterval(_daemonPollIv); _daemonPollIv = null; }
+  document.getElementById('daemon-overlay').style.display = 'none';
+}
+
+document.getElementById('btn-daemon').onclick = _openDaemonPanel;
+document.getElementById('daemon-close').onclick = _closeDaemonPanel;
+document.getElementById('daemon-start').onclick = async () => {
+  await fetch('/api/daemon/start', {method:'POST'});
+  _refreshDaemonStatus();
+};
+document.getElementById('daemon-stop').onclick = async () => {
+  await fetch('/api/daemon/stop', {method:'POST'});
+  _refreshDaemonStatus();
+};
+document.getElementById('daemon-restart').onclick = async () => {
+  await fetch('/api/daemon/restart', {method:'POST'});
+  _refreshDaemonStatus();
 };
 
 loadState();

@@ -118,11 +118,17 @@ After populating tag stats, `compact_tag_ids` is called with the frequency data 
 
 ## Daemon Management
 
-### `DaemonManagerScreen`
+### `DaemonController` (`src/daemon_control.py:21`)
 
-Allows starting, stopping, and restarting the daemon process from within the TUI. Uses `subprocess.Popen` with platform-specific flags (DETACHED_PROCESS on Windows, DEVNULL redirects on Linux). Stores the Popen reference for status checking via `poll()` and graceful shutdown.
+Owns the daemon process for both UIs: `start`, `stop`, `restart`, `status`, `read_pid`, `is_running` and `tail_log`. It launches `python -m src.daemon_runner <config> --daemon` detached (`DETACHED_PROCESS` on Windows, `DEVNULL` stdio elsewhere) and keeps the Popen handle (`DaemonController.proc`) for liveness and forced shutdown.
 
-The screen previously had a live log tail (via `tail -f` on Unix), but it's disabled due to performance issues with large log files.
+The PID-file protocol is unchanged. On Unix, stop sends SIGTERM then deletes `.daemon.pid`; on Windows it deletes the file. Either way it waits up to 15 s for exit, then escalates (Popen terminate/kill, `TerminateProcess` via ctypes on Windows, SIGKILL on Unix). `start` while running and `stop` while stopped are idempotent no-ops.
+
+### `DaemonManagerScreen` (`src/tui.py:282`)
+
+Allows starting, stopping, and restarting the daemon process from within the TUI. It no longer holds the process logic; every button delegates to the app's single `DaemonController` (`src/tui.py:1152`), which is the same instance handed to the embedded web server, so a start or stop from either UI is visible to the other. The status text and `PID: n` display read through `DaemonController.status()`.
+
+The screen previously had a live log tail (via `tail -f` on Unix), but it's disabled due to performance issues with large log files. The web UI's daemon panel reads the same log incrementally through `/api/daemon/log`.
 
 ---
 
