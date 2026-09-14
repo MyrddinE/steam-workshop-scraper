@@ -216,9 +216,19 @@ def _detail_payload(workshop_id):
     if not item:
         return None
 
-    desc = item.get("extended_description_en") or item.get("extended_description") or ""
-    item["description_html"] = _bbcode_to_html(desc)
+    # Both language variants travel together so the client can switch between
+    # them without another request. The TUI's toggle is a local re-render, and
+    # shipping the pair keeps the web equivalent off the network as well.
+    item["description_html"] = _bbcode_to_html(
+        item.get("extended_description_en") or item.get("extended_description") or "")
+    item["description_html_original"] = _bbcode_to_html(item.get("extended_description") or "")
     item["display_title"] = item.get("title_en") or item.get("title") or "N/A"
+    item["display_title_original"] = item.get("title") or item.get("title_en") or "N/A"
+    # The TUI offers the toggle only once a translation has been stored, so the
+    # client is told outright rather than inferring it from a possibly-empty
+    # string: an item can have a translated field that is identical to the
+    # original, and `translate_version` is what actually marks it as translated.
+    item["has_translation"] = bool(item.get("translate_version"))
     return item
 
 

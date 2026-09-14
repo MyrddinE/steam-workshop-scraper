@@ -440,3 +440,64 @@ def test_api_sub_failures_empty(web_client):
     failures = client.get('/api/sub_failures').get_json()
     assert failures == []
 
+
+def test_detail_payload_ships_both_language_variants(web_client):
+    """Both variants travel together so the toggle needs no second request.
+
+    The TUI switches between translated and original with a local re-render.
+    Shipping only the translated field, as this route used to, made the
+    original unreachable from the web UI at all.
+    """
+    client, db_path = web_client
+    insert_or_update_item(db_path, {
+        "workshop_id": 77, "title": "Original Title", "title_en": "Translated Title",
+        "extended_description": "[b]Original[/b]",
+        "extended_description_en": "[b]Translated[/b]",
+        "translate_version": 12345, "status": 200,
+    })
+
+    data = client.get('/api/item/77').get_json()
+    assert data["display_title"] == "Translated Title"
+    assert data["display_title_original"] == "Original Title"
+    assert "<b>Translated</b>" in data["description_html"]
+    assert "<b>Original</b>" in data["description_html_original"]
+    assert data["has_translation"] is True
+
+
+def test_detail_payload_without_a_translation_offers_no_toggle(web_client):
+    """An untranslated item reports no translation, matching the TUI.
+
+    With nothing translated the variants must coincide rather than the original
+    being empty, so the client still has something to render.
+    """
+    client, db_path = web_client
+    insert_or_update_item(db_path, {
+        "workshop_id": 78, "title": "Only Original",
+        "extended_description": "[b]Nur Original[/b]", "status": 200,
+    })
+
+    data = client.get('/api/item/78').get_json()
+    assert data["has_translation"] is False
+    assert data["display_title_original"] == "Only Original"
+    assert data["description_html_original"] == data["description_html"]
+
+
+def test_detail_translation_flag_follows_translate_version(web_client):
+    """`has_translation` keys off translate_version, not off translated text.
+
+    A field can carry text identical to the original, or carry text with no
+    recorded revision. Only translate_version marks an item as translated, and
+    that is the test the TUI's toggle uses too.
+    """
+    client, db_path = web_client
+    insert_or_update_item(db_path, {
+        "workshop_id": 80, "title": "Same", "title_en": "Same",
+        "translate_version": 0, "status": 200,
+    })
+    assert client.get('/api/item/80').get_json()["has_translation"] is False
+
+    insert_or_update_item(db_path, {
+        "workshop_id": 81, "title": "A", "translate_version": 5, "status": 200,
+    })
+    assert client.get('/api/item/81').get_json()["has_translation"] is True
+
