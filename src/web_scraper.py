@@ -50,29 +50,41 @@ def _firefox_user_agent() -> str:
 USER_AGENT = _firefox_user_agent()
 
 
-def _module_available(name: str) -> bool:
-    """Whether a codec module can actually be imported in this interpreter."""
-    try:
-        __import__(name)
-    except ImportError:
-        return False
-    return True
+def _urllib3_accept_encoding() -> str:
+    """What the installed urllib3 is actually able to decompress.
+
+    Isolated in a function of its own so the gate below can be tested without
+    the decoder modules being installed on the test machine.
+    """
+    from urllib3 import response as urllib3_response
+    from urllib3.util.request import ACCEPT_ENCODING
+
+    encodings = [part.strip() for part in ACCEPT_ENCODING.split(",") if part.strip()]
+    # urllib3 1.x leaves brotli out of ACCEPT_ENCODING even though it does decode
+    # it when the module is importable, so honour that rather than under-report.
+    if "br" not in encodings and getattr(urllib3_response, "brotli", None) is not None:
+        encodings.append("br")
+    return ", ".join(encodings)
 
 
 def _accept_encoding() -> str:
-    """`Accept-Encoding` restricted to codecs this interpreter can decode.
+    """`Accept-Encoding` restricted to codecs this stack can actually decode.
 
-    `gzip` and `deflate` are always available. `br` and `zstd` are advertised
-    only when their decoder is importable, because offering a codec nothing here
-    can decode would leave compressed bytes in `response.text` -- a body that
-    looks broken for a reason unrelated to the page. No new dependency is added;
-    this reports what the environment already has.
+    Asking urllib3 rather than probing for the decoder modules is the point: a
+    decoder can be installed and still be unusable by the urllib3 in use. urllib3
+    1.x has no zstd support at all, so advertising `zstd` merely because
+    `zstandard` imports would leave compressed bytes in `response.text` — a body
+    that looks broken for a reason unrelated to the page. urllib3 computes its own
+    list from what it supports, so it is right for whichever version is
+    installed. No dependency is added; this only reports what is already there.
     """
-    encodings = ["gzip", "deflate"]
-    if _module_available("brotli") or _module_available("brotlicffi"):
-        encodings.append("br")
-    if _module_available("zstandard"):
-        encodings.append("zstd")
+    encodings = [
+        part.strip() for part in _urllib3_accept_encoding().split(",") if part.strip()
+    ]
+    # These two are unconditional: every urllib3 decodes them.
+    for required in ("gzip", "deflate"):
+        if required not in encodings:
+            encodings.append(required)
     return ", ".join(encodings)
 
 

@@ -6,7 +6,7 @@ the request was measurably not what a browser sends — Chrome UA beside Firefox
 cookies, `Accept: */*`, no fetch metadata, a fresh session per call — so making
 it browser-faithful is right either way. These tests pin the browser shape: the
 header set from the HAR capture, the profile's whole cookie set, one reused
-session, and an `Accept-Encoding` that only offers codecs this interpreter can
+session, and an `Accept-Encoding` that only offers codecs this stack can actually
 decode.
 """
 
@@ -179,46 +179,53 @@ def test_both_request_sites_share_one_session(monkeypatch):
 
 
 # --- Accept-Encoding only offers decodable codecs ---------------------------
-
-def _deny_codec_imports(monkeypatch):
-    real_import = builtins.__import__
-
-    def fake_import(name, *args, **kwargs):
-        if name in {"brotli", "brotlicffi", "zstandard"}:
-            raise ImportError(name)
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
+#
+# The gate asks urllib3 what it can decompress rather than probing for the
+# decoder modules. A module can be installed and still be useless to the urllib3
+# in use -- urllib3 1.x has no zstd decoder at all -- and advertising a codec
+# that is never decompressed leaves compressed bytes in `response.text`.
 
 
-def test_accept_encoding_falls_back_to_gzip_and_deflate(monkeypatch):
-    _deny_codec_imports(monkeypatch)
-    assert web_scraper._accept_encoding() == "gzip, deflate"
+def _encodings(monkeypatch, urllib3_reports: str) -> list[str]:
+    monkeypatch.setattr(web_scraper, "_urllib3_accept_encoding", lambda: urllib3_reports)
+    return [e.strip() for e in web_scraper._accept_encoding().split(",")]
 
 
-def test_accept_encoding_advertises_only_importable_codecs(monkeypatch):
-    monkeypatch.setitem(sys.modules, "brotli", types.ModuleType("brotli"))
+def test_accept_encoding_always_offers_gzip_and_deflate(monkeypatch):
+    encodings = _encodings(monkeypatch, "gzip,deflate")
+    assert "gzip" in encodings
+    assert "deflate" in encodings
+
+
+def test_accept_encoding_never_offers_a_codec_urllib3_cannot_decode(monkeypatch):
+    """Regression: an importable `zstandard` is not evidence urllib3 can use it."""
     monkeypatch.setitem(sys.modules, "zstandard", types.ModuleType("zstandard"))
-    encoding = web_scraper._accept_encoding()
-    assert "br" in encoding
-    assert "zstd" in encoding
+    assert "zstd" not in _encodings(monkeypatch, "gzip,deflate")
 
 
-def test_br_is_offered_without_zstd(monkeypatch):
-    """Each codec is decided on its own; one missing decoder drops only itself."""
-    real_import = builtins.__import__
+def test_accept_encoding_carries_brotli_when_urllib3_reports_it(monkeypatch):
+    encodings = _encodings(monkeypatch, "gzip,deflate,br")
+    assert "br" in encodings
+    assert "zstd" not in encodings
 
-    def deny_zstd(name, *args, **kwargs):
-        if name == "zstandard":
-            raise ImportError(name)
-        return real_import(name, *args, **kwargs)
 
-    monkeypatch.setitem(sys.modules, "brotli", types.ModuleType("brotli"))
-    monkeypatch.setattr(builtins, "__import__", deny_zstd)
+def test_accept_encoding_passes_through_whatever_urllib3_supports(monkeypatch):
+    """Nothing is filtered out; if urllib3 can do it, we may ask for it."""
+    assert _encodings(monkeypatch, "gzip, deflate, br, zstd") == [
+        "gzip", "deflate", "br", "zstd",
+    ]
 
-    encoding = web_scraper._accept_encoding()
-    assert "br" in encoding
-    assert "zstd" not in encoding
+
+def test_the_real_urllib3_gate_names_only_codecs_this_stack_decodes():
+    """The live probe, not a stubbed one: the answer must be usable as-is."""
+    from urllib3.util.request import ACCEPT_ENCODING
+
+    supported = {e.strip() for e in ACCEPT_ENCODING.split(",") if e.strip()}
+    supported.add("br")  # urllib3 1.x decodes brotli without listing it
+    for encoding in web_scraper._accept_encoding().split(","):
+        assert encoding.strip() in supported, (
+            f"{encoding!r} is advertised but urllib3 cannot decode it here"
+        )
 
 
 # --- the User-Agent tracks the profile --------------------------------------
