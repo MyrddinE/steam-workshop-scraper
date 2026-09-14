@@ -93,9 +93,23 @@ A fixed 3-second poll on the currently-selected detail item. Checks `translation
 
 ### `renderDetail`
 
-Builds the detail view HTML inline. Shows: title (linked to Steam), creator, workshop ID, Wilson scores (color-coded), created date, file size (color-coded), updated date (if different from created), views (via `fmtCount`), subscriptions/favorites (current/lifetime via `fmtCount`), tags (comma-separated from junction table or legacy JSON), Open on Steam link, Subscribe button, and description text (BBCode-to-HTML converted server-side).
+Builds the detail view HTML inline. Shows: title (linked to Steam), creator (a jump-to-author button), workshop ID, Wilson scores (color-coded), created date, file size (color-coded), updated date (if different from created), views (via `fmtCount`), subscriptions/favorites (current/lifetime via `fmtCount`), tags (comma-separated from junction table or legacy JSON), Queue/Unqueue and Subscribe buttons, and description text (BBCode-to-HTML converted server-side).
 
 Stats are in a single-column vertical layout (`.stat-row`), not the previous two-column grid.
+
+### Jump to author
+
+The creator in the heading is a button, the web equivalent of the TUI's `btn-jump-author`. It calls `jumpToAuthor(creatorId)`, which sets an ordinary `Author ID` / `is` filter row through `addRow` and re-runs the search — the same field, operator and value the TUI's jump builds. If the builder already holds an Author ID row, that row is switched to `is` instead of a second, contradictory one being added.
+
+There is deliberately **no single-creator mode and no Return button**. The TUI needs them because its jump replaces a fixed set of rows and cannot undo that; the web builder is always visible and its rows are individually removable, so deleting the author row and searching again restores the previous view. That also means no in-memory filter snapshot has to survive a detail re-render.
+
+`creatorId` comes from the payload's `creator_id`, which is a string. A SteamID64 is seventeen digits — beyond the range a JavaScript number represents exactly — so a numeric field would round in `JSON.parse` and the filter would name a different account (`src/webserver.py`, `_detail_payload`). An item with no creator renders the name plainly and offers no jump.
+
+`/api/authors` (the full author list) is still not consumed: a single jump needs only the one ID already in the payload, and an author picker was out of scope, so no request was added for it.
+
+### Queue / unqueue
+
+`renderDetail` shows one button whose label follows `item.is_queued_for_subscription`, mirroring the TUI's `btn-queue-sub` / `btn-unqueue-sub` pair. `toggleDetailQueue(wid)` POSTs the existing `/api/toggle_sub/<id>` route, which flips the database flag and answers only `{ok: true}`. Since the route does not report which way the flag moved, the client reads the item back through the read-only `/api/item/<id>` route and re-renders from that payload, and updates the matching grid cell's `queued` star as the `s` shortcut does. A read-back rather than a locally flipped guess is deliberate: the `s` shortcut and the subscribe drain's `/api/subscribed` calls change the same flag behind the pane's back, so a guess could label the button with the wrong next action. Rendering from the item payload is also what lets the 3-second translation poll re-render the pane without reverting the toggle. A failed request alerts and leaves the pane alone.
 
 ### Translated and original text
 
@@ -228,7 +242,7 @@ Main search endpoint. Accepts `{filters, sort_by, sort_order, offset, limit}`. S
 
 Read-only detail fetch. Returns full item data with the BBCode-to-HTML converted description. It applies no priority bumps by design: the detail pane polls this every three seconds while it is open, and applying detail priority here re-armed the fetch queue on every poll, so the daemon re-fetched whatever was on screen indefinitely.
 
-Both language variants are returned — `description_html` beside `description_html_original`, and `display_title` beside `display_title_original` — so the client's toggle costs no request. The payload also carries `has_translation` (whether `translate_version` is set) so the client does not have to infer it from the text.
+Both language variants are returned — `description_html` beside `description_html_original`, and `display_title` beside `display_title_original` — so the client's toggle costs no request. The payload also carries `has_translation` (whether `translate_version` is set) so the client does not have to infer it from the text, and `creator_id` (the creator's SteamID64 as a string, so a seventeen-digit ID survives `JSON.parse` and can be fed back into an Author ID filter).
 
 ### `/api/item/<id>/open` — POST
 
@@ -257,6 +271,10 @@ Saves the current enrichment filters to `app_tracking` for the configured AppID.
 ### `/api/subscribe/<id>` — POST
 
 Proxies a Steam Workshop subscribe request using stored session credentials.
+
+### `/api/toggle_sub/<id>` — POST
+
+Flips `is_queued_for_subscription` for one item and answers `{ok: true}`. It is the route behind both the `s` shortcut on a grid cell and the detail pane's Queue/Unqueue button. It returns no new state, so the detail pane reads the item back through the read-only `/api/item/<id>` route to label its button.
 
 ### `/api/sessionid` — POST
 

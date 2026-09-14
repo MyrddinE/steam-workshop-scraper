@@ -229,7 +229,11 @@ function updateOps(row) {
   if (ops.includes(cur)) opSelect.value = cur;
 }
 
-function addRow(logic) {
+// `initial` lets a caller (the author jump) build a row that already carries a
+// filter. The field has to be chosen before updateOps, because updateOps
+// rebuilds the operator list for the current field and would otherwise be left
+// showing the operators of the default field.
+function addRow(logic, initial) {
   const container = document.getElementById('filter-rows');
   const div = document.createElement('div');
   div.className = 'filter-row';
@@ -241,7 +245,12 @@ function addRow(logic) {
     <button onclick="removeRow(this.parentElement)">&#x2715;</button>
   `;
   container.appendChild(div);
+  if (initial && initial.field) div.querySelector('.field-select').value = initial.field;
   updateOps(div);
+  if (initial) {
+    if (initial.op) div.querySelector('.op-select').value = initial.op;
+    if (initial.value != null) div.querySelector('.value-input').value = initial.value;
+  }
 }
 
 function removeRow(row) { row.remove(); }
@@ -497,6 +506,30 @@ function toggleTranslation() {
   if (_currentDetail) renderDetail(_currentDetail);
 }
 
+// Web equivalent of the TUI's `btn-jump-author`: set an Author ID "is" filter to
+// the item's creator and re-run the search. It adds an ordinary filter row
+// through addRow rather than replacing the builder's contents, which is why
+// there is no single-creator mode here: removing the author row and searching
+// again restores the previous view, with no in-memory snapshot that a detail
+// re-render could lose and no Return button to keep in step.
+function jumpToAuthor(creator) {
+  if (creator == null || creator === '') return;
+  const container = document.getElementById('filter-rows');
+  let row = null;
+  container.querySelectorAll('.filter-row').forEach(r => {
+    if (r.querySelector('.field-select').value === 'Author ID') row = r;
+  });
+  if (row) {
+    // Reuse an existing Author ID row instead of stacking a second one that
+    // would contradict it (an item cannot be by two creators at once).
+    row.querySelector('.op-select').value = 'is';
+    row.querySelector('.value-input').value = String(creator);
+  } else {
+    addRow(undefined, {field: 'Author ID', op: 'is', value: String(creator)});
+  }
+  doSearch(true);
+}
+
 function renderDetail(item) {
   _currentDetail = item;
   const pane = document.getElementById('detail-pane');
@@ -509,6 +542,13 @@ function renderDetail(item) {
   const creator = translated
     ? (item.personaname_en || item.personaname || item.creator || 'N/A')
     : (item.personaname || item.creator || 'N/A');
+  // The server sends the creator ID as a string: a SteamID64 runs to seventeen
+  // digits, past the range a JavaScript number holds exactly, so a numeric
+  // field would silently round and the filter would name a different account.
+  const creatorId = item.creator_id != null ? String(item.creator_id) : '';
+  const creatorHtml = creatorId
+    ? `<button onclick="jumpToAuthor('${creatorId}');return false;" style="padding:0;margin:0;width:auto;background:none;border:none;color:var(--pico-primary);text-decoration:underline;font-weight:bold;display:inline" title="Show all items by this creator">${creator}</button>`
+    : `<b>${creator}</b>`;
   const url = `https://steamcommunity.com/sharedfiles/filedetails/?id=${item.workshop_id}`;
 
   const wfs = item.wilson_favorite_score != null ? (item.wilson_favorite_score*100).toFixed(1) : null;
@@ -567,6 +607,12 @@ function renderDetail(item) {
   const toggle = item.has_translation
     ? `<button onclick="toggleTranslation();return false;">${_showTranslated ? 'Show Original' : 'Show Translation'}</button>`
     : '';
+  // Mirrors the TUI's btn-queue-sub/btn-unqueue-sub pair, whose visibility is
+  // driven by is_queued_for_subscription. The state comes straight from the item
+  // payload, so the 3-second translation poll re-rendering the pane cannot lose
+  // it the way a class toggled on the old DOM would.
+  const queueBtn = `<button onclick="toggleDetailQueue(${item.workshop_id});return false;">`
+    + (item.is_queued_for_subscription ? 'Unqueue' : 'Queue') + '</button>';
   // Matches the TUI, which notes a pending translation only while there is no
   // stored one yet.
   const notice = ((item.translation_priority || 0) > 0 && !item.translate_version)
@@ -575,7 +621,7 @@ function renderDetail(item) {
 
   pane.innerHTML = `
     <h2><a href="${url}" target="_blank" title="${tooltip}">${title}</a></h2>
-    <p>by <b>${creator}</b> &mdash; <small>Workshop ID: ${item.workshop_id}</small></p>
+    <p>by ${creatorHtml} &mdash; <small>Workshop ID: ${item.workshop_id}</small></p>
     <p class="stat-wilson"><span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}" title="${_subTitleText}">Subscriber Score: ${wss!=null?wss+'%':'N/A'}</span> &nbsp; <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}" title="${_favTitleText}">Favorite Score: ${wfs!=null?wfs+'%':'N/A'}</span></p>
     <div class="stat-row"><span class="stat-label">Created:</span> ${created}</div>
     <div class="stat-row"><span class="stat-label">Size:</span> <span class="${sc}">${size || 'N/A'}</span></div>
@@ -584,10 +630,43 @@ function renderDetail(item) {
     <div class="stat-row"><span class="stat-label">Subs:</span> ${fmtCount(subs)} / ${fmtCount(lsubs)}</div>
     <div class="stat-row"><span class="stat-label">Favs:</span> ${fmtCount(favs)} / ${fmtCount(lfavs)}</div>
     <div class="stat-row"><span class="stat-label">Tags:</span> <small>${tags}</small></div>
-    <p><button onclick="doSubscribe(${item.workshop_id}, ${item.consumer_appid || 0});return false;">Subscribe</button> ${toggle}</p>
+    <p>${queueBtn} <button onclick="doSubscribe(${item.workshop_id}, ${item.consumer_appid || 0});return false;">Subscribe</button> ${toggle}</p>
     ${notice}
     ${desc ? '<div style="border-left:3px solid var(--pico-muted-border-color);padding-left:.5rem;margin-top:.5rem">'+desc+'</div>' : ''}
   `;
+}
+
+// /api/toggle_sub answers only {ok: true} and says nothing about which way the
+// flag moved, so read the item back instead of flipping a cached guess. The `s`
+// shortcut and the subscribe drain's /api/subscribed calls change the same flag
+// without going through this pane, so a guess could name the wrong next action.
+// Rendering from the returned payload (not from a class on the old DOM) is also
+// what lets the 3-second translation poll re-render afterwards without undoing
+// the toggle.
+async function toggleDetailQueue(wid) {
+  let resp;
+  try {
+    resp = await fetch('/api/toggle_sub/' + wid, {method: 'POST'});
+  } catch (e) {
+    alert('Queue update failed: ' + e.message);
+    return;
+  }
+  if (!resp.ok) {
+    alert('Queue update failed: ' + resp.status + ' ' + resp.statusText);
+    return;
+  }
+  try {
+    // Read-only route: reading the state back must not re-arm the fetch queue.
+    const detail = await fetch('/api/item/' + wid);
+    if (!detail.ok) return;
+    const item = await detail.json();
+    if (item.error) return;
+    if (_currentDetail && _currentDetail.workshop_id === wid) renderDetail(item);
+    // Keep the matching grid cell's queued star in step, as pressing `s` on that
+    // cell would.
+    const cell = document.querySelector(`#results-grid .grid-cell[data-wid="${wid}"]`);
+    if (cell) cell.classList.toggle('queued', !!item.is_queued_for_subscription);
+  } catch (e) { console.debug('Queue state refresh failed', e); }
 }
 
 let _detailPollWid = null, _detailPollTimer = null;

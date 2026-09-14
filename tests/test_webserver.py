@@ -1549,3 +1549,243 @@ def test_analysis_panel_discards_responses_after_close(web_client, tmp_path):
         "a failure landing after close must not write into the closed panel"
     assert "Failed: down" in result["summaryAfterCurrentFailure"], \
         "an open panel must report a failed request"
+
+
+
+
+# ── detail-pane parity: jump-to-author and queue/unqueue ─────────────────────
+#
+# The two affordances live only in the served inline script, so their behaviour
+# is exercised in node against stubs, as the save report and the header port
+# are. Asserting on the script's text would pass with the branch inverted.
+
+
+def test_detail_payload_ships_the_creator_id_as_an_exact_string(web_client):
+    """A SteamID64 is seventeen digits, past what a JS number holds exactly.
+
+    Jump-to-author puts the creator ID into an Author ID filter and posts it
+    back, so the payload has to carry it losslessly. `creator` stays the
+    database integer; `creator_id` is the same value as a string the client can
+    use without JSON.parse rounding it.
+    """
+    client, db_path = web_client
+    steamid = 76561198765432109  # as a float64 this rounds to ...110
+    insert_or_update_item(db_path, {
+        "workshop_id": 90, "title": "Big ID", "creator": steamid, "status": 200,
+    })
+
+    data = client.get('/api/item/90').get_json()
+    assert data["creator"] == steamid
+    assert data["creator_id"] == "76561198765432109"
+    assert isinstance(data["creator_id"], str)
+
+
+def test_detail_payload_omits_creator_id_without_a_creator(web_client):
+    """No creator means no jump target, so no string is invented for one."""
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 91, "title": "Anonymous", "status": 200})
+
+    data = client.get('/api/item/91').get_json()
+    assert data["creator"] is None
+    assert "creator_id" not in data
+
+
+def test_toggle_sub_route_flips_the_queue_flag(web_client):
+    """/api/toggle_sub answers {ok} and flips is_queued_for_subscription.
+
+    It is the route the detail pane's Queue/Unqueue button calls; the button's
+    label comes from a read-back of this same route's data, so the round trip
+    through the database is the state that has to be right.
+    """
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 4242, "title": "Q", "status": 200})
+
+    assert client.post('/api/toggle_sub/4242').get_json() == {"ok": True}
+    assert client.get('/api/item/4242').get_json()["is_queued_for_subscription"] == 1
+
+    assert client.post('/api/toggle_sub/4242').get_json() == {"ok": True}
+    assert client.get('/api/item/4242').get_json()["is_queued_for_subscription"] == 0
+
+
+JUMP_AUTHOR_DRIVER = """
+const fn = (__FN__);
+const added = [];
+let searched = null;
+global.addRow = (logic, initial) => added.push({hasLogic: logic !== undefined, initial: initial});
+global.doSearch = (reset) => { searched = reset; };
+global.document = { getElementById: () => ({ querySelectorAll: () => [] }) };
+fn('76561198765432109');
+
+// With an Author ID row already in the builder the jump must update that row
+// rather than add a second, contradictory one.
+const field = {value: 'Author ID'};
+const op = {value: 'is_not'};
+const val = {value: '999'};
+const row = {querySelector: (sel) =>
+  ({'.field-select': field, '.op-select': op, '.value-input': val})[sel] || null};
+global.document = { getElementById: () => ({ querySelectorAll: () => [row] }) };
+fn('42');
+
+console.log(JSON.stringify({added: added, searched: searched,
+                            op: op.value, val: val.value, field: field.value}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_jump_to_author_sets_the_author_id_filter_and_researches(web_client, tmp_path):
+    """The creator click must set the same filter the TUI's jump sets.
+
+    The TUI builds `{"field": "Author ID", "op": "is", "value": str(creator)}`
+    and re-runs, so the web jump has to produce exactly that row through the
+    ordinary filter machinery rather than a bespoke one.
+    """
+    client, _ = web_client
+    fn = _extract_function(_served_inline_script(client), "jumpToAuthor")
+    result = _run_node(JUMP_AUTHOR_DRIVER.replace("__FN__", fn), tmp_path)
+
+    assert result["added"] == [{
+        "hasLogic": False,
+        "initial": {"field": "Author ID", "op": "is", "value": "76561198765432109"},
+    }]
+    assert result["searched"] is True, "the jump must re-run the search"
+    # The pre-existing row wins over a second one, and is switched to `is`.
+    assert result["field"] == "Author ID"
+    assert result["op"] == "is"
+    assert result["val"] == "42"
+
+
+RENDER_DETAIL_DRIVER = """
+const fn = (__FN__);
+let html = '';
+global.document = { getElementById: () => ({ set innerHTML(v) { html = v; } }) };
+global._showTranslated = true;
+global._subTitleText = 'sub';
+global._favTitleText = 'fav';
+global._currentDetail = null;
+global.wClass = () => 'wilson-low';
+global.fmtSize = () => '1 MB';
+global.sizeClass = () => '';
+global.fmtCount = (n) => String(n || 0);
+const base = {
+  workshop_id: 77, creator: 'Alice', creator_id: '76561198765432109',
+  personaname: 'Alice', has_translation: false,
+  display_title_original: 'Mod', title: 'Mod',
+};
+fn(base);
+const notQueued = html;
+fn(Object.assign({}, base, {is_queued_for_subscription: 1}));
+const queued = html;
+fn(Object.assign({}, base, {creator: null, creator_id: null}));
+const noCreator = html;
+console.log(JSON.stringify({notQueued: notQueued, queued: queued, noCreator: noCreator}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_render_detail_wires_the_author_and_queue_affordances(web_client, tmp_path):
+    """renderDetail must offer the jump and the Queue/Unqueue toggle.
+
+    This runs the served function against a stub pane and inspects the HTML it
+    actually builds, so the label branch and the creator guard are exercised
+    rather than merely appearing in the source.
+    """
+    client, _ = web_client
+    fn = _extract_function(_served_inline_script(client), "renderDetail")
+    result = _run_node(RENDER_DETAIL_DRIVER.replace("__FN__", fn), tmp_path)
+
+    assert "jumpToAuthor('76561198765432109')" in result["notQueued"], \
+        "the creator must carry the lossless id into the jump"
+    assert "toggleDetailQueue(77)" in result["notQueued"]
+    assert ">Queue</button>" in result["notQueued"]
+    assert ">Unqueue</button>" not in result["notQueued"]
+
+    assert ">Unqueue</button>" in result["queued"]
+    assert ">Queue</button>" not in result["queued"]
+
+    assert "jumpToAuthor(" not in result["noCreator"], \
+        "an item with no creator has nothing to jump to"
+
+
+TOGGLE_QUEUE_DRIVER = """
+const fn = (__FN__);
+const rendered = [];
+const classes = new Set();
+let serverQueued = 0;
+global._currentDetail = {workshop_id: 77, is_queued_for_subscription: 0};
+global.renderDetail = (it) => {
+  rendered.push(it.is_queued_for_subscription);
+  global._currentDetail = it;
+};
+global.alert = (m) => rendered.push('alert:' + m);
+global.document = { querySelector: () => ({ classList: { toggle: (c, on) => {
+  if (on) classes.add(c); else classes.delete(c);
+} } }) };
+global.fetch = async (url) => {
+  if (url.indexOf('/api/toggle_sub/') === 0) {
+    serverQueued = serverQueued ? 0 : 1;
+    return {ok: true, status: 200, statusText: 'OK'};
+  }
+  if (url.indexOf('/api/item/') === 0) {
+    return {ok: true, status: 200, statusText: 'OK',
+            json: async () => ({workshop_id: 77, is_queued_for_subscription: serverQueued})};
+  }
+  throw new Error('unexpected url ' + url);
+};
+(async () => {
+  await fn(77);
+  const afterFirst = global._currentDetail.is_queued_for_subscription;
+  const cellAfterFirst = classes.has('queued');
+
+  // The cache is deliberately stale (0) while the database says queued (1), as
+  // the `s` shortcut would leave it. The read-back must win over any local flip.
+  global._currentDetail.is_queued_for_subscription = 0;
+  serverQueued = 1;
+  await fn(77);
+  const afterExternalQueued = global._currentDetail.is_queued_for_subscription;
+  const cellAfterExternalQueued = classes.has('queued');
+
+  global.fetch = async (url) => {
+    if (url.indexOf('/api/toggle_sub/') === 0) {
+      return {ok: false, status: 500, statusText: 'INTERNAL SERVER ERROR'};
+    }
+    throw new Error('the item must not be read after a failed toggle');
+  };
+  await fn(77);
+  const afterServerError = global._currentDetail.is_queued_for_subscription;
+
+  global.fetch = async () => { throw new Error('down'); };
+  await fn(77);
+  console.log(JSON.stringify({rendered: rendered, afterFirst: afterFirst,
+                              afterExternalQueued: afterExternalQueued,
+                              afterServerError: afterServerError,
+                              cellAfterFirst: cellAfterFirst,
+                              cellAfterExternalQueued: cellAfterExternalQueued}));
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_toggle_queue_reflects_the_databases_state_and_rerenders(web_client, tmp_path):
+    """The toggle must re-render from the stored state, not a flipped guess.
+
+    /api/toggle_sub returns only {ok}, and the `s` shortcut and the subscribe
+    drain change the same flag behind the pane's back, so the client reads the
+    item back through the read-only route and renders that. A failed toggle must
+    not touch the pane at all.
+    """
+    client, _ = web_client
+    fn = _extract_function(_served_inline_script(client), "toggleDetailQueue")
+    result = _run_node(TOGGLE_QUEUE_DRIVER.replace("__FN__", fn), tmp_path)
+
+    assert result["afterFirst"] == 1
+    # The DB said queued while the cached payload still said 0; the read-back
+    # value (which the toggle then cleared) is what the pane shows.
+    assert result["afterExternalQueued"] == 0
+    assert result["rendered"] == [
+        1, 0,
+        'alert:Queue update failed: 500 INTERNAL SERVER ERROR',
+        'alert:Queue update failed: down',
+    ]
+    assert result["cellAfterFirst"] is True, "the grid star follows the pane"
+    assert result["cellAfterExternalQueued"] is False
+    assert result["afterServerError"] == 0, "a rejected toggle must not change the pane"
