@@ -7,6 +7,18 @@ from src import capture
 _last_api_call = 0.0
 _API_DELAY = 1.5
 
+# Ceiling on ids carried by one bulk request. The Steamworks reference documents
+# ISteamUser/GetPlayerSummaries/v2's `steamids` as a "Comma-delimited list of
+# SteamIDs (max: 100)"; GetPublishedFileDetails/v1 lists `itemcount` and
+# `publishedfileids[0..]` with no published cap, so the documented
+# GetPlayerSummaries figure is used as the conservative ceiling for both rather
+# than a literal buried at each call site. The live probe that motivated this
+# batching sent 50 ids in one GetPublishedFileDetails call and got all 50 back
+# in 0.441 s.
+#   https://partner.steamgames.com/doc/webapi/ISteamUser#GetPlayerSummaries
+#   https://partner.steamgames.com/doc/webapi/ISteamRemoteStorage#GetPublishedFileDetails
+STEAM_API_MAX_IDS_PER_REQUEST = 100
+
 
 def set_api_delay(seconds: float):
     global _API_DELAY
@@ -21,24 +33,35 @@ def _rate_limit():
     _last_api_call = time.time()
 
 
-def get_workshop_details_api(item_id: int, api_key: str) -> dict | None:
-    """
-    Fetches metadata for a Steam Workshop item using the Steam Web API.
+def get_workshop_details_batch(item_ids: list[int], api_key: str) -> dict[int, dict] | None:
+    """Fetch metadata for many workshop items in a single POST.
 
-    Args:
-        item_id: The ID of the workshop item.
-        api_key: Your Steam Web API key.
+    Returns a mapping keyed by the requested id. Every requested id is present in
+    the result: an id the API omitted is reported as a synthetic ``404``, the
+    same not-found result the single-item spelling produces. Silently dropping an
+    omitted id would leave that row at the front of the queue forever, which is
+    the failure mode this codebase keeps fixing, so the omission is settled as a
+    permanent not-found instead.
 
-    Returns:
-        A dictionary containing the item details, or None if the request fails.
+    Results are keyed by the ``publishedfileid`` each response entry carries, not
+    by its position, so a response that reorders, duplicates or adds ids can never
+    mis-assign a result to the wrong item. Duplicate and unrequested ids are
+    logged and ignored.
+
+    Returns ``None`` -- deliberately not an empty mapping -- when the *request*
+    failed: a transport error, a timeout, an HTTP error status, or a body that is
+    not JSON. That is the signal the daemon backs off on. A request that returns
+    and parses is a success even if every item in it is not-found.
     """
+    requested = list(dict.fromkeys(int(i) for i in item_ids))
+    if not requested:
+        return {}
+
     url = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
-    data = {
-        "itemcount": 1,
-        "publishedfileids[0]": item_id,
-        "key": api_key
-    }
-    
+    data = {"itemcount": len(requested), "key": api_key}
+    for index, item_id in enumerate(requested):
+        data[f"publishedfileids[{index}]"] = item_id
+
     _rate_limit()
     try:
         response = requests.post(url, data=data, timeout=10)
@@ -47,37 +70,83 @@ def get_workshop_details_api(item_id: int, api_key: str) -> dict | None:
             json_data = response.json()
         except ValueError:
             # Not JSON: an HTML error page, a proxy notice, a truncated body.
-            # Capture the evidence, then re-raise so control flow is unchanged -
-            # the caller's existing handling of this exception still applies.
+            # Capture the evidence once for the whole request, then report a
+            # request-level failure so the caller backs off and retries the batch.
             capture.record_failure(
                 kind="api_unparsed_body",
                 stage="api_fetch",
-                workshop_id=item_id,
+                workshop_id=requested[0] if len(requested) == 1 else None,
                 http_status=response.status_code,
                 final_url=url,
                 body=response.text,
                 content_type=response.headers.get("Content-Type"),
+                context={"item_ids": requested, "itemcount": len(requested)},
             )
-            raise
-        
-        details = json_data.get("response", {}).get("publishedfiledetails", [])
-        if not details:
-            # If no details, it means the item was not found or is invalid.
-            return {"status": 404, "publishedfileid": item_id}
-            
-        item = details[0]
-        if item.get("result") != 1:
-            return {"status": 404, "publishedfileid": item_id}
-            
-        # Ensure the item always has a status, default to 200 if not provided by API
-        if "status" not in item:
-            item["status"] = 200
+            return None
 
-        return item
-        
+        details = (json_data.get("response", {}).get("publishedfiledetails", [])
+                   if isinstance(json_data, dict) else [])
+
+        requested_set = set(requested)
+        by_id: dict[int, dict] = {}
+        for detail in details:
+            if not isinstance(detail, dict):
+                continue
+            try:
+                detail_id = int(detail.get("publishedfileid"))
+            except (TypeError, ValueError):
+                # No usable id, so it cannot be matched to an item and must not
+                # be guessed at by position.
+                logging.warning("Steam API batch entry carried no usable publishedfileid; ignoring it.")
+                continue
+            if detail_id not in requested_set:
+                logging.warning("Steam API batch returned unrequested publishedfileid %s; ignoring it.", detail_id)
+                continue
+            if detail_id in by_id:
+                logging.warning("Steam API batch returned duplicate publishedfileid %s; keeping the first entry.", detail_id)
+                continue
+            if detail.get("result") != 1:
+                # Deleted, private or otherwise unavailable; same permanent
+                # not-found the single-item path reports for result != 1.
+                by_id[detail_id] = {"status": 404, "publishedfileid": detail_id}
+                continue
+            # Ensure the item always has a status, default to 200 if not provided by API
+            if "status" not in detail:
+                detail["status"] = 200
+            by_id[detail_id] = detail
+
+        for item_id in requested:
+            # The bulk endpoint answers one entry per requested id, so an omitted
+            # id is a permanent not-found rather than a request failure.
+            by_id.setdefault(item_id, {"status": 404, "publishedfileid": item_id})
+        return by_id
+
     except requests.exceptions.RequestException:
-        # Return a 500 status on API request failure
+        # Transport failure, timeout, or an HTTP error status (429/5xx included):
+        # the request itself failed.
+        return None
+
+
+def get_workshop_details_api(item_id: int, api_key: str) -> dict | None:
+    """
+    Fetches metadata for a single Steam Workshop item using the Steam Web API.
+
+    This is the one-id spelling of :func:`get_workshop_details_batch`, kept for
+    its existing callers and tests. Both paths share request shaping, failure
+    capture and id matching.
+
+    Args:
+        item_id: The ID of the workshop item.
+        api_key: Your Steam Web API key.
+
+    Returns:
+        A dictionary containing the item details, or None if the request fails.
+    """
+    results = get_workshop_details_batch([item_id], api_key)
+    if results is None:
+        # Preserve the single-item contract: a request failure reads as 500.
         return {"status": 500, "publishedfileid": item_id}
+    return results.get(int(item_id), {"status": 404, "publishedfileid": item_id})
 
 def query_workshop_items(appid: int, api_key: str, count: int = 50, page: int = 1) -> list[int]:
     """

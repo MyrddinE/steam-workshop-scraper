@@ -3,7 +3,14 @@ import os
 import pytest
 import responses
 import requests
-from src.steam_api import get_workshop_details_api, query_workshop_items, query_workshop_files, get_player_summaries
+from src.steam_api import (
+    get_workshop_details_api,
+    get_workshop_details_batch,
+    query_workshop_items,
+    query_workshop_files,
+    get_player_summaries,
+    STEAM_API_MAX_IDS_PER_REQUEST,
+)
 
 STEAM_API_URL = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
 QUERY_API_URL = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
@@ -223,3 +230,112 @@ def test_non_json_body_with_capture_off_writes_nothing(tmp_path):
 
     assert result == {"status": 500, "publishedfileid": 1}
     assert not (tmp_path / "outbox").exists()
+
+
+# ── Batched details fetch ────────────────────────────────────────────────────
+# One POST carries many ids. The response is matched to the request by each
+# entry's publishedfileid, never by position, so reordering, duplicates or extra
+# ids cannot mis-assign a result.
+
+def _detail(item_id, **overrides):
+    detail = {"publishedfileid": str(item_id), "result": 1, "title": f"Mod {item_id}"}
+    detail.update(overrides)
+    return detail
+
+
+@responses.activate
+def test_batch_call_builds_one_request_body_for_n_ids():
+    ids = [101, 202, 303]
+    responses.add(responses.POST, STEAM_API_URL, json={
+        "response": {"result": 1, "resultcount": 3,
+                     "publishedfiledetails": [_detail(i) for i in ids]}
+    }, status=200)
+
+    result = get_workshop_details_batch(ids, "TEST_KEY")
+
+    assert len(responses.calls) == 1, "the batch must be a single request"
+    body = responses.calls[0].request.body
+    if isinstance(body, bytes):
+        body = body.decode()
+    from urllib.parse import parse_qs
+    fields = parse_qs(body)
+    assert fields["itemcount"] == ["3"]
+    assert fields["publishedfileids[0]"] == ["101"]
+    assert fields["publishedfileids[1]"] == ["202"]
+    assert fields["publishedfileids[2]"] == ["303"]
+    assert set(result) == set(ids)
+
+
+@responses.activate
+def test_batch_results_map_back_to_the_right_items_regardless_of_order():
+    # The response is deliberately shuffled and one id is absent.
+    responses.add(responses.POST, STEAM_API_URL, json={
+        "response": {"result": 1, "resultcount": 2,
+                     "publishedfiledetails": [_detail(303), _detail(101)]}
+    }, status=200)
+
+    result = get_workshop_details_batch([101, 202, 303], "TEST_KEY")
+
+    assert result[101]["title"] == "Mod 101"
+    assert result[303]["title"] == "Mod 303"
+    # 202 was omitted: an explicit not-found, never a silent skip.
+    assert result[202] == {"status": 404, "publishedfileid": 202}
+
+
+@responses.activate
+def test_batch_ignores_extra_and_duplicate_ids():
+    responses.add(responses.POST, STEAM_API_URL, json={
+        "response": {"result": 1, "resultcount": 4, "publishedfiledetails": [
+            _detail(1, title="first"),
+            _detail(1, title="duplicate-should-not-win"),
+            _detail(999, title="unrequested"),
+            {"publishedfileid": "not-a-number", "result": 1, "title": "malformed"},
+        ]}
+    }, status=200)
+
+    result = get_workshop_details_batch([1, 2], "TEST_KEY")
+
+    assert set(result) == {1, 2}
+    assert result[1]["title"] == "first", "a duplicate must not overwrite the first entry"
+    assert result[2] == {"status": 404, "publishedfileid": 2}
+
+
+@responses.activate
+def test_batch_result_code_9_is_a_permanent_not_found():
+    responses.add(responses.POST, STEAM_API_URL, json={
+        "response": {"result": 1, "resultcount": 2, "publishedfiledetails": [
+            _detail(1),
+            {"publishedfileid": "2", "result": 9},
+        ]}
+    }, status=200)
+
+    result = get_workshop_details_batch([1, 2], "TEST_KEY")
+
+    assert result[1]["title"] == "Mod 1"
+    assert result[2] == {"status": 404, "publishedfileid": 2}
+
+
+@responses.activate
+@pytest.mark.parametrize("setup", [
+    pytest.param(lambda: responses.add(responses.POST, STEAM_API_URL, status=500), id="http_500"),
+    pytest.param(lambda: responses.add(responses.POST, STEAM_API_URL, status=429), id="http_429"),
+    pytest.param(lambda: responses.add(responses.POST, STEAM_API_URL,
+                                       body=requests.exceptions.Timeout()), id="timeout"),
+    pytest.param(lambda: responses.add(responses.POST, STEAM_API_URL,
+                                       body="<html>proxy</html>", status=200,
+                                       content_type="text/html"), id="unparseable"),
+])
+def test_batch_request_failure_returns_none_not_an_empty_mapping(setup):
+    setup()
+    assert get_workshop_details_batch([1, 2, 3], "TEST_KEY") is None
+
+
+@responses.activate
+def test_batch_of_zero_ids_makes_no_request():
+    assert get_workshop_details_batch([], "TEST_KEY") == {}
+    assert len(responses.calls) == 0
+
+
+def test_batch_ceiling_is_a_named_constant():
+    """The per-request id ceiling is a documented constant, not a literal."""
+    assert STEAM_API_MAX_IDS_PER_REQUEST == 100

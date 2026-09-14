@@ -67,7 +67,7 @@ def test_transient_failure_keeps_the_item_queued(tmp_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 5, "status": 200})
 
     daemon = _daemon(db_path)
-    with patch("src.daemon.get_workshop_details_api", return_value={"status": 500}):
+    with patch("src.daemon.get_workshop_details_batch", return_value=None):
         daemon.process_batch()
 
     priority, status = _priority(db_path, 1)
@@ -82,7 +82,7 @@ def test_transient_failure_floors_at_priority_one(tmp_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 1, "status": 200})
 
     daemon = _daemon(db_path)
-    with patch("src.daemon.get_workshop_details_api", return_value={"status": 500}):
+    with patch("src.daemon.get_workshop_details_batch", return_value=None):
         for _ in range(3):
             daemon.process_batch()
 
@@ -98,7 +98,8 @@ def test_permanent_failure_dequeues_and_marks_dead(tmp_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 5, "status": 200})
 
     daemon = _daemon(db_path)
-    with patch("src.daemon.get_workshop_details_api", return_value={"status": 404}):
+    with patch("src.daemon.get_workshop_details_batch",
+               return_value={1: {"status": 404, "publishedfileid": 1}}):
         daemon.process_batch()
 
     priority, status = _priority(db_path, 1)
@@ -113,7 +114,8 @@ def test_unhandled_status_is_treated_as_temporary_not_success(tmp_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 5, "status": 200})
 
     daemon = _daemon(db_path)
-    with patch("src.daemon.get_workshop_details_api", return_value={"status": 403}), \
+    with patch("src.daemon.get_workshop_details_batch",
+               return_value={1: {"status": 403, "publishedfileid": 1}}), \
          patch("src.daemon.capture.record_failure") as mock_capture:
         daemon.process_batch()
 
@@ -125,14 +127,14 @@ def test_unhandled_status_is_treated_as_temporary_not_success(tmp_path):
 
 
 def test_transport_exception_is_temporary(tmp_path):
-    """get_workshop_details_api reports transport failures as 500, so they retry."""
+    """A failed batch request settles every id as a temporary 500, so they retry."""
     db_path = str(tmp_path / "transport.db")
     initialize_database(db_path)
     insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 3, "status": 200})
 
     daemon = _daemon(db_path)
     # What the API helper returns for requests.exceptions.RequestException.
-    with patch("src.daemon.get_workshop_details_api", return_value={"status": 500}):
+    with patch("src.daemon.get_workshop_details_batch", return_value=None):
         daemon.process_batch()
 
     priority, status = _priority(db_path, 1)

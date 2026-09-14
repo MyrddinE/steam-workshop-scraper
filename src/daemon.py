@@ -24,7 +24,16 @@ from src.database import (
     _evaluate_filters,
     WORKSHOP_ITEM_COLUMNS,
 )
-from src.steam_api import get_workshop_details_api, query_workshop_items, get_player_summaries, query_workshop_files, set_api_delay, query_workshop_page_updated
+from src.steam_api import (
+    get_workshop_details_api,
+    get_workshop_details_batch,
+    query_workshop_items,
+    get_player_summaries,
+    query_workshop_files,
+    set_api_delay,
+    query_workshop_page_updated,
+    STEAM_API_MAX_IDS_PER_REQUEST,
+)
 from src.translator import TranslatorThread, is_ascii
 from src.config import login_secure_value, save_config
 from src.database import flag_for_web_scrape, flag_field_for_translation, flag_for_image, translation_is_current
@@ -43,6 +52,70 @@ HANDLED_API_STATUSES = frozenset({200, 404, 500})
 # transport exceptions (which get_workshop_details_api reports as 500), and any
 # status without its own branch -- is retried at one priority level lower.
 PERMANENT_API_STATUSES = frozenset({404})
+
+
+# --- API request backoff -----------------------------------------------------
+# The delay is a property of the *request*, not of the items it carried. One
+# batched GetPublishedFileDetails call returns up to
+# STEAM_API_MAX_IDS_PER_REQUEST results, so per-item signals are the wrong unit:
+# a single overloaded call would be diluted by the results that were fine, and a
+# batch of "not found" results -- a perfectly successful call -- would read as a
+# run of failures. Only the request outcome moves the delay; per-item results
+# drive item state (status, priority, queue flags, death) and nothing else.
+#
+# The shape is TCP congestion control, not a safety net: every healthy request
+# shaves a fixed step off the delay (additive increase of the request rate) and
+# every refusal multiplies it (multiplicative decrease of the rate). The client
+# therefore keeps probing upward until it is refused, backs off, and walks back
+# down, so it converges to just under whatever rate Steam will sustain -- a
+# limit that is not published and may move. Steady state is a sawtooth: the
+# delay sits near the smallest value that does not draw a refusal, one refusal
+# doubles it, and the following successes walk it back down.
+#
+# `api_delay` is a literal inter-call delay, not a target rate. It is added on
+# top of the request's own latency and is normally the smaller term; the
+# production value (0.01 s) exists to add nothing, not to target 100 req/s.
+#
+# Batch size is deliberately NOT folded into the delay. A refusal costs one
+# multiplication whatever ids it carried, so if Steam meters the limit per item
+# rather than per call, the converged *call* delay settles at roughly N times
+# the per-item cost and the item throughput is the same as without batching; if
+# Steam meters per call, the converged item throughput simply rises with the
+# batch, which is the point of batching. Scaling by batch size would have to
+# guess the cost model and buys nothing: the feedback loop finds whichever limit
+# is real.
+
+# Additive decrease of the delay per healthy request: 10 ms, the granularity the
+# live configuration already uses.
+API_DECAY_STEP_SECONDS = 0.01
+
+# Multiplicative increase of the delay on a refusal: doubling is the standard
+# congestion response (halving the rate).
+API_BACKOFF_FACTOR = 2.0
+
+# The delay never drops below this -- a zero delay is not a rate limit and a
+# negative one is nonsense.
+API_DELAY_FLOOR = 0.01
+
+# Keep the decay from rewriting config.yaml on every request: persist only once
+# the delay has moved this far from the last persisted value. The back-off path
+# always persists, so a restart during an outage does not resume hammering.
+API_DELAY_PERSIST_STEP = 0.1
+
+# Ceiling kept for now. Issue #21 records that it must eventually go: it bounds
+# a client that can never succeed (a bad key would otherwise multiply the delay
+# without bound), but it also caps convergence -- if the sustainable delay sits
+# above 2 s the client cannot reach it and is refused at the cap instead.
+API_DELAY_CEILING = 2.0
+
+# The staleness sweep is a full-table UPDATE whose threshold is measured in days
+# (`item_staleness_days`, 60 in production). Running it on every batch -- every
+# few seconds -- scans the table thousands of times for a decision that changes
+# at most once per item per threshold period. Hourly bounds the promotion lag to
+# well under 1% of a 60-day threshold while cutting the scan by ~720x at the
+# observed batch cadence. The sweep still runs on the first batch after startup,
+# so a long-idle daemon does not sit on a stale queue.
+STALE_SWEEP_INTERVAL_SECONDS = 3600
 
 
 # --- API merge allow-list ----------------------------------------------------
@@ -140,10 +213,17 @@ class Daemon:
         # no-op unless an outbox directory is configured, like the backup above.
         capture.configure(self.outbox_dir, self.capture_web_scrapes)
         
-        # State variables for dynamic delay adjustment
+        # State variables for the request-level congestion-control delay. The
+        # counters are diagnostics; the delay itself is the state that matters.
         self.api_successes = 0
         self.api_failures = 0
-        self.api_had_streak = False
+        # The last delay written to config, so the per-request decay does not
+        # rewrite the file on every request.
+        self._persisted_api_delay = self.api_delay
+
+        # Monotonic timestamp of the last staleness sweep; None means "never",
+        # so the first batch after startup always sweeps.
+        self._last_stale_sweep = None
 
         # Page-based discovery (sort by update time) — runs once a day when eligible
         self._last_page_discovery = 0
@@ -322,7 +402,7 @@ class Daemon:
 
     def process_batch(self):
         """Process one batch: housekeeping, acquire work, then process each item."""
-        self._promote_stale_items()
+        self._maybe_promote_stale_items()
 
         items_to_scrape = self._acquire_batch()
         if items_to_scrape is None:
@@ -331,10 +411,72 @@ class Daemon:
             self._wait_for_work()
             return
 
+        if not self.running or self._pid_file_removed():
+            return
+
+        # One bulk details request for the whole batch (chunked only if the
+        # configured batch_size exceeds the endpoint ceiling). Each request's
+        # outcome drives the backoff; the per-item results below only decide
+        # each item's state.
+        api_data_by_id = self._fetch_details(items_to_scrape)
+
+        creators_to_refresh = []
         for existing_data in items_to_scrape:
             if not self.running or self._pid_file_removed():
                 break
-            self._process_item(existing_data)
+            # Items are still processed in the order the queue returned them;
+            # each is matched to its own result by id.
+            creator_id = self._process_item(
+                existing_data,
+                api_data=api_data_by_id.get(existing_data["workshop_id"]),
+            )
+            if creator_id is not None:
+                creators_to_refresh.append(creator_id)
+
+        # Creator personas move from one request per item to one per batch.
+        self._refresh_creators(creators_to_refresh)
+
+    def _fetch_details(self, items: list[dict]) -> dict[int, dict]:
+        """Fetch details for a batch in as few requests as the API allows.
+
+        This is the only place request-level outcomes are counted: one call to
+        `_record_api_request_failure` or `_record_api_request_success` per POST.
+        A request that fails transports, times out, returns an HTTP error or an
+        unparseable body settles every id it carried as a temporary 500; a
+        request that returns and parses is a success whatever the individual
+        results say.
+        """
+        api_data_by_id: dict[int, dict] = {}
+        for start in range(0, len(items), STEAM_API_MAX_IDS_PER_REQUEST):
+            chunk = items[start:start + STEAM_API_MAX_IDS_PER_REQUEST]
+            ids = [row["workshop_id"] for row in chunk]
+            results = get_workshop_details_batch(ids, self.api_key)
+            if results is None:
+                self._record_api_request_failure()
+                for item_id in ids:
+                    api_data_by_id[item_id] = {"status": 500, "publishedfileid": item_id}
+            else:
+                self._record_api_request_success()
+                for item_id in ids:
+                    # The batch helper fills omitted ids in as 404, so this
+                    # fallback only covers an unanticipated response shape.
+                    api_data_by_id[item_id] = results.get(
+                        item_id, {"status": 404, "publishedfileid": item_id})
+        return api_data_by_id
+
+    def _maybe_promote_stale_items(self) -> None:
+        """Run the staleness sweep at most once per STALE_SWEEP_INTERVAL_SECONDS.
+
+        The sweep is a full-table UPDATE, so it cannot sit on the per-batch path
+        at a threshold measured in days. A monotonic clock is used because this
+        is an elapsed-time interval and must not be moved by wall-clock jumps.
+        """
+        now = time.monotonic()
+        if (self._last_stale_sweep is not None
+                and now - self._last_stale_sweep < STALE_SWEEP_INTERVAL_SECONDS):
+            return
+        self._last_stale_sweep = now
+        self._promote_stale_items()
 
     def _promote_stale_items(self) -> None:
         """Periodic sweep: promote stale items from API priority 0 to 1.
@@ -395,13 +537,23 @@ class Daemon:
                 return
             time.sleep(1)
 
-    def _process_item(self, existing_data: dict) -> None:
-        """Fetch, merge, score, flag and persist a single workshop item."""
+    def _process_item(self, existing_data: dict, api_data: dict | None = None) -> int | None:
+        """Fetch, merge, score, flag and persist a single workshop item.
+
+        ``api_data`` is this item's result from the batch fetch. When it is
+        omitted (direct calls, and tests) the item is fetched on its own through
+        the single-id spelling; the batch path always supplies it, so the
+        fallback never turns one request failure into a request per item.
+
+        Returns the creator id this item would refresh, or None. The refresh
+        itself is deferred to the batch so several creators share one request.
+        """
         now_ts = int(time.time())
         item_id = existing_data['workshop_id']
 
         # Step 1: Query API
-        api_data = get_workshop_details_api(item_id, self.api_key)
+        if api_data is None:
+            api_data = get_workshop_details_api(item_id, self.api_key)
         api_status = api_data.get("status", 0)
 
         if api_status not in HANDLED_API_STATUSES:
@@ -452,11 +604,11 @@ class Daemon:
 
         self._flag_translations(merged_data, item_id, enriched, inherited_prio)
 
-        # Step 3: Fetch User/Creator details (only for enriched items)
-        self._refresh_creator(merged_data, enriched)
-
         logging.info(f"[A:{item_id}] \"{display_title}\"{' — \033[31mignored\033[0m' if not enriched else ''}")
-        self._record_api_success()
+        # Step 3: propose the creator for the batch-level persona refresh. The
+        # per-item method no longer makes an HTTP call here; nothing about the
+        # delay is touched, because the request already succeeded.
+        return self._creator_to_refresh(merged_data, enriched)
 
     def _settle_api_failure(self, merged_data: dict, item_id: int, api_status: int,
                             previous_priority: int) -> None:
@@ -496,7 +648,10 @@ class Daemon:
             f"[A:{item_id}] API request failed ({api_status}). "
             f"Requeued at priority {retry_priority} to retry after the current queue."
         )
-        self._record_api_failure()
+        # Deliberately no `_record_api_request_failure()` here: this is one
+        # item's result, not the request's. A batch that returns and parses is a
+        # success even when some of its items settle as temporary failures, so
+        # only `_fetch_details` moves the delay.
 
     def _score_wilson(self, merged_data: dict) -> None:
         """Populate the derived Wilson scores from the freshly fetched counts."""
@@ -570,54 +725,119 @@ class Daemon:
             if text and not translation_is_current(translated, version, steam_updated):
                 flag_field_for_translation(self.db_path, "item", item_id, field, text, t_prio)
 
-    def _refresh_creator(self, merged_data: dict, enriched: bool) -> None:
-        """Refresh the creator's persona name if it is missing or stale."""
+    def _creator_to_refresh(self, merged_data: dict, enriched: bool) -> int | None:
+        """Return the creator id this item proposes for a persona refresh.
+
+        The staleness test deliberately lives in `_refresh_creators`, not here:
+        it needs a `users` read, so the batch collects the distinct candidates
+        first and asks about each one once.
+        """
         creator_id = merged_data.get("creator")
         if not (creator_id and enriched):
-            return
+            return None
         try:
-            creator_id = int(creator_id)
-            existing_user = get_user(self.db_path, creator_id)
-            should_update_user = True
-            if existing_user and existing_user.get("api_fetched_at"):
-                staleness = int(time.time()) - existing_user["api_fetched_at"]
-                if staleness < self.user_staleness_days * 86400:
-                    should_update_user = False
-            if should_update_user:
-                summaries = get_player_summaries([creator_id], self.api_key)
-                if creator_id in summaries:
-                    insert_or_update_user(self.db_path, self._build_user_record(creator_id, summaries[creator_id].get("personaname")))
-        # Optional creator-persona enrichment; an unparseable creator value is skipped
-        # and the persona is retried on a later cycle.
+            return int(creator_id)
         except (ValueError, TypeError):
-            pass
+            # Optional creator-persona enrichment; an unparseable creator value
+            # is skipped and the persona is retried on a later cycle.
+            return None
 
-    def _record_api_failure(self) -> None:
-        """Count a failed fetch and back off once a success streak has ended."""
+    def _refresh_creators(self, creator_ids: list[int]) -> None:
+        """Refresh a batch's creator personas in one API call.
+
+        The rules are unchanged from the per-item version -- only enriched items
+        propose creators, a user row younger than `user_staleness_days` is left
+        alone, and a creator the API does not return is left for a later cycle --
+        but the request count drops from one per item to one per batch.
+        """
+        if not creator_ids:
+            return
+
+        now = int(time.time())
+        stale_after = self.user_staleness_days * 86400
+        to_fetch: list[int] = []
+        seen: set[int] = set()
+        for creator_id in creator_ids:
+            if creator_id in seen:
+                continue
+            seen.add(creator_id)
+            try:
+                existing_user = get_user(self.db_path, creator_id)
+                if existing_user and existing_user.get("api_fetched_at"):
+                    if now - existing_user["api_fetched_at"] < stale_after:
+                        continue
+            except (ValueError, TypeError):
+                # A malformed stored timestamp is skipped; the persona is
+                # retried on a later cycle rather than failing the batch.
+                continue
+            to_fetch.append(creator_id)
+
+        if not to_fetch:
+            return
+
+        summaries = get_player_summaries(to_fetch, self.api_key)
+        for creator_id in to_fetch:
+            if creator_id in summaries:
+                insert_or_update_user(self.db_path, self._build_user_record(
+                    creator_id, summaries[creator_id].get("personaname")))
+
+    def _record_api_request_failure(self) -> None:
+        """Multiply the delay once for a refused request and clear the streak.
+
+        Called once per POST from `_fetch_details`, never from the per-item
+        failure path. A request that returns and parses is a success however its
+        individual results read -- 50 details of which 10 are "not found" is a
+        completely successful API call -- so per-item outcomes must not reach
+        here.
+
+        Every refusal multiplies (rather than waiting for a second strike), so a
+        sustained outage backs off geometrically and the delay can keep climbing
+        until it is under the limit. The multiplication is capped only by the
+        ceiling; see the module comment.
+        """
         self.api_failures += 1
         self.api_successes = 0
-        if self.api_failures >= 2 and self.api_had_streak:
-            old_delay = self.api_delay
-            self.api_delay = min(round(self.api_delay * (1.05 ** 10), 3),2)
+        old_delay = self.api_delay
+        self.api_delay = min(round(self.api_delay * API_BACKOFF_FACTOR, 3),
+                             API_DELAY_CEILING)
+        if old_delay != self.api_delay:
             set_api_delay(self.api_delay)
-            logging.info(f"Multiple consecutive API failures! Increasing API delay from {old_delay} to {self.api_delay}s.")
+            logging.info(
+                f"{self.api_failures} consecutive failed API requests! "
+                f"Increasing API delay from {old_delay} to {self.api_delay}s.")
+            # Persist immediately: a restart during an outage must not resume at
+            # the old, refused pace.
+            self._persisted_api_delay = self.api_delay
             self._save_config_value("api_delay_seconds", self.api_delay)
-            self.api_had_streak = False
 
-    def _record_api_success(self) -> None:
-        """Count a good fetch and speed up after a long success streak."""
+    def _record_api_request_success(self) -> None:
+        """Shave one step off the delay for a healthy request.
+
+        A success is a request that returned and parsed; the individual results
+        are item state, not pacing. Every success decays the delay rather than
+        waiting for a long streak, which is what makes the client keep probing
+        for a higher sustainable rate and converge on the limit. The decay is
+        persisted only once it has moved far enough to be worth a config write.
+        """
         self.api_successes += 1
         self.api_failures = 0
-        if self.api_successes >= 5:
-            self.api_had_streak = True
-        if self.api_successes >= 100:
-            old_delay = self.api_delay
-            self.api_delay = max(0.01, round(self.api_delay / 1.05, 3))
-            if old_delay != self.api_delay:
-                set_api_delay(self.api_delay)
-                logging.info(f"100 consecutive API successes! Decreasing API delay from {old_delay} to {self.api_delay} seconds.")
+        old_delay = self.api_delay
+        self.api_delay = max(round(self.api_delay - API_DECAY_STEP_SECONDS, 3),
+                             API_DELAY_FLOOR)
+        if old_delay != self.api_delay:
+            set_api_delay(self.api_delay)
+            if abs(self.api_delay - self._persisted_api_delay) >= API_DELAY_PERSIST_STEP:
+                self._persisted_api_delay = self.api_delay
+                logging.info(
+                    f"Healthy API requests; decreasing API delay to {self.api_delay} seconds.")
                 self._save_config_value("api_delay_seconds", self.api_delay)
-            self.api_successes = 0
+            else:
+                # One line per step would flood the log while the delay walks
+                # down from a back-off; the persisted steps are the reportable
+                # ones.
+                logging.debug(
+                    "API request succeeded; decreasing API delay from %s to %s seconds.",
+                    old_delay, self.api_delay)
 
     def _pid_file_removed(self) -> bool:
         if not self.running:

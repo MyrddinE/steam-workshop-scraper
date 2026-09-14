@@ -51,7 +51,7 @@ Deep-merges the in-memory config into the disk file, preserving keys not present
 |---|---|---|---|
 | `daemon.target_appids` | list[int] | (required) | Steam AppIDs to scrape. The daemon refuses to start without this. |
 | `daemon.batch_size` | int | 10 | Items to process per `process_batch` iteration. |
-| `daemon.api_delay_seconds` | float | 1.5 | Seconds to wait between Steam API calls. Dynamically adjusted by the success/failure streak mechanism. |
+| `daemon.api_delay_seconds` | float | 1.5 | A literal pause added between Steam API requests, not a target rate. Adjusted per **request** (batched item results do not move it): decays 10 ms on each healthy request and doubles on each refusal, so it converges just under the sustainable rate. |
 | `daemon.web_delay_seconds` | float | 5.0 | Seconds to wait between web scrape requests. Dynamically adjusted. |
 | `daemon.image_delay_seconds` | float | 2.0 | Seconds to wait between image downloads. Dynamically adjusted. |
 | `daemon.item_staleness_days` | int | 30 | Days before a successfully-scraped item is considered stale and re-scraped. |
