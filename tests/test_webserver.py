@@ -1,6 +1,7 @@
 import pytest
 import json
 import os
+import re
 import shutil
 import subprocess
 import lxml.html
@@ -785,3 +786,125 @@ def test_sessionid_push_without_a_sessionid_is_rejected(session_client):
     assert resp.get_json()["ok"] is False
     assert saves == []
 
+
+# ── the honest save report and the header port ───────────────────────────────
+#
+# Both behaviours live only in the served inline script, so a browser would be
+# needed to observe them end to end. Rather than assert on the script's text —
+# which would pass as long as the words appear, even with the branch inverted —
+# these extract the named functions and run them in node against tiny stubs.
+
+
+def _served_inline_script(client) -> str:
+    doc = lxml.html.fromstring(client.get('/').data.decode())
+    return "\n".join(s.text or "" for s in doc.xpath('//script[not(@src)]'))
+
+
+def _extract_function(script: str, name: str) -> str:
+    """Return the source of the top-level function `name` from the script.
+
+    Brace-matched rather than line-grepped, so the snippet node receives is a
+    real function definition and not a fragment that happens to contain it.
+    """
+    match = re.search(r'(?:async\s+)?function\s+' + re.escape(name) + r'\s*\(', script)
+    assert match, f"no function {name} in the served script"
+    start = match.start()
+    brace = script.index('{', match.end() - 1)
+    depth = 0
+    for i in range(brace, len(script)):
+        if script[i] == '{':
+            depth += 1
+        elif script[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return script[start:i + 1]
+    raise AssertionError(f"unterminated function {name}")
+
+
+def _run_node(driver: str, tmp_path):
+    path = tmp_path / "driver.js"
+    path.write_text(driver, encoding="utf-8")
+    result = subprocess.run([NODE, str(path)], capture_output=True, text=True)
+    assert result.returncode == 0, f"node driver failed:\n{result.stdout}\n{result.stderr}"
+    return json.loads(result.stdout)
+
+
+SAVE_FILTER_DRIVER = """
+const fn = (__FN__);
+const calls = [];
+global.alert = (m) => calls.push(m);
+global.getFilters = () => [];
+async function run(resp) {
+  global.fetch = async () => resp;
+  await fn();
+}
+(async () => {
+  await run({ok: true, status: 200, statusText: 'OK', json: async () => ({ok: true})});
+  await run({ok: false, status: 400, statusText: 'BAD REQUEST',
+             json: async () => ({error: 'No target AppID configured'})});
+  await run({ok: false, status: 500, statusText: 'INTERNAL SERVER ERROR',
+             json: async () => { throw new Error('not json'); }});
+  global.fetch = async () => { throw new Error('backend down'); };
+  await fn();
+  console.log(JSON.stringify(calls));
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_save_filter_reports_the_servers_rejection(web_client, tmp_path):
+    """A 400 must not be reported as a save, and the server's reason must show.
+
+    /api/save_filter answers 400 with {"error": "No target AppID configured"}
+    when no AppID is set. The old handler ignored the response and always
+    alerted success, so a rejected save was indistinguishable from a stored one.
+    """
+    client, _ = web_client
+    fn = _extract_function(_served_inline_script(client), "saveFilterAndReport")
+    calls = _run_node(SAVE_FILTER_DRIVER.replace("__FN__", fn), tmp_path)
+
+    assert calls == [
+        'Filter saved for scraper.',
+        'Filter not saved: No target AppID configured',
+        'Filter not saved: 500 INTERNAL SERVER ERROR',
+        'Filter not saved: backend down',
+    ]
+
+
+PORT_DRIVER = """
+const fn = (__FN__);
+let shown = null;
+global.document = { getElementById: () => ({ set textContent(v) { shown = v; } }) };
+global.location = { port: '8080' };
+fn();
+const withPort = shown;
+global.location = { port: '' };
+shown = null;
+fn();
+console.log(JSON.stringify({withPort: withPort, defaultPort: shown}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_header_port_display_is_filled_from_the_pages_own_location(web_client, tmp_path):
+    """The header span renders the port the panel was served on.
+
+    It was declared and styled with nothing ever writing to it, so the header
+    showed an empty span. The page already knows its own port (location.port),
+    so this costs no request and cannot go stale when the configured port
+    changes between loads.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    doc = lxml.html.fromstring(client.get('/').data.decode())
+    assert doc.xpath('//*[@id="port-display"]'), \
+        "the header port element must exist to be populated"
+
+    fn = _extract_function(script, "showServerPort")
+    result = _run_node(PORT_DRIVER.replace("__FN__", fn), tmp_path)
+    assert result["withPort"] == ":8080"
+    assert result["defaultPort"] == ""
+
+    # The function only helps if the page actually calls it on load.
+    assert re.search(r'^showServerPort\(\);$', script, re.M), \
+        "the page never calls showServerPort()"

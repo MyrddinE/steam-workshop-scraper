@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Workshop Scraper — Subscribe Bridge
 // @namespace    https://github.com/MyrddinE/steam-workshop-scraper
-// @version      9
+// @version      10
 // @updateURL    https://raw.githubusercontent.com/MyrddinE/steam-workshop-scraper/main/userscripts/steam_subscribe.user.js
 // @downloadURL  https://raw.githubusercontent.com/MyrddinE/steam-workshop-scraper/main/userscripts/steam_subscribe.user.js
 // @description  Bridges Steam session to the Workshop Scraper web UI for one-click subscribing.
@@ -271,10 +271,36 @@
   // does need it: a backend that restarted has lost its in-memory session, and
   // this is what re-syncs it without waiting for the user to reload the UI.
   const REPUSH_AFTER_MS = 10 * 60 * 1000;
+  // A failed push used to re-arm itself every five seconds forever, so a
+  // backend that was down was polled for as long as a Steam tab stayed open,
+  // and nothing ever gave up. Consecutive failures now double the delay from
+  // five seconds up to a one-minute cap and stop after six retries. A success
+  // resets the counter, so a later transient failure retries promptly again.
+  const RETRY_INITIAL_MS = 5000;
+  const RETRY_MAX_MS = 60000;
+  const RETRY_MAX_ATTEMPTS = 6;
   let lastPushed = null;
   let lastPushedAt = 0;
+  let retryTimer = null;
+  let retryDelay = RETRY_INITIAL_MS;
+  let retriesLeft = RETRY_MAX_ATTEMPTS;
+
+  function scheduleRetry() {
+    // One chain at a time: a timer already pending owns the next attempt.
+    if (retryTimer !== null || retriesLeft <= 0) return;
+    const delay = retryDelay;
+    retriesLeft -= 1;
+    retryDelay = Math.min(retryDelay * 2, RETRY_MAX_MS);
+    retryTimer = setTimeout(function () {
+      retryTimer = null;
+      pushSessionToBackend();
+    }, delay);
+  }
 
   function pushSessionToBackend() {
+    // The pending retry covers the next attempt, so a periodic tick in the
+    // meantime must not start a second, parallel stream of requests.
+    if (retryTimer !== null) return;
     const sid = getSessionId();
     if (!sid) return;
     const login = getLoginSecure();
@@ -288,11 +314,14 @@
       onload: function () {
         lastPushed = payload;
         lastPushedAt = Date.now();
+        retryDelay = RETRY_INITIAL_MS;
+        retriesLeft = RETRY_MAX_ATTEMPTS;
+        if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null; }
         console.debug('[SubscribeBridge] sessionid pushed to backend' +
                       (login ? ' (with login cookie)' : ' (no login cookie)'));
       },
       onerror: function () {
-        setTimeout(pushSessionToBackend, 5000);
+        scheduleRetry();
       },
     });
   }

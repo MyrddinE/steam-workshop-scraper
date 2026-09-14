@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="userscript-version" content="9">
+<meta name="userscript-version" content="10">
 <title>Steam Workshop Scraper</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
 <style>
@@ -183,6 +183,17 @@ let currentOffset = 0, hasMore = true, loading = false, cutoffs = {};
 let _cutoffsCache = null, _cutoffsFilterKey = '';
 let _subTitleText = 'No cutoff data', _favTitleText = 'No cutoff data';
 let _listPollTimer = null;
+
+// The header shows which port this panel answered on. location already knows
+// it — it is the port in the address bar — so this reads the page's own origin
+// rather than adding a request, and it stays right when the configured port
+// changes between loads (there is no baked-in literal to go stale).
+function showServerPort() {
+  const el = document.getElementById('port-display');
+  if (!el) return;
+  el.textContent = location.port ? ':' + location.port : '';
+}
+showServerPort();
 
 function updateOps(row) {
   const field = row.querySelector('.field-select').value;
@@ -700,10 +711,34 @@ document.getElementById('sort-order').onchange = () => doSearch(true);
 document.getElementById('btn-search').onclick = () => doSearch(true);
 document.getElementById('btn-and').onclick = () => addRow('AND');
 document.getElementById('btn-or').onclick = () => addRow('OR');
-document.getElementById('btn-save-filter').onclick = async () => {
-  await fetch('/api/save_filter', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filters: getFilters()})});
+// /api/save_filter can reject the save: it answers 400 with a message when no
+// target AppID is configured. Alerting "saved" regardless, as this did, told
+// the user their filters were stored when they were not — the server's own
+// message is the only thing that says why, so surface it instead of swallowing
+// it, and only claim success on a 2xx.
+async function saveFilterAndReport() {
+  let resp;
+  try {
+    resp = await fetch('/api/save_filter', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({filters: getFilters()})
+    });
+  } catch (e) {
+    alert('Filter not saved: ' + e.message);
+    return;
+  }
+  if (!resp.ok) {
+    let detail = resp.status + ' ' + resp.statusText;
+    try {
+      const body = await resp.json();
+      if (body && body.error) detail = body.error;
+    } catch (e) { /* a non-JSON body leaves the status line as the reason */ }
+    alert('Filter not saved: ' + detail);
+    return;
+  }
   alert('Filter saved for scraper.');
-};
+}
+document.getElementById('btn-save-filter').onclick = saveFilterAndReport;
 
 const _scrollObserver = new IntersectionObserver((entries) => {
   if (loading || !hasMore || !currentOffset) return;

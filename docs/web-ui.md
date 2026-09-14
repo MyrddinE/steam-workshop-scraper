@@ -8,7 +8,7 @@ The Web UI is a single-page application served by Flask and styled with Pico.css
 
 A flex-based layout with three zones:
 
-- **Header**: title and port display
+- **Header**: title and the embedded server's port. `#port-display` is filled from `location.port` on load, so it shows where the panel is actually bound — including an ephemeral or reconfigured port — without asking the server. A default port renders nothing rather than a misleading `:80`.
 - **Left pane** (`#results-pane`): a CSS Grid of result cards (`#results-grid`) with `repeat(auto-fill, minmax(200px, 1fr))` for responsive columns. A `#scroll-sentinel` element inside the grid drives infinite scroll.
 - **Right pane** (`#right-pane`): fixed 360px width containing the search builder at top and detail pane below, separated by a left border
 
@@ -119,7 +119,7 @@ While the panel is open, `_refreshDaemonStatus` polls `/api/daemon` and `_pollDa
 
 The 📊 button (`#btn-stats`, `templates/index.html:98`) opens `#stats-overlay` (`templates/index.html:135`), a modal panel modelled on the daemon overlay. It keeps the button's id and position; clicking it no longer navigates to the raw `/api/stats` JSON.
 
-`_openStatsPanel` (`templates/index.html:1255`) fetches `/api/metrics` for the catalogue — each metric's name, note and `seed_ms` hint — then builds one `<section class="stats-chunk" data-metric="...">` per metric, each with its own body element, and requests **every metric independently** through `GET /api/metrics/<name>` (`_loadMetric`, `templates/index.html:1225`). It deliberately does not `Promise.all` the requests: each section is filled and its own refresh timer armed the moment that metric lands, so a fast chunk draws while a slow one is still running. Every metric shows a human label, its note, and a value rendered to suit it, with its measured `ms` shown quietly in the heading:
+`_openStatsPanel` (`templates/index.html:1292`) fetches `/api/metrics` for the catalogue — each metric's name, note and `seed_ms` hint — then builds one `<section class="stats-chunk" data-metric="...">` per metric, each with its own body element, and requests **every metric independently** through `GET /api/metrics/<name>` (`_loadMetric`, `templates/index.html:1262`). It deliberately does not `Promise.all` the requests: each section is filled and its own refresh timer armed the moment that metric lands, so a fast chunk draws while a slow one is still running. Every metric shows a human label, its note, and a value rendered to suit it, with its measured `ms` shown quietly in the heading:
 
 * **coverage** — a progress bar per stage (API data, description, image, translation, creator) with the count and the live-item total.
 * **totals** — alive and dead counts with the overall total.
@@ -129,9 +129,9 @@ The 📊 button (`#btn-stats`, `templates/index.html:98`) opens `#stats-overlay`
 * **tag_counts** — a summary: distinct-tag count and the most-used tags.
 * **high_water**, **app_tracking** — a formatted timestamp and a per-AppID table.
 
-**Ordering is learned.** The request order is seeded from each metric's `seed_ms` on the first ever open; on every later open it is sorted by the durations measured on the previous open, persisted in `localStorage` under `stats.metric-order.v1`. The stored shape is deliberately tiny and versioned — `{v: 1, ms: {metric: milliseconds}}` — so a stale or corrupt entry from an older build is ignored rather than breaking the panel (`_loadStatsOrder`, `templates/index.html:1186`; `_statsOrder`). The DOM order is fixed when the panel opens; this open's measurements feed the next open.
+**Ordering is learned.** The request order is seeded from each metric's `seed_ms` on the first ever open; on every later open it is sorted by the durations measured on the previous open, persisted in `localStorage` under `stats.metric-order.v1`. The stored shape is deliberately tiny and versioned — `{v: 1, ms: {metric: milliseconds}}` — so a stale or corrupt entry from an older build is ignored rather than breaking the panel (`_loadStatsOrder`, `templates/index.html:1223`; `_statsOrder`). The DOM order is fixed when the panel opens; this open's measurements feed the next open.
 
-**Refresh is per metric.** Each chunk re-requests itself after `max(2 s, 50 × its own measured duration)` (`_intervalFor`, `templates/index.html:1182`), armed with `setTimeout` only once the previous response has landed, so a metric that is still computing is never started twice and a slow metric cannot hold up a fast one. `_closeStatsPanel` (`templates/index.html:1289`) clears every per-metric timer and bumps `_statsToken`, so responses still in flight are discarded rather than written into the closed panel.
+**Refresh is per metric.** Each chunk re-requests itself after `max(2 s, 50 × its own measured duration)` (`_intervalFor`, `templates/index.html:1219`), armed with `setTimeout` only once the previous response has landed, so a metric that is still computing is never started twice and a slow metric cannot hold up a fast one. `_closeStatsPanel` (`templates/index.html:1326`) clears every per-metric timer and bumps `_statsToken`, so responses still in flight are discarded rather than written into the closed panel.
 
 ---
 
@@ -142,6 +142,7 @@ The 📊 button (`#btn-stats`, `templates/index.html:98`) opens `#stats-overlay`
 A Tampermonkey/Greasemonkey userscript that bridges the Steam session to the web UI:
 - On `steamcommunity.com`: captures `sessionid` and `steamLoginSecure` via `GM_setValue`, shows a toast notification on change
 - On the scraper web UI: stamps `document.body.dataset.userscript = '1'` and `userscriptVer` for detection, and pushes both cookies to `/api/sessionid` — on load, then re-checked every 30 seconds but sent only when a value has actually changed, with a slow re-push as the safety net for a backend that restarted and lost its in-memory session
+- Retries a failed push with a bounded backoff rather than a fixed five-second loop: five seconds, doubling to a one-minute cap, at most six retries, then it gives up. A success resets the backoff, and the thirty-second interval remains the slow probe for a backend that comes back later
 - Version checking: reads `<meta name="userscript-version">` from the page and compares with `GM_info.script.version` — refuses to operate if outdated
 
 **Reading the login cookie needs `GM_cookie`, and HttpOnly.** Steam marks `steamLoginSecure`
@@ -153,7 +154,16 @@ does return HttpOnly cookies, but the vendor's documentation states that support
 `sessionid` is a CSRF token, while `steamLoginSecure` is the thing that authenticates the session.
 
 The version literal appears in both this file and `templates/index.html`; nothing links them, so
-`tests/test_userscript_contract.py` asserts they agree.
+`tests/test_userscript_contract.py` asserts they agree. Installed copies update from the script's
+`@updateURL`, so bumping the literal is also how an installed bridge receives a behaviour fix.
+
+**Retrying a down backend.** A failed session push is retried, but not forever: six retries
+scheduled five, ten, twenty, forty, sixty and sixty seconds later (doubling, capped at one minute and
+capped again by the attempt limit), after which the fast chain stops. Only one chain runs at a time,
+so a thirty-second interval tick cannot start a parallel stream. The interval itself keeps its
+original job — a slow probe that re-syncs a backend that restarted — and a successful push resets the
+schedule, so a transient failure later retries promptly. The change-detection is untouched: an
+unchanged value still costs no request until the stale re-push window elapses.
 
 **Throttling.** Steam answers an over-budget request with **HTTP 200** and its ordinary page shell
 carrying "too many requests", so the subscribe button is simply absent. The plugin checks for that
@@ -212,7 +222,7 @@ Reads `.tui_state.yaml` for filter/sort state restoration.
 
 ### `/api/save_filter` — POST
 
-Saves the current enrichment filters to `app_tracking` for the configured AppID.
+Saves the current enrichment filters to `app_tracking` for the configured AppID. When no target AppID is configured it answers **400** with `{"error": "No target AppID configured"}`; the client shows that message and only reports success on a 2xx, so a rejected save is never presented as a stored one.
 
 ### `/api/subscribe/<id>` — POST
 
