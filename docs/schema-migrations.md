@@ -327,6 +327,31 @@ queues with their own work. `cursor.rowcount` counts the rows the statement
 matched rather than the rows it changed, but every matched row here moves from
 `0` to `1`, so the reported count is exact. The web worker change in the same
 release stops a page that was never the item's from being cleared the same way.
+### v18 → v19: Requeue items stranded by cursor discovery
+
+Requeues rows that were discovered but never fetched, the population cursor
+discovery stranded by leaning on the `api_priority` column default:
+
+```sql
+UPDATE workshop_items SET api_priority = 1
+WHERE status IS NULL AND api_fetched_at IS NULL AND api_priority = 0
+```
+
+`CREATE TABLE` declares `api_priority INTEGER NOT NULL DEFAULT 3`, but the
+`ALTER TABLE` in migration 11→12 that adds the column to an older database uses
+`DEFAULT 0`. Cursor discovery inserted only `{"workshop_id": wid}` and let the
+default decide, so on a migrated database — which production is — every
+discovered row landed at `0`, meaning "not queued", and the fetch queue
+(`api_priority > 0`) never handed it out. Migration 15→16 requeued the rows this
+had already produced with the same predicate and priority, but left the cause in
+place, so it kept stranding more; the daemon change in the same release passes
+the priority explicitly at the cursor discovery insert site, so the two database
+histories can no longer diverge. Dead rows (`status = -1`) are excluded by the
+`status` predicate, and `needs_web_scrape`, `needs_image` and
+`translation_priority` are deliberately untouched: this is an API-fetch queue
+repair, not a scrape, image or translation decision. The reported count is the
+number of rows the statement matched; the update is idempotent, so re-running
+leaves already-queued rows queued.
 
 ---
 

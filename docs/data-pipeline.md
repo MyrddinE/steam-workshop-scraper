@@ -29,7 +29,7 @@ The main loop entry point called repeatedly by `run()`. Each invocation:
 Cursor-based discovery using `IPublishedFileService/QueryFiles` with `query_type=1` (rank by publication date, newest first). For each target AppID:
 
 - Resumes from the last stored cursor (`app_tracking.last_cursor`), or `*` for the first page.
-- Fetches `numperpage=100` items per request. Each item's `publishedfileid` is inserted into `workshop_items` as a bare row (status NULL, no metadata).
+- Fetches `numperpage=100` items per request. Each item's `publishedfileid` is inserted into `workshop_items` as a bare row at `api_priority = 3`, the documented new-item priority (status NULL, no metadata). The priority is passed explicitly rather than left to the column default, because that default is not stable across database histories: `CREATE TABLE` declares `DEFAULT 3` while the `ALTER TABLE` in migration 11→12 gives an existing database `DEFAULT 0`, so leaning on it queues discovered items on a fresh database and strands them on a migrated one (the fetch queue selects `api_priority > 0`). `_run_page_discovery` uses `5` because it handles new *and changed* items that should refresh as if visible; cursor discovery finds genuinely new items, so it uses the documented `3`.
 - Stops when `target_new` unscraped items are accumulated, or when the cursor returns empty (no more pages).
 - Persists the cursor after each page via `update_app_tracking_cursor`.
 - When the cursor is empty after a successful scan, sets `_cursor_exhausted = True`, enabling the page-based discovery mode.
