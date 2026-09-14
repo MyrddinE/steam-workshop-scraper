@@ -2076,7 +2076,12 @@ def main():
     # For TUI, prefer file logging only so it doesn't mess up the screen
     handlers = []
     if log_file:
-        handlers.append(logging.FileHandler(log_file))
+        # UTF-8 explicitly, not the platform default: on Windows the default is
+        # cp1252, which corrupts every non-ASCII character the moment the file is
+        # read back as UTF-8 and silently drops any record it cannot represent
+        # (CJK titles, which this project is full of). See `_log_file_handler` in
+        # `src/daemon_runner.py`.
+        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
         
     if handlers:
         logging.basicConfig(

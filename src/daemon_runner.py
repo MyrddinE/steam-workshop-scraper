@@ -20,12 +20,30 @@ class _SafeStreamHandler(logging.StreamHandler):
             msg = self.format(record)
             self.stream.write(msg + self.terminator)
             self.flush()
-        # Windows cp1252 console cannot encode CJK; other handlers still write the
-        # record, so only this console copy is dropped.
+        # The console cannot encode CJK when its code page is not UTF-8. Note
+        # that this copy is the *only* one dropped: the file handler is pinned to
+        # UTF-8 (`_log_file_handler`), so the record is still written where it
+        # matters. Before that pin, this comment was wrong -- the file handler had
+        # the same cp1252 problem and lost the record instead.
         except UnicodeEncodeError:
             pass
         except Exception:
             self.handleError(record)
+
+
+def _log_file_handler(log_file: str) -> logging.FileHandler:
+    """A log file handler that pins UTF-8 rather than the platform default.
+
+    Without this the file is written in the locale encoding, which on Windows is
+    cp1252. That corrupts every non-ASCII character the moment the file is read
+    back as UTF-8 -- the em dash in the "ignored" marker became a lone 0x97 byte,
+    read back as the replacement character -- and, worse, a log record the
+    encoding cannot represent at all is *dropped*: cp1252 has no CJK, and
+    `logging.raiseExceptions = False` below means `handleError` discards the
+    record in silence, so every line naming a Japanese or Chinese item was never
+    written. Pinning UTF-8 removes both problems at the writer.
+    """
+    return logging.FileHandler(log_file, encoding="utf-8")
 
 
 def _fix_windows_encoding():
@@ -99,7 +117,7 @@ def main():
 
     handlers = []
     if log_file:
-        handlers.append(logging.FileHandler(log_file))
+        handlers.append(_log_file_handler(log_file))
     if not is_daemon:
         stdout_handler = _SafeStreamHandler(sys.stdout)
         stdout_handler.setLevel(log_level)

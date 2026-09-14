@@ -46,7 +46,10 @@ def test_tui_main_logging_configured(tmp_path):
         import src.tui
         src.tui.main()
 
-        mock_file_handler.assert_called_once_with(str(log_file))
+        # UTF-8 explicitly: the platform default on Windows is cp1252, which
+        # corrupts non-ASCII on the way back in and silently drops records it
+        # cannot encode. See `_log_file_handler` in src/daemon_runner.py.
+        mock_file_handler.assert_called_once_with(str(log_file), encoding="utf-8")
         kwargs = mock_basic_config.call_args.kwargs
         assert kwargs["level"] == logging.WARNING
         assert mock_fh_instance in kwargs["handlers"]

@@ -104,3 +104,52 @@ def test_main_logging_no_daemon_with_file():
         kwargs = mock_basic_config.call_args.kwargs
         assert kwargs["level"] == logging.DEBUG
         assert len(kwargs["handlers"]) == 3
+
+
+# ── the log file must be written in UTF-8 ─────────────────────────────────────
+#
+# The handler used the platform default, which on Windows is cp1252. That
+# corrupted every non-ASCII character once the file was read back as UTF-8 -- the
+# em dash in the "ignored" marker became a single 0x97 byte, which the reader
+# turns into the replacement character -- and silently dropped any record cp1252
+# cannot represent at all, which is every log line naming a Japanese or Chinese
+# item. Both failures are invisible from inside the process, so they are pinned
+# here rather than left to a future reader to notice.
+
+def test_log_file_handler_pins_utf8():
+    from src.daemon_runner import _log_file_handler
+
+    handler = _log_file_handler("unused-for-this-assertion.log")
+    try:
+        assert handler.encoding.lower().replace("-", "") == "utf8", (
+            "the log file must not be written in the platform default encoding"
+        )
+    finally:
+        handler.close()
+
+
+def test_a_cjk_record_survives_the_log_file(tmp_path):
+    """The record a cp1252 file would have dropped is written and reads back."""
+    import logging
+    from src.daemon_runner import _log_file_handler
+
+    log_path = tmp_path / "scraper.log"
+    handler = _log_file_handler(str(log_path))
+    logger = logging.getLogger("test_cjk_survives")
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    # The failure mode is silent, so silence the handler's own error reporting
+    # the way the daemon does and assert on the bytes that actually landed.
+    previous = logging.raiseExceptions
+    logging.raiseExceptions = False
+    try:
+        logger.info('Scraped "鸣潮-爱弥丝" — ignored')
+    finally:
+        logging.raiseExceptions = previous
+        logger.removeHandler(handler)
+        handler.close()
+
+    text = log_path.read_text(encoding="utf-8")
+    assert "鸣潮-爱弥丝" in text, "a CJK title must survive the log file"
+    assert "—" in text, "the em dash must survive as an em dash"
+    assert "\ufffd" not in text, "nothing may be replaced on the way through"
