@@ -2,7 +2,8 @@ import pytest
 from unittest.mock import patch, MagicMock, ANY
 import signal
 import json
-from src.daemon import Daemon
+import time
+from src.daemon import Daemon, STALE_SWEEP_INTERVAL_SECONDS, API_DELAY_FLOOR
 from src.database import get_app_tracking, initialize_database, update_app_tracking
 
 @pytest.fixture
@@ -46,7 +47,7 @@ def test_daemon_init_missing_appids():
 
 @patch('src.daemon.count_unscraped_items')
 @patch('src.daemon.get_next_items_to_scrape')
-@patch('src.daemon.get_workshop_details_api')
+@patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.get_user')
 @patch('src.daemon.insert_or_update_user')
 @patch('src.daemon.insert_or_update_item')
@@ -55,14 +56,15 @@ def test_daemon_init_missing_appids():
 def test_daemon_process_batch_success(mock_sleep, mock_flag_web, mock_insert, mock_insert_user, mock_get_user, mock_api, mock_get_items, mock_count, mock_config):
     mock_count.return_value = 1000
     mock_get_items.return_value = [{'workshop_id': 123}]
-    mock_api.return_value = {"title": "Test Mod", "creator": "111", "status": 200}
+    mock_api.return_value = {123: {"title": "Test Mod", "creator": "111", "status": 200}}
     mock_get_user.return_value = {"steamid": 111, "api_fetched_at": 1767225600}
 
     daemon = Daemon(mock_config)
     daemon.process_batch()
 
     mock_get_items.assert_called_once_with(mock_config["database"]["path"], limit=2, staleness_days=30)
-    mock_api.assert_called_once_with(123, "TEST_KEY")
+    # One request carrying the whole batch, not one call per item.
+    mock_api.assert_called_once_with([123], "TEST_KEY")
     mock_flag_web.assert_called_once_with(mock_config["database"]["path"], 123, 3)
 
     inserted_data = mock_insert.call_args[0][1]
@@ -71,13 +73,14 @@ def test_daemon_process_batch_success(mock_sleep, mock_flag_web, mock_insert, mo
 
 @patch('src.daemon.count_unscraped_items')
 @patch('src.daemon.get_next_items_to_scrape')
-@patch('src.daemon.get_workshop_details_api')
+@patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
 @patch('time.sleep')
 def test_daemon_process_batch_api_failure(mock_sleep, mock_insert, mock_api, mock_get_items, mock_count, mock_config):
     mock_count.return_value = 1000
     mock_get_items.return_value = [{'workshop_id': 456}]
-    mock_api.return_value = {"status": 500, "publishedfileid": 456} # Mock API failure with status
+    # None is a request-level failure; every id it carried settles as a 500.
+    mock_api.return_value = None
 
     daemon = Daemon(mock_config)
 
@@ -119,7 +122,7 @@ def test_daemon_process_batch_empty(mock_sleep, mock_seed, mock_get_items, mock_
 
 @patch('src.daemon.count_unscraped_items')
 @patch('src.daemon.get_next_items_to_scrape')
-@patch('src.daemon.get_workshop_details_api')
+@patch('src.daemon.get_workshop_details_batch')
 def test_daemon_process_batch_exit_early(mock_api, mock_get_items, mock_count, mock_config):
     """Test behavior when shutdown signal is received mid-batch."""
     mock_count.return_value = 1000
@@ -131,46 +134,139 @@ def test_daemon_process_batch_exit_early(mock_api, mock_get_items, mock_count, m
 
 @patch('src.daemon.count_unscraped_items')
 @patch('src.daemon.get_next_items_to_scrape')
-@patch('src.daemon.get_workshop_details_api')
+@patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.get_user')
 @patch('src.daemon.insert_or_update_user')
 @patch('src.daemon.insert_or_update_item')
 @patch('src.daemon.flag_for_web_scrape')
 @patch('time.sleep')
-def test_api_delay_decreases_on_success(mock_sleep, mock_flag_web, mock_insert, mock_insert_user, mock_get_user, mock_api, mock_get_items, mock_count, mock_config):
-    items = [{'workshop_id': i} for i in range(100)]
+def test_api_delay_decays_on_every_healthy_request(mock_sleep, mock_flag_web, mock_insert, mock_insert_user, mock_get_user, mock_api, mock_get_items, mock_count, mock_config):
+    """Every healthy request shaves one step off the delay.
+
+    One request carries the whole batch, so a batch of five successful items is
+    one decay step, not five.
+    """
     mock_count.return_value = 1000
-    mock_get_items.return_value = items
-    # A fresh dict per call: _merge_and_clean_api_data pops keys off the response,
-    # so a shared mock object loses its "status" after the first item and every
-    # later item reads as an unhandled code rather than a success.
-    mock_api.side_effect = lambda *a, **k: {"title": "Mod", "creator": "111", "status": 200}
+    mock_get_items.return_value = [{'workshop_id': i} for i in range(5)]
+    # A fresh dict per call: _merge_and_clean_api_data pops keys off the
+    # response, so a shared mock object loses its "status" after the first item.
+    mock_api.side_effect = lambda ids, key: {
+        i: {"title": "Mod", "creator": "111", "status": 200} for i in ids}
     mock_get_user.return_value = {"steamid": 111, "api_fetched_at": 1767225600}
 
     daemon = Daemon(mock_config)
+    daemon.batch_size = 5
     daemon.api_delay = 1.0
-    initial = daemon.api_delay
     daemon.process_batch()
-    assert daemon.api_delay < initial
+    assert daemon.api_delay == 0.99, "one successful request decays the delay once"
 
 @patch('src.daemon.count_unscraped_items')
 @patch('src.daemon.get_next_items_to_scrape')
-@patch('src.daemon.get_workshop_details_api')
+@patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
 @patch('time.sleep')
-def test_api_delay_increases_on_failures(mock_sleep, mock_insert, mock_api, mock_get_items, mock_count, mock_config):
+def test_api_delay_multiplies_on_every_refused_request(mock_sleep, mock_insert, mock_api, mock_get_items, mock_count, mock_config):
     mock_count.return_value = 1000
     mock_get_items.return_value = [{'workshop_id': 11}, {'workshop_id': 12}]
-    mock_api.return_value = {"status": 500, "publishedfileid": 11}
+    mock_api.return_value = None  # the request itself failed
 
     daemon = Daemon(mock_config)
-    daemon.api_delay = 1.0
-    daemon.api_successes = 5
-    daemon.api_had_streak = True
-    initial = daemon.api_delay
+    daemon.api_delay = 0.25
 
     daemon.process_batch()
-    assert daemon.api_delay > initial
+    # Two items failed, but that is one refused request: one doubling.
+    assert daemon.api_delay == 0.5
+    assert daemon.api_failures == 1
+
+    daemon.process_batch()
+    assert daemon.api_delay == 1.0, "a sustained outage keeps multiplying"
+
+
+def test_api_delay_backoff_is_capped_and_decay_has_a_floor(db_path, tmp_path):
+    daemon = _real_db_daemon(db_path, tmp_path)
+
+    daemon.api_delay = 2.0
+    daemon._record_api_request_failure()
+    assert daemon.api_delay == 2.0, "the ceiling still bounds a client that never succeeds"
+
+    daemon.api_delay = 0.01
+    daemon._record_api_request_success()
+    assert daemon.api_delay == 0.01, "a zero delay is not a rate limit"
+
+
+def test_delay_converges_to_just_under_the_refusal_threshold(db_path, tmp_path):
+    """The sawtooth probes upward and settles just above the limit.
+
+    Simulate a server that refuses any call faster than 40 ms apart. Started at
+    the floor, the loop must refuse its way up to the threshold and then hover
+    around it, not run away to the ceiling and not sit still.
+    """
+    daemon = _real_db_daemon(db_path, tmp_path)
+    daemon.api_delay = 0.01
+    limit = 0.04
+    refusals = 0
+    for _ in range(200):
+        if daemon.api_delay < limit:
+            daemon._record_api_request_failure()
+            refusals += 1
+        else:
+            daemon._record_api_request_success()
+
+    assert refusals > 0, "it must have probed into the limit at least once"
+    assert limit - 0.01 <= daemon.api_delay <= limit + 0.03, (
+        f"delay settled at {daemon.api_delay}, not near the {limit}s threshold")
+    assert refusals < 200, "it must be refused sometimes, not constantly"
+
+
+def test_mixed_outcome_batch_is_a_healthy_request_not_a_refusal(db_path, tmp_path):
+    """A returned-and-parsed request is a success even with not-found items.
+
+    The API did its job; the individual 404s are item state, not pacing. Start
+    at the floor so the single decay step is a no-op and the assertion isolates
+    "no back-off" from the decay.
+    """
+    from src.database import insert_or_update_item, get_connection
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 5, "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 5, "status": 200})
+    daemon = _real_db_daemon(db_path, tmp_path)
+    daemon.batch_size = 2
+    daemon.api_delay = API_DELAY_FLOOR
+    initial = daemon.api_delay
+
+    with patch("src.daemon.get_next_items_to_scrape", return_value=[
+            {"workshop_id": 1, "api_priority": 5, "status": 200},
+            {"workshop_id": 2, "api_priority": 5, "status": 200}]), \
+         patch("src.daemon.get_workshop_details_batch", return_value={
+             1: {"title": "still here", "status": 200},
+             2: {"status": 404, "publishedfileid": 2},
+         }):
+        daemon.process_batch()
+
+    assert daemon.api_delay == initial, "mixed per-item results must not back the delay off"
+    assert daemon.api_failures == 0
+    assert daemon.api_successes == 1
+
+    conn = get_connection(db_path)
+    rows = {r["workshop_id"]: dict(r)
+            for r in conn.execute("SELECT * FROM workshop_items")}
+    conn.close()
+    assert rows[1]["status"] == 200
+    assert rows[2]["status"] == -1, "the not-found item is still marked dead"
+    assert rows[2]["api_priority"] == 0
+
+
+def test_request_failure_multiplies_delay_and_success_decays_it(db_path, tmp_path):
+    daemon = _real_db_daemon(db_path, tmp_path)
+    daemon.api_delay = 0.25
+
+    daemon._record_api_request_failure()
+    assert daemon.api_delay == 0.5
+    assert daemon.api_failures == 1
+
+    daemon._record_api_request_success()
+    assert daemon.api_delay == 0.49, "a healthy request walks the delay back down"
+    assert daemon.api_failures == 0, "a healthy request resets the failure streak"
 
 
 def test_page_discovery_not_eligible_initially(mock_config):
@@ -216,7 +312,7 @@ def test_merge_and_clean_sets_api_priority_zero(mock_config):
 @patch('src.daemon.save_config')
 @patch('src.daemon.get_next_items_to_scrape')
 @patch('src.daemon.count_unscraped_items', return_value=0)
-@patch('src.daemon.get_workshop_details_api')
+@patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
 @patch('src.daemon.flag_for_web_scrape')
 @patch('src.daemon.flag_for_image')
@@ -227,7 +323,7 @@ def test_process_batch_404_status_marker(
     mock_api, mock_count, mock_items, mock_save, mock_init, mock_config
 ):
     """Verify 404 item gets status=-1 passed to insert."""
-    mock_api.return_value = {"status": 404, "publishedfileid": 1}
+    mock_api.return_value = {1: {"status": 404, "publishedfileid": 1}}
     mock_items.return_value = [{"workshop_id": 1}]
     mock_user.return_value = None
     daemon = Daemon(mock_config)
@@ -244,19 +340,20 @@ def test_process_batch_404_status_marker(
 @patch('src.daemon.save_config')
 @patch('src.daemon.get_next_items_to_scrape')
 @patch('src.daemon.count_unscraped_items', return_value=0)
-@patch('src.daemon.get_workshop_details_api')
+@patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
 @patch('src.daemon.flag_for_web_scrape')
 @patch('src.daemon.flag_for_image')
 @patch('src.daemon.get_connection')
 @patch('src.daemon.get_user')
+@patch('src.daemon.get_player_summaries', return_value={})
 @patch('src.daemon.get_app_tracking', return_value=None)
 def test_process_batch_inherits_priority(
-    mock_track, mock_user, mock_conn, mock_img, mock_web, mock_insert,
+    mock_track, mock_summaries, mock_user, mock_conn, mock_img, mock_web, mock_insert,
     mock_api, mock_count, mock_items, mock_save, mock_init, mock_config
 ):
     """flag_for_web_scrape and flag_for_image get max(inherited, default)."""
-    mock_api.return_value = {"title": "Test", "creator": "111", "preview_url": "http://x", "status": 200}
+    mock_api.return_value = {1: {"title": "Test", "creator": "111", "preview_url": "http://x", "status": 200}}
     mock_items.return_value = [{"workshop_id": 1, "api_priority": 5, "status": 200}]
     mock_user.return_value = None
     daemon = Daemon(mock_config)
@@ -461,4 +558,90 @@ def test_merge_remaps_steam_api_time_fields(db_path):
     assert "time_created" not in result
     assert "time_updated" not in result
     assert result["api_fetched_at"] == 999
+
+
+# ── Batch-level creator refresh and timed staleness sweep ────────────────────
+
+@patch('src.daemon.get_workshop_details_batch')
+@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.insert_or_update_user')
+@patch('src.daemon.get_user')
+@patch('src.daemon.get_player_summaries')
+def test_creator_refresh_makes_one_call_for_several_creators(
+    mock_summaries, mock_get_user, mock_insert_user, mock_items, mock_batch,
+    db_path, tmp_path
+):
+    """Distinct stale creators share a single GetPlayerSummaries request.
+
+    The "only enriched items" and staleness rules are unchanged; only the
+    per-item request is gone.
+    """
+    daemon = _real_db_daemon(db_path, tmp_path)
+    daemon.batch_size = 4
+    mock_items.return_value = [
+        {"workshop_id": i, "api_priority": 5, "status": 200} for i in (1, 2, 3, 4)
+    ]
+    # Creator 111 appears twice and is fresh; 222 and 333 are stale.
+    mock_batch.return_value = {
+        1: {"title": "a", "creator": "111", "status": 200},
+        2: {"title": "b", "creator": "222", "status": 200},
+        3: {"title": "c", "creator": "333", "status": 200},
+        4: {"title": "d", "creator": "111", "status": 200},
+    }
+    fresh = int(time.time())
+    mock_get_user.side_effect = lambda path, cid: (
+        {"steamid": cid, "api_fetched_at": fresh} if cid == 111 else None)
+    mock_summaries.return_value = {
+        111: {"personaname": "One"},
+        222: {"personaname": "Two"},
+        333: {"personaname": "Three"},
+    }
+
+    daemon.process_batch()
+
+    mock_summaries.assert_called_once()
+    assert sorted(mock_summaries.call_args[0][0]) == [222, 333]
+    assert mock_insert_user.call_count == 2
+
+
+@patch('src.daemon.get_workshop_details_batch')
+def test_only_enriched_items_propose_a_creator(mock_batch, db_path, tmp_path):
+    """A non-enriched item proposes no creator, so its persona is not fetched."""
+    from src.daemon import Daemon
+    from src.database import insert_or_update_item
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 5, "status": 200})
+    daemon = _real_db_daemon(db_path, tmp_path)
+    daemon.batch_size = 1
+    mock_batch.return_value = {1: {"title": "x", "creator": "111", "status": 200}}
+    with patch.object(daemon, "_should_enrich", return_value=False), \
+         patch("src.daemon.get_next_items_to_scrape",
+               return_value=[{"workshop_id": 1, "api_priority": 5, "status": 200}]), \
+         patch("src.daemon.get_player_summaries") as mock_summaries, \
+         patch("src.daemon.get_user") as mock_get_user:
+        daemon.process_batch()
+    mock_summaries.assert_not_called()
+    mock_get_user.assert_not_called()
+
+
+@patch.object(Daemon, '_promote_stale_items')
+def test_stale_sweep_runs_at_most_once_per_interval(mock_promote, mock_config):
+    daemon = Daemon(mock_config)
+    daemon._last_stale_sweep = None
+
+    daemon._maybe_promote_stale_items()
+    daemon._maybe_promote_stale_items()
+    assert mock_promote.call_count == 1, "a second batch inside the interval must not sweep"
+
+    daemon._last_stale_sweep = time.monotonic() - STALE_SWEEP_INTERVAL_SECONDS - 1
+    daemon._maybe_promote_stale_items()
+    assert mock_promote.call_count == 2, "the sweep runs again once the interval has elapsed"
+
+
+@patch.object(Daemon, '_promote_stale_items')
+@patch('src.daemon.get_next_items_to_scrape', return_value=None)
+def test_stale_sweep_runs_on_the_first_batch_after_startup(mock_items, mock_promote, mock_config):
+    daemon = Daemon(mock_config)
+    daemon.process_batch()
+    mock_promote.assert_called_once()
 

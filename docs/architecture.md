@@ -38,15 +38,20 @@ The daemon does not merely wait for new items; it actively expands the database:
 * **Proactive user expansion**: The daemon identifies creators whose profile information is missing
   or stale and refreshes their persona details via the Steam API (`GetPlayerSummaries/v2`).
 * **Dynamic scrape delay**: To avoid rate-limiting and adapt to network conditions, the daemon
-  adjusts the delay between requests. It decreases the delay after long periods of success and
-  increases it after a series of consecutive failures.
+  adjusts the delay between requests. It is counted in **requests**, not items: one batched
+  `GetPublishedFileDetails` call is one data point, so a batch whose items are individually
+  "not found" cannot masquerade as a run of failures. The rule is TCP congestion control — each
+  healthy request shaves a fixed 10 ms off the delay and each refused request (a transport error, a
+  timeout, an HTTP error such as 429/5xx, or an unparseable body) doubles it — so the delay
+  converges to just under whatever rate Steam will sustain and keeps probing that moving limit.
+  Individual item results drive item state and never touch the delay.
 
 #### The scrape pipeline
 
 For every identified `workshop_id`, the daemon executes a multi-stage enrichment process:
 
 1. **Primary fetch (API)**: Retrieves core metadata (title, creator, tags, counts, preview URL)
-   using `GetPublishedFileDetails/v1`.
+   using `GetPublishedFileDetails/v1`, one request per batch of ids rather than per item.
 2. **Deep enrichment (web scraper)**: The API does not expose the full body text, so a worker
    thread visits the item's HTML page to extract the extended description and tags using CSS
    selectors. Tags from the API and the scraper are merged.

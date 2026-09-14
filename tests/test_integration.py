@@ -58,14 +58,14 @@ def test_daemon_pipeline_mocked(db_path):
     insert_or_update_item(db_path, {"workshop_id": 555})
 
     with patch("src.daemon.count_unscraped_items", return_value=100), \
-         patch("src.daemon.get_workshop_details_api") as mock_api, \
+         patch("src.daemon.get_workshop_details_batch") as mock_api, \
          patch("src.daemon.get_user") as mock_get_user, \
          patch("src.daemon.insert_or_update_user") as mock_ins_user, \
          patch("src.daemon.flag_for_web_scrape") as mock_flag_web, \
          patch("time.sleep"):
 
         mock_api.return_value = {
-            "title": "Pipeline Mod", "creator": 200, "status": 200, "tags": [{"tag": "test"}]
+            555: {"title": "Pipeline Mod", "creator": 200, "status": 200, "tags": [{"tag": "test"}]}
         }
         mock_get_user.return_value = {"steamid": 200, "api_fetched_at": 1767225600}
 
