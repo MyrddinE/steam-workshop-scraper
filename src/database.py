@@ -643,7 +643,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 17
+    EXPECTED_VERSION = 18
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -1371,6 +1371,42 @@ def initialize_database(db_path: str):
         logging.info(
             "Migration 16->17 complete. Removed %d dead items from the work queues.",
             dequeued_dead,
+        )
+
+    if db_version < 18:
+        logging.info("Running migration 17->18: requeueing items dequeued without a description...")
+
+        # Before 17894f7 the web worker tested the *dict* the scraper returned
+        # rather than the description inside it. A page whose description selector
+        # did not match comes back as a truthy dict with description None, so the
+        # item was written with extended_description NULL and
+        # needs_web_scrape = 0 -- recorded as a finished scrape and permanently
+        # out of the queue. On the 2026-09-12 snapshot that stranded 63,229 rows.
+        #
+        # Priority 1 is the backlog level migration 15->16 used for the rows a
+        # transient failure had stranded: high enough that the item is retried,
+        # but below the 3/5/10 of new and current work, so it cannot jump ahead
+        # of the live queue. Dead items (status -1) are excluded because they can
+        # never complete and issue 17 keeps them out of every queue.
+        #
+        # SQLite's cursor.rowcount counts the rows the UPDATE *matched*, not the
+        # rows whose value actually changed. That cannot inflate this count: every
+        # matched row moves from 0 to 1 (and a re-run matches nothing), so the
+        # count below is exact.
+        cursor.execute(
+            "UPDATE workshop_items SET needs_web_scrape = 1 "
+            "WHERE needs_web_scrape = 0 "
+            "AND COALESCE(extended_description, '') = '' "
+            "AND (status IS NULL OR status <> -1)"
+        )
+        stranded_descriptionless = cursor.rowcount
+
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 18")
+        conn.commit()
+        logging.info(
+            "Migration 17->18 complete. Requeued %d description-less items.",
+            stranded_descriptionless,
         )
 
     # Create indexes for faster querying
