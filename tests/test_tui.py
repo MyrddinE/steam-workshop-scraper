@@ -557,11 +557,43 @@ async def test_stats_screen_puts_every_metric_in_its_own_chunk(mock_config):
             assert screen.query_one("#app-stats-table", DataTable).row_count == 1
             assert screen.query_one("#tag-stats-table", DataTable).row_count == 2
 
-            # One section per metric, no tier grouping, and each shows its cost.
-            assert len(screen.query(".stats-chunk")) == len(metrics.all_names())
+            # One section per metric that is a handful of numbers, no tier
+            # grouping, and each shows its cost. Tags are the exception: they are
+            # a long table and keep a column of their own to the right, so they
+            # own a widget without owning a chunk in the scrolling list.
+            assert len(screen.query(".stats-chunk")) == len(metrics.all_names()) - 1
             assert len(screen.query("#tier-costs")) == 0
             label = str(screen.query_one("#stats-label-totals", Label).render())
             assert "1.0 ms" in label
+
+
+@pytest.mark.asyncio
+async def test_stats_screen_keeps_tags_in_their_own_right_hand_column(mock_config):
+    """Tags are a long list, so they get a column rather than a section.
+
+    Regression: the per-metric rework folded every chunk into one scrolling
+    column, which pushed the tag table in among the counts and left the sections
+    below it off the screen. Tags belonged on the right, filling the height.
+    """
+    with patch('src.tui.load_config', return_value=mock_config), \
+         patch('src.tui.metrics.iter_metrics', side_effect=_fake_iter_metrics([])):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+            app.push_screen(StatsScreen(app.db_path))
+            await pilot.pause(ASYNC_PAUSE)
+            screen = app.screen
+
+            assert screen.query("#stats-right-col #tag-stats-table"), \
+                "the tag table must live in the right-hand column"
+            assert not screen.query("#stats-scroll #tag-stats-table"), \
+                "the tag table must not be one of the scrolling metric chunks"
+
+            # Every other metric is still a chunk in the list.
+            for name in metrics.all_names():
+                if name == StatsScreen.TAG_METRIC:
+                    continue
+                assert screen.query(f"#chunk-{name}"), f"{name} lost its section"
 
 
 def test_stats_request_order_learns_from_the_measured_costs():

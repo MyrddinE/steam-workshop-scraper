@@ -131,6 +131,10 @@ class StatsScreen(Screen):
     #: interval.
     SCHEDULER_TICK_SECONDS = 1.0
 
+    #: The one metric that gets its own column rather than a section in the
+    #: scrolling list: it is a long table, not a handful of numbers.
+    TAG_METRIC = "tag_counts"
+
     #: Human labels for the section headings, kept in step with the web panel's.
     LABELS = {
         "high_water": "Last successful API fetch",
@@ -173,9 +177,25 @@ class StatsScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with VerticalScroll(id="stats-scroll"):
-            for name in metrics.all_names():
-                yield from self._compose_chunk(name)
+        # Two columns, as the screen had before the per-metric rework: the
+        # metrics flow down the left, and the tag table keeps a block of its own
+        # on the right, filling the height. Tags are the one metric that is a
+        # long list rather than a few numbers, so folding it into the same
+        # column pushed every section below it off the screen.
+        with Horizontal(id="stats-main"):
+            with VerticalScroll(id="stats-scroll"):
+                for name in metrics.all_names():
+                    if name == self.TAG_METRIC:
+                        continue
+                    yield from self._compose_chunk(name)
+            with Vertical(id="stats-right-col"):
+                yield Label(
+                    f"[b]{self.LABELS[self.TAG_METRIC]}[/b]",
+                    id=f"stats-label-{self.TAG_METRIC}",
+                    classes="stats-header",
+                )
+                with VerticalScroll(id="tag-stats-scroll"):
+                    yield DataTable(id="tag-stats-table")
         yield Footer()
         yield Button("Close", id="btn-close-sub-queue")
 
@@ -189,9 +209,6 @@ class StatsScreen(Screen):
             )
             if name == "app_tracking":
                 yield DataTable(id="app-stats-table")
-            elif name == "tag_counts":
-                with VerticalScroll(id="tag-stats-scroll"):
-                    yield DataTable(id="tag-stats-table")
             else:
                 yield Static(id=self.CONTENT_IDS[name])
 
@@ -1162,9 +1179,21 @@ class ScraperApp(App):
     #_default {
         layout: vertical;
     }
-    #stats-scroll {
+    #stats-main {
         height: 1fr;
-        padding: 1 2;
+    }
+    #stats-scroll {
+        /* The metrics column. It scrolls on its own so the tag table beside it
+           stays put and keeps the full height. */
+        height: 1fr;
+        width: 40%;
+        padding: 1;
+        border-right: tall $primary;
+    }
+    #stats-right-col {
+        height: 1fr;
+        width: 60%;
+        padding: 1;
     }
     .stats-chunk {
         height: auto;
@@ -1174,10 +1203,9 @@ class ScraperApp(App):
         color: $accent;
     }
     #tag-stats-scroll {
-        /* The screen itself scrolls; this bounds only the longest table so the
-           sections after it stay reachable without scrolling past every tag. */
-        height: auto;
-        max-height: 20;
+        /* Fills the column, so the tag list uses the whole screen height and
+           scrolls within it rather than being capped at a fixed number of rows. */
+        height: 1fr;
     }
     #tag-stats-table, #app-stats-table {
         height: auto;
