@@ -107,14 +107,52 @@ def test_scrape_extended_details_not_found():
     assert details["description"] is None
 
 @responses.activate
-@pytest.mark.parametrize("setup_fn", [
-    pytest.param(lambda url: responses.add(responses.GET, url, status=404), id="http_error"),
-    pytest.param(lambda url: responses.add(responses.GET, url, body=requests.exceptions.Timeout()), id="timeout"),
-])
-def test_scrape_extended_details_returns_none_on_failure(setup_fn):
-    setup_fn(STEAM_WORKSHOP_URL)
+def test_scrape_extended_details_returns_none_on_transport_failure():
+    """A genuine transport failure has no response, so None keeps that meaning."""
+    responses.add(responses.GET, STEAM_WORKSHOP_URL, body=requests.exceptions.Timeout())
     details = scrape_extended_details("https://steamcommunity.com/sharedfiles/filedetails/?id=123")
     assert details is None
+
+
+@responses.activate
+@pytest.mark.parametrize("status", [404, 410])
+def test_scrape_extended_details_keeps_an_http_error_status(status):
+    """An HTTP error is a served answer, not a lost connection.
+
+    ``raise_for_status()``'s ``HTTPError`` carries the response, so the status
+    and body survive for the caller to classify; returning None for both an HTTP
+    error and a timeout is what made a missing item indistinguishable from a
+    transport failure.
+    """
+    responses.add(responses.GET, STEAM_WORKSHOP_URL,
+                  body="<h3>That item does not exist.</h3>", status=status,
+                  content_type="text/html")
+    details = scrape_extended_details("https://steamcommunity.com/sharedfiles/filedetails/?id=123")
+    assert details is not None
+    assert details["description"] is None
+    assert details["http_status"] == status
+    assert "does not exist" in details["body"]
+
+
+@pytest.mark.parametrize("body,expected", [
+    ("<h3>That item does not exist.  It may have been removed by the author.</h3>", True),
+    ("<h3>There was a problem accessing the item.  Please try again.</h3>", True),
+    ("<div class='workshopItem'>x</div>", False),
+    ("<h3>Too many requests</h3>", False),
+    ("", False),
+])
+def test_looks_like_missing_item(body, expected):
+    from src.web_scraper import looks_like_missing_item
+    assert looks_like_missing_item(body) is expected
+
+
+def test_missing_item_reason_quotes_the_page():
+    """The log needs the phrase, because the status is 200 on this page."""
+    from src.web_scraper import missing_item_reason
+    assert missing_item_reason(
+        "<h3>That item does not exist.</h3>") == "that item does not exist"
+    assert missing_item_reason("<div class='workshopItem'>x</div>") is None
+
 
 @responses.activate
 def test_discover_items_by_date_html_success():

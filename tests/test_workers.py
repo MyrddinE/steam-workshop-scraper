@@ -175,6 +175,14 @@ FOUND = {"description": "scraped text", "tags": [], "body": None,
 ITEM_PAGE_WITHOUT_DESCRIPTION = dict(
     MISS, body='<html><div class="workshopItem">x</div></html>')
 
+# The Workshop's "no such item" page. A live probe showed an absent but
+# well-formed id is served with **HTTP 200** from Steam's ordinary error shell,
+# so the wording, not the status, is the evidence; the id-0 wording is included
+# because it is the other phrasing the same shell carries.
+MISSING_ITEM_PAGE = dict(
+    MISS, body='<title>Steam Community :: Error</title>'
+               '<h3>That item does not exist.  It may have been removed by the author.</h3>')
+
 
 def test_selector_miss_without_the_item_page_leaves_the_item_queued(db_path):
     """An error, wall or throttle page is not the item's fault, so the item keeps
@@ -291,6 +299,192 @@ def test_a_found_description_resets_the_failure_streak(db_path):
 
     assert worker.web_failures == 0, "a found description clears the streak"
     assert worker.web_successes >= 1
+
+
+# ── Web worker: the outcome taxonomy ─────────────────────────────────────────
+# Which outcome buys which response is the policy. Only an unattributable
+# outcome grows the delay now: a rate limit pauses, a missing item and a
+# description-less item page are answers the item gave, and a gate is a session
+# problem a slower pace cannot fix. The classification is one table so the next
+# person can read the policy off it.
+
+def test_classify_scrape_names_every_outcome():
+    from src.web_worker import ScrapeOutcome, classify_scrape
+
+    assert classify_scrape(FOUND) is ScrapeOutcome.SUCCESS
+    assert classify_scrape(dict(MISS, http_status=404)) is ScrapeOutcome.ITEM_MISSING
+    assert classify_scrape(dict(MISS, http_status=410)) is ScrapeOutcome.ITEM_MISSING
+    assert classify_scrape(MISSING_ITEM_PAGE) is ScrapeOutcome.ITEM_MISSING
+    assert classify_scrape(
+        dict(MISS, body="<h1>You have made too many requests</h1>")
+    ) is ScrapeOutcome.RATE_LIMITED
+    assert classify_scrape(
+        ITEM_PAGE_WITHOUT_DESCRIPTION) is ScrapeOutcome.ITEM_PAGE_WITHOUT_DESCRIPTION
+    assert classify_scrape(
+        dict(MISS, body='<title>Steam Community :: Error</title><div id="AgeCheck">x</div>')
+    ) is ScrapeOutcome.GATE
+    assert classify_scrape(MISS) is ScrapeOutcome.UNKNOWN
+    assert classify_scrape(None) is ScrapeOutcome.UNKNOWN
+    # A 5xx is a server fault with no attributable cause, whatever the body says.
+    assert classify_scrape(
+        dict(MISS, http_status=503,
+             body='<title>Steam Community :: Error</title><div id="AgeCheck">x</div>')
+    ) is ScrapeOutcome.UNKNOWN
+    assert classify_scrape(
+        dict(MISS, http_status=503, body="<h3>That item does not exist.</h3>")
+    ) is ScrapeOutcome.UNKNOWN
+
+
+def test_a_404_does_not_grow_the_delay_and_clears_the_queue(db_path):
+    """A missing item is the item's own doing, not a pacing problem."""
+    from src.database import insert_or_update_item
+    from src.web_worker import WebScraperThread
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+
+    worker = WebScraperThread(db_path, ".pauselock")
+    worker.web_had_streak = True
+    worker.web_failures = 1
+
+    worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
+                             dict(MISS, http_status=404, body=""), worker=worker)
+
+    assert _web_scrape_priority(db_path) == 0, "a gone item must leave the queue"
+    assert worker.web_failures == 1, "a 404 is not a failure for the delay rule"
+    assert worker.web_delay == 5.0
+
+
+def test_steams_missing_item_page_clears_the_queue_despite_http_200(db_path):
+    """Steam serves the item-error page with HTTP 200, so wording is the signal."""
+    from src.database import insert_or_update_item
+    from src.web_worker import WebScraperThread
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+
+    worker = WebScraperThread(db_path, ".pauselock")
+    worker.web_had_streak = True
+    worker.web_failures = 1
+
+    worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
+                             MISSING_ITEM_PAGE, worker=worker)
+
+    assert _web_scrape_priority(db_path) == 0, "the page says the item is gone"
+    assert worker.web_failures == 1
+    assert worker.web_delay == 5.0
+
+
+def test_a_transport_failure_still_grows_the_delay(db_path):
+    """The one unattributable outcome keeps the back-off it always had."""
+    from src.database import insert_or_update_item
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+
+    worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
+                             [FOUND] * 5 + [None] * 2)
+
+    assert worker.web_had_streak is False, "the transport failures ended the streak"
+    assert worker.web_failures >= 2
+    assert worker.web_delay > 5.0, "a transport failure still slows the scraper"
+
+
+def test_a_rate_limit_pauses_without_growing_the_delay(db_path):
+    """The throttle keeps its 300 s pause and touches nothing else."""
+    from src.database import insert_or_update_item
+    from src.web_worker import RATE_LIMIT_PAUSE_SECONDS, WebScraperThread
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+
+    worker = WebScraperThread(db_path, ".pauselock")
+    worker.web_had_streak = True
+    worker.web_failures = 1
+
+    throttled = dict(MISS, body="<h1>You've made too many requests recently.</h1>")
+    with patch.object(worker, "_wait_out_throttle") as pause:
+        worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
+                                 throttled, worker=worker)
+
+    pause.assert_called_once_with(RATE_LIMIT_PAUSE_SECONDS)
+    assert worker.web_failures == 1, "a spent budget is not a scrape failure"
+    assert worker.web_delay == 5.0
+    assert _web_scrape_priority(db_path) == 5, "the item is not at fault"
+
+
+def test_a_gate_does_not_grow_the_delay(db_path):
+    """A sign-in wall or age check is a session problem, not a pacing one."""
+    from src.database import insert_or_update_item
+    from src.web_worker import WebScraperThread
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+
+    worker = WebScraperThread(db_path, ".pauselock")
+    worker.web_had_streak = True
+    worker.web_failures = 1
+
+    gated = dict(MISS, body='<title>Steam Community :: Error</title>'
+                            '<div id="AgeCheck">age check</div>')
+    worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
+                             gated, worker=worker)
+
+    assert worker.web_failures == 1, "a wall is not a failure for the delay rule"
+    assert worker.web_delay == 5.0
+    assert _web_scrape_priority(db_path) == 5, "the item keeps its queue place"
+
+
+def test_the_missing_item_log_quotes_the_status_and_the_wording(db_path, caplog):
+    """The owner reads scraper.log alone: a 404 and a timeout must read apart."""
+    import logging
+    from src.database import insert_or_update_item
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+
+    with caplog.at_level(logging.WARNING):
+        _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
+                        dict(MISS, http_status=404, body=""))
+
+    text = caplog.text.lower()
+    assert "http 404" in text
+    assert "not available" in text
+    assert "transport failure" not in text
+
+
+def test_the_transport_failure_log_is_distinguishable_from_a_missing_item(db_path, caplog):
+    import logging
+    from src.database import insert_or_update_item
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+
+    with caplog.at_level(logging.WARNING):
+        _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1}, None)
+
+    text = caplog.text.lower()
+    assert "transport failure" in text
+    assert "404" not in text
+
+
+def test_a_missing_item_is_captured_as_its_own_kind(db_path, tmp_path):
+    """There is no capture of this page yet, so it must be noisily on record."""
+    import json
+    from src import capture
+    from src.database import insert_or_update_item
+
+    outbox = tmp_path / "outbox"
+    capture.configure(str(outbox))
+    try:
+        insert_or_update_item(db_path, {"workshop_id": 9, "needs_web_scrape": 5})
+        _run_web_worker(db_path, {"workshop_id": 9, "steam_updated_at": 1},
+                        MISSING_ITEM_PAGE)
+    finally:
+        capture.configure(None)
+
+    group = capture.group_id("web_item_missing", None, "web_scrape")
+    group_dir = outbox / "failures" / group
+    records = [p for p in group_dir.glob("*.json") if p.name != "_group.json"]
+    assert len(records) == 1
+    record = json.loads(records[0].read_text())
+    assert record["workshop_id"] == 9
+    assert record["http_status"] == 200
+    assert record["shape"]["title_tag"] == "Steam Community :: Error"
+
 
 
 def test_selector_miss_is_captured(db_path, tmp_path):
