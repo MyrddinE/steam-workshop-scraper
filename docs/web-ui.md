@@ -131,9 +131,9 @@ While the panel is open, `_refreshDaemonStatus` polls `/api/daemon` and `_pollDa
 
 ## Statistics Panel
 
-The 📊 button (`#btn-stats`, `templates/index.html:98`) opens `#stats-overlay` (`templates/index.html:135`), a modal panel modelled on the daemon overlay. It keeps the button's id and position; clicking it no longer navigates to the raw `/api/stats` JSON.
+The 📊 button (`#btn-stats`, `templates/index.html:99`) opens `#stats-overlay` (`templates/index.html:136`), a modal panel modelled on the daemon overlay. It keeps the button's id and position; clicking it no longer navigates to the raw `/api/stats` JSON.
 
-`_openStatsPanel` (`templates/index.html:1292`) fetches `/api/metrics` for the catalogue — each metric's name, note and `seed_ms` hint — then builds one `<section class="stats-chunk" data-metric="...">` per metric, each with its own body element, and requests **every metric independently** through `GET /api/metrics/<name>` (`_loadMetric`, `templates/index.html:1262`). It deliberately does not `Promise.all` the requests: each section is filled and its own refresh timer armed the moment that metric lands, so a fast chunk draws while a slow one is still running. Every metric shows a human label, its note, and a value rendered to suit it, with its measured `ms` shown quietly in the heading:
+`_openStatsPanel` (`templates/index.html:1316`) fetches `/api/metrics` for the catalogue — each metric's name, note and `seed_ms` hint — then builds one `<section class="stats-chunk" data-metric="...">` per metric, each with its own body element, and requests **every metric independently** through `GET /api/metrics/<name>` (`_loadMetric`, `templates/index.html:1286`). It deliberately does not `Promise.all` the requests: each section is filled and its own refresh timer armed the moment that metric lands, so a fast chunk draws while a slow one is still running. Every metric shows a human label, its note, and a value rendered to suit it, with its measured `ms` shown quietly in the heading:
 
 * **coverage** — a progress bar per stage (API data, description, image, translation, creator) with the count and the live-item total.
 * **totals** — alive and dead counts with the overall total.
@@ -143,9 +143,21 @@ The 📊 button (`#btn-stats`, `templates/index.html:98`) opens `#stats-overlay`
 * **tag_counts** — a summary: distinct-tag count and the most-used tags.
 * **high_water**, **app_tracking** — a formatted timestamp and a per-AppID table.
 
-**Ordering is learned.** The request order is seeded from each metric's `seed_ms` on the first ever open; on every later open it is sorted by the durations measured on the previous open, persisted in `localStorage` under `stats.metric-order.v1`. The stored shape is deliberately tiny and versioned — `{v: 1, ms: {metric: milliseconds}}` — so a stale or corrupt entry from an older build is ignored rather than breaking the panel (`_loadStatsOrder`, `templates/index.html:1223`; `_statsOrder`). The DOM order is fixed when the panel opens; this open's measurements feed the next open.
+**Ordering is learned.** The request order is seeded from each metric's `seed_ms` on the first ever open; on every later open it is sorted by the durations measured on the previous open, persisted in `localStorage` under `stats.metric-order.v1`. The stored shape is deliberately tiny and versioned — `{v: 1, ms: {metric: milliseconds}}` — so a stale or corrupt entry from an older build is ignored rather than breaking the panel (`_loadStatsOrder`, `templates/index.html:1247`; `_statsOrder`). The DOM order is fixed when the panel opens; this open's measurements feed the next open.
 
-**Refresh is per metric.** Each chunk re-requests itself after `max(2 s, 50 × its own measured duration)` (`_intervalFor`, `templates/index.html:1219`), armed with `setTimeout` only once the previous response has landed, so a metric that is still computing is never started twice and a slow metric cannot hold up a fast one. `_closeStatsPanel` (`templates/index.html:1326`) clears every per-metric timer and bumps `_statsToken`, so responses still in flight are discarded rather than written into the closed panel.
+**Refresh is per metric.** Each chunk re-requests itself after `max(2 s, 50 × its own measured duration)` (`_intervalFor`, `templates/index.html:1243`), armed with `setTimeout` only once the previous response has landed, so a metric that is still computing is never started twice and a slow metric cannot hold up a fast one. `_closeStatsPanel` (`templates/index.html:1350`) clears every per-metric timer and bumps `_statsToken`, so responses still in flight are discarded rather than written into the closed panel.
+
+---
+
+## View Window Analysis Panel
+
+The header toolbar's **Analysis** button (`#btn-analysis`, `templates/index.html:64`) opens `#analysis-overlay` (`templates/index.html:144`), the web half of the TUI's `ctrl+?` screen. It mirrors that screen's content: a bucket-size box in days, a **Recalculate** button, a per-bucket table, and a summary line.
+
+`_openAnalysisPanel` resets the box to the TUI's default of 7 days and calls `_runAnalysis`, which requests `GET /api/analysis?bucket_days=N` — one request per open or recalculate. There is deliberately no polling: the query is expensive and the shape it measures moves slowly. The bucket box is read the way the TUI reads its input (`_analysisBucketDays`): anything that is not an integer falls back to 7, and a real number is clamped to at least one day.
+
+`_renderAnalysisTable` draws one row per bucket with its age range, item count and median/p10/p90 views, all through `fmtCount`. The median column is paired with a bar sized to `median / peak median`, so buckets whose absolute medians differ by orders of magnitude can still be compared at a glance — the point of the screen. `_renderAnalysisSummary` states the knee plainly ("Estimated view window: ~N days") alongside the analysed item count and bucket count; when `estimated_window_days` is `null` it says there is insufficient data rather than printing a misleading `0`.
+
+**In-flight responses are discarded.** `_loadAnalysis` carries the token it was started with, and `_analysisToken` is bumped on open, on every recalculate, and on close (`_closeAnalysisPanel`). A response armed under an older token is dropped, so closing or recalculating mid-request can never repaint a panel the user has left — the same guard as `_statsToken` in the statistics panel.
 
 ---
 
@@ -252,9 +264,13 @@ Accepts sessionid from the userscript. Stores it in the `_sessionid` global (for
 
 A push whose `login_secure` matches what is already configured writes nothing. The bridge re-pushes on a timer, so without that guard an open Steam tab rewrote `config.yaml` — a YAML serialisation and a file write — every thirty seconds with a value that had not moved. The CSRF token is still taken from every push, because it lives only in memory.
 
-### `/api/stats`, `/api/tags`, `/api/authors`, `/api/analysis`
+### `/api/stats`, `/api/tags`, `/api/authors`
 
-Read-only endpoints returning database statistics. `/api/stats` still returns the old flat payload; the statistics panel uses the per-metric endpoints below instead.
+Read-only endpoints returning database statistics. `/api/stats` still returns the old flat payload; the statistics panel uses the per-metric endpoints below instead. `/api/authors` still has no client.
+
+### `/api/analysis` — GET
+
+Age-bucketed view statistics, consumed by the view window analysis panel (`api_analysis`, `src/webserver.py:394`). Accepts `bucket_days=N` (default 7) and returns `{buckets: [{age_start, age_end, count, median, p10, p90}], estimated_window_days, items_analyzed}`. The bucket width is floored at one day, because the parameter comes straight from the query string and a zero width would divide by zero (the TUI clamps its input the same way). `estimated_window_days` is the knee — the first bucket whose median drops below a quarter of the early-bucket peak — and is `null` when there is too little data to find one, a distinction the panel renders honestly rather than collapsing to zero.
 
 ### `/api/metrics` — GET
 

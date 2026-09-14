@@ -21,7 +21,7 @@ split into named metrics in `src/metrics.py`, and both front ends render one ind
 chunk per metric, ordered and throttled by measured cost rather than a fixed classification
 ([tui.md](tui.md), [web-ui.md](web-ui.md)). What remains is the schema-dependent half —
 per-queue completion timestamps for throughput/ETA, and the queue indexes — plus the open
-parity gaps in the table below (analysis, authors, view-state persistence).
+parity gaps in the table below (authors, view-state persistence).
 
 
 Bring the web UI to parity with the TUI, rebuild the statistics surface in both so it reports the
@@ -176,8 +176,8 @@ metric at a time. Two further problems compounded this:
    perform database maintenance, even when that maintenance is idempotent. *(Still open: it now runs
    once per tag-metric arrival rather than on every screen update.)*
 7. **Decide the fate of the three unused endpoints.** Build the missing UI for them, or delete them.
-   *(Partly done: the web statistics panel now consumes the tag metric; the analysis and author
-   endpoints still have no client.)*
+   *(Partly done: the web statistics panel consumes the tag metric, and the web view window analysis
+   panel now consumes `/api/analysis`; the author endpoint still has no client.)*
 
 ### Queue indexes
 
@@ -223,7 +223,8 @@ one, so each can be deployed and reverted on its own.
 ### Open decisions
 
 * Whether `/api/analysis`, `/api/authors` and the untiered `/api/stats` should get UI or be deleted.
-  `/api/analysis` in particular has a complete TUI screen behind it and no web equivalent at all.
+  *(Resolved for `/api/analysis`: the web view window analysis panel now consumes it, matching the
+  TUI's `ctrl+?` screen. `/api/authors` and the untiered `/api/stats` remain undecided.)*
 * Whether coverage should be expressed against discovered items only, or whether discovery progress
   should be presented as a separate "still exploring" indicator. (The landed coverage metric uses
   discovered live items as its denominator.)
