@@ -99,47 +99,65 @@ When the detail pane adopts an item, `DetailsPane.watch_workshop_id` calls the `
 
 ### `StatsScreen` (`src/tui.py:104`)
 
-Opened by Ctrl+R. The screen asks `src.metrics` for one tier at a time and draws each tier
-into its own widgets, so the cheap numbers are on screen while the expensive queries are
-still running. General layout and what each tier fills in:
+Opened by Ctrl+R. The screen asks `src.metrics` for named metrics and draws each into its own
+labelled section — one widget per metric — so a chunk appears the moment its own query
+finishes without touching any other. Nothing is grouped or classified by cost. The ten
+metrics and what each section renders:
 
-| Tier | Metrics | Rendered as |
-|---|---|---|
-| instant | `totals`, `high_water`, `app_tracking` | live/dead item counts, the last successful API fetch, and the per-AppID tracking table |
-| fast | `coverage`, `stuck_work`, `status_counts`, `fetch_recency` | coverage bars over live items, the stuck-work callout, the status distribution, and fetch recency |
-| slow | `translation_status`, `priority_breakdowns`, `tag_counts` | the translation classification, per-queue waiting counts by priority, and the tag table |
+| Metric | Rendered as |
+|---|---|
+| `high_water` | the last successful API fetch as a timestamp, or "never" |
+| `totals` | live/dead item counts with the overall total |
+| `app_tracking` | the per-AppID tracking table |
+| `status_counts` | the status distribution |
+| `stuck_work` | the stuck-work callout |
+| `fetch_recency` | fresh / stale / never-attempted counts |
+| `coverage` | coverage bars over live items |
+| `translation_status` | the translation classification |
+| `tag_counts` | the tag table |
+| `priority_breakdowns` | per-queue waiting counts by priority |
 
-Coverage (`_format_coverage`, `src/tui.py:353`) is drawn as a labelled progress bar per
+Coverage (`_format_coverage`, `src/tui.py:396`) is drawn as a labelled progress bar per
 stage — API data, description, image, translation, creator — against the number of live
 items, with dead items excluded because they can never be covered. `stuck_work`
-(`_format_stuck`, `src/tui.py:375`) names any dead items still flagged in a queue and says
+(`_format_stuck`, `src/tui.py:418`) names any dead items still flagged in a queue and says
 the queues will not drain until they are cleared; a zero value shows an all-clear. The
-priority section reads as queue state — "Translation queue: N waiting" followed by the
-priority mix — rather than a raw column dump.
+priority section (`_format_priority`, `src/tui.py:439`) reads as queue state — "Translation
+queue: N waiting" followed by the priority mix — rather than a raw column dump. `high_water`
+is the one metric whose `None` is a real answer ("never"), not a failure.
 
-`#tier-costs` (`_render_tier_costs`, `src/tui.py:395`) lists each tier's total and each
-metric's own `ms`, so the slow tier's cost is visible directly on the screen.
+Each metric's heading quietly carries the `ms` it measured on its last run, so its cost is
+visible without being a label.
 
-### Tiered refresh
+### Ordering and per-metric refresh
 
-Each tier runs in its own thread worker (`self.run_worker(..., thread=True)`,
-`src/tui.py:186`; the worker body is `_compute_tier`, `src/tui.py:198`) and its result is
-applied back on the UI thread from `on_worker_state_changed` (`src/tui.py:237`). The first
-pass runs strictly instant → fast → slow, so the cheap numbers cannot be beaten to the
-screen by the expensive ones.
+One thread worker streams the pass (`self.run_worker(..., thread=True, group="stats",
+exit_on_error=False)`, `src/tui.py:257`; worker body `_stream_metrics`, `src/tui.py:269`).
+It uses `metrics.iter_metrics(...)` — one shared connection — and applies each `(name, entry)`
+to its own widget from the UI thread as it arrives (`_apply_metric`, `src/tui.py:306`), so a
+chunk is drawn as soon as its own query returns rather than when the slowest one does.
+`on_unmount` (`src/tui.py:211`) cancels the group so a late result cannot touch a closed
+screen.
 
-Refresh is throttled per tier, not globally. A tier's interval is
-`max(2 s, 50 × its own measured duration)` (`_interval_for`, `src/tui.py:182`), and a
-one-second timer starts any tier whose own interval has elapsed
-(`_refresh_due_tiers`, `src/tui.py:213`). A slow tier therefore no longer stretches the
-instant tier's refresh out to minutes; the pre-rework screen used one `50 ×` rule for the
-whole payload.
+The order metrics are *requested* in is the only global decision. The first pass uses
+`metrics.all_names()`, the seed order; afterwards `_request_order` (`src/tui.py:224`) sorts by
+the duration each metric actually took last time, falling back to its seed hint while
+unmeasured, so the order follows the data. If a query gets cheap or expensive the display
+reorders itself with no code change, and cheapest-first means a slow query is never started
+ahead of a fast one that is already due.
+
+Refresh is likewise per metric. A metric is re-run once its own interval —
+`max(2 s, 50 × its own measured duration)` (`_interval_for`, `src/tui.py:220`) — has elapsed;
+the UI-thread scheduler asks `_due_metrics` (`src/tui.py:244`) and starts a pass over only the
+due metrics. A slow metric's long interval therefore cannot stretch a fast metric's refresh
+out, and `_inflight` keeps a metric that is still computing from being started again. The
+pre-rework screen applied one `50 ×` rule to the whole payload.
 
 ### `compact_tag_ids` Integration
 
-The tag-frequency compaction still runs, but in the slow tier's worker thread and once per
-slow-tier arrival, rather than on the UI thread on every screen update
-(`src/tui.py:209`).
+The tag-frequency compaction still runs off the UI thread when the `tag_counts` chunk is
+computed — once per tag-metric arrival (`src/tui.py:284`) — rather than on the UI thread on
+every screen update.
 
 ---
 

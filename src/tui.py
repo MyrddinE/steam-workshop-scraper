@@ -102,252 +102,295 @@ def parse_tags(tags) -> list[str]:
         return []
 
 class StatsScreen(Screen):
-    """Database statistics, streamed by tier.
+    """Database statistics, one independent chunk per metric.
 
-    The three metric tiers are drawn in order -- instant, fast, slow -- each in
-    its own thread worker, so the cheap numbers are on screen while the expensive
-    queries are still running. A tier replaces only the widgets it owns, and
-    refreshes on an interval derived from that tier's own measured cost, so a slow
-    query can no longer hold the whole screen back.
+    Nothing here is classified or grouped. Each metric owns exactly one section
+    and one widget, and a chunk is drawn the moment its query returns without
+    touching any other, so the screen fills in whatever order the queries finish.
+
+    The only global decision is the order the metrics are *requested* in. On the
+    first pass nothing has been measured, so it is ``metrics.all_names()`` -- the
+    seed order. Afterwards each metric is placed by what it actually cost last
+    time, so the order follows the data: if a query gets cheap or expensive, the
+    display reorders itself with no code change. Cheapest-first also means a slow
+    query is never started ahead of a fast one that is already due.
+
+    Refresh is per metric as well. A metric is re-run once its own interval --
+    ``REFRESH_FACTOR`` times its own measured duration, floored at
+    ``MIN_REFRESH_SECONDS`` -- has elapsed. The pre-rework screen applied one such
+    rule to the whole payload, so the slowest query stretched every other refresh
+    out to minutes.
     """
 
-    #: The old screen waited 50 durations before refreshing. The same multiple
-    #: applies per tier now; the floor stops a 3 ms instant tier from re-running
-    #: several times a second.
+    #: How many measured durations a metric waits before it is asked for again.
     REFRESH_FACTOR = 50.0
+    #: ...but never faster than this, so a metric that returns in under a
+    #: millisecond is not re-run several times a second.
     MIN_REFRESH_SECONDS = 2.0
+    #: How often the UI thread checks which metrics are due. This is only the
+    #: granularity of the schedule; the throttle itself is each metric's own
+    #: interval.
+    SCHEDULER_TICK_SECONDS = 1.0
+
+    #: Human labels for the section headings, kept in step with the web panel's.
+    LABELS = {
+        "high_water": "Last successful API fetch",
+        "totals": "Totals",
+        "app_tracking": "App tracking",
+        "status_counts": "Status counts",
+        "stuck_work": "Stuck work",
+        "fetch_recency": "Fetch recency",
+        "coverage": "Coverage",
+        "translation_status": "Translation status",
+        "tag_counts": "Tags",
+        "priority_breakdowns": "Queue priorities",
+    }
+
+    #: Text metrics own a Static widget; the two table metrics are special-cased
+    #: in `_compose_chunk` and `_render_metric`.
+    CONTENT_IDS = {
+        "high_water": "high-water-content",
+        "totals": "totals-content",
+        "status_counts": "status-content",
+        "stuck_work": "stuck-content",
+        "fetch_recency": "recency-content",
+        "coverage": "coverage-content",
+        "translation_status": "translation-stats-content",
+        "priority_breakdowns": "priority-stats-content",
+    }
 
     def __init__(self, db_path: str):
         super().__init__()
         self.db_path = db_path
-        self._tier_cost: dict[str, float] = {}
-        self._tier_ms: dict[str, dict[str, float]] = {}
-        self._tier_interval = {tier: self.MIN_REFRESH_SECONDS for tier in metrics.TIERS}
-        self._tier_last = {tier: time.monotonic() for tier in metrics.TIERS}
-        self._tier_busy = {tier: False for tier in metrics.TIERS}
-        self._chained: set[str] = set()
+        #: Last measured duration per metric, and when it finished, both kept for
+        #: the session so the request order and the intervals adapt to the data.
+        self._measured_ms: dict[str, float] = {}
+        self._ran_at: dict[str, float] = {}
+        self._intervals: dict[str, float] = {}
+        #: Metrics in the running pass, so one still computing is never started
+        #: again.
+        self._inflight: set[str] = set()
+        self._pass_running = False
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Horizontal():
-            with Vertical(id="stats-left-col"):
-                yield Label("[b]Queue State[/b]", classes="stats-header")
-                yield Static(id="coverage-content")
-                yield Static(id="stuck-content")
-                yield Label("\n[b]General Statistics[/b]", classes="stats-header")
-                yield Static(id="totals-content")
-                yield Static(id="status-content")
-                yield Static(id="recency-content")
-                yield Label("\n[b]Translation Status[/b]", classes="stats-header")
-                yield Static(id="translation-stats-content")
-                yield Label("\n[b]Priority Breakdowns[/b]", classes="stats-header")
-                yield Static(id="priority-stats-content")
-                yield Label("\n[b]App Tracking[/b]", classes="stats-header")
+        with VerticalScroll(id="stats-scroll"):
+            for name in metrics.all_names():
+                yield from self._compose_chunk(name)
+        yield Footer()
+        yield Button("Close", id="btn-close-sub-queue")
+
+    def _compose_chunk(self, name: str):
+        """One metric's section: a heading, and the one widget only it writes."""
+        with Vertical(classes="stats-chunk", id=f"chunk-{name}"):
+            yield Label(
+                f"[b]{self.LABELS.get(name, name)}[/b]",
+                id=f"stats-label-{name}",
+                classes="stats-header",
+            )
+            if name == "app_tracking":
                 yield DataTable(id="app-stats-table")
-            with Vertical(id="stats-right-col"):
-                yield Label("[b]Tag Statistics[/b]", classes="stats-header")
+            elif name == "tag_counts":
                 with VerticalScroll(id="tag-stats-scroll"):
                     yield DataTable(id="tag-stats-table")
-                yield Label("\n[b]Tier Costs[/b]", classes="stats-header")
-                yield Static(id="tier-costs")
-        yield Footer()
-
-        yield Button("Close", id="btn-close-sub-queue")
+            else:
+                yield Static(id=self.CONTENT_IDS[name])
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-close-sub-queue":
             self.app.pop_screen()
 
     def on_mount(self) -> None:
-        # Placeholders name each section while it is still computing; the instant
-        # tier then starts without waiting for the first timer tick.
-        for widget_id in (
-            "coverage-content", "stuck-content", "totals-content",
-            "status-content", "recency-content",
-            "translation-stats-content", "priority-stats-content",
-        ):
+        # Placeholders name every section while it is still computing; the first
+        # pass then starts without waiting for the scheduler's first tick.
+        for widget_id in self.CONTENT_IDS.values():
             self.query_one(f"#{widget_id}", Static).update("[dim]Computing…[/dim]")
-        self._start_tier(metrics.INSTANT)
-        self.set_interval(1.0, self._refresh_due_tiers)
+        self._start_due_metrics()
+        self.set_interval(self.SCHEDULER_TICK_SECONDS, self._refresh_due_metrics)
 
     def on_unmount(self) -> None:
-        # A tier can be mid-flight when the screen closes. Cancel the group so a
+        # A pass can be mid-query when the screen closes. Cancel the group so a
         # late result cannot touch widgets that are already gone.
         self.workers.cancel_group(self, "stats")
 
     # ------------------------------------------------------------------
-    # refresh scheduling
+    # scheduling
     # ------------------------------------------------------------------
 
     def _interval_for(self, duration_ms: float) -> float:
-        """How long a tier that cost ``duration_ms`` waits before re-running."""
+        """How long a metric that cost ``duration_ms`` waits before re-running."""
         return max(self.MIN_REFRESH_SECONDS, self.REFRESH_FACTOR * duration_ms / 1000.0)
 
-    def _start_tier(self, tier: str) -> None:
-        if self._tier_busy.get(tier):
+    def _request_order(self) -> list[str]:
+        """Metric names, cheapest first.
+
+        Seed order until something has been measured, then measured durations, so
+        the request order follows the data. A metric with no measurement of its
+        own yet keeps its seed estimate.
+        """
+        def estimate(name: str) -> float:
+            return self._measured_ms.get(name, metrics.REGISTRY[name].seed_ms)
+
+        return sorted(metrics.all_names(), key=lambda n: (estimate(n), n))
+
+    def _is_due(self, name: str, now: float) -> bool:
+        if name in self._inflight:
+            return False
+        last = self._ran_at.get(name)
+        if last is None:
+            return True
+        return now - last >= self._intervals.get(name, self.MIN_REFRESH_SECONDS)
+
+    def _due_metrics(self, now: float) -> list[str]:
+        """The metrics whose own interval has elapsed, cheapest first."""
+        return [name for name in self._request_order() if self._is_due(name, now)]
+
+    def _start_due_metrics(self) -> None:
+        """Start one thread worker over every due metric, if none is running."""
+        if self._pass_running or not self.is_mounted:
             return
-        self._tier_busy[tier] = True
+        due = self._due_metrics(time.monotonic())
+        if not due:
+            return
+        self._pass_running = True
+        self._inflight.update(due)
         self.run_worker(
-            partial(self._compute_tier, tier),
-            name=tier,
+            partial(self._stream_metrics, due),
+            name="stats",
             group="stats",
             thread=True,
             exit_on_error=False,
         )
 
-    def _compute_tier(self, tier: str) -> dict:
-        """Worker body: compute one tier, off the UI thread.
+    def _refresh_due_metrics(self) -> None:
+        """Timer callback: let the worker decide what is due."""
+        self._start_due_metrics()
 
-        The tag-frequency compaction runs here too, for the slow tier that
-        produces the frequencies, so a database write never lands on the render
-        path and the screen stays responsive while it happens.
+    def _stream_metrics(self, names: list[str]) -> None:
+        """Worker body: compute each due metric and hand it to the UI as it lands.
+
+        ``iter_metrics`` shares one connection across the pass, but it is a
+        generator, so a chunk is applied the moment its own query returns rather
+        than when the slowest one does.
         """
-        result = metrics.compute_tier(self.db_path, tier)
-        if tier == metrics.SLOW:
-            tag_counts = metrics.values(result).get("tag_counts") or {}
-            if tag_counts:
-                from src.database import compact_tag_ids
-                compact_tag_ids(self.db_path, tag_counts)
-        return result
+        from src.database import compact_tag_ids
 
-    def _refresh_due_tiers(self) -> None:
-        """Start every tier whose own interval has elapsed.
-
-        Each tier is judged against its own last run and interval, so a slow tier
-        being overdue cannot delay a cheap one.
-        """
-        now = time.monotonic()
-        for tier in metrics.TIERS:
-            if self._tier_busy[tier]:
-                continue
-            if now - self._tier_last[tier] >= self._tier_interval[tier]:
-                self._start_tier(tier)
-
-    def _finish_tier(self, tier: str) -> None:
-        self._tier_busy[tier] = False
-        # The first pass runs strictly instant -> fast -> slow, so the cheap
-        # numbers cannot be beaten to the screen by the expensive ones.
-        if tier in self._chained:
-            return
-        self._chained.add(tier)
-        following = {metrics.INSTANT: metrics.FAST, metrics.FAST: metrics.SLOW}.get(tier)
-        if following:
-            self._start_tier(following)
+        for name, entry in metrics.iter_metrics(self.db_path, names):
+            if name == "tag_counts":
+                # The tag-frequency write stays off the UI thread, exactly as the
+                # old slow-tier worker did, and runs once per tag metric arrival.
+                tag_counts = entry.get("value") or {}
+                if tag_counts:
+                    compact_tag_ids(self.db_path, tag_counts)
+            try:
+                self.app.call_from_thread(self._apply_metric, name, entry)
+            except RuntimeError:
+                # The app stopped while this query was in flight: there is no UI
+                # left to apply to, and no point computing the rest.
+                logging.debug("[stats] dropped %s; the app is no longer running", name)
+                return
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        worker = event.worker
-        if worker.group != "stats" or not self.is_mounted:
+        if event.worker.group != "stats":
             return
-        if event.state == WorkerState.SUCCESS:
-            self._apply_tier(worker.name, worker.result)
-        elif event.state in (WorkerState.ERROR, WorkerState.CANCELLED):
-            logging.warning("[stats] %s tier failed: %s", worker.name, worker.error)
-            self._finish_tier(worker.name)
-
-    def _apply_tier(self, tier: str, result: dict | None) -> None:
-        if not result:
-            self._finish_tier(tier)
-            return
-        values = metrics.values(result)
-        per_metric_ms = {name: entry["ms"] for name, entry in result.items()}
-        total_ms = round(sum(per_metric_ms.values()), 1)
-        self._tier_ms[tier] = per_metric_ms
-        self._tier_cost[tier] = total_ms
-        self._tier_last[tier] = time.monotonic()
-        self._tier_interval[tier] = self._interval_for(total_ms)
-        if tier == metrics.INSTANT:
-            self._render_instant(values)
-        elif tier == metrics.FAST:
-            self._render_fast(values)
-        elif tier == metrics.SLOW:
-            self._render_slow(values)
-        self._render_tier_costs()
-        self._finish_tier(tier)
+        if event.state in (WorkerState.ERROR, WorkerState.CANCELLED):
+            logging.warning("[stats] metric pass %s: %s", event.state, event.worker.error)
+        if event.state in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            self._pass_running = False
+            self._inflight.clear()
 
     # ------------------------------------------------------------------
     # rendering
     # ------------------------------------------------------------------
 
-    def _render_instant(self, values: dict) -> None:
-        totals = values.get("totals") or {}
-        high_water = values.get("high_water")
-        fetched = (
-            datetime.datetime.fromtimestamp(high_water).strftime("%Y-%m-%d %H:%M")
-            if high_water else "never"
-        )
-        self.query_one("#totals-content", Static).update(
-            f"[b]Live items:[/b] {totals.get('alive', 0):,}   "
-            f"[b]Dead:[/b] {totals.get('dead', 0):,}   "
-            f"[dim](total {totals.get('total', 0):,})[/dim]\n"
-            f"[b]Last successful API fetch:[/b] {fetched}"
+    def _apply_metric(self, name: str, entry: dict) -> None:
+        """UI-thread callback: record what one metric cost and draw its chunk."""
+        if not self.is_mounted:
+            return
+        duration = entry.get("ms") or 0.0
+        self._measured_ms[name] = duration
+        self._ran_at[name] = time.monotonic()
+        self._intervals[name] = self._interval_for(duration)
+        self._inflight.discard(name)
+        self._render_metric(name, entry.get("value"))
+        self.query_one(f"#stats-label-{name}", Label).update(
+            f"[b]{self.LABELS.get(name, name)}[/b] [dim]{duration:.1f} ms[/dim]"
         )
 
-        app_table = self.query_one("#app-stats-table", DataTable)
-        app_table.clear(columns=True)
-        app_table.add_columns("AppID", "Last Page", "Last Cursor")
-        for app in values.get("app_tracking") or []:
-            cursor = str(app.get("last_cursor", "") or "")
-            app_table.add_row(
-                str(app.get("appid")),
-                str(app.get("last_page_scanned", 0) or 0),
-                cursor[:30] + "..." if len(cursor) > 30 else cursor,
+    def _set_text(self, name: str, text: str) -> None:
+        self.query_one(f"#{self.CONTENT_IDS[name]}", Static).update(text)
+
+    def _render_metric(self, name: str, value) -> None:
+        """Draw one metric's value into the widget that metric owns."""
+        # high_water answers None legitimately -- no successful fetch yet -- so it
+        # is handled before the failed-metric guard rather than shown as an error.
+        if name == "high_water":
+            fetched = (
+                datetime.datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M")
+                if value else "never"
             )
-
-    def _render_fast(self, values: dict) -> None:
-        self.query_one("#coverage-content", Static).update(
-            self._format_coverage(values.get("coverage") or {})
-        )
-        self.query_one("#stuck-content", Static).update(
-            self._format_stuck(values.get("stuck_work") or {})
-        )
-
-        status_lines = [
-            f"  Status {row.get('status')}: {row.get('count', 0):,}"
-            for row in values.get("status_counts") or []
-        ]
-        self.query_one("#status-content", Static).update(
-            "[b]Record count by status[/b]\n" + ("\n".join(status_lines) or "  (none)")
-        )
-
-        recency = values.get("fetch_recency") or {}
-        self.query_one("#recency-content", Static).update(
-            "[b]Record count by fetch recency[/b]\n"
-            f"  Fresh (last {metrics.STALENESS_DAYS}d): {recency.get('fresh', 0):,}\n"
-            f"  Stale: {recency.get('stale', 0):,}\n"
-            f"  Never attempted: {recency.get('blank', 0):,}"
-        )
-
-    def _render_slow(self, values: dict) -> None:
-        translation = values.get("translation_status") or {}
-        self.query_one("#translation-stats-content", Static).update(
-            "\n".join(f"  {status}: {count:,}" for status, count in translation.items())
-            or "[dim]No data.[/dim]"
-        )
-
-        labels = {
-            "translation_priority": "Translation",
-            "needs_image": "Image",
-            "needs_web_scrape": "Web scrape",
-        }
-        breakdowns = values.get("priority_breakdowns") or {}
-        prio_lines = []
-        for key, label in labels.items():
-            rows = breakdowns.get(key, [])
-            total = sum(row.get("cnt", 0) for row in rows)
-            prio_lines.append(f"[b]{label} queue:[/b] {total:,} waiting")
-            for row in rows:
-                prio_lines.append(f"  priority {row.get('prio')}: {row.get('cnt', 0):,}")
-            prio_lines.append("")
-        self.query_one("#priority-stats-content", Static).update(
-            "\n".join(prio_lines).rstrip() or "[dim]No data.[/dim]"
-        )
-
-        tag_counts = values.get("tag_counts") or {}
-        tag_table = self.query_one("#tag-stats-table", DataTable)
-        tag_table.clear(columns=True)
-        tag_table.add_columns("Tag", "Count")
-        for tag, count in sorted(tag_counts.items(), key=lambda kv: kv[1], reverse=True):
-            tag_table.add_row(str(tag), f"{count:,}")
+            self._set_text(name, fetched)
+        elif value is None:
+            if name in self.CONTENT_IDS:
+                self._set_text(name, "[dim]unavailable[/dim]")
+            elif name in ("app_tracking", "tag_counts"):
+                self.query_one(
+                    "#app-stats-table" if name == "app_tracking" else "#tag-stats-table",
+                    DataTable,
+                ).clear(columns=True)
+        elif name == "totals":
+            self._set_text(
+                name,
+                f"[b]Live items:[/b] {value.get('alive', 0):,}   "
+                f"[b]Dead:[/b] {value.get('dead', 0):,}   "
+                f"[dim](total {value.get('total', 0):,})[/dim]",
+            )
+        elif name == "app_tracking":
+            table = self.query_one("#app-stats-table", DataTable)
+            table.clear(columns=True)
+            table.add_columns("AppID", "Last Page", "Last Cursor")
+            for app in value:
+                cursor = str(app.get("last_cursor", "") or "")
+                table.add_row(
+                    str(app.get("appid")),
+                    str(app.get("last_page_scanned", 0) or 0),
+                    cursor[:30] + "..." if len(cursor) > 30 else cursor,
+                )
+        elif name == "status_counts":
+            lines = [
+                f"  Status {row.get('status')}: {row.get('count', 0):,}"
+                for row in value
+            ]
+            self._set_text(
+                name,
+                "[b]Record count by status[/b]\n" + ("\n".join(lines) or "  (none)"),
+            )
+        elif name == "stuck_work":
+            self._set_text(name, self._format_stuck(value))
+        elif name == "fetch_recency":
+            self._set_text(
+                name,
+                "[b]Record count by fetch recency[/b]\n"
+                f"  Fresh (last {metrics.DEFAULT_STALENESS_DAYS}d): {value.get('fresh', 0):,}\n"
+                f"  Stale: {value.get('stale', 0):,}\n"
+                f"  Never attempted: {value.get('blank', 0):,}",
+            )
+        elif name == "coverage":
+            self._set_text(name, self._format_coverage(value))
+        elif name == "translation_status":
+            self._set_text(
+                name,
+                "\n".join(f"  {status}: {count:,}" for status, count in value.items())
+                or "[dim]No data.[/dim]",
+            )
+        elif name == "tag_counts":
+            table = self.query_one("#tag-stats-table", DataTable)
+            table.clear(columns=True)
+            table.add_columns("Tag", "Count")
+            for tag, count in sorted(value.items(), key=lambda kv: kv[1], reverse=True):
+                table.add_row(str(tag), f"{count:,}")
+        elif name == "priority_breakdowns":
+            self._set_text(name, self._format_priority(value))
 
     @staticmethod
     def _format_coverage(cov: dict) -> str:
@@ -392,18 +435,24 @@ class StatsScreen(Screen):
         lines.append("\n[dim]These rows can never complete; the queues will not drain.[/dim]")
         return "\n".join(lines)
 
-    def _render_tier_costs(self) -> None:
+    @staticmethod
+    def _format_priority(breakdowns: dict) -> str:
+        """Outstanding work per queue, read as queue state rather than a column dump."""
+        labels = {
+            "translation_priority": "Translation",
+            "needs_image": "Image",
+            "needs_web_scrape": "Web scrape",
+        }
         lines = []
-        for tier in metrics.TIERS:
-            total = self._tier_cost.get(tier)
-            if total is None:
-                continue
-            parts = ", ".join(
-                f"{name} {ms:.0f}ms" for name, ms in self._tier_ms[tier].items()
-            )
-            lines.append(f"[b]{tier}[/b]: {total:.1f} ms  [dim]({parts})[/dim]")
-        if lines:
-            self.query_one("#tier-costs", Static).update("\n".join(lines))
+        for key, label in labels.items():
+            rows = breakdowns.get(key, [])
+            total = sum(row.get("cnt", 0) for row in rows)
+            lines.append(f"[b]{label} queue:[/b] {total:,} waiting")
+            for row in rows:
+                lines.append(f"  priority {row.get('prio')}: {row.get('cnt', 0):,}")
+            lines.append("")
+        return "\n".join(lines).rstrip() or "[dim]No data.[/dim]"
+
 
 class AnalysisScreen(Screen):
     """Screen that analyzes the view window for Steam Workshop items."""
@@ -1113,29 +1162,26 @@ class ScraperApp(App):
     #_default {
         layout: vertical;
     }
-    #stats-left-col {
-        width: 40%;
-        padding: 1;
-        border-right: tall $primary;
+    #stats-scroll {
+        height: 1fr;
+        padding: 1 2;
     }
-    #stats-right-col {
-        width: 60%;
-        padding: 1;
+    .stats-chunk {
+        height: auto;
+        margin-bottom: 1;
     }
     .stats-header {
         color: $accent;
-        margin-bottom: 1;
     }
     #tag-stats-scroll {
-        height: 1fr;
+        /* The screen itself scrolls; this bounds only the longest table so the
+           sections after it stay reachable without scrolling past every tag. */
+        height: auto;
+        max-height: 20;
     }
     #tag-stats-table, #app-stats-table {
         height: auto;
         border: none;
-    }
-    #tier-costs {
-        height: auto;
-        color: $text-muted;
     }
     #search-container {
         height: auto;

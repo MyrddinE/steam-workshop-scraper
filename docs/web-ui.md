@@ -119,7 +119,7 @@ While the panel is open, `_refreshDaemonStatus` polls `/api/daemon` and `_pollDa
 
 The 📊 button (`#btn-stats`, `templates/index.html:98`) opens `#stats-overlay` (`templates/index.html:135`), a modal panel modelled on the daemon overlay. It keeps the button's id and position; clicking it no longer navigates to the raw `/api/stats` JSON.
 
-`_openStatsPanel` (`templates/index.html:1197`) fetches `/api/metrics` for the catalogue of tiers, their metrics and their notes, builds one `<section>` per tier in server order, then fetches `/api/metrics/<tier>` for each in parallel and fills that section as the response lands. Tiers therefore draw independently: the instant numbers appear while the slow query is still running. Each tier heading carries the tier's `total_ms`, and every metric shows a human label, its note, and a value rendered to suit it:
+`_openStatsPanel` (`templates/index.html:1255`) fetches `/api/metrics` for the catalogue — each metric's name, note and `seed_ms` hint — then builds one `<section class="stats-chunk" data-metric="...">` per metric, each with its own body element, and requests **every metric independently** through `GET /api/metrics/<name>` (`_loadMetric`, `templates/index.html:1225`). It deliberately does not `Promise.all` the requests: each section is filled and its own refresh timer armed the moment that metric lands, so a fast chunk draws while a slow one is still running. Every metric shows a human label, its note, and a value rendered to suit it, with its measured `ms` shown quietly in the heading:
 
 * **coverage** — a progress bar per stage (API data, description, image, translation, creator) with the count and the live-item total.
 * **totals** — alive and dead counts with the overall total.
@@ -129,7 +129,9 @@ The 📊 button (`#btn-stats`, `templates/index.html:98`) opens `#stats-overlay`
 * **tag_counts** — a summary: distinct-tag count and the most-used tags.
 * **high_water**, **app_tracking** — a formatted timestamp and a per-AppID table.
 
-While the panel is open, a 3-second interval re-fetches only the instant tier so the live counts stay current without re-running the slow queries. `_closeStatsPanel` (`templates/index.html:1234`) clears that interval and bumps `_statsToken`, so a tier response still in flight is discarded rather than written into the closed panel.
+**Ordering is learned.** The request order is seeded from each metric's `seed_ms` on the first ever open; on every later open it is sorted by the durations measured on the previous open, persisted in `localStorage` under `stats.metric-order.v1`. The stored shape is deliberately tiny and versioned — `{v: 1, ms: {metric: milliseconds}}` — so a stale or corrupt entry from an older build is ignored rather than breaking the panel (`_loadStatsOrder`, `templates/index.html:1186`; `_statsOrder`). The DOM order is fixed when the panel opens; this open's measurements feed the next open.
+
+**Refresh is per metric.** Each chunk re-requests itself after `max(2 s, 50 × its own measured duration)` (`_intervalFor`, `templates/index.html:1182`), armed with `setTimeout` only once the previous response has landed, so a metric that is still computing is never started twice and a slow metric cannot hold up a fast one. `_closeStatsPanel` (`templates/index.html:1289`) clears every per-metric timer and bumps `_statsToken`, so responses still in flight are discarded rather than written into the closed panel.
 
 ---
 
@@ -224,15 +226,15 @@ A push whose `login_secure` matches what is already configured writes nothing. T
 
 ### `/api/stats`, `/api/tags`, `/api/authors`, `/api/analysis`
 
-Read-only endpoints returning database statistics. `/api/stats` still returns the old flat payload; the statistics panel uses the tiered endpoints below instead.
+Read-only endpoints returning database statistics. `/api/stats` still returns the old flat payload; the statistics panel uses the per-metric endpoints below instead.
 
 ### `/api/metrics` — GET
 
-The metric catalogue: `{tiers: [{tier, metrics: [{name, note}]}]}` in cheapest-first order. The panel draws its layout from this rather than hard-coding metric names, so a metric added on the server appears without a client change (`src/webserver.py:360`).
+The metric catalogue: `{"metrics": [{name, note, seed_ms}], "default_order": [names]}`, where `default_order` and `metrics` are both in seed order (cheapest seed hint first). The panel draws its layout from this rather than hard-coding metric names, so a metric added on the server appears without a client change (`src/webserver.py:359`). `seed_ms` is only a first-open ordering hint; the client replaces it with its own measurements.
 
-### `/api/metrics/<tier>` — GET
+### `/api/metrics/<name>` — GET
 
-One tier's values: `{tier, values, ms, total_ms}`, where `values` is `{name: value}`, `ms` is `{name: milliseconds}`, and `total_ms` is their sum. `instant`, `fast` and `slow` are the valid tiers; anything else returns a 404 with `{error}` (`src/webserver.py:381`). Tiers are fetched separately so the client can draw each as it lands, and each metric is timed on its own so a slow metric is blamed on itself rather than on the payload.
+One metric, computed on its own: `{name, value, ms, note, seed_ms}`, where `ms` is what that metric actually cost. An unknown name returns a 404 with `{error}` (`src/webserver.py:376`). Separate requests are what make the chunks independent: whichever finishes first renders first, and a slow metric cannot hold up a fast one.
 
 ### `/api/daemon` — GET
 

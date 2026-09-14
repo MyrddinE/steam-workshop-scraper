@@ -17,11 +17,11 @@ Absolute timings are hardware-dependent; the ratios are the point.
 ## UI enhancements: web parity, queue-state statistics, page performance
 
 **Status: Partly landed.** The statistics rework is implemented: the monolithic payload is
-split into named, tiered metrics in `src/metrics.py`, both front ends stream
-instant → fast → slow, and refresh is throttled per tier ([tui.md](tui.md),
-[web-ui.md](web-ui.md)). What remains is the schema-dependent half — per-queue completion
-timestamps for throughput/ETA, and the queue indexes — plus the open parity gaps in the table
-below (analysis, authors, view-state persistence).
+split into named metrics in `src/metrics.py`, and both front ends render one independent
+chunk per metric, ordered and throttled by measured cost rather than a fixed classification
+([tui.md](tui.md), [web-ui.md](web-ui.md)). What remains is the schema-dependent half —
+per-queue completion timestamps for throughput/ETA, and the queue indexes — plus the open
+parity gaps in the table below (analysis, authors, view-state persistence).
 
 
 Bring the web UI to parity with the TUI, rebuild the statistics surface in both so it reports the
@@ -47,9 +47,9 @@ reading markup — the distinction proved to matter, because three endpoints exi
 
 | TUI feature | Web UI | Evidence |
 |---|---|---|
-| Statistics screen (`ctrl+r`) | Present | Both front ends stream the tiered metrics: the TUI `StatsScreen` and the web `#stats-overlay` panel. The bare link to the raw JSON endpoint is gone, and the cheap tiers are on screen while the expensive ones are still computing. |
+| Statistics screen (`ctrl+r`) | Present | Both front ends stream the metrics as independent chunks: the TUI `StatsScreen` and the web `#stats-overlay` panel. The bare link to the raw JSON endpoint is gone, and each metric appears as soon as it is ready rather than waiting for the slowest. |
 | Analysis screen (`ctrl+?`) | Not present | The endpoint returns data, but the client never calls it. |
-| Tag statistics | Present | The panel renders a tag summary from the `tag_counts` metric. It is the most expensive single statistic (a 9.2M-row join) and the least actionable; its fate is an open decision below. |
+| Tag statistics | Present | The panel renders a tag summary from the `tag_counts` metric. It is the most expensive single statistic (a 9.2M-row join); the owner has decided it stays because they want the results. |
 | Author list and jump-to-author | Not present | Same. No author affordance exists in the web UI at all. |
 | Daemon start/stop/restart (`ctrl+d`) | Present | Both UIs drive one shared `DaemonController`. Routes: `/api/daemon`, `/api/daemon/start`, `/stop`, `/restart`, `/log`. |
 | Daemon log view | Web only so far | The web panel polls `/api/daemon/log` incrementally. The TUI pane is still inert — its tail call remains commented out and its subprocess-based `_start_tail` is dead code, recorded as issue 10 in [code-issues.md](code-issues.md). `DaemonController.tail_log` now exists and is tested, so repairing the TUI pane no longer needs a subprocess. |
@@ -128,6 +128,10 @@ On the snapshot above:
 | Translation classification | 1,709 ms | full table scan with the classification done in Python |
 | The same classification done in SQL | 255 ms | 6.7× faster |
 
+These measurements are the source of the `seed_ms` hints in `src/metrics.py`. They are one
+database's costs on one machine — a hint to break the tie on the first ever open, not a
+classification — and each front end replaces them with the durations it actually measures.
+
 The monolithic statistics payload took roughly **5.4 seconds**, and three separate endpoints
 requested it:
 
@@ -135,8 +139,8 @@ requested it:
 * The tag endpoint computed all of it and returned one field — about 5 seconds of work for under 2 KB.
 * The analysis endpoint runs a separate expensive query.
 
-With the metrics split, `/api/tags` now computes only `tag_counts` and the front ends request one
-tier at a time. Two further problems compounded this:
+With the metrics split, `/api/tags` now computes only `tag_counts` and each front end requests one
+metric at a time. Two further problems compounded this:
 
 1. **A second stall sits on the search path.** The search flow awaits the percentile-cutoff query
    *after* clearing the results grid and *before* fetching any items, so every fresh search or filter
@@ -145,33 +149,39 @@ tier at a time. Two further problems compounded this:
    *(Still open.)*
 2. **The refresh throttle is global.** *(Fixed for the statistics screen.)* Statistics refreshed no
    more often than 50× the previous duration, so a five-second query yielded a refresh interval of
-   about four minutes. The 50× rule now applies per tier against that tier's own measured duration.
+   about four minutes. The 50× rule now applies per metric against that metric's own measured
+   duration, and each front end orders its requests by what each metric last cost.
 
 ### Approach
 
-1. **Split the monolith into named metrics.** *(Landed: `src/metrics.py`, commit "refactor(stats):
-   compute statistics as named, tiered metrics".)* One function per statistic, each with its own cost
-   and its own cache lifetime, so a cheap metric is never priced at the cost of an expensive one and
-   the tag endpoint stops paying for everything else.
+1. **Split the monolith into named metrics.** *(Landed: `src/metrics.py`.)* One function per
+   statistic, each with its own cost and its own cache lifetime, so a cheap metric is never priced
+   at the cost of an expensive one and the tag endpoint stops paying for everything else. The
+   module earlier carried a tier per metric; the tiers are gone, because a cost measured on one
+   database is an assumption about the data rather than a property of a query.
 2. **Move the per-item classification into SQL.** *(Landed.)* The 1.7-second Python loop answers a
    question SQLite can answer in 255 ms.
-3. **Tier and stream.** *(Landed.)* Draw the instant metrics (<10 ms) immediately, then the fast tier
-   (50–80 ms), then the slow tier, each replacing its own element as it lands. Both front ends
-   consume the same metric definitions ([tui.md](tui.md), [web-ui.md](web-ui.md)).
-4. **Throttle per metric,** not globally. *(Landed: the TUI throttles each tier from its own measured
-   duration; the web panel re-fetches only the instant tier on a timer.)*
+3. **One independent chunk per metric.** *(Landed.)* Every metric renders into its own element and
+   appears as soon as it is ready; nothing is grouped or classified. Ordering and throttling are
+   learned from measured durations rather than a fixed tier table: each front end seeds its request
+   order from `seed_ms`, then replaces those hints with the durations it actually measured
+   ([tui.md](tui.md), [web-ui.md](web-ui.md)). The `seed_ms` values in `src/metrics.py` are hints
+   from one measurement on one database; they only break the tie on the very first open and are
+   meant to be superseded by real measurements.
+4. **Throttle per metric,** not globally. *(Landed: both front ends derive each metric's interval
+   from that metric's own measured duration, so a slow query cannot stretch a fast one's refresh.)*
 5. **Get the cutoff query off the critical path.** Render results first; apply score colouring when
    cutoffs arrive. *(Still open.)*
 6. **Take the tag-compaction write off the render path.** Opening a statistics screen should not
    perform database maintenance, even when that maintenance is idempotent. *(Still open: it now runs
-   once per slow-tier arrival rather than on every screen update.)*
+   once per tag-metric arrival rather than on every screen update.)*
 7. **Decide the fate of the three unused endpoints.** Build the missing UI for them, or delete them.
    *(Partly done: the web statistics panel now consumes the tag metric; the analysis and author
    endpoints still have no client.)*
 
 ### Queue indexes
 
-The three unindexed queues account for most of the slow tier, and the same missing indexes also
+The three unindexed queues account for most of the expensive metrics, and the same missing indexes also
 affect the crawler: the web and image workers select their next item with a full scan plus a sort on
 **every poll**, not only when statistics are requested.
 
@@ -212,11 +222,6 @@ one, so each can be deployed and reverted on its own.
 
 ### Open decisions
 
-* Whether `tag_counts` belongs on the statistics screen at all. It is the most expensive single
-  statistic (a 9.2M-row join, roughly 358 ms) and the least actionable: it describes the reference
-  data, not the progress of any queue. It now has a consumer — the statistics panel renders a tag
-  summary — but the tag *filter* is the only part that needs frequencies, so the screen may still be
-  paying for something it does not use.
 * Whether `/api/analysis`, `/api/authors` and the untiered `/api/stats` should get UI or be deleted.
   `/api/analysis` in particular has a complete TUI screen behind it and no web equivalent at all.
 * Whether coverage should be expressed against discovered items only, or whether discovery progress

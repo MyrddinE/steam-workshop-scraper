@@ -1,10 +1,11 @@
 import pytest
-from textual.widgets import Input, ListItem, Static, ListView, Select, Button, DataTable
+from textual.widgets import Input, ListItem, Static, ListView, Select, Button, DataTable, Label
 from textual.containers import VerticalScroll
 from tests.conftest import ASYNC_PAUSE
 from src.tui import ScraperApp, StatsScreen
 from src import metrics
 from unittest.mock import patch, MagicMock
+import threading
 import time
 
 @pytest.fixture
@@ -479,68 +480,69 @@ async def test_tui_detail_priority_applied_once_per_pane_load(mock_config, mock_
 
 
 # --------------------------------------------------------------------------
-# stats screen: tiered streaming and per-tier throttle
+# stats screen: one independent chunk per metric
 # --------------------------------------------------------------------------
 
-#: One fake payload per tier, shaped exactly as `metrics.compute_tier` returns,
-#: so the screen's renderers run for real.
-_FAKE_TIER_VALUES = {
-    metrics.INSTANT: {
-        "totals": {"total": 3, "alive": 2, "dead": 1},
-        "high_water": 1_700_000_000,
-        "app_tracking": [{"appid": 294100, "last_page_scanned": 7, "last_cursor": "abc"}],
+#: One fake value per metric, shaped exactly as the metric returns it, so the
+#: screen's real per-metric renderers run.
+_FAKE_METRIC_VALUES = {
+    "high_water": 1_700_000_000,
+    "totals": {"total": 3, "alive": 2, "dead": 1},
+    "app_tracking": [{"appid": 294100, "last_page_scanned": 7, "last_cursor": "abc"}],
+    "status_counts": [{"status": 200, "count": 2}, {"status": -1, "count": 1}],
+    "stuck_work": {"web": 1, "image": 0, "translation": 0, "api": 0},
+    "fetch_recency": {"fresh": 1, "stale": 0, "blank": 1},
+    "coverage": {
+        "total": 2, "api_fetched": 2, "described": 1,
+        "imaged": 1, "translated": 0, "attributed": 1,
     },
-    metrics.FAST: {
-        "status_counts": [{"status": 200, "count": 2}, {"status": -1, "count": 1}],
-        "coverage": {
-            "total": 2, "api_fetched": 2, "described": 1,
-            "imaged": 1, "translated": 0, "attributed": 1,
-        },
-        "stuck_work": {"web": 1, "image": 0, "translation": 0, "api": 0},
-        "fetch_recency": {"fresh": 1, "stale": 0, "blank": 1},
-    },
-    metrics.SLOW: {
-        "translation_status": {"Translated": 1, "Queued": 1},
-        "priority_breakdowns": {
-            "translation_priority": [{"prio": 5, "cnt": 2}],
-            "needs_image": [],
-            "needs_web_scrape": [{"prio": 10, "cnt": 1}],
-        },
-        "tag_counts": {"Alpha": 2, "Beta": 1},
+    "translation_status": {"Translated": 1, "Queued": 1},
+    "tag_counts": {"Alpha": 2, "Beta": 1},
+    "priority_breakdowns": {
+        "translation_priority": [{"prio": 5, "cnt": 2}],
+        "needs_image": [],
+        "needs_web_scrape": [{"prio": 10, "cnt": 1}],
     },
 }
 
 
-@pytest.mark.asyncio
-async def test_stats_screen_streams_tiers_cheapest_first(mock_config):
-    """Each tier lands in its own widgets, cheapest first, without wiping the rest."""
-    calls = []
+def _fake_iter_metrics(record=None):
+    """A stand-in for `metrics.iter_metrics` that yields every requested metric."""
+    def run(db_path, names=None, params=None):
+        order = list(names) if names is not None else metrics.all_names()
+        if record is not None:
+            record.append(order)
+        for name in order:
+            yield name, {
+                "value": _FAKE_METRIC_VALUES[name],
+                "ms": 1.0,
+                "note": metrics.REGISTRY[name].note,
+                "seed_ms": metrics.REGISTRY[name].seed_ms,
+            }
+    return run
 
-    def fake_compute_tier(db_path, tier, params=None):
-        calls.append(tier)
-        return {
-            name: {"value": _FAKE_TIER_VALUES[tier][name], "ms": 1.0, "tier": tier, "note": "fake"}
-            for name in metrics.names_in(tier)
-        }
+
+@pytest.mark.asyncio
+async def test_stats_screen_puts_every_metric_in_its_own_chunk(mock_config):
+    """Each metric lands in its own widget, in seed order on the first pass."""
+    requested = []
 
     with patch('src.tui.load_config', return_value=mock_config), \
-         patch('src.tui.metrics.compute_tier', side_effect=fake_compute_tier):
+         patch('src.tui.metrics.iter_metrics', side_effect=_fake_iter_metrics(requested)):
         app = ScraperApp()
         async with app.run_test() as pilot:
             await pilot.pause(ASYNC_PAUSE)
             app.push_screen(StatsScreen(app.db_path))
             await pilot.pause(ASYNC_PAUSE)
             screen = app.screen
-
-            for _ in range(100):
+            for _ in range(200):
                 await pilot.pause(0.02)
-                if metrics.SLOW in screen._tier_cost:
+                if len(screen._measured_ms) >= len(metrics.all_names()):
                     break
 
-            assert calls[:3] == [metrics.INSTANT, metrics.FAST, metrics.SLOW], \
-                "tiers must be computed cheapest first"
+            assert requested and requested[0] == metrics.all_names(), \
+                "the first pass must request metrics in seed order"
 
-            # The instant and fast sections survive the slow tier's arrival.
             totals = str(screen.query_one("#totals-content", Static).render())
             assert "Live items" in totals and "2" in totals
             coverage = str(screen.query_one("#coverage-content", Static).render())
@@ -552,37 +554,84 @@ async def test_stats_screen_streams_tiers_cheapest_first(mock_config):
             assert "Translated" in translation
             priority = str(screen.query_one("#priority-stats-content", Static).render())
             assert "Translation queue" in priority and "waiting" in priority
-
-            costs = str(screen.query_one("#tier-costs", Static).render())
-            assert metrics.SLOW in costs and "ms" in costs, \
-                "the screen must report what the slow tier cost"
-
             assert screen.query_one("#app-stats-table", DataTable).row_count == 1
             assert screen.query_one("#tag-stats-table", DataTable).row_count == 2
 
+            # One section per metric, no tier grouping, and each shows its cost.
+            assert len(screen.query(".stats-chunk")) == len(metrics.all_names())
+            assert len(screen.query("#tier-costs")) == 0
+            label = str(screen.query_one("#stats-label-totals", Label).render())
+            assert "1.0 ms" in label
 
-def test_stats_refresh_is_per_tier_not_global(monkeypatch):
-    """A slow tier's long interval must not hold back a cheap, overdue tier."""
+
+def test_stats_request_order_learns_from_the_measured_costs():
+    """Seed order until something is measured, then the durations actually seen."""
     screen = StatsScreen("unused.db")
-    started = []
-    monkeypatch.setattr(screen, "_start_tier", lambda tier: started.append(tier))
+    assert screen._request_order() == metrics.all_names()
+
+    screen._measured_ms["status_counts"] = 0.5
+    screen._measured_ms["priority_breakdowns"] = 900.0
+    order = screen._request_order()
+    assert order[0] == "status_counts"
+    assert order[-1] == "priority_breakdowns"
+
+    # With every metric measured, the order is purely by measured cost.
+    names = metrics.all_names()
+    screen._measured_ms = {name: float(len(names) - i) for i, name in enumerate(names)}
+    assert screen._request_order() == list(reversed(names))
+
+
+def test_stats_refresh_is_per_metric_not_global():
+    """A slow metric's long interval must not hold back a fast, overdue metric."""
+    screen = StatsScreen("unused.db")
+    names = metrics.all_names()
     now = time.monotonic()
-    screen._tier_interval = {metrics.INSTANT: 2.0, metrics.FAST: 2.0, metrics.SLOW: 600.0}
-    screen._tier_last = {
-        metrics.INSTANT: now - 3.0,  # due on its own 2 s interval
-        metrics.FAST: now,           # not due
-        metrics.SLOW: now - 3.0,     # overdue by wall clock, but its own interval is 10 min
-    }
+    screen._intervals = {name: 2.0 for name in names}
+    screen._intervals["tag_counts"] = 600.0
+    screen._ran_at = {name: now for name in names}
+    screen._ran_at["high_water"] = now - 3.0   # due on its own 2 s interval
+    screen._ran_at["tag_counts"] = now - 3.0   # overdue by wall clock, but its own interval is 10 min
 
-    screen._refresh_due_tiers()
-
-    assert started == [metrics.INSTANT]
+    assert screen._due_metrics(now) == ["high_water"]
 
 
-def test_tier_interval_scales_with_that_tiers_own_cost():
+def test_stats_does_not_restart_a_metric_that_is_still_computing():
+    screen = StatsScreen("unused.db")
+    now = time.monotonic()
+    screen._inflight = {"totals"}
+    assert screen._is_due("totals", now) is False
+    assert screen._is_due("coverage", now) is True
+
+
+def test_metric_interval_scales_with_its_own_measured_cost():
     screen = StatsScreen("unused.db")
     assert screen._interval_for(10) == screen.MIN_REFRESH_SECONDS
     assert screen._interval_for(100) == pytest.approx(5.0)     # 100 ms x 50
     assert screen._interval_for(2000) == pytest.approx(100.0)  # 2 s x 50
 
 
+@pytest.mark.asyncio
+async def test_tag_compaction_runs_off_the_ui_thread(mock_config):
+    """The tag-frequency write must not run on the render path."""
+    threads = []
+
+    def fake_compact(db_path, tag_counts):
+        threads.append(threading.current_thread())
+
+    with patch('src.tui.load_config', return_value=mock_config), \
+         patch('src.tui.metrics.iter_metrics', side_effect=_fake_iter_metrics()), \
+         patch('src.database.compact_tag_ids', side_effect=fake_compact):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+            app.push_screen(StatsScreen(app.db_path))
+            await pilot.pause(ASYNC_PAUSE)
+            screen = app.screen
+            for _ in range(200):
+                await pilot.pause(0.02)
+                if "tag_counts" in screen._measured_ms:
+                    break
+
+    assert threads, "compact_tag_ids must run when the tag metric arrives"
+    assert all(t is not threading.main_thread() for t in threads), \
+        "compact_tag_ids must stay off the UI thread"

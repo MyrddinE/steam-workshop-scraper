@@ -71,45 +71,89 @@ def test_registry_is_well_formed():
     assert metrics.REGISTRY, "no metrics registered"
     for name, spec in metrics.REGISTRY.items():
         assert spec.name == name, "a metric is registered under the wrong name"
-        assert spec.tier in metrics.TIERS, f"{name}: bad tier {spec.tier!r}"
+        assert spec.seed_ms >= 0, f"{name}: seed_ms is a cost hint in milliseconds"
         assert spec.note, f"{name}: every metric explains what it answers"
         assert callable(spec.run)
 
 
-def test_all_names_runs_cheapest_tier_first():
-    """The order matters: it is the order a front end draws them in."""
-    order = [metrics.REGISTRY[n].tier for n in metrics.all_names()]
-    assert order == sorted(order, key=metrics.TIERS.index)
-    assert len(metrics.all_names()) == len(metrics.REGISTRY), "a metric is missing from all_names()"
+def test_all_names_is_seed_ordered_and_complete():
+    order = metrics.all_names()
+    seeds = [metrics.REGISTRY[name].seed_ms for name in order]
+    assert seeds == sorted(seeds), "all_names() must order by the seed cost hint"
+    assert set(order) == set(metrics.REGISTRY), "a metric is missing from all_names()"
 
 
-def test_compute_reports_value_cost_and_tier(db_path):
+def test_catalogue_matches_the_registry_in_seed_order():
+    cat = metrics.catalogue()
+    assert [m["name"] for m in cat] == metrics.all_names()
+    for entry in cat:
+        spec = metrics.REGISTRY[entry["name"]]
+        assert entry["note"] == spec.note
+        assert entry["seed_ms"] == spec.seed_ms
+
+
+def test_compute_reports_value_cost_and_seed(db_path):
     result = metrics.compute(db_path, ["totals"])
     entry = result["totals"]
-    assert entry["tier"] == metrics.INSTANT
     assert entry["value"] == {"total": 0, "dead": 0, "alive": 0}
     assert entry["ms"] >= 0.0
     assert entry["note"]
+    assert entry["seed_ms"] == metrics.REGISTRY["totals"].seed_ms
+    assert "tier" not in entry, "a cost hint is not a classification"
 
 
-def test_compute_tier_returns_only_that_tier(db_path):
-    result = metrics.compute_tier(db_path, metrics.FAST)
-    assert result, "the fast tier is empty"
-    assert {e["tier"] for e in result.values()} == {metrics.FAST}
-    assert set(result) == set(metrics.names_in(metrics.FAST))
+def test_iter_metrics_yields_every_metric_as_it_finishes(db_path):
+    # One fetched item, so `high_water` has a real answer rather than its
+    # legitimate "no successful fetch yet" None.
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "title": "x", "status": 200,
+        "api_fetched_at": int(time.time()),
+    })
+    seen = list(metrics.iter_metrics(db_path))
+    assert [name for name, _ in seen] == metrics.all_names()
+    for name, entry in seen:
+        assert entry["value"] is not None, f"{name} failed: {entry}"
+
+
+def test_iter_metrics_honours_a_requested_order(db_path):
+    requested = ["totals", "high_water", "coverage"]
+    seen = [name for name, _ in metrics.iter_metrics(db_path, requested)]
+    assert seen == requested
+
+
+def test_iter_metrics_shares_one_connection(db_path, monkeypatch):
+    """One connection serves the whole pass.
+
+    Opening one per metric would cost more than the cheapest metrics do, and the
+    pass still has to stream, so the connection is opened once around the loop.
+    """
+    from src import metrics as metrics_module
+
+    real = metrics_module.get_connection
+    opened = []
+
+    def counting_connection(path):
+        opened.append(path)
+        return real(path)
+
+    monkeypatch.setattr(metrics_module, "get_connection", counting_connection)
+    list(metrics_module.iter_metrics(db_path))
+    assert opened == [db_path], "iter_metrics opened more than one connection"
 
 
 def test_unknown_metric_is_rejected(db_path):
     with pytest.raises(KeyError, match="unknown metric"):
         metrics.compute(db_path, ["totals", "not_a_metric"])
+    with pytest.raises(KeyError, match="unknown metric"):
+        list(metrics.iter_metrics(db_path, ["not_a_metric"]))
 
 
 def test_a_broken_metric_does_not_take_down_the_others(db_path, monkeypatch):
-    """The front ends render tiers independently, so one failure is local."""
+    """The front ends render each chunk independently, so one failure is local."""
     def explode(conn, params):
         raise RuntimeError("nope")
 
-    boom = metrics.Metric(name="boom", tier=metrics.INSTANT, note="explodes", run=explode)
+    boom = metrics.Metric(name="boom", seed_ms=0.0, note="explodes", run=explode)
     monkeypatch.setitem(metrics.REGISTRY, "boom", boom)
 
     result = metrics.compute(db_path, ["totals", "boom"])

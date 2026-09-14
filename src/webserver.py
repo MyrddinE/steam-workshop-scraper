@@ -346,11 +346,10 @@ def api_tags():
 
 @app.route('/api/stats')
 def api_stats():
-    """Every statistic at once, untiered.
+    """Every statistic at once.
 
-    Kept for completeness and for diagnosing the database directly. The UI
-    fetches `/api/metrics/<tier>` instead, so the cheap numbers are on screen
-    while the expensive ones are still being computed.
+    Kept for diagnosing the database directly. The UI fetches the metrics one at
+    a time instead, so each chunk appears as soon as it is ready.
     """
     stats = get_db_stats(_db_path)
     return jsonify(stats)
@@ -358,40 +357,37 @@ def api_stats():
 
 @app.route('/api/metrics')
 def api_metrics_catalogue():
-    """What statistics exist, grouped by tier, cheapest first.
+    """What statistics exist, with a seed ordering hint.
 
     The client draws its layout from this rather than hard-coding a list, so a
     metric added on the server appears without a matching front-end change.
+
+    `seed_ms` is only a first-run ordering hint. The client is expected to
+    replace it with the duration it measured last time it asked, so the order
+    follows the data instead of this table.
     """
     return jsonify({
-        "tiers": [
-            {
-                "tier": tier,
-                "metrics": [
-                    {"name": name, "note": metrics.REGISTRY[name].note}
-                    for name in metrics.names_in(tier)
-                ],
-            }
-            for tier in metrics.TIERS
-        ]
+        "metrics": metrics.catalogue(),
+        "default_order": metrics.all_names(),
     })
 
 
-@app.route('/api/metrics/<tier>')
-def api_metrics_tier(tier):
-    """One tier's values, with what each cost.
+@app.route('/api/metrics/<name>')
+def api_metric(name):
+    """One metric, computed on its own.
 
-    Tiers are fetched separately so the client can replace its own elements as
-    each lands instead of waiting for the slowest.
+    Separate requests are what make the chunks independent: whichever finishes
+    first renders first, and a slow metric cannot hold up a fast one.
     """
-    if tier not in metrics.TIERS:
-        return jsonify({"error": f"unknown tier {tier!r}"}), 404
-    result = metrics.compute_tier(_db_path, tier)
+    if name not in metrics.REGISTRY:
+        return jsonify({"error": f"unknown metric {name!r}"}), 404
+    entry = metrics.compute(_db_path, [name])[name]
     return jsonify({
-        "tier": tier,
-        "values": metrics.values(result),
-        "ms": {name: entry["ms"] for name, entry in result.items()},
-        "total_ms": round(sum(e["ms"] for e in result.values()), 1),
+        "name": name,
+        "value": entry["value"],
+        "ms": entry["ms"],
+        "note": entry["note"],
+        "seed_ms": entry["seed_ms"],
     })
 
 

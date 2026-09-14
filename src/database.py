@@ -1834,9 +1834,10 @@ def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
     """Every statistic in one dict, under the key names its callers already use.
 
     Kept as the single-dict entry point for callers that want the lot. A caller
-    that needs only part of it should use `metrics.compute_tier` instead: this
-    pays for the slow tier every time, which is how the tag endpoint came to
-    spend about five seconds computing a payload it threw away.
+    that needs only part of it should use `metrics.compute` with the names it
+    wants, or `metrics.iter_metrics` to take them one at a time: this computes
+    every metric, which is how the tag endpoint came to spend about five seconds
+    producing a payload it threw away.
     """
     # Imported here rather than at module scope: metrics imports this module for
     # its connection helper, so a top-level import would be circular.
