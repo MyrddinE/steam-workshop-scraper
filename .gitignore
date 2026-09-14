@@ -4,6 +4,12 @@ config.yaml
 *.db
 *.log
 
+# Runtime state written beside the database, never source. The TUI's filter
+# state existed before this line and was never ignored; both are local state.
+.tui_state.yaml
+.daemon_state.yaml
+.daemon_state.yaml.tmp
+
 # Python
 __pycache__/
 *.py[cod]

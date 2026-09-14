@@ -27,6 +27,70 @@ ACCOUNT_MAX_SECONDS = 3600.0
 # is worth retrying.
 ACCOUNT_LEVEL_STATUSES = frozenset({401, 402, 403})
 
+# The streak is persisted, so it is read back from a file that a crash, an
+# editor or a bad disk can leave nonsense in. The exponent has to be bounded
+# *before* it is used, because `2 ** (streak - 1)` on a value of a billion would
+# build that integer before `min()` ever saw it. 2**63 seconds is already far
+# beyond every cap here, so clamping costs nothing.
+MAX_FAILURE_STREAK = 64
+
+# The section this thread owns in the daemon state file. See src/daemon_state.py.
+STATE_SECTION = "translation_backoff"
+
+
+def backoff_delay(streak: int, retryable: bool) -> float:
+    """Seconds to wait before the next attempt, after ``streak`` failures.
+
+    Pure so the shape of the backoff can be tested without a thread, a clock or
+    a network, and so the value that gets persisted comes from one place.
+    """
+    base = RETRY_BASE_SECONDS if retryable else ACCOUNT_BASE_SECONDS
+    cap = RETRY_MAX_SECONDS if retryable else ACCOUNT_MAX_SECONDS
+    streak = max(1, min(int(streak), MAX_FAILURE_STREAK))
+    return float(min(base * (2 ** (streak - 1)), cap))
+
+
+def _coerce_utc(value):
+    """A timezone-aware UTC datetime from a stored value, or ``None``.
+
+    Accepts a string or a datetime, because PyYAML resolves an ISO timestamp to
+    a ``datetime`` on the way back in: both shapes arrive here from one file.
+    Naive values are read as UTC rather than rejected.
+    """
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _coerce_streak(value) -> int:
+    """A usable streak from a stored value: 0 when unusable, never out of range."""
+    try:
+        streak = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(streak, MAX_FAILURE_STREAK))
+
+
+def remaining_backoff(next_attempt_at, now: float, cap: float) -> float:
+    """Seconds still to wait for a persisted ``next_attempt_at``.
+
+    Zero when the moment has passed, when the value is unusable, or when it is
+    further away than ``cap``: no legitimate backoff is longer than the cap, so
+    a timestamp beyond it means a bad clock or an edited file, and honouring it
+    would park the thread for an unexplained age.
+    """
+    when = _coerce_utc(next_attempt_at)
+    if when is None:
+        return 0.0
+    return max(0.0, min(cap, when.timestamp() - now))
+
 
 def retryable_failure(exc: BaseException) -> bool:
     """Whether another attempt could plausibly succeed.
@@ -63,13 +127,17 @@ def is_ascii(s: str) -> bool:
 
 
 class TranslatorThread(threading.Thread):
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, state_store=None):
         super().__init__(daemon=True)
         self.config = config
         self.db_path = config.get("database", {}).get("path", "workshop.db")
         self.batch_size = config.get("openai", {}).get("batch", 20)
         self.running = True
         self._failure_streak = 0
+        # Injected, and optional, so the thread stays constructible and testable
+        # without a filesystem. The daemon passes a StateStore so a backoff
+        # outlives a restart; with none, behaviour is exactly as it was.
+        self.state_store = state_store
 
     def run(self):
         openai_config = self.config.get("openai", {})
@@ -80,6 +148,11 @@ class TranslatorThread(threading.Thread):
         client = _create_openai_client(openai_config)
         model = openai_config.get("model", "gpt-4o-mini")
         logging.info("Starting batched translation background thread...")
+
+        # A backoff that was still running when the daemon stopped is resumed,
+        # not restarted: the condition it was waiting on did not change just
+        # because the process did.
+        self._resume_persisted_backoff()
 
         while self.running:
             try:
@@ -122,27 +195,83 @@ class TranslatorThread(threading.Thread):
                 return
             time.sleep(min(1.0, remaining))
 
+    def _resume_persisted_backoff(self) -> None:
+        """Restore the recorded streak, then wait out the rest of its delay.
+
+        Without this the delay restarts from its base on every daemon restart,
+        so a condition that outlives a few restarts is never backed off far
+        enough: an account-level rejection that had reached its hour would be
+        retried a minute after each restart, and the log would say the same
+        thing each time.
+        """
+        if self.state_store is None:
+            return
+        section = self.state_store.load().get(STATE_SECTION)
+        if not isinstance(section, dict):
+            return
+
+        self._failure_streak = _coerce_streak(section.get("failure_streak"))
+        if not self._failure_streak:
+            return
+
+        remaining = remaining_backoff(
+            section.get("next_attempt_at"), time.time(), ACCOUNT_MAX_SECONDS
+        )
+        if remaining <= 0:
+            logging.info(
+                "Resuming translation with %d failed attempt(s) recorded; "
+                "the last backoff has already expired.",
+                self._failure_streak,
+            )
+            return
+        logging.info(
+            "Resuming translation backoff: %.0fs still to wait, after %d failed attempt(s).",
+            remaining, self._failure_streak,
+        )
+        self._sleep(remaining)
+
+    def _persist_backoff(self, delay: float, retryable: bool) -> None:
+        """Record the streak and when the next attempt falls due.
+
+        The streak is what reconstructs the delay if the timestamp is missing;
+        the timestamp is what lets a restart wait only the remainder instead of
+        serving the whole delay again. ``kind`` is for whoever reads the file,
+        not for the arithmetic.
+        """
+        if self.state_store is None:
+            return
+        due = datetime.now(timezone.utc).timestamp() + delay
+        self.state_store.save({STATE_SECTION: {
+            "failure_streak": self._failure_streak,
+            "next_attempt_at": datetime.fromtimestamp(due, timezone.utc).isoformat(),
+            "kind": "retryable" if retryable else "account-level",
+        }})
+
     def _register_failure(self, exc: BaseException) -> float:
         """Record a failed batch and return how long to wait before retrying."""
         retryable = retryable_failure(exc)
         self._failure_streak += 1
-        base = RETRY_BASE_SECONDS if retryable else ACCOUNT_BASE_SECONDS
-        cap = RETRY_MAX_SECONDS if retryable else ACCOUNT_MAX_SECONDS
-        delay = min(base * (2 ** (self._failure_streak - 1)), cap)
+        delay = backoff_delay(self._failure_streak, retryable)
         kind = "retryable" if retryable else "account-level, not retryable"
         logging.error(
             "Batch translation failed (%s, attempt %d): %s — backing off %.0fs.",
             kind, self._failure_streak, exc, delay,
         )
+        self._persist_backoff(delay, retryable)
         return delay
 
     def _register_success(self) -> None:
         """Clear the backoff once a batch gets through."""
-        if self._failure_streak:
-            logging.info(
-                "Translation recovered after %d failed attempt(s).", self._failure_streak
-            )
+        if not self._failure_streak:
+            # Nothing outstanding. This runs after every batch, so the happy
+            # path must not touch the disk.
+            return
+        logging.info(
+            "Translation recovered after %d failed attempt(s).", self._failure_streak
+        )
         self._failure_streak = 0
+        if self.state_store is not None:
+            self.state_store.remove(STATE_SECTION)
 
     def _translate_batch(self, batch: list[dict], client: OpenAI, model: str):
         """Translate a batch of fields using OpenAI and update the database."""

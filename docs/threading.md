@@ -49,6 +49,20 @@ change before retrying can work; the thread resumes on its own once it does, and
 attempt replaces the storm. The streak resets on the first batch that gets through. The wait is served
 in one-second steps so a long backoff cannot hold the daemon's shutdown.
 
+**The backoff outlives the process.** The streak and the moment its next attempt falls due are written
+to the daemon state file beside the database, `.daemon_state.yaml`, so restarting the daemon resumes
+the backoff instead of beginning again at the base — otherwise a service condition that had already
+reached its five minutes is retried two seconds later merely because the process restarted, and an
+account-level rejection that had reached its hour is retried a minute after every restart. The recorded
+streak is what reconstructs the delay; the timestamp is what lets a restart wait only the remainder
+rather than serving the whole delay again. Wait and streak are clamped on the way in, since the file is
+input as far as the thread is concerned: a corrupt streak would otherwise build a gigantic integer
+before any cap applied, and a timestamp far beyond the cap would park the thread for an unexplained
+age. The first batch that gets through removes the section, so a healthy translator leaves nothing
+behind. The store is *injected*, so a thread constructed without one — in a test, or embedded — behaves
+exactly as it did before. The file itself is owned by `src/daemon_state.py`, which is best-effort: an
+unreadable or unwritable state file costs one extra attempt, never a crash.
+
 ---
 
 ## Thread Safety

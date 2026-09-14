@@ -41,6 +41,7 @@ from src.firefox_cookies import steam_login_secure
 from src.web_worker import WebScraperThread
 from src.image_worker import ImageScraperThread
 from src.backup import BackupThread
+from src.daemon_state import StateStore, state_path_for
 from src import capture
 
 # API statuses the fetch path has an explicit branch for. Anything else is
@@ -190,8 +191,12 @@ class Daemon:
             save_config(self.config_path, self.config)
         self.pause_lock_file = ".pauselock"
         
-        # Translator thread
-        self.translator = TranslatorThread(config)
+        # Translator thread. It owns a slice of the daemon state file beside the
+        # database, so the delay it has backed off to survives a restart rather
+        # than beginning again at the base on every one.
+        self.translator = TranslatorThread(
+            config, state_store=StateStore(state_path_for(self.db_path))
+        )
 
         # Optional database backup into a pull-outbox. The feature defaults to
         # OFF: it is only enabled when both `outbox_dir` (or `backup_dir`) and a

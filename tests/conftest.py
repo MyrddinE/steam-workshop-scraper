@@ -175,7 +175,12 @@ def db_path(tmp_path):
 
 @pytest.fixture(autouse=True)
 def cleanup_tui_state():
-    """Ensure tui_state.yaml is removed after each test to prevent side effects."""
+    """Remove state files written beside the working directory by a test.
+
+    Both are runtime state, not source: a test that constructs a worker with its
+    default paths would otherwise leave one in the repository root.
+    """
     yield
-    if os.path.exists(".tui_state.yaml"):
-        os.remove(".tui_state.yaml")
+    for name in (".tui_state.yaml", ".daemon_state.yaml", ".daemon_state.yaml.tmp"):
+        if os.path.exists(name):
+            os.remove(name)
