@@ -113,6 +113,14 @@ does return HttpOnly cookies, but the vendor's documentation states that support
 The version literal appears in both this file and `templates/index.html`; nothing links them, so
 `tests/test_userscript_contract.py` asserts they agree.
 
+**Throttling.** Steam answers an over-budget request with **HTTP 200** and its ordinary page shell
+carrying "too many requests", so the subscribe button is simply absent. The plugin checks for that
+wording before concluding anything, and reports it to `/api/subscribe_throttled/<id>` rather than
+`/api/subscribe_failed/<id>`. The difference matters: a throttled item is **left queued** so the next
+drain retries it, whereas a genuine failure is cleared. The UI polls `/api/sub_health` once per tab it
+opens and stops opening more while Steam is refusing us, telling the user when the rest can be retried.
+The budget is per account or address and refills over minutes.
+
 ### Detection (`_userscriptPresent`)
 
 Checks `document.body.dataset.userscript` for presence and `userscriptVer` against the page's expected version from the meta tag. If outdated, offers to open the install URL.

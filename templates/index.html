@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="userscript-version" content="7">
+<meta name="userscript-version" content="8">
 <title>Steam Workshop Scraper</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
 <style>
@@ -704,6 +704,7 @@ document.addEventListener('keydown', e => {
 let _subPollIv = null;
 let _subScheduleIv = null;
 let _subCanceled = false;
+let _subThrottleStopped = false;
 
 async function _startAutoSubscribe() {
   const resp = await fetch('/api/queued');
@@ -786,6 +787,34 @@ async function _startAutoSubscribe() {
     } catch(e) { console.debug('Autosubscribe poll error', e); /* continue */ }
   }, 1000);
 
+  // Stop launching tabs while Steam is refusing us. Checked once per tab opened,
+  // so it costs one request per attempt rather than a poll.
+  async function _checkSubThrottle() {
+    try {
+      const resp = await fetch('/api/sub_health');
+      const health = await resp.json();
+      if (!health.throttled_at) return;
+      const since = (Date.now() / 1000) - health.throttled_at;
+      if (since >= health.retry_after) return;
+      // A subscribe pass pauses the daemon for its duration, and the daemon is
+      // only released when the pass ends -- either every item was verified, or
+      // the user cancelled. Stopping the tabs early ends the pass too, so the
+      // release has to happen here or the daemon stays paused indefinitely.
+      _subThrottleStopped = true;
+      if (_subScheduleIv) { clearInterval(_subScheduleIv); _subScheduleIv = null; }
+      if (_subPollIv) { clearInterval(_subPollIv); _subPollIv = null; }
+      await fetch('/api/resume', {method:'POST'});
+      const cancelBtn = document.getElementById('sub-cancel');
+      if (cancelBtn) cancelBtn.textContent = 'Close';
+      const p = document.getElementById('sub-progress');
+      if (p) {
+        p.textContent = 'Steam is throttling subscription requests. Stopped opening tabs, and ' +
+          'released the daemon. The rest stay queued and can be retried in about ' +
+          Math.ceil((health.retry_after - since) / 60) + ' minute(s).';
+      }
+    } catch (e) { console.debug('sub_health check failed', e); /* keep the drain running */ }
+  }
+
   // Countdown + tab-open loop
   _subScheduleIv = setInterval(() => {
     if (_subCanceled) return;  // stop launching new tabs on cancel
@@ -811,6 +840,7 @@ async function _startAutoSubscribe() {
         );
         if (w) { w.blur(); window.focus(); }
         countdown.textContent = '';
+        _checkSubThrottle();
       } else {
         countdown.textContent = (openAt - elapsed) + 's';
       }
@@ -832,13 +862,17 @@ document.getElementById('sub-cancel').onclick = () => {
   } else {
     // Second click (Close): dismiss overlay
     if (_subPollIv) { clearInterval(_subPollIv); _subPollIv = null; }
-    // Dequeue any remaining unverified items so they don't stick
-    var rows = document.querySelectorAll('.sub-queue-item:not(.done)');
-    rows.forEach(function(row) {
-      var wid = row.getAttribute('data-wid');
-      if (wid) fetch('/api/subscribed/' + wid, {method:'POST'});
-      row.classList.add('done');
-    });
+    // Dequeue any remaining unverified items so they don't stick -- unless the
+    // pass was stopped by throttling, where the whole point is to leave them
+    // queued so the next drain retries them.
+    if (!_subThrottleStopped) {
+      var rows = document.querySelectorAll('.sub-queue-item:not(.done)');
+      rows.forEach(function(row) {
+        var wid = row.getAttribute('data-wid');
+        if (wid) fetch('/api/subscribed/' + wid, {method:'POST'});
+        row.classList.add('done');
+      });
+    }
     fetch('/api/resume', {method:'POST'});
     document.getElementById('sub-queue-overlay').style.display = 'none';
   }

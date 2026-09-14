@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 import re
 import logging
 import requests
@@ -455,6 +456,37 @@ def api_subscribe_failed(workshop_id):
     clear_subscription_queue_status(_db_path, workshop_id)
     _sub_failures.add(workshop_id)
     return jsonify({"ok": True})
+
+
+# Shipping a throttle as a failure was wrong twice over: the item was never
+# attempted, and clearing it from the queue threw away the work the drain had
+# queued up. A throttled item therefore stays queued, and the UI stops opening
+# tabs until the request budget refills — Steam's is per account or address and
+# refills over minutes.
+SUBSCRIBE_THROTTLE_PAUSE_SECONDS = 300.0
+_sub_throttled_at = 0.0
+_sub_throttled_id = None
+
+
+@app.route('/api/subscribe_throttled/<int:workshop_id>', methods=['POST'])
+def api_subscribe_throttled(workshop_id):
+    global _sub_throttled_at, _sub_throttled_id
+    _sub_throttled_at = time.time()
+    _sub_throttled_id = workshop_id
+    logging.warning(
+        "[Subscribe] Steam throttled the request for workshop_id=%s; it stays queued "
+        "and is retried once the budget refills.", workshop_id)
+    return jsonify({"ok": True, "retry_after": SUBSCRIBE_THROTTLE_PAUSE_SECONDS})
+
+
+@app.route('/api/sub_health')
+def api_sub_health():
+    """Whether Steam is currently refusing us, and for how much longer."""
+    return jsonify({
+        "throttled_at": _sub_throttled_at,
+        "throttled_id": _sub_throttled_id,
+        "retry_after": SUBSCRIBE_THROTTLE_PAUSE_SECONDS,
+    })
 
 
 @app.route('/api/sub_failures')

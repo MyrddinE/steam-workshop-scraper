@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Workshop Scraper — Subscribe Bridge
 // @namespace    https://github.com/MyrddinE/steam-workshop-scraper
-// @version      7
+// @version      8
 // @updateURL    https://raw.githubusercontent.com/MyrddinE/steam-workshop-scraper/main/userscripts/steam_subscribe.user.js
 // @downloadURL  https://raw.githubusercontent.com/MyrddinE/steam-workshop-scraper/main/userscripts/steam_subscribe.user.js
 // @description  Bridges Steam session to the Workshop Scraper web UI for one-click subscribing.
@@ -133,6 +133,34 @@
         return false;
       }
 
+      // Steam answers an over-budget request with HTTP 200 and its ordinary page
+      // shell carrying this wording, and the subscribe button is simply absent —
+      // so without this check a throttled item was indistinguishable from one
+      // that failed, and got cleared from the queue as a failure.
+      function isThrottled() {
+        var text = (document.body && document.body.innerText || '').toLowerCase();
+        return text.indexOf('too many requests') !== -1;
+      }
+
+      function reportThrottledAndClose(apiBase, wid) {
+        if (apiBase && wid) {
+          GM_xmlhttpRequest({
+            method: 'POST',
+            url: apiBase + '/api/subscribe_throttled/' + wid,
+            headers: { 'Content-Type': 'application/json' },
+            onload: function () {
+              console.log('[SubscribeBridge] Reported throttling for', wid, '- left queued');
+              setTimeout(function () { window.close(); }, 500);
+            },
+            onerror: function () {
+              setTimeout(function () { window.close(); }, 500);
+            },
+          });
+        } else {
+          setTimeout(function () { window.close(); }, 500);
+        }
+      }
+
       function reportFailureAndClose(apiBase, wid) {
         if (apiBase && wid) {
           var url = apiBase + '/api/subscribe_failed/' + wid;
@@ -154,6 +182,11 @@
       }
 
       setTimeout(function () {
+        if (isThrottled()) {
+          showToast('Steam is throttling - leaving this one queued');
+          reportThrottledAndClose(apiBase, wid);
+          return;
+        }
         var btn = document.getElementById('SubscribeItemBtn');
         if (btn) {
           if (btn.classList.contains('toggled')) {
@@ -170,6 +203,12 @@
                 clearInterval(poll);
                 showToast('Subscribed!');
                 reportAndClose(apiBase, wid);
+              } else if (isThrottled()) {
+                // Checked before the timeout claim: reporting this as a success
+                // or a failure would both be wrong, since nothing was attempted.
+                clearInterval(poll);
+                showToast('Steam is throttling - leaving this one queued');
+                reportThrottledAndClose(apiBase, wid);
               } else if (Date.now() - startTime > maxWait) {
                 clearInterval(poll);
                 reportAndClose(apiBase, wid);
