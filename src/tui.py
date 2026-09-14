@@ -12,6 +12,7 @@ from textual.reactive import reactive
 from src.database import search_items, get_all_authors, initialize_database, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, get_db_stats, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, get_connection, FILTER_SCHEMA, ALL_FILTER_FIELDS, bump_api_priority_for_list, bump_api_priority_for_detail
 from src.analysis import view_window_analysis
 from src.config import ConfigError, load_config, save_config
+from src.daemon_control import DaemonController
 import os
 import yaml
 import threading
@@ -281,19 +282,10 @@ class AnalysisScreen(Screen):
 class DaemonManagerScreen(Screen):
     """Screen to manage the background daemon process."""
 
-    def __init__(self, config_path: str = "config.yaml"):
+    def __init__(self, controller: DaemonController):
         super().__init__()
-        self.config_path = config_path
-        self.pid_file = ".daemon.pid"
+        self.controller = controller
         self._tail_proc = None
-
-    @property
-    def _daemon_proc(self):
-        return self.app._daemon_proc
-
-    @_daemon_proc.setter
-    def _daemon_proc(self, value):
-        self.app._daemon_proc = value
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -321,150 +313,31 @@ class DaemonManagerScreen(Screen):
             self._tail_proc = None
 
     def _daemon_is_running(self) -> bool:
-        if self._daemon_proc and self._daemon_proc.poll() is None:
-            return True
-        pid = self._read_pid()
-        if pid is None:
-            return False
-        import signal, os as _os, sys
-        try:
-            _os.kill(pid, 0)
-            return True
-        except OSError:
-            if sys.platform == 'win32':
-                return True  # os.kill(0) unreliable on detached Windows processes
-            return False
-        except ProcessLookupError:
-            return False
+        return self.controller.is_running()
 
     def _update_status(self) -> None:
-        if self._daemon_is_running():
-            pid = self._read_pid() or (self._daemon_proc.pid if self._daemon_proc else None)
-            self.query_one("#dm-status", Static).update(f"[green]Running (PID: {pid})[/green]")
+        status = self.controller.status()
+        if status["running"]:
+            self.query_one("#dm-status", Static).update(f"[green]Running (PID: {status['pid']})[/green]")
         else:
-            if self._daemon_proc is not None:
-                self._daemon_proc = None
             self.query_one("#dm-status", Static).update("[red]Not running[/red]")
 
     def _read_pid(self) -> int | None:
-        try:
-            with open(self.pid_file) as f:
-                return int(f.read().strip())
-        except Exception:
-            return None
+        return self.controller.read_pid()
 
     def _start_daemon(self) -> bool:
-        if self._daemon_is_running():
-            pid = self._read_pid()
-            self.query_one("#dm-status", Static).update(f"[green]Already running (PID: {pid})[/green]")
-            return False
-        import subprocess, sys
-        try:
-            kwargs = {}
-            if sys.platform == 'win32':
-                kwargs["creationflags"] = subprocess.DETACHED_PROCESS
-            else:
-                kwargs["stdout"] = subprocess.DEVNULL
-                kwargs["stderr"] = subprocess.DEVNULL
-            self._daemon_proc = subprocess.Popen(
-                [sys.executable, "-m", "src.daemon_runner", self.config_path, "--daemon"],
-                **kwargs,
-            )
-            return True
-        except Exception as e:
-            logging.warning(f"Failed to start daemon: {e}")
-            return False
+        changed, message = self.controller.start()
+        if not changed and message.startswith("Already running"):
+            self.query_one("#dm-status", Static).update(f"[green]{message}[/green]")
+        return changed
 
     def _stop_daemon(self) -> bool:
-        pid = self._read_pid()
-
-        if not self._daemon_is_running():
-            if self._daemon_proc is not None:
-                self._daemon_proc = None
-            return True
-
-        import platform, signal, os as _os, time
-
-        # ── Graceful shutdown: signal the daemon, wait for clean exit ──
-        if platform.system() == 'Windows':
-            # Windows: delete PID file — daemon checks it each loop iteration
-            try:
-                _os.remove(self.pid_file)
-            # Best-effort stop signal; an absent PID file is the goal, and the
-            # graceful-wait/force-kill path below follows regardless.
-            except OSError:
-                pass
-        else:
-            # Unix: send SIGTERM first, then delete PID file as fallback
-            if pid:
-                try:
-                    _os.kill(pid, signal.SIGTERM)
-                # Best-effort graceful signal; if the process is already gone the wait
-                # loop observes it, and SIGKILL is the fallback.
-                except OSError:
-                    pass
-            try:
-                _os.remove(self.pid_file)
-            # Best-effort fallback after SIGTERM; removing an already-absent PID file
-            # is a no-op success.
-            except OSError:
-                pass
-
-        # Wait for graceful exit
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            if self._daemon_proc and self._daemon_proc.poll() is not None:
-                self._daemon_proc = None
-                return True
-            if pid:
-                try:
-                    _os.kill(pid, 0)
-                except (OSError, ProcessLookupError):
-                    self._daemon_proc = None
-                    return True
-            time.sleep(0.5)
-
-        # ── Timeout: force-kill as last resort ──
-        if self._daemon_proc:
-            try:
-                self._daemon_proc.terminate()
-                self._daemon_proc.wait(timeout=3)
-            except Exception:
-                try:
-                    self._daemon_proc.kill()
-                # Last-resort force kill on our own Popen handle; nothing further can
-                # be attempted in-process and the handle is cleared below.
-                except Exception:
-                    pass
-        elif pid and platform.system() == 'Windows':
-            try:
-                import ctypes
-                handle = ctypes.windll.kernel32.OpenProcess(1, False, pid)
-                if handle:
-                    ctypes.windll.kernel32.TerminateProcess(handle, 0)
-                    ctypes.windll.kernel32.CloseHandle(handle)
-            # Best-effort Windows force-kill of a PID this process does not own; no
-            # further in-process remedy exists.
-            except Exception:
-                pass
-        elif pid:
-            try:
-                _os.kill(pid, signal.SIGKILL)
-            # Final Unix escalation; if SIGKILL is refused there is nothing else the
-            # manager can do for this PID.
-            except Exception:
-                pass
-
-        self._daemon_proc = None
+        self.controller.stop()
         return True
 
     def _start_tail(self):
         import subprocess
-        try:
-            cfg = load_config(self.config_path)
-        except Exception:
-            return
-        log_file = cfg.get("logging", {}).get("file")
+        log_file = self.controller.log_file()
         if not log_file:
             return
         try:
@@ -498,8 +371,7 @@ class DaemonManagerScreen(Screen):
             self._stop_daemon()
             self._update_status()
         elif event.button.id == "dm-restart":
-            self._stop_daemon()
-            self._start_daemon()
+            self.controller.restart()
             self._update_status()
         elif event.button.id == "dm-close":
             self.app.pop_screen()
@@ -1274,10 +1146,13 @@ class ScraperApp(App):
         initialize_database(self.db_path)
         self._wilson_cutoffs = {}
         self._web_port = None
+        # One controller for the process: the TUI screen and the embedded web
+        # server both drive the daemon through it, so a start from either UI is
+        # visible to the other.
+        self._daemon_controller = DaemonController(self.config_path, config=self.config)
         self._start_webserver()
         self.current_item_creator = None
         self.pause_lock_file = ".pauselock"
-        self._daemon_proc = None  # persists across screen pushes; re-discovered from PID file on restart
         
         # Pagination state
         self.current_offset = 0
@@ -1753,7 +1628,7 @@ class ScraperApp(App):
 
     def action_show_daemon(self) -> None:
         """Shows the daemon management screen."""
-        self.push_screen(DaemonManagerScreen(self.config_path))
+        self.push_screen(DaemonManagerScreen(self._daemon_controller))
 
     async def action_subscribe(self) -> None:
         """Subscribes to the currently displayed workshop item on Steam."""
@@ -1831,7 +1706,8 @@ class ScraperApp(App):
                 save_config(self.config_path, self.config)
                 logging.info(f"Saved port {self._web_port} to config")
 
-            init_webserver(self.db_path, self.config, config_path=self.config_path)
+            init_webserver(self.db_path, self.config, config_path=self.config_path,
+                           daemon_controller=self._daemon_controller)
 
             def run_server():
                 from waitress import serve
