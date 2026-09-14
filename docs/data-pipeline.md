@@ -98,10 +98,27 @@ A daemon thread that picks up items from `get_next_web_scrape_item`, ordered by 
 1. Calls `scrape_extended_details(url)` which fetches the Steam Community workshop page and parses the extended description and tags.
 2. If the description was found, updates `extended_description`, sets `needs_web_scrape = 0`, and records `scrape_version = steam_updated_at`. The tags the scraper returns are not persisted; tags in the database come from the API.
 3. Flags non-ASCII `extended_description` for translation at priority 3, unless its translation is already current (see [What queues a field for translation](#what-queues-a-field-for-translation)).
-4. If the request failed, raises `api_priority` to 2 so the item is retried (that value has no other source); nothing is cleared, so the item stays in the scrape queue.
-5. If the page loaded but the description selector did **not** match, the response is captured as evidence and the markup decides what the queue learns. If the body carried neither the item template (`workshopItem`) nor the description element (`highlightContent`), the page was not the item's — a wall, an error page, or a throttle page whose wording the marker missed — so the item is not at fault and `needs_web_scrape` is left exactly as it was; the request does count as a failure for pacing, because the server declined to serve content. If the item template is present but the description element is not, the page really is the item's and it genuinely has no extended description: no retry can change that, so `needs_web_scrape` is cleared and the item leaves the queue, which is what lets the queue drain; that outcome is neutral for pacing. See [failure-capture.md](failure-capture.md).
+4. If the request could not be completed at all — a transport failure, which `scrape_extended_details` reports as `None` — raises `api_priority` to 2 so the metadata is re-fetched (that value has no other source); nothing is cleared, so the item stays in the scrape queue.
+5. Otherwise `classify_scrape` names the outcome and the run loop responds to it (see [Outcome taxonomy](#outcome-taxonomy)). Every non-success outcome that carries a served page is captured as evidence, and a miss is never a blanket failure or an empty success: the wording and markup decide what the queue learns. See [failure-capture.md](failure-capture.md).
 
-**Dynamic delay**: Same 100-success / 2-failure compounding pattern as the daemon, but with its own `web_delay_seconds` config key. A request the server did not serve — a transport failure or a page that was not the item's — counts as a failure and grows the delay. A found description counts as a success and resets the failure streak. The item page with no description moves neither counter: the request succeeded, so there is nothing to back off from, but it yielded nothing, so it must not reset the failure streak either — counting it as a success would let the delay fall again while walls continued.
+#### Outcome taxonomy
+
+`classify_scrape` names one outcome per attempt and the run loop switches on it, so which outcome buys which response is one readable table rather than a chain of conditions.
+
+| Outcome | Recognised by | Item's queue flag | Pacing response |
+|---|---|---|---|
+| `SUCCESS` | `description` is not `None` | `needs_web_scrape = 0` | success: resets the failure streak, can decay the delay |
+| `RATE_LIMITED` | the body reports "too many requests" | untouched | the 300 s pause, separate from the delay rule |
+| `ITEM_MISSING` | HTTP 404/410, or the page's item-error wording | `needs_web_scrape = 0` | no back-off |
+| `ITEM_PAGE_WITHOUT_DESCRIPTION` | `workshopItem` present, `highlightContent` absent | `needs_web_scrape = 0` | neutral: neither success nor failure |
+| `GATE` | no item markup, plus an age-check, sign-in or error marker | untouched | no back-off; `_retry_if_gated` has already retried if the cookie changed |
+| `UNKNOWN` | a transport failure, a 5xx, or a page that is neither the item's nor a recognised condition | untouched (a transport failure also raises `api_priority` to 2) | grows `web_delay` |
+
+A 5xx is `UNKNOWN` whatever its body says: the status is a server fault with no attributable cause, so it keeps the back-off.
+
+**A missing item.** A live probe found that the Workshop serves its item-error page with **HTTP 200**, not 404 — a well-formed but absent id returned "There was a problem accessing the item", and a malformed id returned "That item does not exist" — so the status is not trusted and the wording is matched as well (`looks_like_missing_item`). The worker clears `needs_web_scrape` but deliberately does **not** mark the row dead: existence is the API's call, and the API makes it on its own 404. Clearing the flag is the conservative move — the API re-flags the item while its description is still missing if Steam ever serves it again — and it is what stops a gone item spinning in the queue at full pace now that it no longer backs off. Both the status (when there is one) and the matched wording are logged, and the page is captured as evidence, because there was no capture of this page before. A definitive HTTP 404/410 is not retried as a gate — no credential materialises a gone item — while the HTTP 200 wording still gets the one session-recovery retry, since there the status proves nothing.
+
+**Dynamic delay**: Same 100-success / 2-failure compounding pattern as the daemon, but with its own `web_delay_seconds` config key. Only an **unknown** outcome — a transport failure, a 5xx, or a page that is neither the item's nor a recognised condition — counts as a failure and grows the delay. A found description counts as a success and resets the failure streak. A rate limit is a spent budget rather than a pacing problem and buys its own 300 s pause; a missing item and a description-less item page are answers the item gave; and a gate is a session problem a slower pace cannot fix. None of those moves the failure counter, so the scraper is not throttled for a reason a lower request rate could not address. The item page with no description must not count as a success either: it yielded nothing, so counting it as one would let the delay fall again while unknown outcomes continued.
 
 **Throttling**: Steam answers many requests with **HTTP 200** and its ordinary Workshop shell
 carrying "too many requests", so the status code proves nothing and the page is otherwise
@@ -123,8 +140,10 @@ the signed-in markers is therefore caused by the throttling, not by a bad cookie
 page must not be read as evidence that the session has lapsed.
 
 **Gated pages**: A miss whose body carries no item markup but does look like an error page, an age
-check or a sign-in wall is retried once — and only if the login cookie actually changed, which is what
-`session.read_firefox_cookies` refreshes. A merely broken page therefore cannot double the request rate.
+check or a sign-in wall is classified `GATE`. If the login cookie actually changed, `_retry_if_gated`
+already retried once with the fresh credential; a merely broken page cannot double the request rate
+because nothing is retried unless the cookie changed. The item keeps its queue place and the delay is
+left alone, since a slower pace cannot fix a session that is not working.
 
 The two checks are evaluated **independently**, and neither shadows the other. They overlap by
 construction: a throttle page is not the item page, so it lacks the signed-in markers too, and
@@ -133,15 +152,15 @@ reporting a spent budget. Only the network retry is suppressed by throttling. Th
 re-read, because that is a local file copy that spends no network budget, and it means the next
 request that does go out carries the freshest credential.
 
-**Misses**: the throttle check runs before the selector-miss handler and keeps precedence, so a
-throttled page is paused and never read as a genuine absence. Otherwise a miss is neither a blanket
-failure nor an empty success: returning to a description-less page clears the item only when the page
-was really the item's, and a page that was not — an error page, a wall, a throttle the marker missed
-— leaves the item's queue priority untouched. The two are opposites for pacing, too: a page that was
-not the item's counts as a failure, while a description-less item page is neutral, as
-[Dynamic delay](#web-scraping-phase) describes. Migration 17→18 requeues the rows the old
-"truthy dict is success" test stranded with `extended_description = NULL` and
-`needs_web_scrape = 0`; see [schema-migrations.md](schema-migrations.md).
+**Misses**: the throttle outcome outranks the other page outcomes, so a throttled page is paused and
+never read as a genuine absence. Otherwise a miss is neither a blanket failure nor an empty success:
+a page that says the item is gone clears the item's queue flag, a description-less item page clears
+it too, a page that is not the item's — an error page, a wall, a throttle the marker missed — leaves
+the priority untouched, and only a page matching no recognised condition counts as a failure for
+pacing. See the [outcome taxonomy](#outcome-taxonomy) and
+[Dynamic delay](#web-scraping-phase). Migration 17→18 requeues the rows the old "truthy dict is
+success" test stranded with `extended_description = NULL` and `needs_web_scrape = 0`; see
+[schema-migrations.md](schema-migrations.md).
 
 ### `scrape_extended_details` (web_scraper)
 
@@ -149,7 +168,16 @@ Fetches the HTML page `steamcommunity.com/sharedfiles/filedetails/?id={workshop_
 - `description`: the full extended description (from `DESCRIPTION_SELECTOR`, `.workshopItemDescription#highlightContent`)
 - `tags`: the tag names from `TAGS_SELECTOR`, `.workshopTags a`
 
-Returns a dict, or `None` on any request failure. A successful request whose description selector did not match returns `description: None` — truthy, so the caller must test the description and not the dict. On that miss the dict also carries the response `body`, `http_status` and `final_url` so the caller can capture it; on a successful parse `body` is `None`, since there is no reason to retain a few hundred KB of HTML on the happy path. The caller stores only `description`; the `tags` key is discarded.
+Returns a dict, or `None` **only** when the request could not be completed — a connection error or a
+timeout, where there is no response to inspect. An HTTP error is a served answer: `raise_for_status()`
+raises `HTTPError`, which carries the response, so its `http_status` and body are returned in the same
+miss dict (`description: None`) rather than being flattened into `None`. That split is what lets the
+caller classify a 404/410 (the item is gone) apart from a 429 (a throttle) and a 5xx (a server fault).
+A successful request whose description selector did not match returns `description: None` — truthy, so
+the caller must test the description and not the dict. On any miss the dict also carries the response
+`body`, `http_status` and `final_url` so the caller can capture it; on a successful parse `body` is
+`None`, since there is no reason to retain a few hundred KB of HTML on the happy path. The caller
+stores only `description`; the `tags` key is discarded.
 
 **Browser-faithful requests.** The HTTP request is deliberately shaped to match a real Firefox top-level navigation, measured from a HAR capture of a signed-in item load. Both request sites (`scrape_extended_details` and `discover_items_by_date_html`) send one shared header mapping:
 

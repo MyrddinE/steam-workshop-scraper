@@ -254,6 +254,44 @@ def looks_like_item_page_without_description(body: str) -> bool:
     return "workshopItem" in body and "highlightContent" not in body
 
 
+# HTTP statuses that say the item itself is gone. Steam does not reliably use
+# them -- see ``missing_item_reason`` -- so this is one signal among two.
+ITEM_MISSING_HTTP_STATUSES = frozenset({404, 410})
+
+# What Steam's item-error page says when the Workshop has no such item. Both
+# phrases are served with **HTTP 200**, so the status cannot carry the meaning
+# and the wording is the only reliable evidence. Measured in a live probe: a
+# well-formed but absent id (``?id=1``, which the Web API also reports as
+# result 9) returned "There was a problem accessing the item", while a
+# malformed id (``?id=0``, ``?id=abc``) returned "That item does not exist".
+# Both are Steam answering that the item is not there.
+_ITEM_MISSING_MARKERS = (
+    "there was a problem accessing the item",
+    "that item does not exist",
+)
+
+
+def missing_item_reason(body: str) -> str | None:
+    """The phrase by which the page declares the item gone, or ``None``.
+
+    Returned rather than a bare bool so the caller can quote the evidence in the
+    log; the owner diagnoses from the log alone, and the status code alone is
+    ``200`` on this page.
+    """
+    if not body:
+        return None
+    lowered = body.lower()
+    for marker in _ITEM_MISSING_MARKERS:
+        if marker in lowered:
+            return marker
+    return None
+
+
+def looks_like_missing_item(body: str) -> bool:
+    """Whether the page says the Workshop has no such item."""
+    return missing_item_reason(body) is not None
+
+
 def _session_id(config: dict) -> str:
     """The CSRF token, from the browser when that source is enabled.
 
@@ -397,8 +435,13 @@ def scrape_extended_details(item_url: str, keep_body: bool = False) -> dict | No
     """
     Scrapes the extended description and tags from a Steam Workshop page.
 
-    Returns None when the request itself failed. When the request succeeded but
-    the description selector did not match, returns a dict whose "description" is
+    Returns ``None`` only when the request itself could not be completed -- a
+    connection error or a timeout, where there is no response to inspect. An HTTP
+    error is a served answer, so ``raise_for_status``'s ``HTTPError`` is turned
+    into the same miss dict as a selector miss, carrying ``http_status`` and the
+    response body: the caller can then tell a 404 from a timeout instead of
+    reading both as "the request failed". When the request succeeded but the
+    description selector did not match, returns a dict whose "description" is
     None - the caller must treat that as a miss, not as a completed scrape, and
     "body" carries the response so it can be captured as evidence.
     """
@@ -426,8 +469,33 @@ def scrape_extended_details(item_url: str, keep_body: bool = False) -> dict | No
             "http_status": response.status_code,
             "final_url": str(getattr(response, "url", item_url)),
         }
-    except requests.exceptions.RequestException:
+    except requests.exceptions.HTTPError as exc:
+        # raise_for_status() raises HTTPError, which carries the response. Keep
+        # its status and body: a 404/410 is the item's own absence, a 429 may be
+        # the only throttle signal, and a 5xx is a server fault -- all three were
+        # previously flattened into the same None as a timeout.
+        error_response = exc.response
+        try:
+            body = error_response.text if error_response is not None else None
+        except requests.exceptions.RequestException:
+            # An undecodable body must not turn a classified HTTP error back
+            # into an unattributable failure; the status is the important part.
+            body = None
+        return {
+            "description": None,
+            "tags": [],
+            "body": body,
+            "http_status": getattr(error_response, "status_code", None),
+            "final_url": str(getattr(error_response, "url", item_url)),
+        }
+    except requests.exceptions.RequestException as exc:
+        # A genuine transport failure has no response and no status, so None
+        # keeps meaning exactly that. The log names the exception: the owner
+        # reads scraper.log alone, and "no data" tells them nothing.
+        logging.warning("Workshop request to %s failed with no response: %s",
+                        item_url, exc)
         return None
+
 
 def discover_items_by_date_html(appid: int, start_date: int, end_date: int, page: int = 1, search_text: str = "", required_tags: list[str] = None, excluded_tags: list[str] = None, appids_required_for_use: list[int] = None) -> tuple[list[int], int]:
     """

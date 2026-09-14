@@ -22,10 +22,11 @@ nothing, so the feature is a deliberate switch and tests stay hermetic.
 | Kind | Stage | Trigger | Where |
 |---|---|---|---|
 | `web_selector_miss` | `web_scrape` | The page loaded but `DESCRIPTION_SELECTOR` did not match | `web_worker.py` |
+| `web_item_missing` | `web_scrape` | The Workshop reports the item is gone (HTTP 404/410, or its item-error wording on an HTTP 200 page) | `web_worker.py` |
 | `api_unparsed_body` | `api_fetch` | The API response body is not JSON | `steam_api.py` |
 | `api_unhandled_status` | `api_fetch` | A status other than 200, 404 or 500 | `daemon.py` |
 
-All three are **additive**. The failure site returns or raises exactly as it did
+All four are **additive**. The failure site returns or raises exactly as it did
 before; the capture is recorded on the way past. `api_unparsed_body` re-raises the
 `ValueError`, so the existing handler still reports its 500 — the body is simply
 no longer thrown away. `api_unhandled_status` records the payload but still falls
@@ -39,7 +40,7 @@ One JSON record per sample:
 |---|---|
 | `kind`, `stage` | Which failure, and which step of the pipeline |
 | `workshop_id` | The item being processed |
-| `selector` | The CSS selector that failed, for the web kind |
+| `selector` | The CSS selector that failed, for `web_selector_miss` (absent for `web_item_missing`, which is a missing item rather than a broken selector) |
 | `http_status`, `final_url`, `content_type` | How the response arrived |
 | `body_file`, `body_bytes`, `body_sha256` | The retained bytes, and the hash and length of the **full** response, so a re-fetch can be matched against it |
 | `body_truncated` | The 64 KB cap cut the retained content |

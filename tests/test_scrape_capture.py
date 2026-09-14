@@ -137,12 +137,38 @@ def test_a_throttled_page_is_not_mistaken_for_a_stale_cookie():
         assert called == [1], "but the cookie is still re-read: a local read costs no budget"
 
 
+def test_a_definitive_404_is_not_treated_as_a_gate():
+    """A gone item cannot be fixed by a fresher cookie, so it costs no request."""
+    from src.web_worker import WebScraperThread
+    page = {"description": None, "http_status": 404,
+            "body": "<title>Steam Community :: Error</title>"}
+    called = []
+    with patch("src.web_worker.scrape_extended_details") as scrape:
+        WebScraperThread("test.db", "nope.lock", {}, None,
+                         lambda: called.append(1) or True)._retry_if_gated(
+                             {"workshop_id": 1}, "u", page)
+    assert scrape.call_count == 0, "a gone item is not worth a retry"
+    assert called == [], "and it is not a session problem to refresh for"
+
+
 def test_a_throttled_item_is_not_decayed():
-    """The item is fine; only the budget is spent."""
+    """The item is fine; only the budget is spent.
+
+    The rate-limit outcome buys the long pause and nothing else, so it must not
+    reach the failure counter and must not clear the item. The behavioural
+    coverage is in tests/test_workers.py; this pins the classification and the
+    branch shape.
+    """
+    from src.web_worker import ScrapeOutcome, classify_scrape
+
+    throttled = {"description": None, "body": "<h1>too many requests</h1>"}
+    assert classify_scrape(throttled) is ScrapeOutcome.RATE_LIMITED
+
     src = __import__("pathlib").Path("src/web_worker.py").read_text(encoding="utf-8")
-    throttle = src.index("looks_rate_limited(scrape_data.get(\"body\") or \"\")")
-    decay = src.index("self._handle_selector_miss(item, url, scrape_data)", throttle)
-    assert "continue" in src[throttle:decay], "the throttle branch must skip the decay"
+    branch = src.index("elif outcome is ScrapeOutcome.RATE_LIMITED")
+    following = src.index("elif outcome is ScrapeOutcome.ITEM_MISSING", branch)
+    assert "continue" in src[branch:following], "the throttle branch must skip the pacing sleep"
+    assert "_record_web_failure" not in src[branch:following], "a throttle is not a back-off"
 
 
 def test_a_throttled_page_does_not_shadow_the_auth_check():
