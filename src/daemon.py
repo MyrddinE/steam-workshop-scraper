@@ -478,6 +478,14 @@ class Daemon:
             )
             merged_data["status"] = -1
             merged_data["api_priority"] = 0
+            # A dead item can never complete, so clear the other three queue
+            # flags as well. The web, image and translation polls select on
+            # these columns alone and have no dead-item guard, so a flag left
+            # set here keeps the item at the front of a queue that can never
+            # drain and spends requests on a page that no longer exists.
+            merged_data["needs_web_scrape"] = 0
+            merged_data["needs_image"] = 0
+            merged_data["translation_priority"] = 0
             insert_or_update_item(self.db_path, merged_data)
             return
 

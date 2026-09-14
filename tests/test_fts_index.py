@@ -71,7 +71,7 @@ def _drop_fts_triggers(db_path):
 def test_chain_reaches_terminal_schema_version(db_path):
     conn = get_connection(db_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 17
     finally:
         conn.close()
 

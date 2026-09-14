@@ -279,6 +279,28 @@ Measured on a copy of the production snapshot (1,725,544 items), through
 ~158 MB. Re-running the migration is a no-op beyond one more rebuild, and
 `initialize_database` remains idempotent.
 
+### v16 → v17: Dead items leave every work queue
+
+Clears the queue flags on rows already marked dead (`status = -1`):
+
+```sql
+UPDATE workshop_items
+SET needs_web_scrape = 0, needs_image = 0, translation_priority = 0
+WHERE status = -1
+```
+
+Before this version the permanent-failure path cleared only `api_priority` when
+it marked an item dead. The web, image and translation polls select on their own
+flag alone with no dead-item guard, so a row still flagged there was retried
+forever: it could never complete, so the queue never drained and the scraper
+spent requests on a page that no longer exists. About ten thousand rows on the
+production database. `api_priority` is deliberately **not** touched — the 404
+path already zeroes it, and a dead row still holding an API priority is a
+separate defect. The reported count is the number of dead rows the statement
+matched; the update is idempotent, so re-running leaves already-cleared rows
+clear. The daemon change in the same release stops new dead rows from being
+flagged in the first place.
+
 ---
 
 ## Database Utility Functions
