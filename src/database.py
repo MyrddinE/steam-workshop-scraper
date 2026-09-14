@@ -643,7 +643,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 18
+    EXPECTED_VERSION = 19
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -1407,6 +1407,37 @@ def initialize_database(db_path: str):
         logging.info(
             "Migration 17->18 complete. Requeued %d description-less items.",
             stranded_descriptionless,
+        )
+
+    if db_version < 19:
+        logging.info("Running migration 18->19: requeueing items stranded by cursor discovery...")
+
+        # Cursor discovery inserted bare rows and let the api_priority column
+        # default decide whether they were queued. That default is not stable
+        # across database histories: CREATE TABLE declares DEFAULT 3, but the
+        # ALTER TABLE in migration 11->12 gives an existing database DEFAULT 0.
+        # On a migrated database -- the production one -- every discovered row
+        # therefore landed at 0, which means "not queued", and the fetch queue
+        # selects api_priority > 0, so nothing ever fetched them. Migration
+        # 15->16 requeued the rows already stranded by this but left the cause
+        # in place, so it kept stranding more; the daemon now passes the
+        # priority explicitly. Requeue the same never-attempted population at
+        # the same backlog priority as 15->16's second statement. The status
+        # predicate excludes dead rows (status = -1) and the other queue flags
+        # are deliberately untouched: this is an API-fetch queue repair, not a
+        # scrape, image or translation decision.
+        cursor.execute(
+            "UPDATE workshop_items SET api_priority = 1 "
+            "WHERE status IS NULL AND api_fetched_at IS NULL AND api_priority = 0"
+        )
+        stranded_unattempted = cursor.rowcount
+
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 19")
+        conn.commit()
+        logging.info(
+            "Migration 18->19 complete. Requeued %d never-attempted items stranded by cursor discovery.",
+            stranded_unattempted,
         )
 
     # Create indexes for faster querying

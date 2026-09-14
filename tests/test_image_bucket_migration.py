@@ -61,11 +61,12 @@ def test_migration_12_to_13(tmp_path):
     
     # 5. Assert database version bumped to the terminal version (12->13 image
     # buckets, 13->14 renames, 14->15 full-text index, 15->16 stranded-row
-    # recovery, 16->17 dead-queue cleanup, 17->18 description-less requeue)
+    # recovery, 16->17 dead-queue cleanup, 17->18 description-less requeue,
+    # 18->19 stranded-discovery requeue)
     conn = get_connection(db_path)
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert version == 18
+    assert version == 19
     
     # 6. Assert files were migrated correctly
     # Case A should be moved

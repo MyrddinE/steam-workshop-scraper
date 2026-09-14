@@ -720,7 +720,15 @@ class Daemon:
                 page_new_count = 0
                 for item in result["items"]:
                     wid = int(item.get("publishedfileid", 0))
-                    if wid and insert_or_update_item(self.db_path, {"workshop_id": wid}):
+                    # Pass api_priority explicitly rather than leaning on the column
+                    # default: CREATE TABLE declares DEFAULT 3 but the migration that
+                    # adds the column to an older database uses DEFAULT 0, so the same
+                    # insert queues the item on a fresh database and strands it on a
+                    # migrated one (the fetch queue selects api_priority > 0). 3 is the
+                    # documented new-item priority (data-model.md, and migration 11->12
+                    # sets never-scraped rows to 3), so this also leaves the fresh
+                    # database's queue order unchanged.
+                    if wid and insert_or_update_item(self.db_path, {"workshop_id": wid, "api_priority": 3}):
                         page_new_count += 1
 
                 new_discovered_count += page_new_count

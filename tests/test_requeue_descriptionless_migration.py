@@ -55,7 +55,7 @@ def test_migration_18_requeues_descriptionless_done_rows(db_path):
     conn = get_connection(db_path)
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert version == 18
+    assert version == 19
     assert _row(db_path, 1)["needs_web_scrape"] == 1
     assert _row(db_path, 2)["needs_web_scrape"] == 1
 
