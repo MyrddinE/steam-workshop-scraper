@@ -301,6 +301,33 @@ matched; the update is idempotent, so re-running leaves already-cleared rows
 clear. The daemon change in the same release stops new dead rows from being
 flagged in the first place.
 
+### v17 → v18: Description-less items return to the scrape queue
+
+Puts rows that were marked done without ever producing a description back into
+the web-scrape queue:
+
+```sql
+UPDATE workshop_items SET needs_web_scrape = 1
+WHERE needs_web_scrape = 0
+  AND COALESCE(extended_description, '') = ''
+  AND (status IS NULL OR status <> -1)
+```
+
+Before `17894f7` the web worker tested the truthy dict `scrape_extended_details`
+returns rather than the `description` inside it. A page whose selector did not
+match therefore came back as a completed scrape: `extended_description` NULL with
+`needs_web_scrape = 0`, and the item left the queue permanently. On the
+2026-09-12 snapshot that stranded 63,229 rows, against 33,966 (2.0%) that hold a
+description. Priority `1` is the backlog level migration 15→16 used for its own
+stranded rows: retried, but below the `3/5/10` of new and current work, so the
+recovered rows cannot jump ahead of the live queue. Dead rows (`status = -1`) are
+excluded because they can never complete, and `api_priority`, `needs_image` and
+`translation_priority` are deliberately **not** touched — those are separate
+queues with their own work. `cursor.rowcount` counts the rows the statement
+matched rather than the rows it changed, but every matched row here moves from
+`0` to `1`, so the reported count is exact. The web worker change in the same
+release stops a page that was never the item's from being cleared the same way.
+
 ---
 
 ## Database Utility Functions

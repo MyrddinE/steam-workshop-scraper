@@ -229,6 +229,27 @@ def test_an_empty_body_cannot_be_judged():
     assert looks_gated("") is False
 
 
+# --- telling "no description" from "not the item page" ---------------------
+
+@pytest.mark.parametrize("body,expected", [
+    ('<div class="workshopItem">x</div>', True),                 # the item page, no description
+    ('<div class="workshopItem"></div><div id="highlightContent">d</div>', False),
+    ('<title>Steam Community :: Error</title>', False),          # never the item page
+    ('<html><h1>Too many requests</h1></html>', False),          # a throttle the marker missed
+    ("", False),
+])
+def test_item_page_without_description(body, expected):
+    from src.web_scraper import looks_like_item_page_without_description
+    assert looks_like_item_page_without_description(body) is expected
+
+
+def test_a_description_marker_without_the_template_is_not_a_genuine_absence():
+    """The template is the evidence the page is the item's; a stray description
+    marker on a page that is not the item's must not clear the row."""
+    from src.web_scraper import looks_like_item_page_without_description
+    assert looks_like_item_page_without_description('<div id="highlightContent">d</div>') is False
+
+
 # --- the worker's refresh-and-retry ---------------------------------------
 
 def _worker_with(refresh):

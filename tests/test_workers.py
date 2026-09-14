@@ -103,7 +103,9 @@ def test_image_worker_failure_sets_api_priority(db_path):
 # A selector miss returns {"description": None, "tags": []}, which is truthy. It
 # used to be taken as success, writing extended_description = NULL and
 # needs_web_scrape = 0, so the item was recorded as permanently scraped with
-# nothing to show for it and was never retried.
+# nothing to show for it and was never retried. A miss now distinguishes a page
+# that was never the item's (left queued) from the item page with no description
+# (a permanent absence, so the item leaves the queue).
 
 def _run_web_worker(db_path, item, scrape_data):
     from src.web_worker import WebScraperThread
@@ -131,25 +133,37 @@ def _web_scrape_priority(db_path, workshop_id=1):
 MISS = {"description": None, "tags": [], "body": "<html>no selector</html>",
         "http_status": 200, "final_url": "https://example.invalid/?id=1"}
 
+# The item template is present but the description element is not: the page really
+# is the item's, and it simply has no extended description.
+ITEM_PAGE_WITHOUT_DESCRIPTION = dict(
+    MISS, body='<html><div class="workshopItem">x</div></html>')
 
-def test_selector_miss_decays_the_queue_but_never_zeroes_it(db_path):
+
+def test_selector_miss_without_the_item_page_leaves_the_item_queued(db_path):
+    """An error, wall or throttle page is not the item's fault, so the item keeps
+    its place in the queue rather than decaying out of it."""
     from src.database import insert_or_update_item
 
     insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
 
     _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1}, MISS)
 
-    assert _web_scrape_priority(db_path) == 4, "a miss must not mark the item done"
+    assert _web_scrape_priority(db_path) == 5, \
+        "the item must not be blamed for a page it never got"
 
 
-def test_selector_miss_floors_at_one(db_path):
+def test_selector_miss_on_the_item_page_clears_the_queue(db_path):
+    """The item page loaded and has no description: retrying cannot change that,
+    so the item leaves the queue, which is what lets the queue drain."""
     from src.database import insert_or_update_item
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 1})
+    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
 
-    _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1}, MISS)
+    _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
+                    ITEM_PAGE_WITHOUT_DESCRIPTION)
 
-    assert _web_scrape_priority(db_path) == 1, "the item must stay queued"
+    assert _web_scrape_priority(db_path) == 0, \
+        "a genuine, permanent absence must not stay queued"
 
 
 def test_selector_miss_leaves_existing_description_untouched(db_path):
@@ -159,7 +173,8 @@ def test_selector_miss_leaves_existing_description_untouched(db_path):
         "workshop_id": 1, "needs_web_scrape": 3,
         "extended_description": "previously scraped text"})
 
-    _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1}, MISS)
+    _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
+                    ITEM_PAGE_WITHOUT_DESCRIPTION)
 
     conn = get_connection(db_path)
     try:

@@ -99,7 +99,7 @@ A daemon thread that picks up items from `get_next_web_scrape_item`, ordered by 
 2. If the description was found, updates `extended_description`, sets `needs_web_scrape = 0`, and records `scrape_version = steam_updated_at`. The tags the scraper returns are not persisted; tags in the database come from the API.
 3. Flags non-ASCII `extended_description` for translation at priority 3, unless its translation is already current (see [What queues a field for translation](#what-queues-a-field-for-translation)).
 4. If the request failed, raises `api_priority` to 2 so the item is retried (that value has no other source); nothing is cleared, so the item stays in the scrape queue.
-5. If the page loaded but the description selector did **not** match, that is a failure rather than an empty success: the response is captured as evidence and `needs_web_scrape` is stepped down by one, floored at 1, so the item stays queued but sinks below current work. See [failure-capture.md](failure-capture.md).
+5. If the page loaded but the description selector did **not** match, the response is captured as evidence and the markup decides what the queue learns. If the body carried neither the item template (`workshopItem`) nor the description element (`highlightContent`), the item page was never served — a wall, an error page, or a throttle page whose wording the marker missed — so the item is not at fault and `needs_web_scrape` is left exactly as it was. If the item template is present but the description element is not, the page really is the item's and it genuinely has no extended description: no retry can change that, so `needs_web_scrape` is cleared and the item leaves the queue, which is what lets the queue drain. See [failure-capture.md](failure-capture.md).
 
 **Dynamic delay**: Same 100-success / 2-failure compounding pattern as the daemon, but with its own `web_delay_seconds` config key. A selector miss does not participate: the request succeeded, so slowing down would not help.
 
@@ -126,6 +126,14 @@ reading that overlap as "signed out" would refresh and then spend a budget that 
 Only the network retry is suppressed by throttling. The cookie is still re-read, because that is a
 local file copy that spends none of the exhausted budget, and it means the next request that does
 go out carries the freshest credential.
+
+**Misses**: the throttle check runs before the selector-miss handler and keeps precedence, so a
+throttled page is paused and never read as a genuine absence. Otherwise a miss is neither a blanket
+failure nor an empty success: returning to a description-less page clears the item only when the page
+was really the item's, and a page that was not — an error page, a wall, a throttle the marker missed
+— leaves the item's queue priority untouched. Migration 17→18 requeues the rows the old
+"truthy dict is success" test stranded with `extended_description = NULL` and
+`needs_web_scrape = 0`; see [schema-migrations.md](schema-migrations.md).
 
 ### `scrape_extended_details` (web_scraper)
 

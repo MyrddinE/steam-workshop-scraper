@@ -6,8 +6,8 @@ import logging
 import threading
 from datetime import datetime, timezone
 from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, flag_field_for_translation, translation_is_current
-from src.web_scraper import (DESCRIPTION_SELECTOR, looks_gated, looks_rate_limited,
-                             looks_signed_out, scrape_extended_details)
+from src.web_scraper import (DESCRIPTION_SELECTOR, looks_gated, looks_like_item_page_without_description,
+                             looks_rate_limited, looks_signed_out, scrape_extended_details)
 from src import capture
 
 # Steam's per-account request budget refills over minutes, so the useful
@@ -89,16 +89,26 @@ class WebScraperThread(threading.Thread):
         scrape_extended_details returns ``{"description": None, "tags": []}`` on a
         miss, which is truthy. The previous code took that as success and wrote
         ``extended_description = NULL`` with ``needs_web_scrape = 0``, so the item
-        was recorded as permanently scraped with nothing to show for it end.
+        was recorded as permanently scraped with nothing to show for it (issue 19).
 
-        A miss is now a failure with two effects. The artefact is captured for a
-        regression test, and the item is stepped down the queue by one, floored at
-        1, so it stays queued and sinks below current work but is never zeroed.
-        This mirrors the needs_image decay in image_worker.py.
+        A miss now means one of two things, told apart by the markup:
 
-        The request itself succeeded, so this deliberately does not raise
-        api_priority and does not touch the network-failure backoff: slowing down
-        would not make a broken selector match.
+        * The item page was never served -- neither ``workshopItem`` nor
+          ``highlightContent`` is present. The item is not at fault, so its queue
+          priority is left exactly as it is: stepping it down, or clearing it,
+          would blame the item for a wall, an error page, or a throttle page whose
+          wording the rate-limit marker missed.
+        * The item page was served but has no extended description -- the template
+          is present and the description element is not. Some Workshop items
+          genuinely have none, so this is permanent: clearing ``needs_web_scrape``
+          lets the queue drain instead of retrying a page that will never carry
+          one.
+
+        The response is captured as evidence in both cases, since either may be a
+        layout change worth knowing about. The request itself succeeded, so this
+        deliberately does not raise ``api_priority`` and does not touch the
+        network-failure backoff: slowing down would not make a broken selector
+        match.
         """
         workshop_id = item["workshop_id"]
         capture.record_failure(
@@ -111,14 +121,20 @@ class WebScraperThread(threading.Thread):
             body=scrape_data.get("body"),
             content_type="text/html",
         )
-        logging.warning(
-            "[W:%s] Selector %s did not match; item stays queued", workshop_id,
-            DESCRIPTION_SELECTOR)
 
+        body = scrape_data.get("body") or ""
+        if not looks_like_item_page_without_description(body):
+            logging.warning(
+                "[W:%s] Selector %s did not match and the item page was not served; "
+                "leaving needs_web_scrape unchanged", workshop_id, DESCRIPTION_SELECTOR)
+            return
+
+        logging.warning(
+            "[W:%s] Item page has no extended description; clearing needs_web_scrape",
+            workshop_id)
         conn = get_connection(self.db_path)
         conn.execute(
-            "UPDATE workshop_items SET needs_web_scrape = MAX(1, needs_web_scrape - 1) "
-            "WHERE workshop_id = ?",
+            "UPDATE workshop_items SET needs_web_scrape = 0 WHERE workshop_id = ?",
             (workshop_id,)
         )
         conn.commit()

@@ -102,6 +102,27 @@ def looks_gated(body: str) -> bool:
     return any(marker in body for marker in _GATE_MARKERS)
 
 
+def looks_like_item_page_without_description(body: str) -> bool:
+    """Whether the body is the item's own page but carries no description block.
+
+    A selector miss has two causes that need opposite responses. The item page may
+    never have been served -- a wall, an error page, or a throttle page whose
+    wording the rate-limit marker did not catch -- in which case the item is not
+    at fault and must stay queued. Or the item page may have been served and
+    genuinely have no extended description, which no retry can change, so the item
+    can leave the queue.
+
+    ``workshopItem`` marks the item template and ``highlightContent`` marks the
+    element ``DESCRIPTION_SELECTOR`` targets, so requiring the template while the
+    description marker is absent separates the two from markup rather than from
+    wording. Used only for a body that already failed to yield the description, so
+    the ``highlightContent`` check cannot fire on a successful parse.
+    """
+    if not body:
+        return False
+    return "workshopItem" in body and "highlightContent" not in body
+
+
 def _session_id(config: dict) -> str:
     """The CSRF token, from the browser when that source is enabled.
 
