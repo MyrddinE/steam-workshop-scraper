@@ -1853,3 +1853,70 @@ def test_the_log_pane_keeps_raw_lines_so_the_cap_counts_lines(web_client):
         "the pane must keep the raw lines it renders"
     assert "_daemonLogLines.map(_ansiToHtml)" in script, \
         "the pane must render from the raw lines"
+
+
+# ── the cutoff query must not hold up the results ─────────────────────────────
+#
+# `doSearch` cleared the grid and then *awaited* the percentile-cutoff query
+# before fetching the first page, so every fresh search blanked the pane for as
+# long as that query took -- seconds on a large database. It decides colour only,
+# so it is now started and left to land.
+
+CUTOFF_DRIVER = """
+let cutoffs = {};
+const wClass = (__WCLASS__);
+const _applyCutoffColours = (__APPLY__);
+const els = [
+  { score: '0.55', key: 'wilson_subscription', className: 'stale',
+    getAttribute(n) { return n === 'data-score' ? this.score : this.key; } },
+  { score: '', key: 'wilson_favorite', className: 'stale',
+    getAttribute(n) { return n === 'data-score' ? this.score : this.key; } },
+];
+global.document = { querySelectorAll: () => els };
+
+const empty = wClass(0.55, 'wilson_subscription');
+
+cutoffs = { wilson_subscription_p50: 0.1, wilson_subscription_p90: 0.5,
+            wilson_subscription_p99: 0.9, wilson_favorite_p50: 0.1 };
+_applyCutoffColours();
+
+console.log(JSON.stringify({
+  empty: empty,
+  after: els.map(e => e.className),
+}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_scores_are_uncoloured_until_their_cutoffs_arrive(web_client, tmp_path):
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = (CUTOFF_DRIVER
+              .replace("__WCLASS__", _extract_function(script, "wClass"))
+              .replace("__APPLY__", _extract_function(script, "_applyCutoffColours")))
+    out = _run_node(driver, tmp_path)
+
+    # With no cutoffs there is nothing to compare against. Treating 0/0/0 as the
+    # thresholds made every score "top tier", which is a claim, not a default.
+    assert out["empty"] == "wilson-unknown", \
+        "a score with no cutoffs must make no percentile claim"
+
+    # Once they land, the rows already on screen are re-coloured from the score
+    # kept on each span -- no re-render and no refetch.
+    assert out["after"][0] == "wilson-p90", "0.55 sits between p50 and p90"
+    assert out["after"][1] == "wilson-low", "a missing score stays low"
+
+
+def test_the_search_does_not_wait_for_the_cutoff_query(web_client):
+    """The stall was an `await` between clearing the grid and the first fetch."""
+    client, _ = web_client
+    script = _served_inline_script(client)
+    body = _extract_function(script, "doSearch")
+
+    assert "await loadCutoffs()" not in body, \
+        "the cutoff query must not be awaited on the search path"
+    assert "_refreshCutoffs()" in body, \
+        "the cutoffs still have to be fetched, just not waited on"
+    # The rows must be built after the reset without a cutoff round trip between.
+    assert body.index("_refreshCutoffs()") < body.index("fetch('/api/search'"), \
+        "the cutoff refresh is started, not blocking, before the search fetch"

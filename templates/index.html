@@ -61,6 +61,10 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .wilson-p90 { color: #ffd700; }
 .wilson-p50 { color: #e0e0e0; }
 .wilson-low { color: #888; }
+/* Before the percentile cutoffs for this filter set have arrived there is
+   nothing to compare a score against, so it gets no colour and makes no claim.
+   Rendering it as "low" would be as wrong as rendering it as "top tier". */
+.wilson-unknown { color: var(--pico-muted-color); }
 .size-small { color: var(--pico-muted-color); }
 .size-medium { color: inherit; }
 .size-large { color: #ffd700; }
@@ -294,7 +298,10 @@ function getFilters() {
 async function loadCutoffs() {
   const filters = getFilters();
   const key = JSON.stringify(filters);
-  if (key === _cutoffsFilterKey && _cutoffsCache !== null) return;
+  // A cache hit has to restore `cutoffs` too: a search now clears it before the
+  // rows are drawn, so returning early without assigning would leave the grid
+  // colourless on a repeat of the same filter set.
+  if (key === _cutoffsFilterKey && _cutoffsCache !== null) { cutoffs = _cutoffsCache; return; }
   const resp = await fetch('/api/cutoffs', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filters})});
   cutoffs = await resp.json();
   if (cutoffs && typeof cutoffs === 'object' && Object.keys(cutoffs).length) {
@@ -311,6 +318,8 @@ async function loadCutoffs() {
 
 function wClass(score, key) {
   if (score == null) return 'wilson-low';
+  // Nothing to compare against yet: see `.wilson-unknown`.
+  if (!Object.keys(cutoffs).length) return 'wilson-unknown';
   const p99 = cutoffs[key + '_p99'] || 0;
   const p90 = cutoffs[key + '_p90'] || 0;
   const p50 = cutoffs[key + '_p50'] || 0;
@@ -318,6 +327,29 @@ function wClass(score, key) {
   if (score >= p90) return 'wilson-p90';
   if (score >= p50) return 'wilson-p50';
   return 'wilson-low';
+}
+
+// Re-colour what is already on screen once the cutoffs land. The scores are kept
+// on the spans as data attributes so this needs no re-render and no refetch --
+// the rows were drawn before the cutoffs arrived, which is the whole point.
+function _applyCutoffColours() {
+  document.querySelectorAll('[data-wilson]').forEach(el => {
+    const raw = el.getAttribute('data-score');
+    const score = (raw == null || raw === '') ? null : Number(raw);
+    el.className = wClass(Number.isNaN(score) ? null : score, el.getAttribute('data-wilson'));
+  });
+}
+
+// The cutoff query is expensive and decides only colour, so it never holds up
+// the results. It used to be awaited between clearing the grid and fetching the
+// first page, which blanked the pane for as long as it took.
+async function _refreshCutoffs() {
+  try {
+    await loadCutoffs();
+    _applyCutoffColours();
+  } catch (e) {
+    console.debug('Cutoff refresh failed; scores stay uncoloured', e);
+  }
 }
 
 function fmtCount(n) {
@@ -357,7 +389,18 @@ async function doSearch(reset = true) {
   // A reset search starts a new result set, so an item selected in the old one
   // is not a selection any more; keeping it would send restore hunting for a
   // row that is no longer there.
-  if (reset) { _stopListPoll(); currentOffset = 0; hasMore = true; _selectedWid = null; document.getElementById('results-grid').innerHTML = ''; await loadCutoffs(); }
+  if (reset) {
+    _stopListPoll();
+    currentOffset = 0;
+    hasMore = true;
+    _selectedWid = null;
+    document.getElementById('results-grid').innerHTML = '';
+    // Drop to the neutral colour and fetch the cutoffs in the background. They
+    // decide colour only, and colouring this filter set with the previous set's
+    // percentiles would be worse than not colouring it.
+    cutoffs = {};
+    _refreshCutoffs();
+  }
 
   const filters = getFilters();
   const resp = await fetch('/api/search', {
@@ -391,8 +434,8 @@ async function doSearch(reset = true) {
       <div class="grid-title">${title}</div>
       <div class="grid-meta"><span class="${sizeClass(item.file_size)}">${size}</span></div>
       <div class="grid-scores">
-        <span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}">S ${wss!=null?wss+'%':'—'}</span>
-        <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}">F ${wfs!=null?wfs+'%':'—'}</span>
+        <span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}" data-wilson="wilson_subscription" data-score="${item.wilson_subscription_score ?? ''}">S ${wss!=null?wss+'%':'—'}</span>
+        <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}" data-wilson="wilson_favorite" data-score="${item.wilson_favorite_score ?? ''}">F ${wfs!=null?wfs+'%':'—'}</span>
       </div>
       <div class="grid-spinner"></div>`;
     if (_itemHasPending(item)) div.classList.add('has-spinner');
@@ -493,8 +536,8 @@ function _startListPoll(filters, sortBy, sortOrder) {
         const wss = item.wilson_subscription_score != null ? (item.wilson_subscription_score*100).toFixed(1) : null;
         const scores = el.querySelector('.grid-scores');
         if (scores) scores.innerHTML = `
-          <span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}">S ${wss!=null?wss+'%':'—'}</span>
-          <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}">F ${wfs!=null?wfs+'%':'—'}</span>`;
+          <span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}" data-wilson="wilson_subscription" data-score="${item.wilson_subscription_score ?? ''}">S ${wss!=null?wss+'%':'—'}</span>
+          <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}" data-wilson="wilson_favorite" data-score="${item.wilson_favorite_score ?? ''}">F ${wfs!=null?wfs+'%':'—'}</span>`;
       });
 
       const delay = Math.max(1, Math.log2(pending.length)) * 1000;
@@ -639,7 +682,7 @@ function renderDetail(item) {
   pane.innerHTML = `
     <h2><a href="${url}" target="_blank" title="${tooltip}">${title}</a></h2>
     <p>by ${creatorHtml} &mdash; <small>Workshop ID: ${item.workshop_id}</small></p>
-    <p class="stat-wilson"><span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}" title="${_subTitleText}">Subscriber Score: ${wss!=null?wss+'%':'N/A'}</span> &nbsp; <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}" title="${_favTitleText}">Favorite Score: ${wfs!=null?wfs+'%':'N/A'}</span></p>
+    <p class="stat-wilson"><span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}" data-wilson="wilson_subscription" data-score="${item.wilson_subscription_score ?? ''}" title="${_subTitleText}">Subscriber Score: ${wss!=null?wss+'%':'N/A'}</span> &nbsp; <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}" data-wilson="wilson_favorite" data-score="${item.wilson_favorite_score ?? ''}" title="${_favTitleText}">Favorite Score: ${wfs!=null?wfs+'%':'N/A'}</span></p>
     <div class="stat-row"><span class="stat-label">Created:</span> ${created}</div>
     <div class="stat-row"><span class="stat-label">Size:</span> <span class="${sc}">${size || 'N/A'}</span></div>
     ${updated ? `<div class="stat-row"><span class="stat-label">Updated:</span> ${updated}</div>` : ''}
