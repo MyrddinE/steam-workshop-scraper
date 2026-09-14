@@ -4,7 +4,7 @@ The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_
 
 ---
 
-## Current Schema (v14)
+## Current Schema (v20)
 
 The application-level reference for every table and column is
 [data-model.md](data-model.md); the timestamp conventions are in
@@ -352,6 +352,25 @@ histories can no longer diverge. Dead rows (`status = -1`) are excluded by the
 repair, not a scrape, image or translation decision. The reported count is the
 number of rows the statement matched; the update is idempotent, so re-running
 leaves already-queued rows queued.
+
+### v19 → v20: Dead items give up their queue priority
+
+Clears the fetch priority the rows that died before the permanent-failure path
+learned to clear it:
+
+```sql
+UPDATE workshop_items SET api_priority = 0
+WHERE status = -1 AND api_priority > 0
+```
+
+This is not an ongoing leak — `_settle_api_failure` clears `api_priority` when it
+marks an item dead — it is the rows that were already dead when that line was
+added. They matter because `api_priority > 0` is what every count of "queued for
+a fetch" reads, and the statistics screen reports dead items still holding a
+queue flag as `stuck_work`. Leaving ten thousand of them there would peg a
+detector whose whole value is that it reads zero unless something has regressed.
+Only `api_priority` is touched: the other queue flags were cleared by 16→17, and
+`status` is what makes an item dead in the first place.
 
 ---
 

@@ -643,7 +643,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 19
+    EXPECTED_VERSION = 20
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -1438,6 +1438,33 @@ def initialize_database(db_path: str):
         logging.info(
             "Migration 18->19 complete. Requeued %d never-attempted items stranded by cursor discovery.",
             stranded_unattempted,
+        )
+
+    if db_version < 20:
+        logging.info("Running migration 19->20: clearing queue priority from dead items...")
+
+        # The permanent-failure path clears api_priority when it marks an item
+        # dead, so this is not an ongoing leak -- it is the rows that were already
+        # dead before that line existed. They matter because api_priority > 0 is
+        # what every count of "queued for a fetch" looks at, and the statistics
+        # screen reports dead items still holding a queue flag as `stuck_work`.
+        # Leaving ten thousand of them there would peg a detector whose whole
+        # value is that it reads zero unless something has regressed.
+        #
+        # Only api_priority: the other queue flags were cleared by 16->17, and
+        # status is what makes an item dead in the first place.
+        cursor.execute(
+            "UPDATE workshop_items SET api_priority = 0 "
+            "WHERE status = -1 AND api_priority > 0"
+        )
+        dead_priority_cleared = cursor.rowcount
+
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 20")
+        conn.commit()
+        logging.info(
+            "Migration 19->20 complete. Cleared the queue priority of %d dead items.",
+            dead_priority_cleared,
         )
 
     # Create indexes for faster querying

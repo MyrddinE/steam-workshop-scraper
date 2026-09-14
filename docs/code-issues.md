@@ -3,7 +3,7 @@
 Known defects in the current source. Each entry was re-checked against the code rather than carried
 forward from an earlier list, and resolved entries are deleted rather than marked as fixed.
 
-* **Checked against source**: `8455ddf`.
+* **Checked against source**: `d6344f4`.
 * **Snapshot, not a tracker**: re-read the code before acting on an entry.
 * **Priorities** are judgement calls about impact, not measurements.
 * **Status**: `Open` (a defect), `Unverified` (a claim not yet tested), `Informational` (true and
@@ -18,7 +18,6 @@ the production database on 2026-09-12.
 | 3 | `api_priority = 2` sits outside the documented scale | Open | Low | Written by the image worker's failure path (`src/image_worker.py:134`) and the web worker's request-failure path (`src/web_worker.py:200`) as a retry marker. It is not one of `0/1/3/5/10`, and no other queue uses it. [data-model.md](data-model.md#queue-priorities). |
 | 4 | `update_app_tracking` and `update_app_tracking_page` are never called | Open | Low | Defined at `src/database.py:2248` and `src/database.py:2259`, imported at `src/daemon.py:17`, but only `update_app_tracking_cursor` is used (`src/daemon.py:724`). Discovery flow: [data-pipeline.md](data-pipeline.md). |
 | 5 | `language` is never populated | Open | Low | Present in `WORKSHOP_ITEM_COLUMNS` (`src/database.py:18`) and the merge allow-list, so a response carrying it would be stored — none has, and every live row is NULL. [data-model.md](data-model.md#known-gaps). |
-| 6 | Dead items keep their queue priority | Open | Low | An item marked dead retains `api_priority > 0`. The 404 path clears it (`src/daemon.py:474`), so this is legacy data rather than an ongoing leak, and the discovery guard now counts only fetchable work, so they no longer suppress discovery. They still inflate any count of `api_priority > 0`: *measured live*, 10,476 dead rows against 1 fetchable item. [data-model.md](data-model.md#queue-columns). |
 | 7 | `scrape_version` is written by two workers and read by nobody | Open | Low | The web scraper (`src/web_worker.py:154`) and the image worker (`src/image_worker.py:111`) both write the item's `steam_updated_at` into this one column, so it cannot distinguish which stage wrote it last, and no code reads it. It is not a completion timestamp either — it holds Steam's revision, not our clock. [timestamps.md](timestamps.md). |
 | 8 | Migration chain still references the dropped `tags` column | Informational | Info | `CREATE TABLE` keeps the historical `tags` name because migrations 1→2 and 5→6 read it (`src/database.py:687`), and a later migration drops it defensively while logging the skip. Fresh databases must therefore replay the old shape. [schema-migrations.md](schema-migrations.md). |
 | 9 | `status = 206` is never written | Informational | Info | The schema and one migration query allow a partial-data status (`src/database.py:704`), but no code writes it and the live database contains zero such rows. [data-model.md](data-model.md#known-gaps). |
@@ -34,6 +33,7 @@ behaviour, or covered by a test:
 
 | Was | Now |
 |---|---|
+| Dead items kept their queue priority | They held `api_priority > 0` long after they were known to be gone, because the rows predate the permanent-failure path clearing it. Migration 19→20 zeroes it for `status = -1`, so a count of queued fetches is honest again and the `stuck_work` statistic — which reports dead items still holding a queue flag — reads zero unless something has genuinely regressed |
 | Single-creator mode could not be exited | `btn-return` now has a handler: `action_return_from_creator` clears `is_single_creator_mode`, shows "Save Filter for Scraper" again, and restores the in-memory filter snapshot the jump replaced before re-running the search. The jump also builds its author row from an initial filter, because assigning the Selects after mount raised `InvalidSelectValueError` for the `is` operator — [tui.md](tui.md#jump-to-author) |
 | `action_update_visible` could re-queue dead items | The TUI's bulk update carries the same `AND (status IS NULL OR status != -1)` guard as `/api/update_visible` (`src/webserver.py`), so an item known to be gone is not put back in the API fetch queue — [data-pipeline.md](data-pipeline.md) |
 | `btn-request-translation` was a dead handler for a button that no longer exists | The event branch and its call to the non-existent `action_request_translation` were removed; neither the id nor the method is referenced anywhere in `src/tui.py` |
