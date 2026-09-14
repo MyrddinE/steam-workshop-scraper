@@ -156,3 +156,24 @@ def test_group_state_files_are_not_promoted_as_samples(outbox, tmp_path):
         str(tests_dir / "test_ingest_regressions.py"))
 
     assert len(capture_promote.collect_fixtures(fixtures)) == 1
+
+
+def test_a_body_less_capture_is_not_promoted_into_an_empty_fixture(outbox, tmp_path):
+    """Image failures carry metadata only, so there is nothing to replay."""
+    _make_capture(outbox, workshop_id=1, selector=".a", http_status=200,
+                  final_url="https://steamcommunity.com/sharedfiles/filedetails/?id=1")
+    capture.record_image_download(9, "https://cdn.example.invalid/9.jpg", False,
+                                  http_status=404, headers={"X-Cache": "MISS"},
+                                  error="HTTP 404", error_type="Exception")
+    tests_dir = tmp_path / "tests"
+    fixtures = str(tests_dir / "fixtures")
+
+    result = capture_promote.promote_all(
+        os.path.join(outbox, "failures"), fixtures,
+        str(tests_dir / "test_ingest_regressions.py"))
+
+    assert len(result["promoted"]) == 1, "the web capture is still promotable"
+    assert any("no captured body" in reason for _path, reason in result["skipped"])
+    metas = capture_promote.collect_fixtures(fixtures)
+    assert len(metas) == 1
+    assert not any(m["kind"] == "image_download_failed" for m in metas)

@@ -52,13 +52,14 @@ Deep-merges the in-memory config into the disk file, preserving keys not present
 | `daemon.target_appids` | list[int] | (required) | Steam AppIDs to scrape. The daemon refuses to start without this. |
 | `daemon.batch_size` | int | 10 | Items to process per `process_batch` iteration. |
 | `daemon.api_delay_seconds` | float | 1.5 | A literal pause added between Steam API requests, not a target rate. Adjusted per **request** (batched item results do not move it): decays 10 ms on each healthy request and doubles on each refusal, so it converges just under the sustainable rate. |
-| `daemon.web_delay_seconds` | float | 5.0 | Seconds to wait between web scrape requests. Dynamically adjusted. |
+| `daemon.web_delay_seconds` | float | 6.0 | Seconds to wait between web scrape requests. Dynamically adjusted; the decay rule floors it at 6.0 s, so the default is set to the floor rather than below it. |
 | `daemon.image_delay_seconds` | float | 2.0 | Seconds to wait between image downloads. Dynamically adjusted. |
 | `daemon.item_staleness_days` | int | 30 | Days before a successfully-scraped item is considered stale and re-scraped. |
 | `daemon.user_staleness_days` | int | 90 | Days before a user profile is re-fetched from Steam. |
 | `daemon.outbox_dir` | string | None | Directory a separate machine pulls artefacts from. Enables [failure capture](failure-capture.md) on its own, and database backups together with `backup_interval_seconds` below. The daemon and the puller must not run as the same OS user unless the outbox is writable by both. `daemon.backup_dir` is an accepted legacy alias. |
 | `daemon.backup_interval_seconds` | float | 0 (off) | Seconds between verified database snapshots into `<outbox_dir>/db/`. Backups are **off** unless this is positive *and* `outbox_dir` is set, so enabling backups on the live instance is a deliberate switch. |
 | `daemon.capture_web_scrapes` | bool | false | **Debugging switch.** Save *every* web scrape — successes as well as failures — to `<outbox_dir>/scrapes`, body kept whole. The failure capture only ever holds misses, so it cannot show what a working, signed-in page looks like; this exists to identify that markup, which is a more direct signal that the session is still good than a failed scrape is. Deliberately unbounded and unstripped: it is on for a session or two, and thinning a sample before anyone has looked at it only means collecting the evidence twice. Each record carries an `auth_markers` map of candidate marker strings and the `g_steamID` value, recorded rather than interpreted. Turn it off when done. |
+| `daemon.capture_image_downloads` | bool | false | **Debugging switch**, separate from the web one. Save *every* image download — successes as well as failures — to `<outbox_dir>/image_downloads`, as metadata and headers only: status, URL, content type, bytes written, and the path of the image on disk. The image bytes are never copied into the outbox; the downloaded file is the artefact. Image *failures* need neither this switch nor `capture_web_scrapes` — an `outbox_dir` alone captures them. Turn it off when done. |
 
 ### `web`
 

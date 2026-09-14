@@ -18,6 +18,18 @@ from src import capture
 # seconds used for ordinary pacing.
 RATE_LIMIT_PAUSE_SECONDS = 300.0
 
+# The slowest the decay rule will take the scraper. The owner learned the figure
+# empirically: the same Steam budget is shared with their own hand-browsing, so
+# when scrapes start failing the worker has to back off far enough that the
+# Workshop is still usable by hand while the daemon runs. The old 1.0 s floor
+# left no room for that.
+WEB_DELAY_FLOOR = 6.0
+
+# The starting delay. Set to the floor rather than below it: a default under the
+# floor would be a delay the decay rule considers too fast, and the first 100
+# successes would rewrite it upward to the floor anyway.
+WEB_DELAY_DEFAULT = WEB_DELAY_FLOOR
+
 
 class ScrapeOutcome(enum.Enum):
     """What one web scrape attempt turned out to be, and so what it earns.
@@ -108,7 +120,7 @@ class WebScraperThread(threading.Thread):
         # is worth retrying. None when no browser source is configured.
         self._session_refresh = session_refresh
         self.running = True
-        self.web_delay = float((daemon_config or {}).get("web_delay_seconds") or 5.0)
+        self.web_delay = float((daemon_config or {}).get("web_delay_seconds") or WEB_DELAY_DEFAULT)
         self.web_successes = 0
         self.web_failures = 0
         self.web_had_streak = False
@@ -360,7 +372,7 @@ class WebScraperThread(threading.Thread):
                     self.web_had_streak = True
                 if self.web_successes >= 100:
                     old = self.web_delay
-                    self.web_delay = max(1.0, round(self.web_delay / 1.05, 3))
+                    self.web_delay = max(WEB_DELAY_FLOOR, round(self.web_delay / 1.05, 3))
                     if old != self.web_delay:
                         logging.info(f"100 consecutive web successes! Decreasing web delay from {old} to {self.web_delay}s.")
                         if self._save_cb:

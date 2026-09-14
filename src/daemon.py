@@ -198,8 +198,13 @@ class Daemon:
         # positive `backup_interval_seconds` are configured, so turning it on for
         # the live instance is a deliberate switch.
         self.outbox_dir = daemon_config.get("outbox_dir") or daemon_config.get("backup_dir")
-        # A debugging switch, not a permanent one: on means keep everything.
+        # Debugging switches, not permanent ones: on means keep everything. The
+        # image switch is separate because the web switch keeps whole page
+        # bodies unbounded, and an owner reviewing image metadata should not have
+        # to collect pages to do it. Image *failures* need neither switch — the
+        # outbox alone is enough, like every other failure capture.
         self.capture_web_scrapes = bool(daemon_config.get("capture_web_scrapes", False))
+        self.capture_image_downloads = bool(daemon_config.get("capture_image_downloads", False))
         self.backup_interval_seconds = float(daemon_config.get("backup_interval_seconds") or 0)
         self._backup_worker = None
         if self.outbox_dir and self.backup_interval_seconds > 0:
@@ -211,7 +216,8 @@ class Daemon:
 
         # Failure capture rides on the same outbox but needs no interval: it is a
         # no-op unless an outbox directory is configured, like the backup above.
-        capture.configure(self.outbox_dir, self.capture_web_scrapes)
+        capture.configure(self.outbox_dir, self.capture_web_scrapes,
+                          self.capture_image_downloads)
         
         # State variables for the request-level congestion-control delay. The
         # counters are diagnostics; the delay itself is the state that matters.

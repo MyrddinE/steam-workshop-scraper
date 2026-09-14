@@ -243,6 +243,14 @@ def promote_all(failures_dir: str, fixtures_root: str = DEFAULT_FIXTURES,
                 continue
             record_path = os.path.join(dirpath, filename)
             try:
+                with open(record_path, "r", encoding="utf-8") as handle:
+                    record = json.load(handle)
+                if not record.get("body_file"):
+                    # No body means nothing to replay. Image-download failures
+                    # carry metadata only, by design; promoting one would write
+                    # an empty fixture and a test that asserts nothing.
+                    skipped.append((record_path, "no captured body"))
+                    continue
                 promoted.append(promote(record_path, outbox_root, fixtures_root))
             except (OSError, ValueError, KeyError) as exc:
                 skipped.append((record_path, str(exc)))
