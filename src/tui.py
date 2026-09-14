@@ -20,7 +20,6 @@ from src.daemon_control import DaemonController
 import os
 import yaml
 import threading
-import socket
 import webbrowser
 import datetime
 
@@ -1407,6 +1406,9 @@ class ScraperApp(App):
         self.has_more_results = True
         self.is_loading = False
         self.is_single_creator_mode = False
+        # Filters that the last "Jump to Author" replaced, kept in memory so the
+        # Return button can put them back without depending on a state file read.
+        self._pre_jump_filters: list[dict] | None = None
         
         # UI State recovery
         # We use a hidden file to avoid cluttering the working directory
@@ -1717,10 +1719,20 @@ class ScraperApp(App):
             if isinstance(row, SearchRow):
                 row.remove()
 
+        elif event.button.id == "btn-return":
+            self.action_return_from_creator()
+
         elif event.button.id == "btn-jump-author" and self.current_item_creator:
             # Save state before switching to single creator mode
             if not self.is_single_creator_mode:
                 self.save_state()
+                # Snapshot what the jump is about to throw away so Return can
+                # restore it. This is in memory on purpose: the on-disk snapshot
+                # above is for a restart, and a later state write could overwrite
+                # it before the user presses Return.
+                self._pre_jump_filters = self.query_one(
+                    "#search-builder", SearchBuilder
+                ).get_filters()
 
             self.is_single_creator_mode = True
             self.query_one("#btn-save-filter", Button).display = False
@@ -1731,15 +1743,24 @@ class ScraperApp(App):
             # Clear all current rows
             await builder.query(SearchRow).remove()
 
-            # Add a fresh first row
-            new_row = SearchRow(builder.fields, builder.field_ops, is_first=True)
+            # Build the row already carrying the author filter. Assigning the
+            # Selects after mount used to race the field's Change handler, which
+            # is what populates the op list: "is" was rejected for the default
+            # text field before that handler ran.
+            new_row = SearchRow(
+                builder.fields,
+                builder.field_ops,
+                is_first=True,
+                initial_filter={
+                    "field": "Author ID",
+                    "op": "is",
+                    "value": str(self.current_item_creator),
+                },
+            )
             await builder.mount(new_row)
 
             # Use call_after_refresh to ensure selects are populated
             def setup_author_filter():
-                new_row.query_one("#field-select", Select).value = "Author ID"
-                new_row.query_one("#op-select", Select).value = "is"
-                new_row.query_one("#value-input", Input).value = str(self.current_item_creator)
                 self.run_worker(self.execute_search())
 
             self.call_after_refresh(setup_author_filter)
@@ -1747,8 +1768,35 @@ class ScraperApp(App):
         elif event.button.id == "btn-toggle-translation":
             self.action_toggle_translation()
 
-        elif event.button.id == "btn-request-translation":
-            self.action_request_translation()
+    def action_return_from_creator(self) -> None:
+        """Leaves single-creator mode and puts back the filters the jump replaced.
+
+        The filter snapshot is the one the jump took in memory. Restoring it is
+        deferred to the next refresh because ``set_filters`` mounts rows
+        asynchronously and the rows must be composed before they can be read
+        back or saved. Clearing the flag first makes ``save_state`` accept writes
+        again immediately, so returning always leaves the app usable even if
+        there is no snapshot to restore.
+        """
+        filters = self._pre_jump_filters
+        self._pre_jump_filters = None
+
+        self.is_single_creator_mode = False
+        self.query_one("#btn-save-filter", Button).display = True
+        self.query_one("#btn-return", Button).display = False
+
+        if filters is None:
+            self.save_state()
+            return
+
+        builder = self.query_one("#search-builder", SearchBuilder)
+        builder.set_filters(filters)
+
+        def after_restore() -> None:
+            self.save_state()
+            self.run_worker(self.execute_search())
+
+        self.call_after_refresh(after_restore)
 
     async def action_save_filter_for_scraper(self) -> None:
         builder = self.query_one("#search-builder", SearchBuilder)
@@ -1847,15 +1895,21 @@ class ScraperApp(App):
                     visible_ids.append(child.item_data["workshop_id"])
                     child.item_data["api_priority"] = 10  # update in-memory for spinner
                     if hasattr(child, 'refresh_item'):
-                        child.refresh_item()
+                        # refresh_item is async (every other call site awaits it);
+                        # calling it bare only raised a RuntimeWarning and never
+                        # re-composed the row.
+                        await child.refresh_item()
 
         if not visible_ids:
             self.notify("No items visible.")
             return
         conn = get_connection(self.db_path)
         placeholders = ",".join("?" * len(visible_ids))
+        # Same guard as the web route: an item known to be gone (status -1) must
+        # not be put back in the API fetch queue by a bulk update.
         conn.execute(
-            f"UPDATE workshop_items SET api_priority = 10 WHERE workshop_id IN ({placeholders})",
+            f"UPDATE workshop_items SET api_priority = 10 WHERE workshop_id IN ({placeholders}) "
+            "AND (status IS NULL OR status != -1)",
             visible_ids,
         )
         conn.commit()
@@ -1923,31 +1977,33 @@ class ScraperApp(App):
             self.notify(f"Subscribe request failed: {e}", severity="error")
 
     def _start_webserver(self) -> None:
-        """Starts the embedded web server in a background thread."""
+        """Starts the embedded web server in a background thread.
+
+        Waitress binds the listening socket inside ``create_server`` and reports
+        the port it actually got, so the port the TUI records is the port the
+        server serves on: there is no probe-then-close gap for another process to
+        grab. A busy configured port still falls back to an ephemeral one, and a
+        port chosen here is still persisted to config.
+        """
+        server = None
         try:
             from src.webserver import app, init_webserver
+            from waitress import create_server
 
             configured = self.config.get("web", {}).get("port")
-            port_changed = False
-            if configured:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                try:
-                    s.bind(('0.0.0.0', configured))
-                    self._web_port = configured
-                except OSError:
-                    s.close()
-                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    s.bind(('0.0.0.0', 0))
-                    self._web_port = s.getsockname()[1]
-                    port_changed = True
-                    logging.warning(f"Configured port {configured} in use, using {self._web_port}")
-                s.close()
-            else:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.bind(('0.0.0.0', 0))
-                self._web_port = s.getsockname()[1]
-                s.close()
+            port_changed = not configured
+            try:
+                server = create_server(app, host='0.0.0.0', port=configured or 0)
+            except OSError:
+                if not configured:
+                    raise
+                logging.warning(f"Configured port {configured} in use, using a random port")
+                server = create_server(app, host='0.0.0.0', port=0)
                 port_changed = True
+
+            # ``effective_port`` is the port the bound socket reports, as a
+            # string; the rest of the app stores and formats it as an int.
+            self._web_port = int(server.effective_port)
 
             if port_changed:
                 self.config.setdefault("web", {})["port"] = self._web_port
@@ -1958,13 +2014,16 @@ class ScraperApp(App):
                            daemon_controller=self._daemon_controller)
 
             def run_server():
-                from waitress import serve
-                serve(app, host='0.0.0.0', port=self._web_port, _quiet=True)
+                server.run()
 
             self._web_thread = threading.Thread(target=run_server, daemon=True)
             self._web_thread.start()
             logging.info(f"Web server started on port {self._web_port}")
         except Exception as e:
+            # Release the bound socket if anything after the bind failed, so a
+            # failed startup does not leave the chosen port occupied.
+            if server is not None:
+                server.close()
             logging.warning(f"Web server failed to start: {e}")
 
 def main():

@@ -181,10 +181,12 @@ The screen's log pane (`RichLog`, `src/tui.py:551`) is fed by `_poll_tail` (`src
 
 ### `_start_webserver`
 
-Starts a Waitress server in a daemon thread serving the Flask app. Port selection:
-1. If `config["web"]["port"]` is set, tries to bind to that port
-2. If the configured port is in use, falls back to a random port
-3. If no port is configured, picks a random port and persists it to config via `save_config`
+Starts a Waitress server in a daemon thread serving the Flask app. Waitress binds the listening socket itself (`create_server`), and the TUI reads the bound port back from `server.effective_port`, so the port it records is the socket the server holds — there is no probe-then-close window for another process to take it. Port selection:
+1. If `config["web"]["port"]` is set, binds to that port
+2. If the configured port is in use, falls back to an ephemeral port
+3. If no port is configured, uses an ephemeral port and persists it to config via `save_config`
+
+The chosen port is stored as an `int` (Waitress reports it as a string). If startup fails after the socket was bound, the server is closed so the port is not left occupied.
 
 The server shares the TUI's database connection path (set via `init_webserver`). It also shares the `_sessionid` global for subscribe operations.
 
@@ -224,7 +226,11 @@ Opened by Ctrl+?. Shows a view-window analysis table grouping items by time buck
 
 ### Jump to Author
 
-The "Jump to Author" button replaces the current filter set with a single filter on the creator's ID. The `btn-return` button restores the previous filter state (saved before the jump).
+The "Jump to Author" button replaces the current filter set with a single `Author ID is <creator>` filter, built as the row's initial filter rather than by assigning the Select widgets after mount (the field's Change handler is what populates the operator list, so assigning `is` first was rejected for the default text field).
+
+Before replacing the rows, the app saves state to disk and snapshots the current filters in memory. `is_single_creator_mode` is then set, which hides "Save Filter for Scraper" and makes `save_state` a no-op so the author filter is not persisted.
+
+The `btn-return` button leaves single-creator mode: it clears the flag, shows the save button again, restores the in-memory filter snapshot (replacing the author row and re-running the search), and lets state saving apply once more. The snapshot is in memory rather than re-read from `.tui_state.yaml` so that a state write between the jump and the Return cannot lose the filters the jump replaced.
 
 ### Subscription Queue (s/l keys)
 
