@@ -16,6 +16,27 @@ from src.web_worker import WEB_DELAY_DEFAULT
 
 app = Flask(__name__, template_folder='../templates')
 app.config['TEMPLATES_AUTO_RELOAD'] = True
+
+
+@app.after_request
+def _do_not_cache_generated_pages(response):
+    """Stop the browser serving a stale copy of the page or the userscript.
+
+    Both are generated per request and read from disk each time, so a cached copy
+    is always a stale copy — and there were no validators either, no ETag and no
+    Last-Modified, so the browser had nothing to revalidate against and reused
+    its copy freely. That cost real time: a web-UI fix was deployed and verified
+    on the server while the browser kept running the previous page, which made
+    the fix look broken.
+
+    Scoped away from /images: those are large, immutable once written, and worth
+    caching.
+    """
+    if not request.path.startswith('/images/'):
+        response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
 _db_path = "workshop.db"
 _config = {}
 _images_dir = "images"

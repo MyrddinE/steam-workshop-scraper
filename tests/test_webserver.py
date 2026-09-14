@@ -1920,3 +1920,36 @@ def test_the_search_does_not_wait_for_the_cutoff_query(web_client):
     # The rows must be built after the reset without a cutoff round trip between.
     assert body.index("_refreshCutoffs()") < body.index("fetch('/api/search'"), \
         "the cutoff refresh is started, not blocking, before the search fetch"
+
+
+# ── the served page must not be cached ────────────────────────────────────────
+#
+# Both the page and the injected userscript are generated per request from files
+# on disk, so a cached copy is a stale copy. With no Cache-Control and no
+# validators either, the browser had nothing to revalidate against: a web-UI fix
+# was deployed and verified on the server while the browser kept running the
+# previous page, and the fix looked broken.
+
+def test_the_page_is_served_without_cache(web_client):
+    client, _ = web_client
+    resp = client.get('/')
+    assert resp.headers.get('Cache-Control') == 'no-store', \
+        "a generated page must not be cached; there is nothing to revalidate against"
+
+
+def test_the_userscript_is_served_without_cache(web_client):
+    client, _ = web_client
+    resp = client.get('/userscript/steam_subscribe.user.js')
+    assert resp.status_code == 200
+    assert resp.headers.get('Cache-Control') == 'no-store', \
+        "the injected userscript changes with the server's host; it must not be cached"
+
+
+def test_images_may_still_be_cached(web_client):
+    """The exclusion matters: images are large, immutable once written, and the
+    one thing here worth caching."""
+    import src.webserver as ws
+    client, _ = web_client
+    resp = client.get('/images/nothing.jpg')
+    assert resp.headers.get('Cache-Control') != 'no-store', \
+        "images must keep whatever caching they had"
