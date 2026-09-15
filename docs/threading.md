@@ -63,13 +63,16 @@ behind. The store is *injected*, so a thread constructed without one — in a te
 exactly as it did before. The file itself is owned by `src/daemon_state.py`, which is best-effort: an
 unreadable or unwritable state file costs one extra attempt, never a crash.
 
-**Resetting it.** The other three delays live in `config.yaml` and are reset by editing the key and
-restarting; the translator's is not, so the equivalent is to delete the section from
-`.daemon_state.yaml` (or delete the file, which only ever holds daemon-owned state) and restart. That
-is the manual escape hatch, and it is the whole reason the other three are still in `config.yaml` while
-the backoffs are being fixed — see issue 21 in [code-issues.md](code-issues.md), where moving them out
-of the config and removing their ceilings are recorded as one change, to be made together and not
-before. A bounded delay is also what keeps this rare: the translator's cannot exceed an hour.
+**Resetting it.** The three rate-seeking delays are reset by editing their key in `config.yaml` and
+restarting, because they are not trusted yet and an operator needs to pull one back down when it
+over-reacts. The translator's has no config key, so the equivalent is to delete the `translation_backoff`
+section from `.daemon_state.yaml` — or the file, which only ever holds daemon-owned state — and restart.
+It is the trusted one of the four: it has never backed off when it should not, nor failed to when it
+should, which is exactly why it was never given a config key, and why its differing from the other three
+is not a gap to close. Its ceilings are not the same device as theirs either: they bound how long a
+condition that waiting cannot fix is left alone, so a raised spend limit is picked up within the hour
+without a restart. See issue 21 in [code-issues.md](code-issues.md), where the config storage and the
+ceilings on the other three are recorded as one change, to be made together and not before.
 
 ---
 
