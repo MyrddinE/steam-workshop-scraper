@@ -248,6 +248,13 @@ def _coverage(conn, params) -> dict:
     only coverage says how far along the library actually is. Dead items are
     excluded because they will never be covered, and counting them would make
     coverage fall as the library is cleaned up.
+
+    The image stage counts a *recorded answer*, not only a stored file.
+    ``image_extension`` holds the server's reply as well as a file type, so an
+    item whose preview is permanently missing has been dealt with -- the
+    question about it is settled -- and counting it as outstanding would leave
+    the bar permanently short of the truth. What is still outstanding is an item
+    with no answer at all.
     """
     row = conn.execute(
         """

@@ -15,6 +15,7 @@ from textual.worker import Worker, WorkerState
 from src.database import search_items, get_all_authors, initialize_database, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, get_connection, FILTER_SCHEMA, ALL_FILTER_FIELDS, bump_api_priority_for_list, bump_api_priority_for_detail
 from src.analysis import view_window_analysis
 from src import metrics
+from src import images
 from src.config import ConfigError, load_config, save_config
 from src.daemon_control import DaemonController
 import os
@@ -965,7 +966,10 @@ class WorkshopItem(ListItem):
 
     @staticmethod
     def _has_pending(item):
-        return ((item.get("needs_image", 0) >= 5 and not item.get("image_extension"))
+        # A non-empty image_extension is not proof of a picture: it may hold the
+        # status that said there is none, which is settled, not pending.
+        return ((item.get("needs_image", 0) >= 5
+                 and not images.is_resolved(item.get("image_extension")))
                 or item.get("translation_priority", 0) >= 5
                 or item.get("needs_web_scrape", 0) >= 5
                 or item.get("api_priority", 0) >= 5)

@@ -487,6 +487,57 @@ def test_api_items_empty_list(web_client):
     assert resp.status_code == 400
 
 
+def test_api_items_reports_the_image_state_the_page_branches_on(web_client):
+    """The page is told which cells may be fetched and which must be drawn.
+
+    `image_extension` now holds an answer as well as a file type, so the raw
+    column cannot be used as a truthiness test in the browser: '404' is truthy
+    and would become a request for /images/<id>.404. The classification is made
+    once, server-side, and sent alongside the value it describes.
+    """
+    from src.database import insert_or_update_item
+    client, db_path = web_client
+    for wid, ext in ((11, "jpg"), (12, "404"), (13, "html"), (14, None), (15, "503")):
+        row = {"workshop_id": wid, "title": f"item {wid}", "status": 200}
+        if ext is not None:
+            row["image_extension"] = ext
+        insert_or_update_item(db_path, row)
+
+    items = {it["workshop_id"]: it
+             for it in client.post('/api/items', json={"ids": [11, 12, 13, 14, 15]}).get_json()}
+
+    assert len(items) == 5
+    assert items[11]["image_state"] == "present" and items[11]["image_resolved"] is True
+    assert items[12]["image_state"] == "permanent" and items[12]["image_resolved"] is True
+    assert items[13]["image_state"] == "other" and items[13]["image_resolved"] is True
+    assert items[14]["image_state"] == "absent" and items[14]["image_resolved"] is False
+    assert items[15]["image_state"] == "transient" and items[15]["image_resolved"] is False
+
+
+def _image_cell_js():
+    """The _imageCellHtml body, read as text like the repo's other client-side checks."""
+    from pathlib import Path
+    html = Path("templates/index.html").read_text(encoding="utf-8")
+    body = html[html.index("function _imageCellHtml(item) {"):]
+    return body[:body.index("\n}")]
+
+
+def test_the_grid_builds_an_image_url_only_for_a_real_extension():
+    """The single URL the grid builds sits behind the state guard.
+
+    The browser must not be asked for /images/<id>.<ext> when <ext> is a status
+    marker, so the one URL construction has to be inside the 'present' branch
+    and every other state has to draw something instead.
+    """
+    js = _image_cell_js()
+    assert js.count("/images/") == 1, "an image URL must be built in exactly one place"
+    assert js.index("state === 'present'") < js.index("/images/"), \
+        "the URL must sit behind the state guard"
+    assert "grid-img-failed" in js, "a final answer must render as the failure cell"
+    assert "_escapeHtml(item.image_extension)" in js, \
+        "the drawn value is interpolated into markup, so it must be escaped"
+
+
 def test_api_subscribe_no_session(web_client):
     client, _ = web_client
     resp = client.post('/api/subscribe/1')

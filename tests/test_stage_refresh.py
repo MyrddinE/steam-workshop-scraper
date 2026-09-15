@@ -79,3 +79,51 @@ def test_unknown_revision_counts_as_changed(db_path):
     img, web = _flag(_daemon(db_path), _item(steam_updated_at=None), _item(steam_updated_at=1000))
     img.assert_called_once()
     web.assert_called_once()
+
+
+# --- an answer from the server is final ------------------------------------
+#
+# image_extension holds the answer, not only a file type: a 404 or a non-image
+# content type is stored there as well. These pin the consequence, which is the
+# fix for a preview that was fetched forever: the re-flag gate must treat those
+# values as settled, so an item the server has already refused leaves the queue
+# for good.
+
+def test_a_missing_preview_is_never_fetched_again(db_path):
+    img, _ = _flag(_daemon(db_path), _item(image_extension="404"), _item(image_extension="404"))
+    img.assert_not_called()
+
+
+def test_a_gone_preview_is_never_fetched_again(db_path):
+    img, _ = _flag(_daemon(db_path), _item(image_extension="410"), _item(image_extension="410"))
+    img.assert_not_called()
+
+
+def test_a_missing_preview_is_not_revived_by_a_new_revision(db_path):
+    """A revision change re-fetches a real image, but never revives a refusal.
+
+    The preview may legitimately be replaced when an item is updated, which is
+    why a present image is re-fetched -- but a 404 is an answer about the item,
+    and re-asking is the loop being closed here.
+    """
+    img, _ = _flag(_daemon(db_path), _item(image_extension="404", steam_updated_at=1000),
+                   _item(image_extension="404", steam_updated_at=2000))
+    img.assert_not_called()
+
+
+def test_a_non_image_content_type_is_never_fetched_again(db_path):
+    """A served text/html is what will be served next time too."""
+    img, _ = _flag(_daemon(db_path), _item(image_extension="html"), _item(image_extension="html"))
+    img.assert_not_called()
+
+
+def test_a_transient_status_is_still_fetched(db_path):
+    """A 503 is not a fact about the preview, so it must stay retryable."""
+    img, _ = _flag(_daemon(db_path), _item(image_extension="503"), _item(image_extension="503"))
+    img.assert_called_once()
+
+
+def test_a_real_image_is_still_refetched_when_the_revision_changes(db_path):
+    """The gate must not become a blanket refusal to refresh anything."""
+    img, _ = _flag(_daemon(db_path), _item(image_extension="jpg"), _item(steam_updated_at=2000))
+    img.assert_called_once()

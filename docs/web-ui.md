@@ -30,7 +30,7 @@ Two layers of validation: a capture-phase `blur` event listener on the document 
 
 1. `doSearch(reset=true)` fetches `/api/search` with the current filters, sort, and pagination state
 2. Results are rendered as `.grid-cell` divs inside `#results-grid`
-3. Each cell shows: preview image (or "pending"/"no image" placeholder), title (2-line clamp), file size (color-coded via `sizeClass`), and Wilson subscriber/favorite scores (color-coded via `wClass`)
+3. Each cell shows: preview image, or "pending"/"no image" when nothing has been recorded, or — when the server has already answered for that preview — the answer itself drawn in red at half the cell's height (a `404`, a `410`, or the content type it served instead). Plus title (2-line clamp), file size (color-coded via `sizeClass`), and Wilson subscriber/favorite scores (color-coded via `wClass`)
 4. `_placeSentinel()` handles infinite scroll by checking whether the first item of the batch is visible and placing or removing the scroll sentinel accordingly
 
 ### State Persistence
@@ -75,13 +75,13 @@ When `doSearch(reset=true)` clears the grid (`innerHTML = ''`), the old sentinel
 An adaptive-timeout poll that updates grid cells as images and translations arrive:
 - Collects workshop_ids from DOM elements with `.grid-img-placeholder`
 - POSTs to `/api/items` (bulk ID lookup)
-- For each returned item: updates title text, swaps placeholder for `<img>` if `image_extension` arrived, appends `.` to pending text for visual progress
+- For each returned item: updates title text, then replaces the placeholder with `_imageCellHtml(item)` — the `<img>` once a real extension arrives, or the red failure cell once the server reports a final answer — and appends `.` to pending text for visual progress
 - Delay: `max(1, log2(pending_count))` seconds → speeds up as images arrive
 - Stops when no pending placeholders remain in the DOM
 
 ### Dot Animation
 
-Each poll cycle appends a `.` to the placeholder text via `ph.textContent += '.'`. This gives visual feedback that the poll is iterating over the cell. When an image arrives, the entire placeholder div is replaced by an `<img>`, so dots naturally clear.
+Each poll cycle appends a `.` to the placeholder text via `ph.textContent += '.'`. This gives visual feedback that the poll is iterating over the cell. When an image arrives, the entire placeholder div is replaced by an `<img>`, so dots naturally clear. The failure cell is exempt: it holds a `<span>` with the status, not pending text, so `_stopListPoll` skips `.grid-img-failed` rather than overwriting an answer with "no image".
 
 ### `_startDetailPoll`
 

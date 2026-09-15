@@ -9,6 +9,7 @@ import requests
 from flask import Flask, request, jsonify, render_template, send_from_directory
 from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, get_queued_items, FILTER_SCHEMA, bump_api_priority_for_detail, clear_pending_items
 from src.analysis import view_window_analysis
+from src import images
 from src import metrics
 from src.config import login_secure_value, save_config
 from src.daemon_control import DaemonController
@@ -16,6 +17,23 @@ from src.web_worker import WEB_DELAY_DEFAULT
 
 app = Flask(__name__, template_folder='../templates')
 app.config['TEMPLATES_AUTO_RELOAD'] = True
+
+
+def _with_image_state(rows):
+    """Attach the image classification the grid branches on.
+
+    Computed here from `src/images.py` rather than left to the browser: if the
+    page re-derived the rule from the raw column it would need its own copy of
+    the extension allowlist, and the writer and the reader disagreeing about
+    what counts as a picture is the bug this exists to prevent.
+    """
+    for row in rows:
+        state = images.image_state(row.get("image_extension"))
+        row["image_state"] = state
+        # Sent alongside so the page never has to know which states count as
+        # settled; only src/images.py decides that.
+        row["image_resolved"] = state in (images.PRESENT, images.PERMANENT, images.OTHER)
+    return rows
 
 
 @app.after_request
@@ -242,7 +260,7 @@ def api_search():
             sample = results[0] if results else {}
             logging.info(f"[Search] returned {len(results)} items, flagged {image_flagged_count} for image, sample needs_image={sample.get('needs_image')} image_extension={sample.get('image_extension')!r}")
 
-        return jsonify(results)
+        return jsonify(_with_image_state(results))
     except Exception as e:
         logging.exception(f"[Search] Error processing search request")
         return jsonify({"error": str(e)}), 500
@@ -330,7 +348,7 @@ def api_items():
         FROM workshop_items w LEFT JOIN users u ON w.creator = u.steamid
         WHERE w.workshop_id IN ({placeholders})
     """
-    results = [dict(r) for r in conn.execute(sql, ids).fetchall()]
+    results = _with_image_state([dict(r) for r in conn.execute(sql, ids).fetchall()])
     conn.close()
     return jsonify(results)
 
@@ -459,14 +477,20 @@ def api_save_filter():
 
 
 def _ensure_image_flagged(workshop_id, priority):
-    """If item has preview_url but no image_extension, flag it for download."""
+    """Flag the image for download unless it already has a final answer.
+
+    "Final" means a file exists, or the server has already said the picture is
+    not there (a 404, a non-image content type). Re-flagging the latter is how
+    opening a detail pane used to put a missing preview back in the queue for
+    an item that can never satisfy it.
+    """
     conn = get_connection(_db_path)
     row = conn.execute(
         "SELECT preview_url, image_extension, needs_image FROM workshop_items WHERE workshop_id=?",
         (workshop_id,)
     ).fetchone()
     conn.close()
-    if row and row["preview_url"] and not row["image_extension"]:
+    if row and row["preview_url"] and not images.is_resolved(row["image_extension"]):
         flag_for_image(_db_path, workshop_id, max(row["needs_image"] or 1, priority))
         return True
     return False

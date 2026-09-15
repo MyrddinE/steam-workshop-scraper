@@ -21,6 +21,13 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .grid-cell.selected { outline: 2px solid #44aa44; outline-offset: 2px; }
 .grid-img { width: 100%; aspect-ratio: 16/10; object-fit: cover; border-radius: 3px; background: var(--pico-muted-border-color); }
 .grid-img-placeholder { width: 100%; aspect-ratio: 16/10; border-radius: 3px; background: var(--pico-muted-border-color); display: flex; align-items: center; justify-content: center; color: var(--pico-muted-color); font-size: .8rem; }
+/* A cell whose image the server has already answered for: 404, 410, or a
+   content type that was not a picture. The status is drawn, never fetched.
+   container-type makes cqh resolve against this box, so the mark is half the
+   box's height on any width; the rem line is the fallback for a browser
+   without container queries. */
+.grid-img-failed { color: #d33; container-type: size; }
+.grid-img-failed-mark { font-size: 2.5rem; font-size: 50cqh; line-height: 1; font-weight: 700; letter-spacing: -.02em; }
 .grid-title { font-size: .82rem; font-weight: bold; line-height: 1.2; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .grid-meta { font-size: .7rem; color: var(--pico-muted-color); display: flex; flex-wrap: wrap; gap: .2em .5em; }
 .grid-scores { font-size: .7rem; font-weight: bold; display: flex; gap: .5em; }
@@ -420,13 +427,7 @@ async function doSearch(reset = true) {
     const wss = item.wilson_subscription_score != null ? (item.wilson_subscription_score*100).toFixed(1) : null;
     const size = fmtSize(item.file_size);
 
-    let imgHtml;
-    if (item.image_extension) {
-      imgHtml = `<img class="grid-img" src="/images/${item.workshop_id}.${item.image_extension}" loading="lazy" alt="">`;
-    } else {
-      const label = (item.needs_image > 0) ? 'pending' : 'no image';
-      imgHtml = `<div class="grid-img-placeholder">${label}</div>`;
-    }
+    const imgHtml = _imageCellHtml(item);
 
     const div = document.createElement('div');
     div.className = 'grid-cell';
@@ -484,8 +485,34 @@ function _placeSentinel() {
   _scrollObserver.observe(sentinel);
 }
 
+// What the server recorded for this item's image. image_state comes from
+// src/images.py, which owns the rule about what may be treated as a picture.
+// The numeric fallback is defence in depth only: a status marker must never
+// become a URL even if a payload somehow predates the field.
+function _imageState(item) {
+  if (item.image_state) return item.image_state;
+  const ext = item.image_extension;
+  if (!ext) return 'absent';
+  return /^\d+$/.test(ext) ? 'permanent' : 'present';
+}
+
+function _imageCellHtml(item) {
+  const state = _imageState(item);
+  if (state === 'present') {
+    return `<img class="grid-img" src="/images/${item.workshop_id}.${item.image_extension}" loading="lazy" alt="">`;
+  }
+  if (state !== 'absent') {
+    // Answered: draw the answer instead of asking the browser for a file that
+    // was never written.
+    return `<div class="grid-img-placeholder grid-img-failed" title="Image unavailable">`
+      + `<span class="grid-img-failed-mark">${_escapeHtml(item.image_extension)}</span></div>`;
+  }
+  const label = (item.needs_image > 0) ? 'pending' : 'no image';
+  return `<div class="grid-img-placeholder">${label}</div>`;
+}
+
 function _itemHasPending(item) {
-  return (item.needs_image >= 5 && !item.image_extension)
+  return (item.needs_image >= 5 && !item.image_resolved)
       || item.translation_priority >= 5
       || item.needs_web_scrape >= 5
       || item.api_priority >= 5;
@@ -525,11 +552,9 @@ function _startListPoll(filters, sortBy, sortOrder) {
         const title = item.title_en || item.title || 'Untitled';
         const titleEl = el.querySelector('.grid-title');
         if (titleEl) titleEl.textContent = title;
-        if (item.image_extension && !el.querySelector('.grid-img')) {
+        if (!el.querySelector('.grid-img') && !el.querySelector('.grid-img-failed')) {
           const ph = el.querySelector('.grid-img-placeholder');
-          if (ph) {
-            ph.outerHTML = `<img class="grid-img" src="/images/${item.workshop_id}.${item.image_extension}" loading="lazy" alt="">`;
-          }
+          if (ph && _imageState(item) !== 'absent') ph.outerHTML = _imageCellHtml(item);
         }
         if (_itemHasPending(item)) {
           el.classList.add('has-spinner');
@@ -556,7 +581,7 @@ function _stopListPoll() {
   if (_listPollTimer) {
     clearTimeout(_listPollTimer);
     _listPollTimer = null;
-    document.querySelectorAll('.grid-img-placeholder').forEach(ph => {
+    document.querySelectorAll('.grid-img-placeholder:not(.grid-img-failed)').forEach(ph => {
       if (ph.textContent.startsWith('pending')) ph.textContent = 'no image';
     });
   }

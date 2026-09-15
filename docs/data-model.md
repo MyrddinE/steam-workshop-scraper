@@ -82,7 +82,7 @@ Tags are not a column on `workshop_items`. They live in `tags(tag_id, tag_name)`
 | `last_fetch_attempted_at` | STATE (ours) | Set on every API attempt, success or failure. |
 | `scrape_version` | STATE (Steam value) | `steam_updated_at` at the moment the web scraper ran. |
 | `translate_version` | STATE (Steam value) | `steam_updated_at` at the moment the translator ran. |
-| `image_extension` | STATE | Extension of the downloaded preview image, or NULL if not downloaded. |
+| `image_extension` | STATE | The preview's **outcome**, not only its file type. A real extension (`jpg`, `png`, …) means the file exists at `images/<bucket>/<id>.<ext>` and a URL may be built from it. A **wholly numeric** value is an HTTP status the server answered with: `404`/`410` mean the preview is permanently missing and will not be retried, any other code is recorded but still retryable. Any other token (`html`, `svg+xml`) is a content type that was not a picture this downloader can store. NULL means nothing has been recorded yet. One rule follows from this: **a URL is only ever built from a known image extension**, which `src/images.py` owns so the writer and every reader agree. |
 | `is_queued_for_subscription` | QUEUE | Subscription queue flag. Set by the TUI (`s`) and by `POST /api/toggle_sub/<id>`; cleared by `POST /api/subscribed/<id>` and `POST /api/subscribe_failed/<id>` when the userscript reports an outcome. Transient working state — it reads `0` whenever nothing is queued, which is the normal resting state, not evidence of disuse. |
 
 ### Queue columns

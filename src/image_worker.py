@@ -6,28 +6,13 @@ import logging
 import threading
 import requests
 from datetime import datetime, timezone
-from src import capture
+from src import capture, images
 from src.database import get_next_image_item, insert_or_update_item, get_image_path
 
-
-MIME_MAP = {
-    "image/jpeg": "jpg",
-    "image/png": "png",
-    "image/gif": "gif",
-    "image/webp": "webp",
-    "image/bmp": "bmp",
-    "image/jpg": "jpg",
-}
-
-MAGIC_EXT_MAP = {
-    ".jpeg": "jpg",
-    ".jpg": "jpg",
-    ".jfif": "jpg",
-    ".png": "png",
-    ".gif": "gif",
-    ".webp": "webp",
-    ".bmp": "bmp",
-}
+# Re-exported so this module still reads as the place the downloader's formats
+# are defined; the definitions live in src/images.py because the reader (the URL
+# guard) must agree with the writer about what an image extension is.
+from src.images import MIME_MAP, MAGIC_EXT_MAP  # noqa: F401
 
 
 def _response_metadata(resp) -> dict:
@@ -121,7 +106,9 @@ class ImageScraperThread(threading.Thread):
                         error=f"unknown MIME type {mime!r}",
                         error_type="UnknownMimeType")
                     conn = self._get_conn()
-                    conn.execute("UPDATE workshop_items SET needs_image=0 WHERE workshop_id=?", (wid,))
+                    conn.execute(
+                        "UPDATE workshop_items SET needs_image=0, image_extension=? WHERE workshop_id=?",
+                        (images.served_type_marker(ct), wid))
                     conn.commit()
                     conn.close()
                     time.sleep(self.image_delay)
@@ -174,23 +161,48 @@ class ImageScraperThread(threading.Thread):
                 capture.record_image_download(
                     wid, url, False, **_response_metadata(resp),
                     error=str(e), error_type=type(e).__name__)
-                new_pri = max(0, (item.get("needs_image") or 1) - 1)
+
+                status = resp.status_code if resp is not None else None
+                marker = images.status_marker(status)
                 conn = self._get_conn()
-                conn.execute(
-                    "UPDATE workshop_items SET needs_image=?, api_priority = CASE WHEN api_priority < 2 THEN 2 ELSE api_priority END WHERE workshop_id=?",
-                    (new_pri, wid)
-                )
-                conn.commit()
-                conn.close()
-                self.image_failures += 1
-                self.image_successes = 0
-                if self.image_failures >= 2 and self.image_had_streak:
-                    old = self.image_delay
-                    self.image_delay = min(round(self.image_delay * (1.05 ** 10), 3),20)
-                    logging.info(f"Multiple consecutive image failures! Increasing delay from {old} to {self.image_delay}s.")
-                    if self._save_cb:
-                        self._save_cb("image_delay_seconds", self.image_delay)
-                    self.image_had_streak = False
+                if marker is not None:
+                    # The server answered that the picture is not there, and
+                    # asking again cannot change a fact about the item. Record
+                    # the answer in image_extension, which is what BOTH the
+                    # re-fetch gate and the URL guard read, and take the item out
+                    # of the queue.
+                    #
+                    # api_priority is deliberately *not* raised. That raise asked
+                    # for an API refresh, the refresh re-flagged the image, and
+                    # the download 404'd again -- the cycle that fetched item
+                    # 3731736934 twenty-five times in one day for a preview that
+                    # never existed.
+                    conn.execute(
+                        "UPDATE workshop_items SET image_extension=?, needs_image=0 "
+                        "WHERE workshop_id=?", (marker, wid))
+                    conn.commit()
+                    conn.close()
+                    # A content answer says nothing about our request rate, so it
+                    # is neutral for pacing: it does not grow the delay (404s
+                    # alone had pinned this thread at its ceiling) and it does not
+                    # break a run of successes either.
+                else:
+                    new_pri = max(0, (item.get("needs_image") or 1) - 1)
+                    conn.execute(
+                        "UPDATE workshop_items SET needs_image=?, api_priority = CASE WHEN api_priority < 2 THEN 2 ELSE api_priority END WHERE workshop_id=?",
+                        (new_pri, wid)
+                    )
+                    conn.commit()
+                    conn.close()
+                    self.image_failures += 1
+                    self.image_successes = 0
+                    if self.image_failures >= 2 and self.image_had_streak:
+                        old = self.image_delay
+                        self.image_delay = min(round(self.image_delay * (1.05 ** 10), 3),20)
+                        logging.info(f"Multiple consecutive image failures! Increasing delay from {old} to {self.image_delay}s.")
+                        if self._save_cb:
+                            self._save_cb("image_delay_seconds", self.image_delay)
+                        self.image_had_streak = False
 
             time.sleep(self.image_delay)
 

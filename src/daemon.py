@@ -42,6 +42,7 @@ from src.web_worker import WebScraperThread
 from src.image_worker import ImageScraperThread
 from src.backup import BackupThread
 from src.daemon_state import StateStore, state_path_for
+from src import images
 from src import capture
 
 # API statuses the fetch path has an explicit branch for. Anything else is
@@ -706,9 +707,15 @@ class Daemon:
 
         # Image work, on the same revision test. Without it every API fetch
         # re-flagged the image, so previews that had not changed were downloaded
-        # again on each staleness cycle.
+        # again on each staleness cycle. An answer the server has already given
+        # -- a 404, a non-image type -- is final whatever the revision says:
+        # re-flagging it is exactly how a preview that never existed came to be
+        # fetched forever. A real image is still re-fetched when the item is
+        # revised, because the preview may have been replaced.
+        existing_ext = existing_data.get("image_extension")
         if merged_data.get("preview_url") and not (
-                revision_unchanged and existing_data.get("image_extension")):
+                images.blocks_retry(existing_ext)
+                or (revision_unchanged and images.can_render_image(existing_ext))):
             flag_for_image(self.db_path, item_id,
                            max(3, inherited_prio) if enriched else max(1, inherited_prio))
         return enriched
