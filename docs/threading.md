@@ -63,6 +63,14 @@ behind. The store is *injected*, so a thread constructed without one — in a te
 exactly as it did before. The file itself is owned by `src/daemon_state.py`, which is best-effort: an
 unreadable or unwritable state file costs one extra attempt, never a crash.
 
+**Resetting it.** The other three delays live in `config.yaml` and are reset by editing the key and
+restarting; the translator's is not, so the equivalent is to delete the section from
+`.daemon_state.yaml` (or delete the file, which only ever holds daemon-owned state) and restart. That
+is the manual escape hatch, and it is the whole reason the other three are still in `config.yaml` while
+the backoffs are being fixed — see issue 21 in [code-issues.md](code-issues.md), where moving them out
+of the config and removing their ceilings are recorded as one change, to be made together and not
+before. A bounded delay is also what keeps this rare: the translator's cannot exceed an hour.
+
 ---
 
 ## Thread Safety
