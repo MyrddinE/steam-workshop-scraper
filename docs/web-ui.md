@@ -154,7 +154,7 @@ The 📊 button (`#btn-stats`, `templates/index.html:99`) opens `#stats-overlay`
 * **stuck_work** — flagged in red when non-zero: the number of dead items still sitting in a queue, broken down per queue. A zero value renders as an all-clear.
 * **priority_breakdowns** — one "queue: N waiting" block per queue with the priority mix.
 * **translation_status**, **status_counts**, **fetch_recency** — labelled count lists.
-* **tag_counts** — a summary: distinct-tag count and the most-used tags.
+* **tag_counts** — a two-column table (Tag, Count) over every tag, sorted by count descending and scrolling inside a bounded box so a long list cannot push the chunks below it off the panel. Counts print in full (`fmtExact`) rather than through `fmtCount`: a tag count is read and compared, not merely scanned, and `fmtCount` reports 5,000 as "5.00K".
 * **high_water**, **app_tracking** — a formatted timestamp and a per-AppID table.
 
 **Ordering is learned.** The request order is seeded from each metric's `seed_ms` on the first ever open; on every later open it is sorted by the durations measured on the previous open, persisted in `localStorage` under `stats.metric-order.v1`. The stored shape is deliberately tiny and versioned — `{v: 1, ms: {metric: milliseconds}}` — so a stale or corrupt entry from an older build is ignored rather than breaking the panel (`_loadStatsOrder`, `templates/index.html:1247`; `_statsOrder`). The DOM order is fixed when the panel opens; this open's measurements feed the next open.

@@ -371,6 +371,14 @@ function fmtCount(n) {
   const v=n/1000000; return n<10000000?v.toFixed(2)+'M':n<100000000?v.toFixed(1)+'M':Math.round(v)+'M';
 }
 
+// Exact digits, grouped. fmtCount above is right for a card's view count, where
+// the magnitude is all that matters, but it reports 5,000 as "5.00K" -- which
+// loses the number the tag table exists to show. The locale is pinned so the
+// grouping reads the same for everyone, matching the TUI's f"{count:,}".
+function fmtExact(n) {
+  return Number(n).toLocaleString('en-US');
+}
+
 function fmtSize(bytes) {
   if (!bytes) return '';
   const kb = bytes / 1024;
@@ -1580,9 +1588,9 @@ function _renderTags(tags) {
   if (!names.length) return '<p class="stat-label">No tags recorded.</p>';
   const sorted = names.sort(function(a, b) { return tags[b] - tags[a]; });
   const rows = sorted.map(function(name) {
-    return '<tr><td>' + _escapeHtml(name) + '</td><td>' + fmtCount(tags[name]) + '</td></tr>';
+    return '<tr><td>' + _escapeHtml(name) + '</td><td>' + fmtExact(tags[name]) + '</td></tr>';
   }).join('');
-  return '<p>' + fmtCount(names.length) + ' distinct tags</p>'
+  return '<p>' + fmtExact(names.length) + ' distinct tags</p>'
     + '<div class="stats-scroll"><table class="stats-table"><thead><tr><th>Tag</th><th>Count</th></tr></thead>'
     + '<tbody>' + rows + '</tbody></table></div>';
 }

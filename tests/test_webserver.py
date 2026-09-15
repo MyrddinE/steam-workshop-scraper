@@ -388,6 +388,10 @@ def test_tag_stats_render_as_a_table_not_a_truncated_paragraph(web_client):
     assert "slice(0, 15)" not in js, "every tag must be listed, not a top 15"
     assert "Most used:" not in js, "the inline run of tag names must be gone"
     assert 'class="stats-scroll"' in js, "the table must sit in the scroll container"
+    # A tag count is read and compared, so it is printed in full: fmtCount
+    # reports 5,000 as "5.00K", which is the number the table exists to show.
+    assert "fmtExact(tags[name])" in js, "the count column must show the full digits"
+    assert "fmtCount(tags[name])" not in js, "not a contracted count"
 
 
 def test_tag_stats_table_is_bounded_and_scrollable(web_client):
