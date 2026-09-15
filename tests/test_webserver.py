@@ -314,7 +314,7 @@ def test_metrics_unknown_metric_is_a_404(web_client):
 
 
 def test_stats_button_opens_a_panel_instead_of_navigating(web_client):
-    """The affordance keeps its id and place, but it is no longer a link to JSON."""
+    """The affordance keeps its id, now lives in the header, and is no longer a link to JSON."""
     client, _ = web_client
     body = client.get('/').data.decode()
     doc = lxml.html.fromstring(body)
@@ -323,6 +323,20 @@ def test_stats_button_opens_a_panel_instead_of_navigating(web_client):
     assert len(buttons) == 1, "expected exactly one #btn-stats"
     assert buttons[0].tag == "button", "the stats affordance must not navigate away"
     assert not buttons[0].get("href"), "the stats button still points at /api/stats"
+    assert "Stats" in buttons[0].text_content(), \
+        "the moved button must carry the visible word Stats, like its neighbours"
+
+    # The button moved out of the search builder into the page header, beside
+    # the daemon button; pin that home so a regression is caught.
+    header = doc.xpath('//header')
+    assert header, "missing <header>"
+    assert buttons[0] in header[0].iterdescendants(), \
+        "#btn-stats must be a descendant of <header>"
+
+    daemon = doc.xpath('//*[@id="btn-daemon"]')
+    assert len(daemon) == 1, "expected exactly one #btn-daemon"
+    assert daemon[0].getparent() is buttons[0].getparent(), \
+        "#btn-stats and #btn-daemon must share a parent"
 
     overlay = doc.xpath('//*[@id="stats-overlay"]')
     assert overlay, "missing #stats-overlay"
