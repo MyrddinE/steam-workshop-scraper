@@ -354,6 +354,50 @@ def test_stats_button_opens_a_panel_instead_of_navigating(web_client):
         "the tier grouping must be gone from the statistics panel"
 
 
+def _render_tags_js():
+    """The _renderTags body, read as text like the repo's other client-side checks."""
+    from pathlib import Path
+    html = Path("templates/index.html").read_text(encoding="utf-8")
+    body = html[html.index("function _renderTags(tags) {"):]
+    return body[:body.index("\n}")]
+
+
+def _css_rule(selector):
+    from pathlib import Path
+    html = Path("templates/index.html").read_text(encoding="utf-8")
+    marker = selector + " {"
+    if marker not in html:
+        return ""
+    rule = html[html.index(marker):]
+    return rule[:rule.index("}")]
+
+
+def test_tag_stats_render_as_a_table_not_a_truncated_paragraph(web_client):
+    """Tags are their own rows, all of them, not an inline run cut at fifteen.
+
+    The old renderer joined the top 15 into one "Most used: …" paragraph: the
+    run was mushed inline with the others and the list was truncated. Both
+    halves are pinned here.
+    """
+    js = _render_tags_js()
+    assert 'class="stats-table"' in js, "tags must render as the shared stats table"
+    assert "<th>Tag</th>" in js and "<th>Count</th>" in js, \
+        "the tag table needs Tag and Count headers"
+    assert "_escapeHtml(name)" in js, \
+        "a tag containing & or < must be escaped, not interpolated raw"
+    assert "slice(0, 15)" not in js, "every tag must be listed, not a top 15"
+    assert "Most used:" not in js, "the inline run of tag names must be gone"
+    assert 'class="stats-scroll"' in js, "the table must sit in the scroll container"
+
+
+def test_tag_stats_table_is_bounded_and_scrollable(web_client):
+    """A long tag list scrolls inside its chunk instead of pushing the rest down."""
+    rule = _css_rule(".stats-scroll")
+    assert rule, "missing the .stats-scroll rule"
+    assert "max-height" in rule, "the tag list needs a bounded height"
+    assert "overflow" in rule, "and must scroll rather than grow"
+
+
 def test_analysis(web_client):
     client, db_path = web_client
     import time

@@ -201,6 +201,10 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .stats-chunk-body ul { margin:.2rem 0 0 1rem; }
 .stats-chunk-body progress { margin:0; }
 .stats-table td, .stats-table th { padding:.15rem .5rem .15rem 0; }
+/* Tags are the one metric that is a long list rather than a handful of
+   numbers, so it scrolls inside a bounded box instead of pushing every
+   chunk below it off the screen. */
+.stats-scroll { max-height: 20rem; overflow-y: auto; }
 .analysis-controls { display:flex;gap:.5rem;align-items:flex-end;margin-bottom:.75rem;flex-wrap:wrap; }
 .analysis-controls label { margin:0; }
 .analysis-controls input { width:6rem;margin:0; }
@@ -1550,11 +1554,12 @@ function _renderTags(tags) {
   const names = Object.keys(tags);
   if (!names.length) return '<p class="stat-label">No tags recorded.</p>';
   const sorted = names.sort(function(a, b) { return tags[b] - tags[a]; });
-  const top = sorted.slice(0, 15).map(function(name) {
-    return name + ' (' + fmtCount(tags[name]) + ')';
-  }).join(', ');
+  const rows = sorted.map(function(name) {
+    return '<tr><td>' + _escapeHtml(name) + '</td><td>' + fmtCount(tags[name]) + '</td></tr>';
+  }).join('');
   return '<p>' + fmtCount(names.length) + ' distinct tags</p>'
-    + '<p class="stat-label">Most used: ' + top + (sorted.length > 15 ? ', …' : '') + '</p>';
+    + '<div class="stats-scroll"><table class="stats-table"><thead><tr><th>Tag</th><th>Count</th></tr></thead>'
+    + '<tbody>' + rows + '</tbody></table></div>';
 }
 
 function _renderAppTracking(apps) {
