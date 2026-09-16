@@ -76,7 +76,13 @@ def _sha256_file(path: str) -> str:
 
 
 def read_source_stats(db_path: str) -> dict:
-    """Read ``(rows, max_api_fetched_at)`` from the source with a read-only view.
+    """Read a few facts about the source with a read-only view.
+
+    ``rows`` is the live row count and moves under the reader whenever the
+    daemon is running; it is reported, never enforced. ``user_version`` is the
+    schema version, which does *not* move while the daemon runs -- migrations
+    all happen before the backup thread starts -- so it is the one thing here a
+    snapshot can fairly be checked against.
 
     The connection is marked ``PRAGMA query_only = ON`` so this can never write
     to the live database, and it is short-lived so it does not hold a read lock
@@ -88,7 +94,9 @@ def read_source_stats(db_path: str) -> dict:
         conn.execute("PRAGMA query_only = ON;")
         rows = conn.execute("SELECT COUNT(*) FROM workshop_items").fetchone()[0]
         max_api_fetched_at = conn.execute("SELECT MAX(api_fetched_at) FROM workshop_items").fetchone()[0]
-        return {"rows": rows, "max_api_fetched_at": max_api_fetched_at}
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        return {"rows": rows, "max_api_fetched_at": max_api_fetched_at,
+                "user_version": user_version}
     finally:
         conn.close()
 
@@ -98,8 +106,22 @@ def verify_snapshot(snapshot_path: str, source_db_path: str) -> dict:
 
     Checks, in order: the file exists and is non-empty; it opens; ``PRAGMA
     quick_check`` returns exactly ``ok``; it contains a readable
-    ``workshop_items`` table; and its row count matches the source's, read via
-    :func:`read_source_stats`.
+    ``workshop_items`` table; its schema version matches the source's; and it is
+    not empty while the source is not.
+
+    **The row count is deliberately not compared for equality.** The daemon
+    writes throughout the copy, so a snapshot taken by ``VACUUM INTO`` is
+    legitimately a few hundred rows behind by the time the source is read: 2,107,917
+    against 2,108,115 on one observed run, and 54 such failures against 25
+    successes in one window of the live log. The snapshot is still a consistent
+    point-in-time copy -- that is what ``VACUUM INTO`` guarantees -- so its age
+    relative to a moving source says nothing about whether it is valid, and
+    failing on it discarded a perfectly good backup for most of the day. The
+    count is reported in the log instead, where it is genuinely informative.
+
+    What remains catches a snapshot that is actually wrong rather than merely
+    older: a corrupt file, a different schema, or one with no rows where the
+    source has them.
 
     Returns ``{"rows": int, "max_api_fetched_at": ...}`` on success and raises
     :class:`BackupError` on any failure. Tests monkeypatch this function to
@@ -119,6 +141,7 @@ def verify_snapshot(snapshot_path: str, source_db_path: str) -> dict:
             if check != [("ok",)]:
                 raise BackupError(f"quick_check failed for {snapshot_path}: {check}")
             row = conn.execute("SELECT COUNT(*), MAX(api_fetched_at) FROM workshop_items").fetchone()
+            snapshot_version = conn.execute("PRAGMA user_version").fetchone()[0]
         finally:
             conn.close()
     except sqlite3.DatabaseError as exc:
@@ -130,16 +153,26 @@ def verify_snapshot(snapshot_path: str, source_db_path: str) -> dict:
     except sqlite3.DatabaseError as exc:
         raise BackupError(f"could not read source database {source_db_path}: {exc}") from exc
 
+    if snapshot_version != source["user_version"]:
+        # The schema does not change while the daemon runs, so this is a fair
+        # comparison, and it is the check that answers "is this a copy of our
+        # database" without racing the writer.
+        raise BackupError(
+            f"snapshot schema version {snapshot_version} does not match the "
+            f"source's {source['user_version']}"
+        )
+
+    if snapshot_rows == 0 and source["rows"] > 0:
+        raise BackupError(
+            f"snapshot has no rows but the source has {source['rows']}"
+        )
+
     if snapshot_rows != source["rows"]:
-        # The live daemon may have discovered a new item between VACUUM INTO and
-        # the source read. Re-read once before declaring a mismatch, so an
-        # in-flight insert does not cause a spurious backup failure.
-        source = read_source_stats(source_db_path)
-        if snapshot_rows != source["rows"]:
-            raise BackupError(
-                "snapshot row count mismatch: snapshot has "
-                f"{snapshot_rows}, source has {source['rows']}"
-            )
+        logging.debug(
+            "Snapshot holds %d rows; the source, read later, holds %d (%+d while "
+            "the copy ran). A live writer makes this expected.",
+            snapshot_rows, source["rows"], source["rows"] - snapshot_rows,
+        )
 
     return {"rows": snapshot_rows, "max_api_fetched_at": row[1]}
 

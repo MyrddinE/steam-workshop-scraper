@@ -58,7 +58,13 @@ def test_snapshot_verifier_rejects_empty_file(db_path, tmp_path):
         verify_snapshot(str(empty), db_path)
 
 
-def test_snapshot_verifier_rejects_row_count_mismatch(db_path, tmp_path):
+def test_snapshot_verifier_rejects_an_empty_snapshot_of_a_populated_source(db_path, tmp_path):
+    """The residual of the old row-count check, without the part that raced.
+
+    An empty snapshot of a database that has rows is wrong in a way no amount of
+    live writing explains, so it still fails; a snapshot that is merely *behind*
+    does not, which is the next test.
+    """
     insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 1})
 
     other_db = str(tmp_path / "other.db")
@@ -66,7 +72,50 @@ def test_snapshot_verifier_rejects_row_count_mismatch(db_path, tmp_path):
     dest = str(tmp_path / "snap.db")
     snapshot_database(other_db, dest)
 
-    with pytest.raises(BackupError, match="row count mismatch"):
+    with pytest.raises(BackupError, match="no rows but the source has 1"):
+        verify_snapshot(dest, db_path)
+
+
+def test_a_snapshot_taken_under_a_live_writer_still_verifies(db_path, tmp_path):
+    """The bug this replaced: a valid snapshot discarded for being a few rows old.
+
+    The daemon writes throughout the copy, so the source is always read later
+    than the snapshot was taken and can hold more rows. That says nothing about
+    whether the snapshot is valid -- ``VACUUM INTO`` guarantees a consistent
+    point-in-time copy -- and treating it as a failure discarded a good backup
+    on most runs. Observed live: 2,107,917 against 2,108,115, and 54 failures to
+    25 successes in one window.
+    """
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "A", "api_fetched_at": 1})
+    dest = str(tmp_path / "snap.db")
+    snapshot_database(db_path, dest)
+
+    # The daemon carries on while the copy is validated.
+    for wid in range(2, 12):
+        insert_or_update_item(db_path, {"workshop_id": wid, "api_fetched_at": wid})
+
+    # It verifies, and it reports what *it* holds, not what the source holds now.
+    assert verify_snapshot(dest, db_path) == {"rows": 1, "max_api_fetched_at": 1}
+
+
+def test_snapshot_verifier_rejects_a_different_schema_version(db_path, tmp_path):
+    """Schema is stable while the daemon runs, so this comparison is fair.
+
+    It is the check that answers "is this a copy of our database" without racing
+    the writer, and it replaces the count equality that could not.
+    """
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 1})
+    dest = str(tmp_path / "snap.db")
+    snapshot_database(db_path, dest)
+
+    conn = sqlite3.connect(dest)
+    try:
+        conn.execute("PRAGMA user_version = 3")
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(BackupError, match="schema version 3 does not match"):
         verify_snapshot(dest, db_path)
 
 
