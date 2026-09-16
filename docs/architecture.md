@@ -41,10 +41,12 @@ The daemon does not merely wait for new items; it actively expands the database:
   adjusts the delay between requests. It is counted in **requests**, not items: one batched
   `GetPublishedFileDetails` call is one data point, so a batch whose items are individually
   "not found" cannot masquerade as a run of failures. The rule is TCP congestion control — each
-  healthy request shaves a fixed 10 ms off the delay and each refused request (a transport error, a
-  timeout, an HTTP error such as 429/5xx, or an unparseable body) doubles it — so the delay
-  converges to just under whatever rate Steam will sustain and keeps probing that moving limit.
-  Individual item results drive item state and never touch the delay.
+  refused request (a transport error, a timeout, an HTTP error such as 429/5xx, or an unparseable
+  body) doubles the delay, and healthy operation halves it for every ten minutes it has been
+  running — so the delay converges to just under whatever rate Steam will sustain and keeps probing
+  that moving limit. The recovery is measured in **time** rather than in successful requests, so
+  every queue recovers over the same wall-clock window; `src/pacing.py` holds the rule for all
+  three. Individual item results drive item state and never touch the delay.
 
 #### The scrape pipeline
 

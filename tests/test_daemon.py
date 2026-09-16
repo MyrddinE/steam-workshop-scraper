@@ -3,6 +3,7 @@ from unittest.mock import patch, MagicMock, ANY
 import signal
 import json
 import time
+from src import pacing
 from src.daemon import Daemon, STALE_SWEEP_INTERVAL_SECONDS, API_DELAY_FLOOR
 from src.database import get_app_tracking, initialize_database, update_app_tracking
 
@@ -157,8 +158,12 @@ def test_api_delay_decays_on_every_healthy_request(mock_sleep, mock_flag_web, mo
     daemon = Daemon(mock_config)
     daemon.batch_size = 5
     daemon.api_delay = 1.0
+    # The batch is one request and therefore one interval; pretend the interval
+    # lasted a half-life.
+    daemon._api_clock._at = pacing.now() - pacing.HALF_LIFE_SECONDS
     daemon.process_batch()
-    assert daemon.api_delay == 0.99, "one successful request decays the delay once"
+    assert daemon.api_delay == pytest.approx(0.5, rel=1e-4), \
+        "a half-life of healthy operation halves the delay, whatever the call count"
 
 @patch('src.daemon.count_unscraped_items')
 @patch('src.daemon.get_next_items_to_scrape')
@@ -182,40 +187,59 @@ def test_api_delay_multiplies_on_every_refused_request(mock_sleep, mock_insert, 
     assert daemon.api_delay == 1.0, "a sustained outage keeps multiplying"
 
 
-def test_api_delay_backoff_is_capped_and_decay_has_a_floor(db_path, tmp_path):
+def test_the_api_delay_doubles_past_the_old_ceiling_and_still_floors(db_path, tmp_path):
+    """A refusal doubles the delay, and nothing clips it from above any more.
+
+    The 2 s ceiling was a defence against a delay moved by the wrong signal, but
+    it also stopped the client ever reaching a sustainable rate above it. An
+    uncapped delay cannot run away: it only doubles when an attempt fails, and
+    the next attempt is a whole delay away, so it tracks the outage rather than
+    outrunning it.
+    """
     daemon = _real_db_daemon(db_path, tmp_path)
 
     daemon.api_delay = 2.0
     daemon._record_api_request_failure()
-    assert daemon.api_delay == 2.0, "the ceiling still bounds a client that never succeeds"
+    assert daemon.api_delay == 4.0, "the delay doubles past the old 2 s ceiling"
 
     daemon.api_delay = 0.01
-    daemon._record_api_request_success()
+    ticks = iter(range(0, 100_000, 600))
+    with patch("src.pacing.now", side_effect=lambda: next(ticks)):
+        daemon._api_clock = pacing.Clock()
+        daemon._record_api_request_success()
     assert daemon.api_delay == 0.01, "a zero delay is not a rate limit"
 
 
-def test_delay_converges_to_just_under_the_refusal_threshold(db_path, tmp_path):
-    """The sawtooth probes upward and settles just above the limit.
+def test_the_delay_settles_around_a_refusal_threshold(db_path, tmp_path):
+    """Started below the limit, the loop refuses its way up and then hovers.
 
-    Simulate a server that refuses any call faster than 40 ms apart. Started at
-    the floor, the loop must refuse its way up to the threshold and then hover
-    around it, not run away to the ceiling and not sit still.
+    The clock is driven forward by one delay per call, because the delay *is*
+    the interval -- that is what the wall clock does. The probe back down is
+    deliberately slow: taking a doubling back costs `HALF_LIFE_SECONDS` of
+    healthy operation, so this runs a long simulated period rather than a few
+    hundred calls. That slowness is the trade the API makes for being the most
+    reliable of the queues.
     """
     daemon = _real_db_daemon(db_path, tmp_path)
     daemon.api_delay = 0.01
-    limit = 0.04
+    limit = 0.32
+    simulated = {"t": 0.0}
     refusals = 0
-    for _ in range(200):
-        if daemon.api_delay < limit:
-            daemon._record_api_request_failure()
-            refusals += 1
-        else:
-            daemon._record_api_request_success()
+
+    with patch("src.pacing.now", side_effect=lambda: simulated["t"]):
+        daemon._api_clock = pacing.Clock()
+        for _ in range(6000):
+            simulated["t"] += daemon.api_delay
+            if daemon.api_delay < limit:
+                daemon._record_api_request_failure()
+                refusals += 1
+            else:
+                daemon._record_api_request_success()
 
     assert refusals > 0, "it must have probed into the limit at least once"
-    assert limit - 0.01 <= daemon.api_delay <= limit + 0.03, (
-        f"delay settled at {daemon.api_delay}, not near the {limit}s threshold")
-    assert refusals < 200, "it must be refused sometimes, not constantly"
+    assert refusals < 100, "and must back off rather than keep knocking"
+    assert limit / 4 <= daemon.api_delay <= limit * 2, (
+        f"delay settled at {daemon.api_delay}, nowhere near the {limit}s threshold")
 
 
 def test_mixed_outcome_batch_is_a_healthy_request_not_a_refusal(db_path, tmp_path):
@@ -264,8 +288,11 @@ def test_request_failure_multiplies_delay_and_success_decays_it(db_path, tmp_pat
     assert daemon.api_delay == 0.5
     assert daemon.api_failures == 1
 
+    # A half-life of healthy operation is exactly what takes back one doubling.
+    daemon._api_clock._at = pacing.now() - pacing.HALF_LIFE_SECONDS
     daemon._record_api_request_success()
-    assert daemon.api_delay == 0.49, "a healthy request walks the delay back down"
+    assert daemon.api_delay == pytest.approx(0.25, rel=1e-4), \
+        "a half-life of healthy operation undoes a doubling"
     assert daemon.api_failures == 0, "a healthy request resets the failure streak"
 
 

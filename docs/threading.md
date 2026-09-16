@@ -49,6 +49,15 @@ change before retrying can work; the thread resumes on its own once it does, and
 attempt replaces the storm. The streak resets on the first batch that gets through. The wait is served
 in one-second steps so a long backoff cannot hold the daemon's shutdown.
 
+**Why this one does not share the pacing rule.** The other three move a delay up and down to find a
+rate Steam will sustain, and they now share `src/pacing.py`. The translator is waiting out a daily
+allowance that resets every 24 hours, not a rate: asking more slowly buys nothing, and asking less
+slowly costs nothing except on the day the allowance runs out. The horizon is the reset, so backing off
+to an hour and re-probing about twenty-four times a day is the right shape, and an uncapped or
+rate-seeking delay would be worse than useless — it would answer a question nobody asked. This is also
+why it keeps its ceilings while the other three lost theirs, and why it is the one worker that was
+never given a config key: it has never needed an escape hatch.
+
 **The backoff outlives the process.** The streak and the moment its next attempt falls due are written
 to the daemon state file beside the database, `.daemon_state.yaml`, so restarting the daemon resumes
 the backoff instead of beginning again at the base — otherwise a service condition that had already

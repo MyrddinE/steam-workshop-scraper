@@ -7,6 +7,7 @@ import logging
 import threading
 from datetime import datetime, timezone
 from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, flag_field_for_translation, translation_is_current
+from src import pacing
 from src.web_scraper import (DESCRIPTION_SELECTOR, ITEM_MISSING_HTTP_STATUSES, looks_gated,
                              looks_like_item_page_without_description, looks_like_missing_item,
                              looks_rate_limited, looks_signed_out, missing_item_reason,
@@ -16,7 +17,6 @@ from src import capture
 # Steam's per-account request budget refills over minutes, so the useful
 # response to its throttle page is a pause measured in minutes, not the
 # seconds used for ordinary pacing.
-RATE_LIMIT_PAUSE_SECONDS = 300.0
 
 # The slowest the decay rule will take the scraper. The owner learned the figure
 # empirically: the same Steam budget is shared with their own hand-browsing, so
@@ -25,9 +25,9 @@ RATE_LIMIT_PAUSE_SECONDS = 300.0
 # left no room for that.
 WEB_DELAY_FLOOR = 6.0
 
-# The starting delay. Set to the floor rather than below it: a default under the
-# floor would be a delay the decay rule considers too fast, and the first 100
-# successes would rewrite it upward to the floor anyway.
+# The starting delay. Set to the floor rather than below it, so an installation
+# that has never written a delay starts at the slowest rate the decay will take
+# it to anyway.
 WEB_DELAY_DEFAULT = WEB_DELAY_FLOOR
 
 
@@ -124,15 +124,10 @@ class WebScraperThread(threading.Thread):
         self.web_successes = 0
         self.web_failures = 0
         self.web_had_streak = False
-
-    def _wait_out_throttle(self, seconds: float) -> None:
-        """Sleep in one-second steps so a pause cannot hold shutdown hostage."""
-        deadline = time.monotonic() + seconds
-        while self.running:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return
-            time.sleep(min(1.0, remaining))
+        # In memory only: a daemon restarted after a day resumes at the delay it
+        # had reached rather than treating the downtime as healthy operation.
+        self._clock = pacing.Clock()
+        self._persisted_web_delay = self.web_delay
 
     def _retry_if_gated(self, item: dict, url: str, scrape_data: dict | None) -> dict | None:
         """Retry once when a failed scrape looks like Steam withholding the page.
@@ -185,6 +180,33 @@ class WebScraperThread(threading.Thread):
                      item.get("workshop_id"))
         return scrape_extended_details(url) or scrape_data
 
+    def _decay_delay(self, elapsed: float) -> None:
+        """Shrink the delay for the healthy time since the previous attempt.
+
+        The interval is wall-clock, so the delay halves over
+        `pacing.HALF_LIFE_SECONDS` whatever its size. The old rule needed 100
+        consecutive successes, which is a different amount of elapsed time at
+        every delay and so recovered faster the faster it was already going.
+        """
+        old = self.web_delay
+        self.web_delay = pacing.decay(self.web_delay, elapsed, WEB_DELAY_FLOOR)
+        if old != self.web_delay:
+            self._persist_delay()
+
+    def _persist_delay(self, force: bool = False) -> None:
+        """Write the delay back when it has moved far enough to be worth it.
+
+        The decay runs on every success now, so without a step of its own it
+        would rewrite config.yaml once per scrape.
+        """
+        if not self._save_cb:
+            return
+        if not force and not pacing.needs_persist(
+                self.web_delay, self._persisted_web_delay):
+            return
+        self._persisted_web_delay = self.web_delay
+        self._save_cb("web_delay_seconds", pacing.persistable(self.web_delay))
+
     def _record_web_failure(self) -> None:
         """Count one scrape whose outcome we cannot attribute, and grow the delay.
 
@@ -199,10 +221,11 @@ class WebScraperThread(threading.Thread):
         self.web_successes = 0
         if self.web_failures >= 2 and self.web_had_streak:
             old = self.web_delay
-            self.web_delay = min(round(self.web_delay * (1.05 ** 10), 3),20)
+            self.web_delay = pacing.backoff(self.web_delay)
             logging.info(f"Multiple consecutive web scrape failures! Increasing web delay from {old} to {self.web_delay}s.")
-            if self._save_cb:
-                self._save_cb("web_delay_seconds", self.web_delay)
+            # Always written: a restart during an outage must not resume at the
+            # pace that was just refused.
+            self._persist_delay(force=True)
             self.web_had_streak = False
 
     def _clear_web_scrape_flag(self, workshop_id: int) -> None:
@@ -339,6 +362,10 @@ class WebScraperThread(threading.Thread):
             url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}"
             # When scrape capture is on, ask for the body even on success: the
             # whole point is to see what a working, signed-in page looks like.
+            # One interval per attempt, advanced whether or not it succeeds; a
+            # failure must not leave it running, or the next success would read
+            # the whole outage as elapsed time and collapse the delay at once.
+            elapsed = self._clock.since()
             keeping = capture.web_scrape_capture_active()
             scrape_data = scrape_extended_details(url, keep_body=keeping)
             scrape_data = self._retry_if_gated(item, url, scrape_data)
@@ -370,28 +397,31 @@ class WebScraperThread(threading.Thread):
                 self.web_failures = 0
                 if self.web_successes >= 5:
                     self.web_had_streak = True
-                if self.web_successes >= 100:
-                    old = self.web_delay
-                    self.web_delay = max(WEB_DELAY_FLOOR, round(self.web_delay / 1.05, 3))
-                    if old != self.web_delay:
-                        logging.info(f"100 consecutive web successes! Decreasing web delay from {old} to {self.web_delay}s.")
-                        if self._save_cb:
-                            self._save_cb("web_delay_seconds", self.web_delay)
-                    self.web_successes = 0
+                self._decay_delay(elapsed)
             elif outcome is ScrapeOutcome.RATE_LIMITED:
                 # Not a bad item and not necessarily a stale cookie: the page
                 # itself reports too many requests, and that is the only thing
-                # that has actually been observed. Acting on it is right either
-                # way -- the reply is not the item -- so the cause is left
-                # unnamed. Decaying the item would blame the wrong thing, and a
-                # retry would spend more of whatever the budget is. The pause is
-                # the whole response; the delay rule is not touched.
+                # observed. The item is left alone either way -- the reply is not
+                # the item -- so the cause stays unnamed.
+                #
+                # A throttle is a refusal, and an unambiguous one, so it halves
+                # the request rate immediately rather than waiting for the
+                # second strike an unattributable failure needs.
+                # same way any other refusal does. It used to sleep a fixed
+                # 300 s and leave the delay alone, which made it a second pacing
+                # rule that could not converge: the same pause every time,
+                # forever. The doubling is served by the wait at the end of this
+                # iteration, so a sustained throttle backs off geometrically.
+                old_delay = self.web_delay
+                self.web_delay = pacing.backoff(self.web_delay)
                 logging.warning(
                     "[W:%s] Steam returned a page reporting too many requests; "
-                    "pausing %.0fs and leaving the item untouched.",
-                    workshop_id, RATE_LIMIT_PAUSE_SECONDS)
-                self._wait_out_throttle(RATE_LIMIT_PAUSE_SECONDS)
-                continue
+                    "increasing the delay from %.2fs to %.2fs and leaving the "
+                    "item untouched.",
+                    workshop_id, old_delay, self.web_delay)
+                self._persist_delay(force=True)
+                self.web_failures += 1
+                self.web_successes = 0
             elif outcome is ScrapeOutcome.ITEM_MISSING:
                 self._handle_missing_item(item, url, scrape_data)
             elif outcome is ScrapeOutcome.ITEM_PAGE_WITHOUT_DESCRIPTION:
@@ -400,10 +430,11 @@ class WebScraperThread(threading.Thread):
                 self._handle_gate(item, url, scrape_data)
             else:  # ScrapeOutcome.UNKNOWN
                 self._handle_unknown(item, url, scrape_data)
-            time.sleep(self.web_delay)
+            # Responsive, so a long backoff cannot make the worker deaf to a
+            # stop or a pause. It serves the delay in full; it does not shorten it.
+            pacing.wait(self.web_delay, lambda: self.running)
 
-        if self._save_cb:
-            self._save_cb("web_delay_seconds", self.web_delay)
+        self._persist_delay(force=True)
         logging.info("Web scraper thread stopped.")
 
 

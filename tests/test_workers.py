@@ -65,22 +65,31 @@ def test_the_default_web_delay_is_not_below_the_floor():
 
 
 def test_the_web_delay_floor_is_honoured_during_decay(db_path):
-    """100 successes shrink the delay, but only down to the floor."""
+    """The decay is measured in time, and it stops at the floor.
+
+    The clock is driven rather than waited on: one tick per attempt, each worth
+    well over the half-life, so a handful of successes is enough to drive the
+    delay into the floor. Successes alone would do nothing at all now -- the
+    decay is paid for in elapsed time, not in requests.
+    """
+    from src import pacing
     from src.database import insert_or_update_item
     from src.web_worker import WEB_DELAY_FLOOR, WebScraperThread
 
     insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
 
-    # Just above the floor: one decay step would land under it unfloored.
+    # Just above the floor: one step lands under it unless it is clamped.
     worker = WebScraperThread(db_path, ".pauselock")
     worker.web_delay = WEB_DELAY_FLOOR + 0.2
 
-    worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
-                             [FOUND] * 100, worker=worker)
+    ticks = iter(range(0, 10_000, 120))
+    with patch("src.pacing.now", side_effect=lambda: next(ticks)):
+        worker._clock = pacing.Clock()
+        worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
+                                 [FOUND] * 10, worker=worker)
 
     assert worker.web_delay == WEB_DELAY_FLOOR, \
         "the decay must stop at the floor, not pass through it"
-    assert worker.web_delay >= WEB_DELAY_FLOOR
 
 
 # ── Image worker ─────────────────────────────────────────────────────────────
@@ -376,8 +385,12 @@ def _run_web_worker(db_path, item, scrape_data, iterations=None, worker=None):
             return None
         return item
 
+    # `time.sleep` alone is not enough to keep this fast: pacing.wait measures
+    # its deadline against the real monotonic clock, so with sleep stubbed it
+    # would spin for the delay in real time and the join below would give up
+    # mid-run. The wait is not what these tests are about, so it is patched out.
     with patch("src.web_worker.get_next_web_scrape_item", side_effect=next_item), \
-         scrape_patch, patch("time.sleep"):
+         scrape_patch, patch("time.sleep"), patch("src.pacing.wait"):
         worker.start()
         worker.join(timeout=5)
     return worker
@@ -620,25 +633,30 @@ def test_a_transport_failure_still_grows_the_delay(db_path):
     assert worker.web_delay > WEB_DELAY_DEFAULT, "a transport failure still slows the scraper"
 
 
-def test_a_rate_limit_pauses_without_growing_the_delay(db_path):
-    """The throttle keeps its 300 s pause and touches nothing else."""
+def test_a_rate_limit_halves_the_request_rate(db_path):
+    """A throttle is an unambiguous refusal, so it slows the scraper at once.
+
+    It used to sleep a fixed 300 s and leave the delay untouched, which was a
+    second pacing rule that could not converge -- the same pause however often
+    the throttle recurred, and no slower a rate afterwards. Now the doubling is
+    served by the wait at the end of the iteration, so a sustained throttle
+    backs off geometrically.
+    """
     from src.database import insert_or_update_item
-    from src.web_worker import RATE_LIMIT_PAUSE_SECONDS, WebScraperThread
+    from src.web_worker import WebScraperThread
 
     insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
 
     worker = WebScraperThread(db_path, ".pauselock")
-    worker.web_had_streak = True
-    worker.web_failures = 1
+    before = worker.web_delay
 
     throttled = dict(MISS, body="<h1>You've made too many requests recently.</h1>")
-    with patch.object(worker, "_wait_out_throttle") as pause:
-        worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
-                                 throttled, worker=worker)
+    worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
+                             throttled, worker=worker)
 
-    pause.assert_called_once_with(RATE_LIMIT_PAUSE_SECONDS)
-    assert worker.web_failures == 1, "a spent budget is not a scrape failure"
-    assert worker.web_delay == WEB_DELAY_DEFAULT
+    assert worker.web_delay == before * 2, \
+        "a throttle is a refusal and halves the request rate"
+    assert worker.web_failures == 1, "a throttle is counted, unlike a bad item"
     assert _web_scrape_priority(db_path) == 5, "the item is not at fault"
 
 

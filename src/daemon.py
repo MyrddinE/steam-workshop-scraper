@@ -42,6 +42,7 @@ from src.web_worker import WebScraperThread
 from src.image_worker import ImageScraperThread
 from src.backup import BackupThread
 from src.daemon_state import StateStore, state_path_for
+from src import pacing
 from src import images
 from src import capture
 
@@ -65,14 +66,24 @@ PERMANENT_API_STATUSES = frozenset({404})
 # run of failures. Only the request outcome moves the delay; per-item results
 # drive item state (status, priority, queue flags, death) and nothing else.
 #
-# The shape is TCP congestion control, not a safety net: every healthy request
-# shaves a fixed step off the delay (additive increase of the request rate) and
-# every refusal multiplies it (multiplicative decrease of the rate). The client
-# therefore keeps probing upward until it is refused, backs off, and walks back
-# down, so it converges to just under whatever rate Steam will sustain -- a
-# limit that is not published and may move. Steady state is a sawtooth: the
-# delay sits near the smallest value that does not draw a refusal, one refusal
-# doubles it, and the following successes walk it back down.
+# The shape is TCP congestion control, not a safety net: every refusal doubles
+# the delay and healthy operation walks it back down, so the client converges on
+# the fastest rate Steam will sustain -- a limit that is not published and may
+# move. Steady state is a sawtooth around that rate.
+#
+# The walk back down is measured in *time*, not in successful requests: the
+# delay halves for every `pacing.HALF_LIFE_SECONDS` of healthy operation, so it
+# recovers over the same wall-clock window whatever its current size. A count
+# would not do that -- one successful request is a different amount of time at
+# every delay -- and it is the reason all three pacing workers share
+# `src/pacing.py` instead of each keeping its own arithmetic.
+#
+# There is no ceiling. One was kept while the back-off could still be moved by
+# the wrong signal, but it also caps convergence, and an uncapped delay cannot
+# run away: it only doubles when an attempt fails, and the next attempt is a
+# whole delay away, so the delay after k refusals is d0 * 2**k and the elapsed
+# time to reach it is d0 * (2**k - 1). The delay tracks the length of the outage
+# rather than outrunning it.
 #
 # `api_delay` is a literal inter-call delay, not a target rate. It is added on
 # top of the request's own latency and is normally the smaller term; the
@@ -87,28 +98,9 @@ PERMANENT_API_STATUSES = frozenset({404})
 # guess the cost model and buys nothing: the feedback loop finds whichever limit
 # is real.
 
-# Additive decrease of the delay per healthy request: 10 ms, the granularity the
-# live configuration already uses.
-API_DECAY_STEP_SECONDS = 0.01
-
-# Multiplicative increase of the delay on a refusal: doubling is the standard
-# congestion response (halving the rate).
-API_BACKOFF_FACTOR = 2.0
-
 # The delay never drops below this -- a zero delay is not a rate limit and a
 # negative one is nonsense.
 API_DELAY_FLOOR = 0.01
-
-# Keep the decay from rewriting config.yaml on every request: persist only once
-# the delay has moved this far from the last persisted value. The back-off path
-# always persists, so a restart during an outage does not resume hammering.
-API_DELAY_PERSIST_STEP = 0.1
-
-# Ceiling kept for now. Issue #21 records that it must eventually go: it bounds
-# a client that can never succeed (a bad key would otherwise multiply the delay
-# without bound), but it also caps convergence -- if the sustainable delay sits
-# above 2 s the client cannot reach it and is refused at the cap instead.
-API_DELAY_CEILING = 2.0
 
 # The staleness sweep is a full-table UPDATE whose threshold is measured in days
 # (`item_staleness_days`, 60 in production). Running it on every batch -- every
@@ -232,6 +224,9 @@ class Daemon:
         # The last delay written to config, so the per-request decay does not
         # rewrite the file on every request.
         self._persisted_api_delay = self.api_delay
+        # In memory only, so a daemon restarted after a day resumes at the delay
+        # it had reached rather than treating the downtime as healthy operation.
+        self._api_clock = pacing.Clock()
 
         # Monotonic timestamp of the last staleness sweep; None means "never",
         # so the first batch after startup always sweeps.
@@ -815,9 +810,9 @@ class Daemon:
         """
         self.api_failures += 1
         self.api_successes = 0
+        self._api_clock.since()
         old_delay = self.api_delay
-        self.api_delay = min(round(self.api_delay * API_BACKOFF_FACTOR, 3),
-                             API_DELAY_CEILING)
+        self.api_delay = pacing.backoff(self.api_delay)
         if old_delay != self.api_delay:
             set_api_delay(self.api_delay)
             logging.info(
@@ -826,7 +821,8 @@ class Daemon:
             # Persist immediately: a restart during an outage must not resume at
             # the old, refused pace.
             self._persisted_api_delay = self.api_delay
-            self._save_config_value("api_delay_seconds", self.api_delay)
+            self._save_config_value(
+                "api_delay_seconds", pacing.persistable(self.api_delay))
 
     def _record_api_request_success(self) -> None:
         """Shave one step off the delay for a healthy request.
@@ -840,15 +836,16 @@ class Daemon:
         self.api_successes += 1
         self.api_failures = 0
         old_delay = self.api_delay
-        self.api_delay = max(round(self.api_delay - API_DECAY_STEP_SECONDS, 3),
-                             API_DELAY_FLOOR)
+        self.api_delay = pacing.decay(
+            self.api_delay, self._api_clock.since(), API_DELAY_FLOOR)
         if old_delay != self.api_delay:
             set_api_delay(self.api_delay)
-            if abs(self.api_delay - self._persisted_api_delay) >= API_DELAY_PERSIST_STEP:
+            if pacing.needs_persist(self.api_delay, self._persisted_api_delay):
                 self._persisted_api_delay = self.api_delay
                 logging.info(
                     f"Healthy API requests; decreasing API delay to {self.api_delay} seconds.")
-                self._save_config_value("api_delay_seconds", self.api_delay)
+                self._save_config_value(
+                    "api_delay_seconds", pacing.persistable(self.api_delay))
             else:
                 # One line per step would flood the log while the delay walks
                 # down from a back-off; the persisted steps are the reportable
@@ -976,7 +973,7 @@ class Daemon:
                 cursor = result.get("next_cursor") or ""
                 if cursor:
                     update_app_tracking_cursor(self.db_path, appid, cursor)
-                time.sleep(self.api_delay)
+                pacing.wait(self.api_delay, lambda: self.running)
 
                 if new_discovered_count >= target_new:
                     logging.info(f"Discovered {new_discovered_count} new items for AppID {appid}, enough for now.")
@@ -1068,6 +1065,6 @@ class Daemon:
 
                 logging.info(f"Page mode: page {page} added/updated {page_new} items for AppID {appid}.")
                 cursor = result.get("next_cursor") or ""
-                time.sleep(self.api_delay)
+                pacing.wait(self.api_delay, lambda: self.running)
 
         logging.info("Page-based discovery complete.")

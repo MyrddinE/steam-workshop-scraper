@@ -6,13 +6,18 @@ import logging
 import threading
 import requests
 from datetime import datetime, timezone
-from src import capture, images
+from src import capture, images, pacing
 from src.database import get_next_image_item, insert_or_update_item, get_image_path
 
 # Re-exported so this module still reads as the place the downloader's formats
 # are defined; the definitions live in src/images.py because the reader (the URL
 # guard) must agree with the writer about what an image extension is.
 from src.images import MIME_MAP, MAGIC_EXT_MAP  # noqa: F401
+
+# The slowest the decay rule will take this worker. The image queue is the one
+# that has to keep up with the library, and a preview is a single small file, so
+# it can probe far harder than the web scraper's shared Steam budget allows.
+IMAGE_DELAY_FLOOR = 0.5
 
 
 def _response_metadata(resp) -> dict:
@@ -47,6 +52,11 @@ class ImageScraperThread(threading.Thread):
         self.image_successes = 0
         self.image_failures = 0
         self.image_had_streak = False
+        # The decay is measured in time, from a clock that exists only in this
+        # process: a daemon restarted after a day must resume where it left off,
+        # not treat the day as healthy operation.
+        self._clock = pacing.Clock()
+        self._persisted_image_delay = self.image_delay
 
     def run(self):
         logging.info("Image download thread started.")
@@ -74,6 +84,12 @@ class ImageScraperThread(threading.Thread):
             # The response, when there was one, is the evidence a capture needs.
             # None distinguishes a transport failure from a refused status.
             resp = None
+            # One interval per attempt, measured from the previous attempt to
+            # this one and advanced whether or not this one succeeds. If a
+            # failure left the interval running, the first success afterwards
+            # would read the whole run as elapsed time and collapse the delay in
+            # a single step -- the opposite of backing off.
+            elapsed = self._clock.since()
             try:
                 resp = requests.get(url, allow_redirects=True, timeout=15, stream=True)
                 if resp.status_code != 200:
@@ -144,14 +160,7 @@ class ImageScraperThread(threading.Thread):
                 self.image_failures = 0
                 if self.image_successes >= 5:
                     self.image_had_streak = True
-                if self.image_successes >= 100:
-                    old = self.image_delay
-                    self.image_delay = max(0.5, round(self.image_delay / 1.05, 3))
-                    if old != self.image_delay:
-                        logging.info(f"100 consecutive image successes! Decreasing delay from {old} to {self.image_delay}s.")
-                        if self._save_cb:
-                            self._save_cb("image_delay_seconds", self.image_delay)
-                    self.image_successes = 0
+                self._decay_delay(elapsed)
 
             except Exception as e:
                 logging.warning(f"[I:{wid}] Image download failed: {e}")
@@ -198,17 +207,46 @@ class ImageScraperThread(threading.Thread):
                     self.image_successes = 0
                     if self.image_failures >= 2 and self.image_had_streak:
                         old = self.image_delay
-                        self.image_delay = min(round(self.image_delay * (1.05 ** 10), 3),20)
+                        self.image_delay = pacing.backoff(self.image_delay)
                         logging.info(f"Multiple consecutive image failures! Increasing delay from {old} to {self.image_delay}s.")
-                        if self._save_cb:
-                            self._save_cb("image_delay_seconds", self.image_delay)
+                        # Always written: a restart during an outage must not
+                        # resume at the pace that was just refused.
+                        self._persist_delay(force=True)
                         self.image_had_streak = False
 
-            time.sleep(self.image_delay)
+            # Responsive, so a long backoff cannot make the worker deaf to a
+            # stop or a pause. It serves the delay in full; it does not shorten it.
+            pacing.wait(self.image_delay, lambda: self.running)
 
-        if self._save_cb:
-            self._save_cb("image_delay_seconds", self.image_delay)
+        self._persist_delay(force=True)
         logging.info("Image download thread stopped.")
+
+    def _decay_delay(self, elapsed: float) -> None:
+        """Shrink the delay for the healthy time since the previous attempt.
+
+        One healthy attempt is worth the wall-clock time it occupied, so the
+        delay halves over `pacing.HALF_LIFE_SECONDS` however large it is -- the
+        property a success-counted rule cannot have, since a count means a
+        different amount of time at every delay.
+        """
+        old = self.image_delay
+        self.image_delay = pacing.decay(self.image_delay, elapsed, IMAGE_DELAY_FLOOR)
+        if old != self.image_delay:
+            self._persist_delay()
+
+    def _persist_delay(self, force: bool = False) -> None:
+        """Write the delay back when it has moved far enough to be worth it.
+
+        Without a step the decay -- which now runs on every success -- would
+        rewrite config.yaml per download.
+        """
+        if not self._save_cb:
+            return
+        if not force and not pacing.needs_persist(
+                self.image_delay, self._persisted_image_delay):
+            return
+        self._persisted_image_delay = self.image_delay
+        self._save_cb("image_delay_seconds", pacing.persistable(self.image_delay))
 
     def _get_conn(self):
         from src.database import get_connection

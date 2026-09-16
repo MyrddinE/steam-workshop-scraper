@@ -154,8 +154,11 @@ def test_a_definitive_404_is_not_treated_as_a_gate():
 def test_a_throttled_item_is_not_decayed():
     """The item is fine; only the budget is spent.
 
-    The rate-limit outcome buys the long pause and nothing else, so it must not
-    reach the failure counter and must not clear the item. The behavioural
+    A throttle must not reach the per-item handling: it is not evidence against
+    the item, so it must neither clear its queue flag nor be counted as an
+    unattributable failure. It does move the *rate* -- a throttle is an
+    unambiguous refusal and halves the request rate at once -- which is the
+    change from the fixed pause it used to serve instead. The behavioural
     coverage is in tests/test_workers.py; this pins the classification and the
     branch shape.
     """
@@ -167,8 +170,10 @@ def test_a_throttled_item_is_not_decayed():
     src = __import__("pathlib").Path("src/web_worker.py").read_text(encoding="utf-8")
     branch = src.index("elif outcome is ScrapeOutcome.RATE_LIMITED")
     following = src.index("elif outcome is ScrapeOutcome.ITEM_MISSING", branch)
-    assert "continue" in src[branch:following], "the throttle branch must skip the pacing sleep"
-    assert "_record_web_failure" not in src[branch:following], "a throttle is not a back-off"
+    body = src[branch:following]
+    assert "_record_web_failure" not in body, "a throttle is not an item failure"
+    assert "_handle_unknown" not in body, "and it must not blame the item"
+    assert "pacing.backoff" in body, "a throttle is a refusal: it slows the scraper"
 
 
 def test_a_throttled_page_does_not_shadow_the_auth_check():
