@@ -16,6 +16,7 @@ from src.database import search_items, get_all_authors, initialize_database, get
 from src.analysis import view_window_analysis
 from src import metrics
 from src import images
+from src import pending
 from src.config import ConfigError, load_config, save_config
 from src.daemon_control import DaemonController
 import os
@@ -958,21 +959,30 @@ class DetailsPane(VerticalScroll):
 class WorkshopItem(ListItem):
     """A list item representing a workshop item."""
     BRAILLE = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-    _frame = 0
+    # One tick for the whole list; an item divides it by its stage's period
+    # multiplier to get its own frame, so items can run at different speeds from
+    # a single timer. The modulus keeps the sequence repeating exactly for the
+    # slowest stage.
+    _tick = 0
+    _TICK_MODULUS = len(BRAILLE) * max(m for _s, m, _c in pending.STAGES)
 
     def __init__(self, item_data: dict):
         super().__init__()
         self.item_data = item_data
 
-    @staticmethod
-    def _has_pending(item):
-        # A non-empty image_extension is not proof of a picture: it may hold the
-        # status that said there is none, which is settled, not pending.
-        return ((item.get("needs_image", 0) >= 5
-                 and not images.is_resolved(item.get("image_extension")))
-                or item.get("translation_priority", 0) >= 5
-                or item.get("needs_web_scrape", 0) >= 5
-                or item.get("api_priority", 0) >= 5)
+    def _spinner(self) -> str:
+        """This item's marker, or a space when nothing is outstanding.
+
+        The speed says which stage is waiting and the colour fades with it, so a
+        marker that clears in seconds does not look like one that may take
+        hours. Both come from `src/pending.py`, which the web list mirrors.
+        """
+        stage = pending.pending_stage(self.item_data)
+        if stage is None:
+            return " "
+        multiplier, colour = pending.stage_spec(stage)
+        frame = (self._tick // multiplier) % len(self.BRAILLE)
+        return f"[{colour}]{self.BRAILLE[frame]}[/]"
 
     def compose(self) -> ComposeResult:
         wid = self.item_data.get("workshop_id", "N/A")
@@ -980,7 +990,7 @@ class WorkshopItem(ListItem):
         creator = self.item_data.get("personaname_en") or self.item_data.get("personaname") or self.item_data.get("creator", "Unknown Creator")
         is_queued = self.item_data.get("is_queued_for_subscription", 0)
         prefix = "[green]*[/green] " if is_queued else "  "
-        spin = self.BRAILLE[self._frame] if self._has_pending(self.item_data) else " "
+        spin = self._spinner()
 
         yield Label(f"{prefix}[b]{title}[/b] ({wid})")
         yield Label(f"  By: {creator}   {spin}")
@@ -1519,11 +1529,11 @@ class ScraperApp(App):
             pass
 
     async def _tick_spinners(self) -> None:
-        WorkshopItem._frame = (WorkshopItem._frame + 1) % len(WorkshopItem.BRAILLE)
+        WorkshopItem._tick = (WorkshopItem._tick + 1) % WorkshopItem._TICK_MODULUS
         try:
             list_view = self.query_one("#results-list", ListView)
             for child in list_view.children:
-                if hasattr(child, 'item_data') and WorkshopItem._has_pending(child.item_data):
+                if hasattr(child, 'item_data') and pending.pending_stage(child.item_data):
                     await child.refresh_item()
         # Cosmetic spinner refresh; a failure is retried on the next 0.15 s tick.
         except Exception:
@@ -1925,7 +1935,6 @@ class ScraperApp(App):
                 bot = top + child_h
                 if bot > scroll_y and top < scroll_y + visible_h:
                     visible_ids.append(child.item_data["workshop_id"])
-                    child.item_data["api_priority"] = 10  # update in-memory for spinner
                     if hasattr(child, 'refresh_item'):
                         # refresh_item is async (every other call site awaits it);
                         # calling it bare only raised a RuntimeWarning and never

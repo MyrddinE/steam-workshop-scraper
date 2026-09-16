@@ -15,6 +15,13 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 #results-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: .5rem; overflow-y: auto; align-content: start; flex: 1; min-height: 0; }
 .grid-cell { cursor: pointer; padding: .5em; border: 1px solid var(--pico-muted-border-color); border-radius: 4px; display: flex; flex-direction: column; gap: .25em; outline: none; position: relative; }
 .grid-cell .grid-spinner { display: none; position: absolute; bottom: 4px; right: 4px; width: 12px; height: 12px; border: 2px solid var(--pico-muted-border-color); border-top-color: #44aa44; border-radius: 50%; animation: spin .6s linear infinite; }
+/* The marker's speed says which stage is outstanding and its colour fades with
+   it, so a marker that clears in seconds does not look like one that may take
+   hours. The durations and colours are mirrored from src/pending.py, and a
+   contract test fails if the two ever disagree. */
+.grid-cell.pending-image .grid-spinner { animation-duration: 0.6s; border-top-color: #44aa44; }
+.grid-cell.pending-translation .grid-spinner { animation-duration: 2.4s; border-top-color: #7f9a7f; }
+.grid-cell.pending-web .grid-spinner { animation-duration: 9.6s; border-top-color: #8a8a8a; }
 .grid-cell.has-spinner .grid-spinner { display: block; }
 .grid-cell:hover { border-color: var(--pico-primary-hover-background); }
 .grid-cell:focus-visible { outline: 2px solid #44aa44; outline-offset: 2px; }
@@ -451,7 +458,7 @@ async function doSearch(reset = true) {
         <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}" data-wilson="wilson_favorite" data-score="${item.wilson_favorite_score ?? ''}">F ${wfs!=null?wfs+'%':'—'}</span>
       </div>
       <div class="grid-spinner"></div>`;
-    if (_itemHasPending(item)) div.classList.add('has-spinner');
+    _applyPending(div, item);
     div.onclick = () => showDetail(item.workshop_id);
     grid.appendChild(div);
   });
@@ -519,16 +526,29 @@ function _imageCellHtml(item) {
   return `<div class="grid-img-placeholder">${label}</div>`;
 }
 
-function _itemHasPending(item) {
-  return (item.needs_image >= 5 && !item.image_resolved)
-      || item.translation_priority >= 5
-      || item.needs_web_scrape >= 5
-      || item.api_priority >= 5;
+// Which stage this item's marker should show, or null. Fastest first: a marker
+// that is about to clear says so rather than hiding behind a slower stage, and
+// the slow grey one is the one that must not nag. Mirrors src/pending.py.
+// api_priority is deliberately absent: a list only shows items the API has
+// already returned, so a pending refresh is not content anyone is waiting on.
+function _pendingStage(item) {
+  if (item.needs_image >= 5 && !item.image_resolved) return 'image';
+  if (item.translation_priority >= 5) return 'translation';
+  if (item.needs_web_scrape >= 5) return 'web';
+  return null;
+}
+
+function _applyPending(el, item) {
+  const stage = _pendingStage(item);
+  ['image', 'translation', 'web'].forEach(function(name) {
+    el.classList.toggle('pending-' + name, stage === name);
+  });
+  el.classList.toggle('has-spinner', stage !== null);
 }
 
 function _listNeedsPoll(items) {
   for (const item of items) {
-    if (_itemHasPending(item)) return true;
+    if (_pendingStage(item) !== null) return true;
   }
   return false;
 }
@@ -564,11 +584,7 @@ function _startListPoll(filters, sortBy, sortOrder) {
           const ph = el.querySelector('.grid-img-placeholder');
           if (ph && _imageState(item) !== 'absent') ph.outerHTML = _imageCellHtml(item);
         }
-        if (_itemHasPending(item)) {
-          el.classList.add('has-spinner');
-        } else {
-          el.classList.remove('has-spinner');
-        }
+        _applyPending(el, item);
         const wfs = item.wilson_favorite_score != null ? (item.wilson_favorite_score*100).toFixed(1) : null;
         const wss = item.wilson_subscription_score != null ? (item.wilson_subscription_score*100).toFixed(1) : null;
         const scores = el.querySelector('.grid-scores');
