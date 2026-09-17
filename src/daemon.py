@@ -14,8 +14,6 @@ from src.database import (
     get_user, 
     flag_for_translation,
     get_app_tracking,
-    update_app_tracking,
-    update_app_tracking_page,
     update_app_tracking_cursor,
     save_app_filter,
     get_connection,
