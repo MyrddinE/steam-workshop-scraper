@@ -1,10 +1,17 @@
 import requests
 import time
+import threading
 import logging
 
 from src import capture
 
-_last_api_call = 0.0
+# The shared request schedule. ``_next_slot`` is the earliest monotonic moment at
+# which the next caller may start a request, so every caller — the batched
+# details fetch, the creator summaries, discovery — draws on one budget rather
+# than each keeping its own. That is what makes it safe to run discovery on its
+# own thread: concurrency redistributes the budget, it does not enlarge it.
+_lock = threading.Lock()
+_next_slot = 0.0
 _API_DELAY = 1.5
 
 # Ceiling on ids carried by one bulk request. The Steamworks reference documents
@@ -22,15 +29,50 @@ STEAM_API_MAX_IDS_PER_REQUEST = 100
 
 def set_api_delay(seconds: float):
     global _API_DELAY
-    _API_DELAY = seconds
+    with _lock:
+        _API_DELAY = seconds
 
 
-def _rate_limit():
-    global _last_api_call
-    elapsed = time.time() - _last_api_call
-    if 0 < elapsed < _API_DELAY:
-        time.sleep(_API_DELAY - elapsed)
-    _last_api_call = time.time()
+def _rate_limit(keep_running=None) -> bool:
+    """Wait for this caller's own slot in the shared request schedule.
+
+    The slot is reserved under the lock and slept for outside it. Holding the
+    lock across the wait would serialise the *requests* as well as the gaps, and
+    the gap is the only thing being rationed; reserving and releasing lets
+    several callers be asleep at once, each waking for its own turn.
+
+    ``time.monotonic`` rather than the wall clock, because a clock correction
+    must not be able to break the schedule.
+
+    ``keep_running`` makes the wait abandonable: the wait is served in one-second
+    steps and the call returns ``False`` if the predicate goes false first. A
+    discovery thread needs that, because a backoff can leave a long wait ahead of
+    it and a shutdown must not be held for it. Without a predicate the whole wait
+    is served, which is what every existing caller wants.
+
+    Returns whether the caller may proceed. Callers that pass no predicate can
+    ignore it: ``False`` is then impossible.
+    """
+    global _next_slot
+    with _lock:
+        now = time.monotonic()
+        slot = max(now, _next_slot)
+        _next_slot = slot + _API_DELAY
+        delay = slot - now
+
+    if delay <= 0:
+        return True
+    if keep_running is None:
+        time.sleep(delay)
+        return True
+
+    deadline = time.monotonic() + delay
+    while keep_running():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return True
+        time.sleep(min(1.0, remaining))
+    return False
 
 
 def get_workshop_details_batch(item_ids: list[int], api_key: str) -> dict[int, dict] | None:
@@ -215,12 +257,18 @@ def get_player_summaries(steamids: list[int], api_key: str) -> dict[int, dict]:
     except (requests.exceptions.RequestException, ValueError, KeyError):
         return {}
 
-def query_workshop_files(appid: int, cursor: str, api_key: str) -> dict:
+def query_workshop_files(appid: int, cursor: str, api_key: str,
+                         keep_running=None) -> dict:
     """
     Queries the Steam Workshop using IPublishedFileService/QueryFiles,
     sorted by publication date (newest first). Uses cursor-based pagination
     for unlimited depth (pass '*' for the first page).
     Returns a dict with 'total', 'items', and 'next_cursor'.
+
+    ``keep_running`` is forwarded to the shared rate limiter so a caller on its
+    own thread can abandon a long wait when the daemon is stopping. When it goes
+    false the request is not made and ``{"abandoned": True}`` comes back, which
+    the caller must not mistake for a page of results.
     """
     url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
     params = {
@@ -237,7 +285,8 @@ def query_workshop_files(appid: int, cursor: str, api_key: str) -> dict:
         "return_metadata": False,
     }
     
-    _rate_limit()
+    if not _rate_limit(keep_running):
+        return {"abandoned": True, "total": 0, "items": [], "next_cursor": ""}
     try:
         response = requests.get(url, params=params, timeout=15)
         response.raise_for_status()
@@ -257,7 +306,8 @@ def query_workshop_files(appid: int, cursor: str, api_key: str) -> dict:
         return {"total": 0, "items": [], "next_cursor": "", "error": True}
 
 
-def query_workshop_page_updated(appid: int, cursor: str, api_key: str, numperpage: int = 100) -> dict:
+def query_workshop_page_updated(appid: int, cursor: str, api_key: str, numperpage: int = 100,
+                                keep_running=None) -> dict:
     """
     Queries Steam Workshop via IPublishedFileService/QueryFiles with
     query_type=21 (rank by last updated), cursor-based pagination.
@@ -280,7 +330,8 @@ def query_workshop_page_updated(appid: int, cursor: str, api_key: str, numperpag
         "return_metadata": False,
     }
 
-    _rate_limit()
+    if not _rate_limit(keep_running):
+        return {"abandoned": True, "total": 0, "items": [], "next_cursor": "", "error": False}
     try:
         response = requests.get(url, params=params, timeout=15)
         response.raise_for_status()
