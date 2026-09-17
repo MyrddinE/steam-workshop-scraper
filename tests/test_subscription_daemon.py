@@ -12,7 +12,8 @@ from unittest.mock import patch
 
 import pytest
 
-from src.daemon import Daemon, SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS
+from src.daemon import (Daemon, SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS,
+                        SUBSCRIPTION_RECONCILE_RETRY_SECONDS)
 
 
 @pytest.fixture
@@ -147,3 +148,49 @@ def test_a_failing_refresh_does_not_stop_the_reconcile(daemon):
         daemon._maybe_reconcile_subscriptions()
 
     assert walk.called
+
+
+# --- a walk that could not authenticate is retried sooner --------------------
+#
+# The daily interval has already elapsed for the day by the time the operator
+# fixes the login the banner told them about, so waiting the full interval again
+# would hold the markers wrong for another day. The recorded problem is the
+# signal, and it is the same fact the web UI shows.
+
+def test_a_broken_login_is_retried_on_the_short_interval(daemon):
+    from src import session_health
+    daemon.target_appids = [111]
+    session_health.record_rejected(daemon.db_path, "the login cookie expired", now=1000)
+
+    with patch.object(Daemon, '_refresh_login_cookie'), \
+         patch.object(Daemon, 'reconcile_subscriptions') as walk:
+        daemon._maybe_reconcile_subscriptions()
+        assert walk.call_count == 1
+        # Short of the daily interval but past the retry one.
+        daemon._last_subscription_reconcile -= SUBSCRIPTION_RECONCILE_RETRY_SECONDS + 1
+        daemon._maybe_reconcile_subscriptions()
+
+    assert walk.call_count == 2, "a broken login must not hold the markers for a day"
+
+
+def test_a_healthy_login_is_not_retried_on_the_short_interval(daemon):
+    daemon.target_appids = [111]
+    with patch.object(Daemon, '_refresh_login_cookie'), \
+         patch.object(Daemon, 'reconcile_subscriptions') as walk:
+        daemon._maybe_reconcile_subscriptions()
+        daemon._last_subscription_reconcile -= SUBSCRIPTION_RECONCILE_RETRY_SECONDS + 1
+        daemon._maybe_reconcile_subscriptions()
+
+    assert walk.call_count == 1, "the daily cadence is what keeps the walk cheap"
+
+
+def test_the_recorded_problem_lifts_the_short_interval_once_it_clears(daemon):
+    """The retry stops as soon as the walk works, which is what clears it."""
+    from src import session_health
+    daemon.target_appids = [111]
+    session_health.record_rejected(daemon.db_path, "the login cookie expired", now=1000)
+    assert daemon._reconcile_interval() == SUBSCRIPTION_RECONCILE_RETRY_SECONDS
+
+    session_health.record_accepted(daemon.db_path)
+
+    assert daemon._reconcile_interval() == SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS

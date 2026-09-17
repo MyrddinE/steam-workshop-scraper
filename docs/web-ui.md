@@ -196,6 +196,8 @@ Either path clears it the moment an authenticated page is seen, so the warning d
 
 The strip has no close button on purpose: the condition is a silent data outage, and the only thing that clears it is a working login. It is polled every 30 seconds (`_refreshSessionWarning`) because the fact is written by a worker thread in another process — a push would need a channel that does not exist — and half a minute is far more often than the condition can change. The poll is started on load and is never released, unlike the daemon panel's, because the warning has to be visible without opening anything.
 
+**Fixing the login brings the markers back, not just the banner.** The reconcile normally walks once a day, and that walk has already happened for the day by the time an operator responds to the warning — so waiting out the interval again would leave every `own_subscribed` flag wrong for another day *after* it was fixed. While a session problem is recorded, the daemon walks on `SUBSCRIPTION_RECONCILE_RETRY_SECONDS` (15 minutes) instead of the daily interval, returning to the daily cadence as soon as a walk authenticates. The retries cost no requests while the token is still expired: the expiry check is local and the browser re-read is a file copy. So the sequence is: sign in, Recheck, and the stars are back within a quarter of an hour.
+
 ---
 
 ## Statistics Panel

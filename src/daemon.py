@@ -44,6 +44,7 @@ from src.daemon_state import StateStore, state_path_for
 from src import pacing
 from src import images
 from src import capture
+from src import session_health
 from src.subscription_sync import reconcile_own_subscriptions
 
 # API statuses the fetch path has an explicit branch for. Anything else is
@@ -125,6 +126,15 @@ DISCOVERY_IDLE_SECONDS = 30.0
 # this is a housekeeping task on the per-batch path, so it runs on the first
 # batch and is guarded by a monotonic interval afterwards.
 SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS = 86400
+
+# ...unless the walk could not authenticate. Then the cadence above is the wrong
+# clock, because what was wrong is a credential the operator can renew in a
+# browser at any moment, and the daily walk has already happened for the day: the
+# markers would stay wrong for another day after they had already fixed it. A
+# retry on this interval costs no request while the token is still expired -- the
+# check is local, and re-reading the browser's store is a file copy -- and one
+# walk as soon as it is not, which is the first one that can succeed.
+SUBSCRIPTION_RECONCILE_RETRY_SECONDS = 900
 
 
 # --- API merge allow-list ----------------------------------------------------
@@ -596,6 +606,23 @@ class Daemon:
         self._last_stale_sweep = now
         self._promote_stale_items()
 
+    def _reconcile_interval(self) -> float:
+        """How long to wait before the next walk, given how the last one went.
+
+        Daily normally. After a walk that could not authenticate, the short
+        retry instead: the daily walk has already run for this day, so waiting
+        the full interval again would hold the markers wrong for a day *after*
+        the operator fixed the login the banner told them about.
+
+        The recorded problem is the signal, which is the same fact the web UI
+        shows. It is written by whichever path found it -- this walk, or a scrape
+        that came back signed out -- so a login that breaks mid-day is retried on
+        the short clock too, instead of waiting for tomorrow.
+        """
+        if session_health.read(self.db_path):
+            return SUBSCRIPTION_RECONCILE_RETRY_SECONDS
+        return SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS
+
     def _maybe_reconcile_subscriptions(self) -> None:
         """Reconcile the owner's subscriptions onto every target appid, daily.
 
@@ -610,11 +637,14 @@ class Daemon:
         idle would spend its one reconcile of the day on a cookie that died
         overnight. The refresh is a local file copy, and it returns without
         writing anything when the browser's copy has not moved.
+
+        A walk that could not authenticate is retried on a much shorter interval,
+        for the reason :meth:`_reconcile_interval` gives.
         """
         now = time.monotonic()
         if (self._last_subscription_reconcile is not None
                 and now - self._last_subscription_reconcile
-                < SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS):
+                < self._reconcile_interval()):
             return
         self._last_subscription_reconcile = now
         try:
