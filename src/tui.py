@@ -553,6 +553,10 @@ class DaemonManagerScreen(Screen):
         # asks for what has appeared since.
         self._log_offset = 0
         self._log_timer = None
+        # A transition holds the controller for as long as the process takes to
+        # stop, so only one may be in flight and the controls are disabled while
+        # it runs.
+        self._transitioning = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -598,15 +602,60 @@ class DaemonManagerScreen(Screen):
     def _read_pid(self) -> int | None:
         return self.controller.read_pid()
 
-    def _start_daemon(self) -> bool:
-        changed, message = self.controller.start()
-        if not changed and message.startswith("Already running"):
-            self.query_one("#dm-status", Static).update(f"[green]{message}[/green]")
-        return changed
+    def _set_controls_enabled(self, enabled: bool) -> None:
+        for button_id in ("dm-start", "dm-stop", "dm-restart"):
+            try:
+                self.query_one(f"#{button_id}", Button).disabled = not enabled
+            except Exception:
+                # The screen can be torn down mid-transition; a control that is
+                # already gone needs nothing done to it.
+                logging.debug("Daemon control %s is not on screen", button_id)
 
-    def _stop_daemon(self) -> bool:
-        self.controller.stop()
-        return True
+    def _begin_transition(self, gerund: str, action) -> None:
+        """Run a daemon transition on a worker so the interface keeps running.
+
+        Every controller transition blocks: ``stop`` polls the process every half
+        second for up to ``STOP_TIMEOUT_SECONDS`` (15 s) and then waits up to
+        another 3 s for a forced kill, and ``restart`` is ``stop`` followed by
+        ``start``. Called straight from the button handler, that froze the whole
+        application for the duration -- no keypress, no screen change and no
+        timer, including this screen's own two-second log poll, which fell silent
+        at the moment its output was most wanted. See issue 26 in
+        docs/code-issues.md.
+        """
+        if self._transitioning:
+            # The controls are disabled while this is true, so reaching here
+            # means a press that raced the disable; ignore it rather than
+            # starting a second shutdown.
+            return
+        self._transitioning = True
+        self._set_controls_enabled(False)
+        self.query_one("#dm-status", Static).update(f"[yellow]{gerund}...[/yellow]")
+
+        def work():
+            try:
+                changed, message = action()
+            except Exception as exc:
+                # A controller fault must not leave the screen with its controls
+                # disabled and no way back.
+                changed, message = False, f"{gerund} failed: {exc}"
+            try:
+                self.app.call_from_thread(self._transition_finished, changed, message)
+            except RuntimeError:
+                # The app stopped while the transition was in flight; there is no
+                # UI left to report to, and the transition itself happened.
+                logging.debug("Daemon %s finished with no app to report to", gerund)
+
+        self.run_worker(work, name=f"daemon-{gerund.lower()}", group="daemon",
+                        thread=True, exclusive=True, exit_on_error=False)
+
+    def _transition_finished(self, changed: bool, message: str) -> None:
+        """Put the controls back, on the event loop, once the worker is done."""
+        self._transitioning = False
+        self._set_controls_enabled(True)
+        self._update_status()
+        if message and not changed:
+            self.app.notify(message, severity="warning")
 
     def _poll_tail(self) -> None:
         """Write a bounded preview of the daemon log into the pane."""
@@ -629,15 +678,17 @@ class DaemonManagerScreen(Screen):
         self._log_offset = result.get("offset", self._log_offset)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        # Every transition goes to a worker: these calls block for as long as the
+        # daemon takes to stop, and running one here froze the interface until it
+        # returned.
         if event.button.id == "dm-start":
-            self._start_daemon()
-            self._update_status()
+            self._begin_transition("Starting", self.controller.start)
         elif event.button.id == "dm-stop":
-            self._stop_daemon()
-            self._update_status()
+            self._begin_transition("Stopping", self.controller.stop)
         elif event.button.id == "dm-restart":
-            self.controller.restart()
-            self._update_status()
+            # One call rather than stop-then-start, so a restart cannot interleave
+            # with another press between the two halves.
+            self._begin_transition("Restarting", self.controller.restart)
         elif event.button.id == "dm-close":
             self.app.pop_screen()
 
