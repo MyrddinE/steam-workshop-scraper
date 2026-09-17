@@ -81,7 +81,8 @@ def test_seed_database_resumes_from_cursor(mock_sleep, mock_query, tmp_path):
 
     daemon.seed_database(target_new=100)
 
-    mock_query.assert_called_once_with(1062090, cursor="saved_cursor", api_key="test_key")
+    mock_query.assert_called_once_with(1062090, cursor="saved_cursor", api_key="test_key",
+                                       keep_running=daemon._discovery_alive)
     assert count_unscraped_items(db_path) == 120
 
 
@@ -107,4 +108,5 @@ def test_seed_database_starts_from_star(mock_sleep, mock_query, tmp_path):
 
     daemon.seed_database(target_new=100)
 
-    mock_query.assert_called_once_with(1062090, cursor="*", api_key="test_key")
+    mock_query.assert_called_once_with(1062090, cursor="*", api_key="test_key",
+                                       keep_running=daemon._discovery_alive)

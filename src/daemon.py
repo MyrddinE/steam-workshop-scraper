@@ -4,6 +4,7 @@ import signal
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 from src.database import (
     get_next_items_to_scrape, 
@@ -110,6 +111,12 @@ API_DELAY_FLOOR = 0.01
 # so a long-idle daemon does not sit on a stale queue.
 STALE_SWEEP_INTERVAL_SECONDS = 3600
 
+# How long the discovery thread waits between passes. It is a check interval, not
+# a rate: `seed_database` returns at once while the fetchable queue is already at
+# its target, so the nap costs nothing and waking often keeps the queue topped up
+# as the fetch loop drains it.
+DISCOVERY_IDLE_SECONDS = 30.0
+
 # The owner's subscriptions are reconciled once per appid at startup and then on
 # this cadence. Daily is the right order for it: the list only moves when a
 # human subscribes or unsubscribes, the one moment that matters (a subscribe the
@@ -154,6 +161,77 @@ def wilson_lower(successes: int, trials: int, z: float = 1.96) -> float:
     denom = 1 + z2 / trials
     numer = p + z2 / (2 * trials) - z * math.sqrt(max(0.0, p * (1 - p) / trials) + z2 / (4 * trials * trials))
     return max(0.0, min(1.0, numer / denom))
+
+
+class DiscoveryThread(threading.Thread):
+    """Keep the fetch queue topped up, off the fetch loop's critical path.
+
+    Discovery used to run *inside* the fetch loop and only once that loop had
+    drained the queue to nothing, so the daemon starved: it blocked on paging
+    until enough new items appeared, and only then resumed fetching. Batching the
+    details calls made fetching fast enough that the stall became a visible share
+    of the daemon's time.
+
+    This buys no extra API budget. ``steam_api._rate_limit`` is one schedule
+    shared by every caller, so this thread waits its turn exactly as the fetch
+    loop does; what it buys is that the queue is refilled *while* the loop is
+    still working, so the loop never has to stop.
+
+    It holds no state of its own beyond its loop. The cursor, the page-discovery
+    cooldown and ``_cursor_exhausted`` all live on the daemon, and only this
+    thread writes them, which is what keeps them safe without a lock. The
+    fetch loop reads none of them.
+    """
+
+    # ``_page_discovery_eligible`` can run a COUNT over the whole table, and
+    # nothing indexes the column it counts. Page discovery is only interesting
+    # once the cursor walk has finished or the owner has asked for it, so the
+    # count is taken every twentieth pass, or at once when a cheap signal fires.
+    PAGE_ELIGIBILITY_EVERY = 20
+
+    def __init__(self, owner: "Daemon", interval: float = DISCOVERY_IDLE_SECONDS):
+        super().__init__(daemon=True)
+        self.owner = owner
+        self.interval = interval
+        self.running = True
+        self._passes = 0
+
+    def run(self) -> None:
+        logging.info("Discovery thread started.")
+        while self.running and self.owner.running:
+            try:
+                if self._page_discovery_worth_checking():
+                    self.owner._run_page_discovery()
+                self.owner.seed_database()
+            except Exception as exc:
+                # A failed pass is a log line, not a dead thread: the fetch loop
+                # goes on draining whatever is already queued.
+                logging.warning("Discovery pass failed; will try again: %s", exc)
+            finally:
+                # Wake the fetch loop if it is idling. A spurious wake costs one
+                # empty batch read, which is cheaper than the fetch loop asking
+                # the database whether there is work on a timer.
+                self.owner._work_available.set()
+            self._sleep()
+
+    def _page_discovery_worth_checking(self) -> bool:
+        self._passes += 1
+        if self.owner._cursor_exhausted or os.path.exists('.fetch_new'):
+            return True
+        return self._passes % self.PAGE_ELIGIBILITY_EVERY == 0 and \
+            self.owner._page_discovery_eligible()
+
+    def _sleep(self) -> None:
+        """Nap, staying responsive to shutdown."""
+        deadline = time.monotonic() + self.interval
+        while self.running and self.owner.running:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(1.0, remaining))
+
+    def stop(self) -> None:
+        self.running = False
 
 
 class Daemon:
@@ -242,6 +320,13 @@ class Daemon:
 
         # Page-based discovery (sort by update time) — runs once a day when eligible
         self._last_page_discovery = 0
+
+        # Set by the discovery thread when it has run a pass, waited on by the
+        # fetch loop when the queue is empty. A signal rather than a poll: the
+        # only cheap way to ask "is there work?" is this event, because the count
+        # query scans the whole table and nothing indexes api_priority.
+        self._work_available = threading.Event()
+        self._discovery_thread = None
         self._cursor_exhausted = False
         self._saw_pid_file = False  # set True once PID file is seen; prevents false trigger in tests
 
@@ -387,6 +472,10 @@ class Daemon:
             self._image_worker.running = False
         if self._backup_worker is not None:
             self._backup_worker.running = False
+
+    def _discovery_alive(self) -> bool:
+        """Whether a discovery pass should keep going rather than abandon a wait."""
+        return self.running and not self._pid_file_removed()
 
     def expand_user_discovery(self):
         """
@@ -555,23 +644,19 @@ class Daemon:
             logging.warning("Stale-item promotion failed; housekeeping skipped this sweep: %s", exc)
 
     def _acquire_batch(self):
-        """Return the next batch of items, refilling the queue when it is empty.
+        """Return the next batch of items. Returns None on a database error.
 
-        Returns None when this iteration should be abandoned: a database error, or
-        the daemon stopping during discovery.
+        Refilling is not this method's business: the discovery thread owns it, so
+        an empty result here means the queue is genuinely empty rather than
+        "discovery has not been run yet".
         """
-        items_to_scrape = self._fetch_batch()
-        if items_to_scrape is None or items_to_scrape:
-            return items_to_scrape
-
-        logging.debug("No items to scrape. Expanding discovery...")
-        if self._page_discovery_eligible():
-            self._run_page_discovery()
-            # Fall through to cursor mode if page mode didn't fill the queue
-            if not self.running:
-                return None
-        self.seed_database()
-        return self._fetch_batch("Database error after seeding")
+        # Discovery is the discovery thread's job now. It used to happen here,
+        # which meant the fetch loop only refilled the queue after draining it
+        # completely: the daemon starved, blocked on paging until enough new
+        # items appeared, and then resumed. Batching the details calls made
+        # fetching fast enough that the stall became a visible share of the
+        # time, so the refill moved off this path entirely.
+        return self._fetch_batch()
 
     def _fetch_batch(self, error_message: str = "Database error in process_batch"):
         """Read one batch from the database. Returns None on database error."""
@@ -584,11 +669,26 @@ class Daemon:
             return None
 
     def _wait_for_work(self) -> None:
-        """Idle poll: wait up to ten minutes for work to appear."""
+        """Wait up to ten minutes for the discovery thread to refill the queue.
+
+        Woken by the thread's signal rather than by polling the database. The
+        question "is there work?" is a count over the whole table and nothing
+        indexes ``api_priority``, so asking it once a second would cost far more
+        than the sleep it replaced; asking a flag costs nothing.
+
+        The flag is checked on each one-second tick rather than by waiting on the
+        event, so the tick stays an ordinary ``time.sleep`` -- which is the seam
+        the tests stub. Waiting on the event would be marginally quicker to wake
+        and would make every test that expects an empty queue sit here for the
+        full ten minutes.
+        """
         for _ in range(600):
             if not self.running:
                 return
             if self._pid_file_removed():
+                return
+            if self._work_available.is_set():
+                self._work_available.clear()
                 return
             time.sleep(1)
 
@@ -931,6 +1031,8 @@ class Daemon:
         """Main loop that continuously queries and scrapes."""
         logging.info("Starting daemon loop...")
         self.translator.start()
+        self._discovery_thread = DiscoveryThread(self)
+        self._discovery_thread.start()
         self._web_worker = WebScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value,
                                               session_refresh=self._refresh_login_cookie)
         self._web_worker.start()
@@ -942,6 +1044,10 @@ class Daemon:
             self.process_batch()
             self._pid_file_removed()
         logging.info("Daemon gracefully exited.")
+        if self._discovery_thread is not None:
+            self._discovery_thread.stop()
+            self._discovery_thread.join(timeout=5)
+            logging.info("Discovery thread stopped.")
         self._web_worker.running = False
         self._web_worker.join(timeout=5)
         logging.info("Web scraper thread stopped.")
@@ -979,8 +1085,9 @@ class Daemon:
         if not self.api_key:
             logging.error("No Steam API key configured. Discovery cannot run. "
                           "Set STEAM_API_KEY environment variable or add api.key to config.yaml.")
-            return
+            return 0
 
+        discovered_total = 0
         for appid in self.target_appids:
             # The guard must measure work the fetch queue can actually hand out.
             # It used to test count_unscraped_items -- items never successfully
@@ -1005,10 +1112,22 @@ class Daemon:
             while cursor and self.running:
                 if self._pid_file_removed():
                     break
-                result = query_workshop_files(appid, cursor=cursor, api_key=self.api_key)
+                result = query_workshop_files(appid, cursor=cursor, api_key=self.api_key,
+                                              keep_running=self._discovery_alive)
+                if result.get("abandoned"):
+                    logging.info("Abandoned discovery for AppID %s: the daemon is stopping.", appid)
+                    break
                 if result.get("error"):
+                    # Discovery requests are requests on the same key and the same
+                    # budget, so a refusal here is evidence about the rate exactly
+                    # as a refused details call is. Not recording it left the
+                    # controller blind to half its traffic -- tolerable while it
+                    # was serialised behind the fetch loop, not once it runs on
+                    # its own thread.
+                    self._record_api_request_failure()
                     logging.error(f"API error for AppID {appid}. Halting discovery.")
                     break
+                self._record_api_request_success()
 
                 if pages == 0 and result["total"]:
                     logging.info(f"AppID {appid} has ~{result['total']} total items.")
@@ -1045,6 +1164,10 @@ class Daemon:
                 if not cursor:
                     self._cursor_exhausted = True
                     logging.info("Cursor exhausted — page-based discovery now eligible.")
+
+            discovered_total += new_discovered_count
+
+        return discovered_total
 
     def _page_discovery_eligible(self) -> bool:
         if os.path.exists('.fetch_new'):
@@ -1083,10 +1206,16 @@ class Daemon:
             cursor = "*"
             page = 0
             while cursor and self.running and page < 500:
-                result = query_workshop_page_updated(appid, cursor, self.api_key)
+                result = query_workshop_page_updated(
+                    appid, cursor, self.api_key, keep_running=self._discovery_alive)
+                if result.get("abandoned"):
+                    logging.info("Abandoned page discovery for AppID %s: the daemon is stopping.", appid)
+                    break
                 if result.get("error"):
+                    self._record_api_request_failure()
                     logging.error(f"Page discovery error for AppID {appid}.")
                     break
+                self._record_api_request_success()
 
                 items = result.get("items", [])
                 if page == 0:
