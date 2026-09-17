@@ -67,7 +67,15 @@ On `Input.Blurred` (when the value input loses focus), `_clamp_percentile()` rou
 
 ### `WorkshopItem` (list item)
 
-Renders a single item in the list. Shows title (preferring `title_en`), creator name (preferring `personaname_en`), and subscription queue status. Each item stores `item_data` (the full search result dict) for detail rendering and state tracking.
+Renders a single item in the list. Shows title (preferring `title_en`), creator name (preferring `personaname_en`), and subscription status. Each item stores `item_data` (the full search result dict) for detail rendering and state tracking.
+
+### The subscription marker
+
+The row's second line shows the owner's subscription marker next to the pending spinner, and the detail pane shows the same marker immediately before the title — the convention the web pane uses too. `_subscription_marker` and `DetailsPane.update_content` both read `src/subscription.py`, which owns the four states (`subscribed`, `pending`, `previously`, `never`), their precedence, and the glyph/colour for each, so the TUI and the web grid cannot disagree about why the same row looks the way it does. The marker replaces the old leading `*` prefix on the title line for `is_queued_for_subscription`; there is only one indicator.
+
+The TUI marker is **not clickable** — there is no click affordance in the TUI, and `s` remains the way to change the state. The detail pane's old `btn-queue-sub` / `btn-unqueue-sub` pair is gone for the same reason: the marker *is* that control now.
+
+`previously` can only mean "we have seen this account subscribed"; Steam exposes no per-account subscription history, so the marker carries that limitation in its tooltip. See [data-model.md](data-model.md) for the two columns behind it and [web-ui.md](web-ui.md) for the shared table.
 
 ### Infinite Scroll
 

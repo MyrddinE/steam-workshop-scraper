@@ -372,6 +372,36 @@ detector whose whole value is that it reads zero unless something has regressed.
 Only `api_priority` is touched: the other queue flags were cleared by 16→17, and
 `status` is what makes an item dead in the first place.
 
+### v20 → v21: The owner's subscription columns
+
+Adds the two columns behind the per-item subscription marker:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `own_subscribed` | INTEGER DEFAULT 0 | Whether the owner is subscribed to this item right now. |
+| `own_first_subscribed_at` | INTEGER DEFAULT NULL | When we first *saw* the owner subscribed; sticky, and the only source of the `previously` state. |
+
+Both are added by `_safe_add_columns(cursor, "workshop_items", [...])` — a fresh
+database gets them from the `CREATE TABLE` block, an existing one from the
+`ALTER TABLE` — which is the same convention every other later column follows.
+
+The migration body then defaults `own_subscribed` to `0` where SQLite's `ALTER
+TABLE` left it NULL:
+
+```sql
+UPDATE workshop_items SET own_subscribed = 0 WHERE own_subscribed IS NULL
+```
+
+`own_first_subscribed_at` is deliberately left NULL everywhere. A pre-existing row
+has no subscription observation behind it, and inventing one would claim we had
+seen a subscription we had not — which is exactly the honesty constraint the
+`previously` state is documented under in
+[data-model.md](data-model.md). Steam exposes no per-account subscription
+history, so this column can only mean "first seen by us".
+
+No index is added: the columns are read with the row (the grid and detail
+payloads select them outright) and nothing filters or sorts on them.
+
 ---
 
 ## Database Utility Functions

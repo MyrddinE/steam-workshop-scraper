@@ -108,9 +108,45 @@ There is deliberately **no single-creator mode and no Return button**. The TUI n
 
 `/api/authors` (the full author list) is still not consumed: a single jump needs only the one ID already in the payload, and an author picker was out of scope, so no request was added for it.
 
-### Queue / unqueue
+### The subscription marker (queue / unqueue)
 
-`renderDetail` shows one button whose label follows `item.is_queued_for_subscription`, mirroring the TUI's `btn-queue-sub` / `btn-unqueue-sub` pair. `toggleDetailQueue(wid)` POSTs the existing `/api/toggle_sub/<id>` route, which flips the database flag and answers only `{ok: true}`. Since the route does not report which way the flag moved, the client reads the item back through the read-only `/api/item/<id>` route and re-renders from that payload, and updates the matching grid cell's `queued` star as the `s` shortcut does. A read-back rather than a locally flipped guess is deliberate: the `s` shortcut and the subscribe drain's `/api/subscribed` calls change the same flag behind the pane's back, so a guess could label the button with the wrong next action. Rendering from the item payload is also what lets the 3-second translation poll re-render the pane without reverting the toggle. A failed request alerts and leaves the pane alone.
+`renderDetail` draws the owner's subscription marker immediately before the title, and the grid
+cell draws the same marker at its top-right. It has four states, resolved by
+`subscription.subscription_state(item)` and rendered from the one table in `src/subscription.py`
+(which the TUI reads too — see [tui.md](tui.md)):
+
+| State | Glyph | Colour | Meaning | Click |
+|---|---|---|---|---|
+| `subscribed` | ★ | solid yellow | the owner is subscribed now | nothing |
+| `pending` | ☆ | green | queued to subscribe | un-queues |
+| `previously` | ☆ | yellow | we have seen the owner subscribed, and they are not now | queues |
+| `never` | ○ | gray | never seen subscribed | queues |
+
+There is exactly one such indicator: the old `queued` CSS class and its `★` prefix on `.grid-title`
+are gone, and the pane's `Queue` / `Unqueue` button pair is replaced by the marker itself. The
+marker's glyph, colour, CSS class, label, tooltip and clickability all arrive on the payload,
+computed by the server from the shared table, so the page holds no copy of the state vocabulary.
+
+Clicking the marker calls `toggleDetailQueue(wid)`, except for `subscribed`, which sends nothing —
+the only action available there would be an unsubscribe, and an accidental unsubscribe is not
+wanted. `toggleDetailQueue` POSTs the existing `/api/toggle_sub/<id>` route, which flips the
+database flag and answers only `{ok: true}`. Since the route does not report which way the flag
+moved, the client reads the item back through the read-only `/api/item/<id>` route and re-renders
+the pane and the matching cell's marker (`_applySub`) from that payload — the same path the `s`
+shortcut takes. A read-back rather than a locally flipped guess is deliberate: the `s` shortcut and
+the subscribe drain's `/api/subscribed` calls change the same flag behind the pane's back, so a
+guess could show the wrong state. Rendering from the item payload is also what lets the 3-second
+translation poll re-render the pane without reverting the toggle. A failed request alerts and leaves
+the pane alone.
+
+The marker sits inside the cell that opens the detail pane, so its click handler stops propagation:
+without that, toggling the queue would also drag the pane to the item.
+
+`previously` can only ever mean "we have **seen** this account subscribed". Steam exposes no
+per-account subscription history — `lifetime_subscriptions` is an item-wide count and
+`EnumerateUserSubscribedFiles` is publisher-key-only — so on the day the marker shipped there were
+zero `previously` markers regardless of real history, and they fill in over time. The marker's
+tooltip says this rather than implying a complete record.
 
 ### Translated and original text
 
