@@ -1,21 +1,51 @@
 # Threading & Concurrency Model
 
-The daemon runs three worker threads — web scraper, image downloader, and translator — plus the main loop, and one more (the backup thread) when database backups are configured. The TUI and web server run in the main process with their own threading. This document covers thread responsibilities, shared state, locking, and coordination.
+The daemon runs four worker threads — web scraper, image downloader, translator, and discovery — plus the main loop, and one more (the backup thread) when database backups are configured. The TUI and web server run in the main process with their own threading. This document covers thread responsibilities, shared state, locking, and coordination.
 
 ---
 
 ## Daemon Thread Architecture
+
+### Discovery Thread (`DiscoveryThread`)
+
+Keeps the API fetch queue topped up. It used to be the main loop's job, and only
+once that loop had drained the queue to nothing: the daemon starved, blocked on
+paging until enough new items appeared, and then resumed fetching. Batching the
+details calls made fetching fast enough that the stall became a visible share of
+the daemon's time, so the refill moved off that path.
+
+It buys no extra API budget. `steam_api._rate_limit` is one schedule shared by
+every caller, so this thread waits its turn exactly as the fetch loop does; what
+it buys is that the queue is refilled *while* the loop is still working, so the
+loop never has to stop.
+
+It calls `_run_page_discovery` when page mode is worth checking and `seed_database`
+otherwise, then sets `_work_available` so an idling fetch loop wakes now rather
+than at the end of its poll. `seed_database`'s own guard decides whether anything
+is actually needed: it returns at once while at least `target_new` (100) items are
+fetchable, which is what keeps this thread cheap.
+
+It holds no state of its own. The cursor, the page-discovery cooldown and
+`_cursor_exhausted` live on the daemon, and only this thread writes them — which
+is what keeps them safe without a lock. The fetch loop reads none of them.
+
+Its requests feed the adaptive backoff exactly as the details calls do. While
+discovery was serialised behind the fetch loop it was tolerable that a refused
+page only logged an error; on its own thread it would have been a second request
+stream the controller could not see, so a refusal now doubles the delay and a
+healthy page decays it. A page abandoned for shutdown moves nothing, because a
+shutdown is not evidence about the request rate.
 
 ### Main Loop (`run` / `process_batch`)
 
 Runs on the main thread. Spawns the worker threads, then enters a `while self.running` loop calling `process_batch` repeatedly. Each iteration:
 1. Checks for PID file existence (graceful shutdown signal from TUI)
 2. Fetches items due for processing
-3. If none, triggers discovery (page-based or cursor-based)
+3. If none, waits for the discovery thread to refill the queue
 4. For each item: calls Steam API, merges data, writes to DB, flags for web/image/translation
 5. Dynamic API delay sleeps between items
 
-The main loop is the only thread that writes metadata fields (title, description, subscriptions, etc.) and the only thread that creates new items. It reads `api_fetched_at` to determine staleness.
+The main loop is the only thread that writes metadata fields (title, description, subscriptions, etc.). It reads `api_fetched_at` to determine staleness. It is *not* the only thread that creates items: cursor discovery does that too, on the discovery thread, and did so from the main thread before the refill moved. Both go through `insert_or_update_item`, whose column filtering is what keeps that safe.
 
 ### Web Scraper Thread (`WebScraperThread`)
 
@@ -95,10 +125,11 @@ The database runs in WAL (Write-Ahead Logging) mode, set during `initialize_data
 
 No formal locking protocol exists, but columns have clear ownership:
 - **Main loop**: title, short_description, extended_description (via insert_or_update_item), subscriptions, favorited, views, tags, `steam_*`, `first_seen_at`, `api_fetched_at`, `last_fetch_attempted_at`, `wilson_*`, `translation_priority`
+- **Discovery thread**: nothing beyond the bare row it creates — `workshop_id` and `api_priority` — so every other column on a discovered item is the main loop's
 - **Web scraper**: extended_description, needs_web_scrape
 - **Image thread**: image_extension, needs_image
 - **Translator**: title_en, short_description_en, extended_description_en, personaname_en, translate_version (translated_at on users)
-- **Web scraper and image thread**: scrape_version (stamped by whichever last processed the item)
+- **Web scraper**: scrape_version, the revision the *page* was scraped at. The image thread used to write it too, which made an unscraped item claim a scrape; it no longer touches the column
 
 ### Priority Bumping
 
@@ -112,7 +143,7 @@ Two producers write the same `manifest.json` when an outbox is configured: the b
 
 ### `insert_or_update_item` Concurrency
 
-This function uses `INSERT ... ON CONFLICT(workshop_id) DO UPDATE SET`. It's called by the main loop, web scraper, and image thread. Each call only writes the columns it has data for (dict keys are filtered against `WORKSHOP_ITEM_COLUMNS`). The `DO UPDATE SET` only updates columns that appear in the INSERT, so concurrent writes to different columns don't overwrite each other.
+This function uses `INSERT ... ON CONFLICT(workshop_id) DO UPDATE SET`. It's called by the main loop, the discovery thread, the web scraper, and the image thread. Each call only writes the columns it has data for (dict keys are filtered against `WORKSHOP_ITEM_COLUMNS`). The `DO UPDATE SET` only updates columns that appear in the INSERT, so concurrent writes to different columns don't overwrite each other.
 
 ---
 
