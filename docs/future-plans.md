@@ -300,6 +300,12 @@ count, 17 by the "dead but still queued" count. Both are single statements. They
 they did because every stage reported success, so the only signal was a coverage figure drifting
 downwards over weeks.
 
+*Measured live* on 2026-09-17 against 2,497,545 rows, neither count is zero today: **28** items are
+`status = 200` with no description and in no queue at all, and **1** dead item is still queued for
+translation. Both numbers came from running the two statements described above, which is the argument
+for putting them in the statistics rather than leaving them in a document: they are cheap, they are
+meant to be zero, and one query finds them.
+
 ---
 
 ## Discovery logging: mark what is being enriched, not what is not
