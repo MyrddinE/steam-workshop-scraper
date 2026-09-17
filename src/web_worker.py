@@ -8,6 +8,7 @@ import threading
 from datetime import datetime, timezone
 from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, flag_field_for_translation, translation_is_current
 from src import pacing
+from src import session_health
 from src.web_scraper import (DESCRIPTION_SELECTOR, ITEM_MISSING_HTTP_STATUSES, looks_gated,
                              looks_like_item_page_without_description, looks_like_missing_item,
                              looks_rate_limited, looks_signed_out, missing_item_reason,
@@ -175,10 +176,37 @@ class WebScraperThread(threading.Thread):
             # Never retry into a budget that is already spent.
             return scrape_data
         if not changed:
+            # Nothing in the browser is newer than the cookie that just failed,
+            # so the operator is the only one who can fix this.
+            self._note_session_from(body)
             return scrape_data
         logging.info("[W:%s] Scrape looked gated; retrying with the refreshed login cookie",
                      item.get("workshop_id"))
-        return scrape_extended_details(url) or scrape_data
+        retried = scrape_extended_details(url)
+        self._note_session_from((retried or {}).get("body") or body)
+        return retried or scrape_data
+
+    def _note_session_from(self, body: str) -> None:
+        """Record or clear the login problem a failed scrape is evidence of.
+
+        The predicate is :func:`looks_signed_out`, the specific one, rather than
+        the broader gate predicate beside it: it is what this codebase already
+        trusts for exactly this decision, and unlike the gate predicate it does
+        not fire on a throttle page. It is a heuristic and is documented as one --
+        a withheld page that arrived without Steam's header (an error shell, an
+        age check) reads the same way -- which is affordable because the warning
+        names the remedy and the recheck button clears it from the token alone.
+
+        An empty body claims nothing in either direction. This runs on the
+        scraped page rather than on the cookie alone because Steam's answer is
+        what settles the question -- a token can look valid and still be refused.
+        """
+        if not body:
+            return
+        if looks_signed_out(body):
+            session_health.record_rejected(self.db_path, session_health.NOT_ACCEPTED_DETAIL)
+        else:
+            session_health.record_accepted(self.db_path)
 
     def _decay_delay(self, elapsed: float) -> None:
         """Shrink the delay for the healthy time since the previous attempt.

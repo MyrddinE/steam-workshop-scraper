@@ -23,6 +23,22 @@ def outbox(tmp_path):
     capture.configure(None)
 
 
+@pytest.fixture(autouse=True)
+def _state_file_in_tmp(tmp_path, monkeypatch):
+    """Keep the worker's session record out of the checkout.
+
+    A worker that scrapes a signed-out page records that fact beside its
+    database, and these tests build workers on a literal "test.db". The path is
+    redirected into tmp rather than each call site being changed, so the
+    behaviour under test stays exactly as it is in production -- and the tests
+    that assert the record still read it through `session_health.read`.
+    """
+    monkeypatch.setattr(
+        "src.session_health.state_path_for",
+        lambda db_path: str(tmp_path / (os.path.basename(str(db_path)) + ".state.yaml")),
+    )
+
+
 def _scrape(ok=True, body=None):
     return {
         "description": "text" if ok else None,
@@ -204,3 +220,71 @@ def test_a_signed_out_page_without_throttling_still_retries():
                                lambda: True)._retry_if_gated({"workshop_id": 1}, "u", page)
     assert scrape.call_count == 1
     assert out["description"] == "found"
+
+
+# --- the login warning the worker raises -------------------------------------
+#
+# The reconcile is not the only place a dead cookie surfaces: a scrape that comes
+# back signed out is the more common one, and the only one that fires while the
+# queue is busy. The worker records the same fact through the same module, so the
+# warning says the same thing whichever path found it.
+#
+# The predicate is `looks_signed_out`, which reads the absent signed-in markers.
+# It is a heuristic and is documented as one: a withheld page that arrived
+# without Steam's header (an error shell, an age check) reads the same way. That
+# cost is accepted because the warning names the remedy and Recheck clears it
+# from the token alone -- a false alarm is one click.
+
+def test_a_signed_out_scrape_records_the_problem_for_the_ui():
+    from src import session_health
+    from src.web_worker import WebScraperThread
+    miss = {"description": None, "body": "<html>no account dropdown here</html>"}
+
+    with patch("src.web_worker.scrape_extended_details", return_value=miss):
+        WebScraperThread("test.db", "nope.lock", {}, None,
+                         lambda: False)._retry_if_gated({"workshop_id": 1}, "u", miss)
+
+    problem = session_health.read("test.db")
+    assert problem is not None
+    assert "sign-in page" in problem["detail"]
+
+
+def test_a_retry_that_works_clears_the_problem():
+    from src import session_health
+    from src.web_worker import WebScraperThread
+    session_health.record_rejected("test.db", "the login cookie expired", now=1000)
+    miss = {"description": None, "body": "<html>no account dropdown here</html>"}
+    good = {"description": "found", "body": "<div class='account_pulldown'>me</div>"}
+
+    with patch("src.web_worker.scrape_extended_details", return_value=good):
+        WebScraperThread("test.db", "nope.lock", {}, None,
+                         lambda: True)._retry_if_gated({"workshop_id": 1}, "u", miss)
+
+    assert session_health.read("test.db") is None
+
+
+def test_a_signed_in_page_leaves_a_healthy_session_alone():
+    from src import session_health
+    from src.web_worker import WebScraperThread
+    miss = {"description": None, "body": "<div class='account_pulldown'>me</div>"}
+
+    with patch("src.web_worker.scrape_extended_details", return_value=miss):
+        WebScraperThread("test.db", "nope.lock", {}, None,
+                         lambda: True)._retry_if_gated({"workshop_id": 1}, "u", miss)
+
+    assert session_health.read("test.db") is None
+
+
+def test_a_throttled_page_makes_no_claim_about_the_cookie():
+    """A throttle is not evidence about the login, so it must neither raise the
+    warning nor clear one that is already up."""
+    from src import session_health
+    from src.web_worker import WebScraperThread
+    session_health.record_rejected("test.db", "the login cookie expired", now=1000)
+    throttled = {"description": None, "body": "<h1>Too many requests</h1>"}
+
+    WebScraperThread("test.db", "nope.lock", {}, None,
+                     lambda: True)._retry_if_gated({"workshop_id": 1}, "u", throttled)
+
+    assert session_health.read("test.db") == {
+        "detail": "the login cookie expired", "detected_at": 1000}

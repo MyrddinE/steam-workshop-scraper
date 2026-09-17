@@ -18,6 +18,10 @@ from src.daemon import Daemon, SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS
 @pytest.fixture
 def daemon(mock_config_with_api, monkeypatch):
     monkeypatch.setattr('src.daemon.save_config', lambda *a, **k: None)
+    # The refresh reads the browser's cookie store: a real file, present on a
+    # developer's machine and absent in most containers. The scheduling tests are
+    # not about it, so it is stubbed here; the tests that are about it re-patch it.
+    monkeypatch.setattr(Daemon, '_refresh_login_cookie', lambda self: False)
     return Daemon(mock_config_with_api)
 
 
@@ -90,3 +94,56 @@ def test_one_bad_appid_does_not_stop_the_others(daemon):
         daemon.reconcile_subscriptions()
 
     assert calls == [1, 2, 3]
+
+
+# --- the login cookie is refreshed first -------------------------------------
+#
+# The reconcile runs on a daily clock of its own while its credential expires on
+# Steam's, about a day out. The browser read is cached for the process lifetime,
+# so a daemon that read a valid cookie at startup keeps replaying it -- even
+# after the operator signs in again -- until something asks for a re-read. This
+# caller has to be that something, or its one reconcile of the day is spent on a
+# cookie that died overnight.
+
+def test_the_login_cookie_is_refreshed_before_the_reconcile(daemon):
+    order = []
+    daemon.target_appids = [111]
+    with patch.object(Daemon, '_refresh_login_cookie',
+                      side_effect=lambda *a, **k: order.append("refresh")), \
+         patch('src.daemon.reconcile_own_subscriptions',
+               side_effect=lambda *a, **k: order.append("reconcile")):
+        daemon._maybe_reconcile_subscriptions()
+
+    assert order == ["refresh", "reconcile"]
+
+
+def test_the_refresh_happens_once_per_interval_not_once_per_appid(daemon):
+    """It is a cookie-store copy, and the store is the same for every appid."""
+    daemon.target_appids = [111, 222]
+    with patch.object(Daemon, '_refresh_login_cookie') as refresh, \
+         patch('src.daemon.reconcile_own_subscriptions'):
+        daemon._maybe_reconcile_subscriptions()
+
+    assert refresh.call_count == 1
+
+
+def test_the_refresh_stays_inside_the_interval_guard(daemon):
+    with patch.object(Daemon, '_refresh_login_cookie') as refresh, \
+         patch('src.daemon.reconcile_own_subscriptions'):
+        daemon._maybe_reconcile_subscriptions()
+        refresh.reset_mock()
+        daemon._maybe_reconcile_subscriptions()
+
+    assert refresh.call_count == 0, "the guard has to be outside the file copy too"
+
+
+def test_a_failing_refresh_does_not_stop_the_reconcile(daemon):
+    """The browser read is a convenience; the reconcile is the job. A refresh
+    that raises must not cost the walk, which may still work off the config."""
+    daemon.target_appids = [111]
+    with patch.object(Daemon, '_refresh_login_cookie',
+                      side_effect=RuntimeError("cookies.sqlite is locked")), \
+         patch.object(Daemon, 'reconcile_subscriptions') as walk:
+        daemon._maybe_reconcile_subscriptions()
+
+    assert walk.called

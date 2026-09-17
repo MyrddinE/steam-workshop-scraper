@@ -9,6 +9,7 @@ The Web UI is a single-page application served by Flask and styled with Pico.css
 A flex-based layout with three zones:
 
 - **Header**: title and the embedded server's port. `#port-display` is filled from `location.port` on load, so it shows where the panel is actually bound — including an ephemeral or reconfigured port — without asking the server. A default port renders nothing rather than a misleading `:80`.
+- **Session warning** (`#session-warning`): a strip between the header and the panes, hidden until the daemon reports that its Steam login has stopped working. It is not dismissible; see [The Session Warning](#the-session-warning).
 - **Left pane** (`#results-pane`): a CSS Grid of result cards (`#results-grid`) with `repeat(auto-fill, minmax(200px, 1fr))` for responsive columns. A `#scroll-sentinel` element inside the grid drives infinite scroll.
 - **Right pane** (`#right-pane`): fixed 360px width containing the search builder at top and detail pane below, separated by a left border
 
@@ -180,6 +181,23 @@ While the panel is open, `_refreshDaemonStatus` polls `/api/daemon` and `_pollDa
 
 ---
 
+## The Session Warning
+
+The daemon signs its Workshop requests with a `steamLoginSecure` cookie, and that cookie expires: *measured live*, the token Steam issues carries `exp - iat` of 24.1 hours, so it dies about once a day while a daemon runs for weeks. When it dies, nothing else on the page looks wrong — the subscriptions simply stop updating, and before this banner existed the only sign was an absence of stars. The failure is therefore reported where it happens and shown where it is read.
+
+**The fact is recorded by whoever finds it.** `src/session_health.py` owns one section (`session`) of `.daemon_state.yaml` beside the database — the same transient, best-effort store as the pacing backoff, for the same reasons (`src/daemon_state.py`). Two paths write it:
+
+* the **subscription reconcile** (`src/subscription_sync.py`), which refuses a cookie whose token has already expired and recognises Steam's sign-in page if one arrives anyway; and
+* the **web worker** (`src/web_worker.py`), which records the same reason when a scrape comes back signed out and a re-read of the browser's cookie store produced nothing newer.
+
+Either path clears it the moment an authenticated page is seen, so the warning disappears on its own once the login works again.
+
+**`#session-warning` is a strip between the header and the panes**, holding a sentence and two controls. The sentence comes from the server verbatim — `the saved login cookie expired 14h ago (at 2026-09-17 00:32)` — because the reason is known where the failure is discovered and the client should not re-derive it. **Sign in to Steam** is an ordinary link to the page the scraper itself uses (`/my/`, which redirects to the login form when signed out and to the profile when signed in), so signing in there mints the cookie the daemon reads; it opens in a new tab so the panel is not lost. **Recheck** posts `/api/session/recheck` and then re-reads `/api/session` rather than trusting the POST's own body, so the banner has exactly one source of truth.
+
+The strip has no close button on purpose: the condition is a silent data outage, and the only thing that clears it is a working login. It is polled every 30 seconds (`_refreshSessionWarning`) because the fact is written by a worker thread in another process — a push would need a channel that does not exist — and half a minute is far more often than the condition can change. The poll is started on load and is never released, unlike the daemon panel's, because the warning has to be visible without opening anything.
+
+---
+
 ## Statistics Panel
 
 The 📊 button (`#btn-stats`, `templates/index.html:99`) opens `#stats-overlay` (`templates/index.html:136`), a modal panel modelled on the daemon overlay. It keeps the button's id and position; clicking it no longer navigates to the raw `/api/stats` JSON.
@@ -317,7 +335,15 @@ Flips `is_queued_for_subscription` for one item and answers `{ok: true}`. It is 
 
 Accepts sessionid from the userscript. Stores it in the `_sessionid` global (for server-side subscribe); if the payload also carries a `login_secure` value that differs from the configured one, that is written to `_config["session"]["login_secure"]` (for the Steam cookie) and persisted so the daemon picks it up. The TUI subscribe action also calls through the server endpoint.
 
-A push whose `login_secure` matches what is already configured writes nothing. The bridge re-pushes on a timer, so without that guard an open Steam tab rewrote `config.yaml` — a YAML serialisation and a file write — every thirty seconds with a value that had not moved. The CSRF token is still taken from every push, because it lives only in memory.
+A push whose `login_secure` matches what is already configured writes nothing. The bridge re-pushes on a timer, so without that guard an open Steam tab rewrote `config.yaml` — a YAML serialisation and a file write — every thirty seconds with a value that had not moved. The CSRF token is still taken from every push, because it lives only in memory. A push that *does* carry a changed cookie is also the best local evidence that the login works again — it comes from the operator's own signed-in browser — so a value that is not already expired clears the [session warning](#the-session-warning) without waiting for a scrape to confirm it.
+
+### `/api/session` — GET
+
+Whether the daemon's Steam login is still working, for the session warning banner: `{problem, detail, detected_at, login_url}`. `detail` is the sentence the daemon recorded and `login_url` is where an operator signs in again, so neither is hard-coded in the template. `problem` is false when nothing has been recorded — including when the recorded section is present but carries no sentence, since an unexplained warning is worse than none. One small YAML file read, because the banner polls it.
+
+### `/api/session/recheck` — POST
+
+Re-reads `steamLoginSecure` from the browser's cookie store after the operator signs in, using the same lookup the daemon prefers. A cookie that is not already expired from its own token is saved to `config.yaml` — which the daemon re-reads per request and per batch, so nothing needs restarting — and the warning is cleared. The judgement is local: proving the cookie by spending a request would duplicate what the next scrape is about to do anyway, and the daemon's answer corrects the banner if Steam still refuses. When the browser has nothing newer, the route answers `{ok: false, problem: true, detail}` with the reason (which may be the configured cookie's expiry, or that there is no cookie at all), and a cookie found but not writable answers **500** with the failure named, so a save that did not happen is never reported as a cleared warning.
 
 ### `/api/stats`, `/api/tags`, `/api/authors`
 

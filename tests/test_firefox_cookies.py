@@ -6,6 +6,7 @@ same user who owns the profile, so the store is the one source that needs
 neither a plugin nor a hand-copied value.
 """
 
+import os
 import sqlite3
 from unittest.mock import patch
 
@@ -20,6 +21,20 @@ from src.firefox_cookies import (
     steam_login_secure,
 )
 from src.web_scraper import _resolve_login_secure, _session_id
+
+
+@pytest.fixture(autouse=True)
+def _state_file_in_tmp(tmp_path, monkeypatch):
+    """Keep the worker's session record out of the checkout.
+
+    The refresh-and-retry tests below build workers on a literal "test.db", and a
+    signed-out scrape records that fact beside its database. Redirecting the path
+    keeps the behaviour under test identical while leaving the checkout clean.
+    """
+    monkeypatch.setattr(
+        "src.session_health.state_path_for",
+        lambda db_path: str(tmp_path / (os.path.basename(str(db_path)) + ".state.yaml")),
+    )
 
 
 def _make_store(path, rows, table=True):

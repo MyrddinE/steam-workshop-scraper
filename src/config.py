@@ -3,6 +3,8 @@ import os
 import yaml
 from pathlib import Path
 
+from src.session_cookie import ENCODED_SEPARATOR
+
 def load_config(path: str) -> dict:
     """
     Loads configuration from a YAML file and applies environment variable overrides.
@@ -62,11 +64,12 @@ def login_secure_value(config: dict) -> str:
     The config key takes a raw cookie string or the three pipe-separated
     components as a YAML list; both mean the same cookie. Everything that sends
     it must agree on the encoding, so the rule lives here rather than being
-    repeated at each call site.
+    repeated at each call site -- and the separator itself lives in
+    :mod:`src.session_cookie`, which reads both forms back out.
     """
     value = config.get("session", {}).get("login_secure", "")
     if isinstance(value, list):
-        return "%7C%7C".join(str(part) for part in value)
+        return ENCODED_SEPARATOR.join(str(part) for part in value)
     return value or ""
 
 

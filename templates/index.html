@@ -96,6 +96,12 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .size-large { color: #ffd700; }
 .size-huge { color: #ff6347; }
 #port-display { font-size: .8rem; color: var(--pico-muted-color); }
+/* The session warning. Not dismissible: it is cleared by fixing the login, not
+   by clicking it away, so there is deliberately no close button. It sits above
+   the results because the failure is silent otherwise -- subscriptions simply
+   stop updating and nothing else on the page looks wrong. */
+#session-warning { flex-shrink: 0; display: none; align-items: center; flex-wrap: wrap; gap: .5rem; padding: .35rem .75rem; background: #7f1d1d; color: #fff; font-size: .82rem; }
+#session-warning a[role="button"], #session-warning button { width: auto; margin: 0; padding: .15rem .6rem; font-size: .78rem; }
 @media (max-width: 768px) {
   main { flex-direction: column; }
   #right-pane { flex: 0 0 auto; border-left: none; border-top: 1px solid var(--pico-muted-border-color); padding-left: 0; padding-top: .5rem; }
@@ -113,6 +119,14 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
     <span id="port-display"></span>
   </span>
 </header>
+<!-- The daemon's Steam login has stopped working. The link is the page the
+     scraper itself uses, so signing in there mints the cookie it reads; the
+     second button re-reads the browser's copy without waiting for the daemon. -->
+<div id="session-warning" role="alert">
+  <span id="session-warning-text"></span>
+  <a id="session-warning-login" href="https://steamcommunity.com/my/" target="_blank" rel="noopener" role="button">Sign in to Steam</a>
+  <button id="session-warning-recheck" class="secondary">Recheck</button>
+</div>
 <main>
   <div id="results-pane">
     <div id="results-grid"></div>
@@ -1459,6 +1473,43 @@ async function _refreshDaemonStatus() {
   } catch(e) { console.debug('Daemon status poll error', e); /* keep polling */ }
 }
 
+// The Steam login can stop working at any time -- the cookie is reissued about
+// daily, and a profile nobody has opened keeps the stale one -- and when it does
+// the subscriptions silently stop updating. The fact is written by a worker
+// thread in another process, so it is polled rather than pushed; half a minute
+// is far more often than it can change.
+let _sessionWarningIv = null;
+const SESSION_WARNING_POLL_MS = 30000;
+
+async function _refreshSessionWarning() {
+  try {
+    const resp = await fetch('/api/session');
+    const s = await resp.json();
+    const el = document.getElementById('session-warning');
+    if (!el) return;
+    if (!s.problem) { el.style.display = 'none'; return; }
+    document.getElementById('session-warning-text').textContent =
+      'Steam login problem — ' + (s.detail || 'the saved cookie was not accepted') + '.';
+    const link = document.getElementById('session-warning-login');
+    if (link && s.login_url) link.href = s.login_url;
+    el.style.display = 'flex';
+  } catch(e) { console.debug('Session warning poll error', e); /* keep polling */ }
+}
+
+async function _recheckSession() {
+  const btn = document.getElementById('session-warning-recheck');
+  if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+  try {
+    await fetch('/api/session/recheck', {method: 'POST'});
+  } catch(e) { console.debug('Session recheck failed', e); /* the poll reports the state */ }
+  if (btn) { btn.disabled = false; btn.textContent = 'Recheck'; }
+  // The recheck's own response is deliberately ignored: the banner has one
+  // source of truth and re-reading it is what keeps it that way.
+  await _refreshSessionWarning();
+}
+
+document.getElementById('session-warning-recheck').onclick = _recheckSession;
+
 // The daemon writes SGR colour escapes into its log file -- the "ignored"
 // marker on a rejected discovery is red. A plain text node cannot show them, so
 // the pane used to render the escape as a replacement glyph and the code itself
@@ -1944,6 +1995,8 @@ document.getElementById('analysis-close').onclick = _closeAnalysisPanel;
 document.getElementById('analysis-recalc').onclick = _runAnalysis;
 
 loadState();
+_refreshSessionWarning();
+if (!_sessionWarningIv) _sessionWarningIv = setInterval(_refreshSessionWarning, SESSION_WARNING_POLL_MS);
 </script>
 </body>
 </html>

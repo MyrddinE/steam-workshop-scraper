@@ -15,7 +15,12 @@ probe against it:
   proves these are subscriptions rather than the account's own publications.
 * The ``/my/`` form needs no steamid (it redirects to the profile). A
   ``/profiles/<steamid>/...`` form also works, and the steamid is derivable from
-  the ``steamLoginSecure`` cookie, whose value is ``<steamid>||<token>``.
+  the ``steamLoginSecure`` cookie, whose value is ``<steamid>||<token>``; see
+  :mod:`src.session_cookie` for that value's shape and its expiry.
+* **The cookie expires daily.** A request made with a stale cookie is not an
+  error: Steam answers it with a 200 and its sign-in page. That page is
+  recognised and reported as a failed session rather than as a page whose markup
+  did not parse, because the two call for different responses.
 
 That page is the only source, so this is a *reconcile*, not a history: it can
 say "the owner is subscribed right now", and it can stamp the first time we
@@ -43,7 +48,7 @@ import math
 import re
 import time
 
-from src import web_scraper
+from src import session_cookie, session_health, web_scraper
 from src.database import apply_own_subscriptions
 
 # The page's own URL shape. `/my/` is used rather than `/profiles/<steamid>/`
@@ -114,24 +119,29 @@ def page_count(declared_total: int) -> int:
     return max(1, math.ceil(declared_total / ITEMS_PER_PAGE))
 
 
-def steamid_from_login_secure(value: str | None) -> str | None:
-    """The steamid embedded in a ``steamLoginSecure`` cookie, or ``None``.
+class SignInRequired(RuntimeError):
+    """Steam answered with its sign-in page instead of the requested page.
 
-    The cookie is ``<steamid>||<token>``. Only used for logging: `/my/` needs no
-    steamid, and the token half must never be logged.
+    Raised rather than logged at the point of the request so the caller can stop
+    the whole walk: every later page would be the same sign-in page, and a
+    sign-in page is not evidence about anyone's subscriptions.
     """
-    if not value or "||" not in value:
-        return None
-    steamid = value.split("||", 1)[0].strip()
-    return steamid or None
+
+
+# Steam sends a signed-out request for any signed-in page here. The path is the
+# reliable signal -- the response status is 200, and the page is a full-size
+# document, so neither the status nor the length distinguishes it.
+SIGN_IN_PATH = "/login/"
 
 
 def _fetch_page(appid: int, page: int, config: dict) -> str:
     """Fetch one subscriptions page and return its body.
 
-    Raises on a transport error or a non-2xx status: a page that did not arrive
-    is not evidence about the owner's subscriptions, and the caller converts the
-    raise into a failed sync rather than a cleared flag.
+    Raises :class:`SignInRequired` when the response is Steam's sign-in page,
+    which is what an expired or revoked login cookie produces. Raises on a
+    transport error or a non-2xx status: a page that did not arrive is not
+    evidence about the owner's subscriptions, and the caller converts the raise
+    into a failed sync rather than a cleared flag.
     """
     url = SUBSCRIPTIONS_URL.format(appid=appid, page=page)
     session = web_scraper._get_session()
@@ -142,6 +152,11 @@ def _fetch_page(appid: int, page: int, config: dict) -> str:
         timeout=15,
     )
     response.raise_for_status()
+    final_url = getattr(response, "url", "") or ""
+    if SIGN_IN_PATH in final_url:
+        raise SignInRequired(
+            f"the request for page {page} was redirected to Steam's sign-in page"
+        )
     return response.text or ""
 
 
@@ -210,6 +225,18 @@ def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
     about the items it omits. Returns ``None`` only when nothing at all was
     learned, in which case the database was not touched.
 
+    A dead login cookie is refused before the first request rather than
+    discovered from the third: the token states its own expiry, so a reconcile
+    that cannot authenticate says so and stops, and a sign-in page that arrives
+    anyway (a revoked session, an unreadable token) ends the walk on the spot.
+    Either way the reason is recorded through :mod:`src.session_health`, which is
+    what lets the web UI tell the operator instead of leaving them to notice that
+    nothing has a star.
+
+    ``seen_at`` is this run's clock: it stamps the one-way facts, and it is the
+    instant the login cookie is judged against, so a caller replaying a past
+    reconcile gets that reconcile's verdict rather than today's.
+
     Never raises into a scrape loop; a failure is a log line. The one exception
     is a programming error (a bad ``config``), which is left to surface in tests
     rather than swallowed.
@@ -218,7 +245,6 @@ def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
         seen_at = int(time.time())
 
     login = web_scraper._resolve_login_secure(config)
-    steamid = steamid_from_login_secure(login)
     if not login:
         # An anonymous request returns the sign-in shell, whose total cannot be
         # verified. Say so once rather than fetching pages that cannot succeed.
@@ -228,11 +254,45 @@ def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
         )
         return None
 
+    cookie = session_cookie.parse(login)
+
+    reason = session_health.evaluate_login(login, now=seen_at)
+    if reason:
+        # The token says it is dead, so the walk cannot succeed: Steam answers
+        # every page with its sign-in shell. Declining here costs nothing and
+        # names the reason, where fetching would spend three attempts to learn
+        # only that the page has no declared total. The same sentence is what the
+        # web UI shows, so it has to stand on its own.
+        session_health.record_rejected(db_path, reason, now=seen_at)
+        logging.warning(
+            "Subscription reconcile for appid %s skipped: %s. Steam answers an expired "
+            "cookie with its sign-in page, so no page was requested and no flag was "
+            "changed. Sign in to Steam in the browser the daemon reads cookies from, "
+            "then restart the daemon so it picks the refreshed cookie up.",
+            appid, reason,
+        )
+        return None
+
     best: tuple[set[int], int | None] | None = None
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             ids, declared_total = collect_subscribed_ids(appid, config)
+        except SignInRequired as exc:
+            # Retrying cannot help and would only ask Steam again, so the walk
+            # ends here. Nothing is applied: a sign-in page is not a list. The
+            # local expiry was readable and still in the future, so this is the
+            # case that proves Steam's answer has to be recorded, not just the
+            # token's.
+            session_health.record_rejected(db_path, session_health.NOT_ACCEPTED_DETAIL,
+                                           now=seen_at)
+            logging.warning(
+                "Subscription reconcile for appid %s stopped: %s. No flag was changed. "
+                "Sign in to Steam in the browser the daemon reads cookies from, then "
+                "restart the daemon so it picks the refreshed cookie up.",
+                appid, exc,
+            )
+            return None
         except Exception as exc:
             logging.warning(
                 "Subscription reconcile for appid %s failed on attempt %d/%d: %s",
@@ -251,6 +311,12 @@ def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
             )
             continue
 
+        # A page that states its own total is a signed-in page -- the wording is
+        # rendered for the account -- so whatever problem was recorded earlier is
+        # over. Cleared here rather than only on a complete read because this is
+        # the first point where the session is demonstrably working.
+        session_health.record_accepted(db_path)
+
         if len(ids) < declared_total:
             # Unsubscribing mid-walk renumbers the pages, so a short read is
             # expected occasionally and must be retried, never accepted: the
@@ -267,7 +333,7 @@ def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
         logging.info(
             "Subscription reconcile for appid %s (steamid %s): %d subscribed, %d newly "
             "stamped, %d unstamped, %d queued flags cleared.",
-            appid, steamid or "unknown", counts["subscribed"], counts["stamped"],
+            appid, cookie.steamid or "unknown", counts["subscribed"], counts["stamped"],
             counts["cleared"], counts["queued_cleared"],
         )
         return counts

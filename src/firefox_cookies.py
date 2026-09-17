@@ -197,9 +197,15 @@ def steam_login_secure(refresh: bool = False,
                        profiles_root: Path | None = None) -> str | None:
     """The current `steamLoginSecure`, or None if it cannot be found.
 
-    The last value read is remembered; pass ``refresh=True`` to look again. There
-    is no time-based expiry, because the caller decides when looking again is
-    worth a file copy: a gate-shaped scrape failure is the signal, not a clock.
+    The last value read is remembered; pass ``refresh=True`` to look again. This
+    function has no cache lifetime of its own, because the caller decides when
+    looking again is worth a file copy: a gate-shaped scrape failure is the
+    signal, not a clock.
+
+    The value it returns does expire, though -- Steam reissues `steamLoginSecure`
+    about daily, and a profile nobody has opened keeps the stale one. Callers can
+    read that expiry off the value with :func:`src.session_cookie.parse` rather
+    than inferring it from a request that came back as the sign-in page.
     """
     return browser_cookies(refresh=refresh, profiles_root=profiles_root).get(LOGIN_COOKIE)
 

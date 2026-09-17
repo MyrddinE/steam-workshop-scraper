@@ -11,9 +11,11 @@ from src.database import search_items, get_item_details, get_db_stats, get_all_a
 from src.analysis import view_window_analysis
 from src import images
 from src import metrics
+from src import session_health
 from src import subscription
 from src.config import login_secure_value, save_config
 from src.daemon_control import DaemonController
+from src.firefox_cookies import steam_login_secure
 from src.web_worker import WEB_DELAY_DEFAULT
 
 app = Flask(__name__, template_folder='../templates')
@@ -395,6 +397,59 @@ def api_state():
     return jsonify(state)
 
 
+@app.route('/api/session')
+def api_session():
+    """Whether the saved Steam login is still working, for the header warning.
+
+    Read-only and cheap: one small YAML file beside the database. The UI polls
+    it, so it must stay a file read -- no request to Steam belongs here.
+    """
+    problem = session_health.read(_db_path) or {}
+    return jsonify({
+        "problem": bool(problem),
+        "detail": problem.get("detail"),
+        "detected_at": problem.get("detected_at"),
+        "login_url": session_health.LOGIN_URL,
+    })
+
+
+@app.route('/api/session/recheck', methods=['POST'])
+def api_session_recheck():
+    """Re-read the login cookie from the browser after the operator signs in.
+
+    The browser is the source the daemon itself prefers, so this is the same
+    lookup rather than a second opinion. A cookie that is not locally expired is
+    saved and clears the warning; the daemon re-reads config.yaml per request and
+    per batch, so it picks the value up without a restart.
+
+    Clearing on an unexpired cookie rather than on a successful request is
+    deliberate: proving it would mean spending a request now, when the next
+    scrape or reconcile is about to make one anyway and will correct the warning
+    if Steam still refuses. Telling the operator the truth sooner is worth more
+    than a guarantee this route cannot cheaply give.
+    """
+    fresh = steam_login_secure(refresh=True) or login_secure_value(_config)
+
+    reason = session_health.evaluate_login(fresh)
+    if reason:
+        session_health.record_rejected(_db_path, reason)
+        return jsonify({"ok": False, "problem": True, "detail": reason})
+
+    if fresh != login_secure_value(_config):
+        _config.setdefault("session", {})["login_secure"] = fresh
+        try:
+            save_config(_config_path, _config)
+        except Exception as exc:
+            detail = f"a fresh login cookie was found but could not be saved ({exc})"
+            session_health.record_rejected(_db_path, detail)
+            logging.warning("[Session] %s", detail)
+            return jsonify({"ok": False, "problem": True, "detail": detail}), 500
+
+    session_health.record_accepted(_db_path)
+    logging.info("[Session] login cookie re-read from the browser; the warning is cleared")
+    return jsonify({"ok": True, "problem": False})
+
+
 @app.route('/api/clear_pending', methods=['POST'])
 def api_clear_pending():
     """Delete every never-successfully-fetched item.
@@ -610,6 +665,12 @@ def api_sessionid():
             state = "set and persisted"
         except Exception as exc:
             state = f"set but not persisted ({exc})"
+        # A push carries the operator's own live credential, so it is the best
+        # evidence available here that the login works again. Judged from the
+        # token alone -- Steam is not asked -- which is the same rule the
+        # recheck route uses, and a value that is not expired clears the warning.
+        if session_health.evaluate_login(login_secure) is None:
+            session_health.record_accepted(_db_path)
 
     # A push that changed nothing is worth a debug line, not an info one.
     log = logging.info if changed else logging.debug

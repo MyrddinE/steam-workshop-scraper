@@ -359,8 +359,16 @@ class Daemon:
 
         Returns True only when the value actually changed, which is what makes a
         retry worthwhile. The config holds the cookie between refreshes rather
-        than re-reading the browser on a timer: it is valid for days, and a gate
-        shaped scrape failure is the evidence that it has gone stale.
+        than re-reading the browser on a timer: an unchanged file copy is pure
+        overhead, and a gate-shaped scrape failure is the evidence that the
+        configured value has gone stale.
+
+        The cookie itself, though, is short-lived: the deployed
+        ``steamLoginSecure`` carried ``exp - iat`` of 86,954 seconds, so Steam
+        reissues it about daily and the browser renews it silently on use. A
+        caller that runs on its own slow schedule -- the subscription reconcile
+        is daily -- must therefore refresh first rather than wait to be told by
+        a failure.
         """
         if not self.config.get("session", {}).get("read_firefox_cookies"):
             return False
@@ -595,6 +603,13 @@ class Daemon:
         is: it is a handful of network round trips, and the per-batch path runs
         every few seconds. It runs on the first batch after startup, so a daemon
         that has just come up does not sit on last week's markers.
+
+        The login cookie is refreshed from the browser first. This is the one
+        caller that runs on a clock of its own, and the cookie expires on Steam's
+        clock, about a day out; without the refresh a daemon that had been up and
+        idle would spend its one reconcile of the day on a cookie that died
+        overnight. The refresh is a local file copy, and it returns without
+        writing anything when the browser's copy has not moved.
         """
         now = time.monotonic()
         if (self._last_subscription_reconcile is not None
@@ -602,6 +617,14 @@ class Daemon:
                 < SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS):
             return
         self._last_subscription_reconcile = now
+        try:
+            self._refresh_login_cookie()
+        except Exception as exc:
+            # The refresh is the optional half -- the configured cookie may still
+            # be good -- so a browser store that cannot be read must not cost the
+            # walk. Same rule as every other piece of housekeeping here.
+            logging.warning(
+                "Login cookie refresh before the subscription reconcile failed: %s", exc)
         self.reconcile_subscriptions()
 
     def reconcile_subscriptions(self) -> None:

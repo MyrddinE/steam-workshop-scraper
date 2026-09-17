@@ -14,9 +14,13 @@ makes the result trustworthy:
   found subscribed is cleared.
 """
 
+import base64
+import json
+import logging
+
 import pytest
 
-from src import subscription_sync
+from src import session_health, subscription_sync
 from src.database import (
     apply_own_subscriptions, get_connection, initialize_database,
     insert_or_update_item, mark_own_subscribed, own_subscription_ids,
@@ -36,29 +40,46 @@ def _page(ids, declared_total):
 
 
 class _FakeResponse:
-    def __init__(self, text):
+    """A response whose final URL is what the redirect check reads.
+
+    Steam answers a signed-out request with a 200 and the sign-in page, so the
+    final URL -- not the status -- is what tells the two apart.
+    """
+
+    def __init__(self, text, url=""):
         self.text = text
+        self.url = url
 
     def raise_for_status(self):
         return None
 
 
+# What Steam returns, as a URL and a body, when the login cookie is not accepted.
+_SIGN_IN_URL = ("https://steamcommunity.com/login/home/"
+                "?goto=%2Fmy%2Fmyworkshopfiles%2F")
+_SIGN_IN_PAGE = ("<html><head><title>Sign In</title></head>"
+                 "<body>Sign In</body></html>")
+
+
 class _FakeSession:
     """A session that answers from a scripted page mapping and records the URLs."""
 
-    def __init__(self, pages):
+    def __init__(self, pages, sign_in=False):
         self.pages = pages
+        self.sign_in = sign_in
         self.urls = []
 
     def get(self, url, **kwargs):
         self.urls.append(url)
+        if self.sign_in:
+            return _FakeResponse(_SIGN_IN_PAGE, url=_SIGN_IN_URL)
         page = int(url.rsplit("p=", 1)[1])
         answer = self.pages.get(page)
         if answer is None:
-            return _FakeResponse(_page([], 0))
+            return _FakeResponse(_page([], 0), url=url)
         if isinstance(answer, Exception):
             raise answer
-        return _FakeResponse(answer)
+        return _FakeResponse(answer, url=url)
 
 
 @pytest.fixture
@@ -72,8 +93,8 @@ def sync_env(tmp_path, monkeypatch):
     db_path = str(tmp_path / "sync.db")
     initialize_database(db_path)
 
-    def configure(pages, login="76561198000000000||tok"):
-        session = _FakeSession(pages)
+    def configure(pages, login="76561198000000000||tok", sign_in=False):
+        session = _FakeSession(pages, sign_in=sign_in)
         monkeypatch.setattr(subscription_sync.web_scraper, "_get_session", lambda: session)
         monkeypatch.setattr(subscription_sync.web_scraper, "_build_workshop_cookies",
                             lambda config: {"steamLoginSecure": login})
@@ -82,6 +103,20 @@ def sync_env(tmp_path, monkeypatch):
         return session
 
     return db_path, configure
+
+
+def _cookie(expires_at, steamid="76561198000000000", encoded=True):
+    """A ``steamLoginSecure`` value whose token states an expiry.
+
+    The token is a real three-segment shape -- header, payload, signature --
+    because that is what the parser has to cope with; only the header and the
+    signature are filler. ``%7C%7C`` is the form a browser stores and the config
+    writes, and ``||`` is the form a hand-written config uses.
+    """
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"exp": expires_at}).encode()).decode().rstrip("=")
+    token = f"eyJhbGciOiJub25lIn0.{payload}.c2ln"
+    return f"{steamid}{'%7C%7C' if encoded else '||'}{token}"
 
 
 def _items(db_path, *ids, appid=294100, **columns):
@@ -283,6 +318,124 @@ def test_no_login_cookie_skips_without_a_request(sync_env):
     assert session.urls == [], "an anonymous request cannot verify the total"
 
 
+# --- the login cookie --------------------------------------------------------
+#
+# Steam issues `steamLoginSecure` with a lifetime of about a day, so the copy in
+# the config is expected to go stale between runs. A stale cookie is answered
+# with the sign-in page and a 200 -- not an error -- and a sign-in page is no
+# evidence about anyone's subscriptions, so the walk must stop rather than
+# conclude anything from it. Both facts below were read off the live deployment,
+# where the reconcile failed exactly this way.
+
+def test_an_expired_cookie_skips_before_making_a_request(sync_env):
+    db_path, configure = sync_env
+    _items(db_path, 1)
+    session = configure({1: _page([1], 1)}, login=_cookie(expires_at=1000))
+
+    result = subscription_sync.reconcile_own_subscriptions(db_path, 294100, {},
+                                                           seen_at=2000)
+
+    assert result is None
+    assert session.urls == [], "a token that says it is dead needs no round trip"
+
+
+def test_a_skipped_reconcile_leaves_the_operator_a_reason(sync_env):
+    """The daemon knows why nothing was fetched; the web UI has to be able to
+    say it, or the failure looks exactly like having no subscriptions."""
+    db_path, configure = sync_env
+    _items(db_path, 1)
+    configure({1: _page([1], 1)}, login=_cookie(expires_at=1000))
+
+    subscription_sync.reconcile_own_subscriptions(db_path, 294100, {}, seen_at=2000)
+
+    problem = session_health.read(db_path)
+    assert problem is not None
+    assert problem["detail"].startswith("the saved login cookie expired")
+    assert problem["detected_at"] == 2000
+
+
+def test_a_working_login_clears_a_recorded_problem(sync_env):
+    """The other half of the contract: a warning that cannot clear itself is
+    worse than no warning."""
+    db_path, configure = sync_env
+    _items(db_path, 1)
+    configure({1: _page([1], 1)})
+    session_health.record_rejected(db_path, "the saved login cookie expired", now=1000)
+
+    counts = subscription_sync.reconcile_own_subscriptions(db_path, 294100, {},
+                                                           seen_at=2000)
+
+    assert counts is not None
+    assert session_health.read(db_path) is None
+
+
+def test_the_sign_in_page_leaves_the_operator_a_reason(sync_env):
+    db_path, configure = sync_env
+    _items(db_path, 1)
+    configure({}, login=_cookie(expires_at=9_999_999_999), sign_in=True)
+
+    subscription_sync.reconcile_own_subscriptions(db_path, 294100, {}, seen_at=2000)
+
+    problem = session_health.read(db_path)
+    assert problem is not None
+    assert "sign-in page" in problem["detail"]
+
+
+def test_a_live_cookie_is_not_skipped(sync_env):
+    """The gate must not refuse a cookie that is still good."""
+    db_path, configure = sync_env
+    _items(db_path, 1)
+    session = configure({1: _page([1], 1)}, login=_cookie(expires_at=3000))
+
+    counts = subscription_sync.reconcile_own_subscriptions(db_path, 294100, {},
+                                                           seen_at=2000)
+
+    assert counts is not None and counts["subscribed"] == 1
+    assert session.urls, "a live cookie must still be used"
+
+
+def test_a_cookie_without_a_readable_expiry_is_still_tried(sync_env):
+    """`cannot tell` must not be read as `expired`: refusing to try is worse."""
+    db_path, configure = sync_env
+    _items(db_path, 1)
+    session = configure({1: _page([1], 1)}, login="76561198000000000||opaque")
+
+    counts = subscription_sync.reconcile_own_subscriptions(db_path, 294100, {},
+                                                           seen_at=2000)
+
+    assert counts is not None and counts["subscribed"] == 1
+    assert session.urls
+
+
+def test_the_sign_in_page_stops_the_walk_and_changes_nothing(sync_env):
+    """Steam answers a revoked session with a 200 and the sign-in page."""
+    db_path, configure = sync_env
+    _items(db_path, 1, 2)
+    apply_own_subscriptions(db_path, 294100, {1, 2})
+    session = configure({}, sign_in=True)
+
+    result = subscription_sync.reconcile_own_subscriptions(db_path, 294100, {})
+
+    assert result is None
+    assert len(session.urls) == 1, \
+        "a sign-in page ends the walk; retrying only asks Steam again"
+    assert own_subscription_ids(db_path, 294100) == {1, 2}, \
+        "a sign-in page is not a list, so it may clear nothing"
+
+
+def test_a_sign_in_redirect_is_detected_even_when_the_token_looks_live(sync_env):
+    """The local expiry is a shortcut, never the authority: Steam decides."""
+    db_path, configure = sync_env
+    _items(db_path, 1)
+    session = configure({}, login=_cookie(expires_at=9_999_999_999), sign_in=True)
+
+    result = subscription_sync.reconcile_own_subscriptions(db_path, 294100, {},
+                                                           seen_at=2000)
+
+    assert result is None
+    assert len(session.urls) == 1
+
+
 # --- first-seen stamping and the queue flag ---------------------------------
 
 def test_the_first_seen_timestamp_is_stamped_once(sync_env):
@@ -360,11 +513,25 @@ def test_page_count_covers_a_partial_last_page():
     assert subscription_sync.page_count(0) == 1
 
 
-def test_steamid_is_taken_from_the_login_cookie_before_the_token():
-    assert (subscription_sync.steamid_from_login_secure("76561198000000000||abc")
-            == "76561198000000000")
-    assert subscription_sync.steamid_from_login_secure(None) is None
-    assert subscription_sync.steamid_from_login_secure("no-separator") is None
+def test_the_reported_steamid_comes_from_the_cookie_it_was_handed(sync_env, caplog):
+    """The log names the account, in whichever encoding the cookie arrived.
+
+    Both forms have to work: the config writes `%7C%7C` and a hand-written one
+    uses `||`, and the steamid is only ever useful when it is read out of the
+    value rather than mistaken for it. The parser itself is covered in
+    `tests/test_session_cookie.py`; what is pinned here is that the reconcile
+    uses it.
+    """
+    db_path, configure = sync_env
+    _items(db_path, 1)
+
+    for login in ("76561198000000000||tok", "76561198000000000%7C%7Ctok"):
+        configure({1: _page([1], 1)}, login=login)
+        with caplog.at_level(logging.INFO):
+            subscription_sync.reconcile_own_subscriptions(db_path, 294100, {},
+                                                          seen_at=1000)
+        assert "steamid 76561198000000000" in caplog.text, login
+        caplog.clear()
 
 
 # --- the database helper itself ---------------------------------------------
