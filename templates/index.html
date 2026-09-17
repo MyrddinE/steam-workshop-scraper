@@ -847,10 +847,7 @@ async function toggleDetailQueue(wid) {
     if (!detail.ok) return;
     const item = await detail.json();
     if (item.error) return;
-    if (_currentDetail && _currentDetail.workshop_id === wid) {
-      _currentDetail = item;
-      renderDetail(item);
-    }
+    if (_currentDetail && _currentDetail.workshop_id === wid) renderDetail(item);
     // Keep the matching grid cell's marker in step, as pressing `s` on that
     // cell would. _applySub is the one writer, so the cell shows whatever the
     // server said rather than a locally flipped guess.
