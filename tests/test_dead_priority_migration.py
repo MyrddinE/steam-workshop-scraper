@@ -10,7 +10,7 @@ whose entire value is that it reads zero unless something has regressed.
 
 import logging
 
-from src.database import get_connection, initialize_database, insert_or_update_item
+from src.database import get_connection, initialize_database, insert_or_update_item, EXPECTED_VERSION
 
 
 def _age_to_v19(db_path):
@@ -76,4 +76,4 @@ def test_the_terminal_version_is_reached(db_path):
     conn = get_connection(db_path)
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert version == 21
+    assert version == EXPECTED_VERSION

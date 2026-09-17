@@ -15,7 +15,7 @@ The migration is an API-fetch queue repair only: it must not disturb dead rows
 
 import logging
 
-from src.database import get_connection, initialize_database, insert_or_update_item
+from src.database import get_connection, initialize_database, insert_or_update_item, EXPECTED_VERSION
 
 STRANDED_WORK = {
     "needs_web_scrape": 5,
@@ -66,7 +66,7 @@ def test_migration_18_to_19_requeues_never_attempted_rows(db_path):
 
     initialize_database(db_path)
 
-    assert _version(db_path) == 21
+    assert _version(db_path) == EXPECTED_VERSION
     # 1 was discovered and never attempted: the migration's whole purpose.
     assert _row(db_path, 1)["api_priority"] == 1
     # 2 has a (if odd) fetch time, so it is not part of the stranded population.

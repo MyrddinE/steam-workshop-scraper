@@ -379,18 +379,66 @@ def test_process_batch_inherits_priority(
     mock_track, mock_summaries, mock_user, mock_conn, mock_img, mock_web, mock_insert,
     mock_api, mock_count, mock_items, mock_save, mock_init, mock_config
 ):
-    """flag_for_web_scrape and flag_for_image get max(inherited, default)."""
+    """flag_for_web_scrape and flag_for_image keep a priority the user asked for.
+
+    api_priority 5 is "visible in a list" -- a person asked for this item -- so
+    the dependent stages inherit it rather than falling back to their own
+    default. The priorities the *daemon* sets (1 backlog, 2 retry, 3 discovery)
+    do not survive; see test_process_batch_does_not_inherit_the_discovery_priority.
+    """
     mock_api.return_value = {1: {"title": "Test", "creator": "111", "preview_url": "http://x", "status": 200}}
     mock_items.return_value = [{"workshop_id": 1, "api_priority": 5, "status": 200}]
     mock_user.return_value = None
     daemon = Daemon(mock_config)
     daemon.process_batch()
-    # Web scrape should be flagged at max(3, 5) = 5 (enriched, inherited_prio=5)
+    # Web scrape should be flagged at max(3, 5) = 5 (enriched, inherited 5)
     # Image should be flagged at max(3, 5) = 5
     for call in mock_web.call_args_list:
         assert call[0][2] >= 5
     for call in mock_img.call_args_list:
         assert call[0][2] >= 5
+
+
+@patch('src.database.initialize_database')
+@patch('src.daemon.save_config')
+@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.count_unscraped_items', return_value=0)
+@patch('src.daemon.get_workshop_details_batch')
+@patch('src.daemon.insert_or_update_item')
+@patch('src.daemon.flag_for_web_scrape')
+@patch('src.daemon.flag_for_image')
+@patch('src.daemon.get_connection')
+@patch('src.daemon.get_user')
+@patch('src.daemon.get_player_summaries', return_value={})
+@patch('src.daemon.get_app_tracking')
+def test_process_batch_does_not_inherit_the_discovery_priority(
+    mock_track, mock_summaries, mock_user, mock_conn, mock_img, mock_web, mock_insert,
+    mock_api, mock_count, mock_items, mock_save, mock_init, mock_config
+):
+    """A newly discovered item the filters exclude is queued at backlog, not at 3.
+
+    Discovery is where an item starts, not something anyone asked for, and the
+    two queues share one number -- so inheriting all of it put a filtered-out item
+    in the same band as one the filters selected. Measured live before this: of
+    the items above backlog priority, 760,782 web entries belonged to excluded
+    items while 107,365 selected ones waited behind them.
+    """
+    mock_api.return_value = {1: {
+        "title": "Test", "creator": "111", "status": 200, "consumer_appid": 123,
+        "preview_url": "http://x", "steam_updated_at": 1000,
+    }}
+    mock_items.return_value = [{"workshop_id": 1, "api_priority": 3, "status": 200}]
+    mock_track.return_value = {"enrichment_filters": json.dumps(
+        [{"field": "Tags", "op": "contains", "value": "Mature"}])}
+    mock_user.return_value = None
+    daemon = Daemon(mock_config)
+    daemon.process_batch()
+
+    assert mock_web.call_args_list, "it is still scraped, just not prioritised"
+    for call in mock_web.call_args_list:
+        assert call[0][2] == 1, "the discovery priority must not reach the scrape queue"
+    for call in mock_img.call_args_list:
+        assert call[0][2] == 1
 
 
 def test_page_discovery_eligible_trigger_file(mock_config):

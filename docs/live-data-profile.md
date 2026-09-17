@@ -45,6 +45,15 @@ of the shared vocabulary. The queues do not behave uniformly:
 
 Treat the scale as per-queue. See [data-model.md](data-model.md) for the column semantics.
 
+**Re-measured 2026-09-17** (2,497,545 rows, five days after the snapshot above): `needs_web_scrape`
+held `0` for 87,535, **`1` for 1,544,799**, `2` for 2,406, **`3` for 862,650**, `5` for 155; and
+`needs_image` `1` for 1,391,781 with `3` for 670,502. The `3` band had gone from a rounding error to
+a third of the queue in five days, because the daemon inherited a discovered item's `api_priority`
+(`3`) into these queues while **95% of what discovery finds fails the enrichment filters** — so the
+backlog was being filled, at discovery speed, with work on items the filters exclude. Migration
+21→22 returns those rows to backlog;
+[code-issues.md](code-issues.md#recently-closed) records the measurement in full.
+
 ## Dead columns
 
 | Column | Reality |

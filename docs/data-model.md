@@ -147,6 +147,23 @@ download-failure path (`src/image_worker.py:201`) and the web worker's request-f
 re-evaluates it happens soon — above the backlog, below an item someone is looking at. See
 [live-data-profile.md](live-data-profile.md) for the measured distribution of each queue.
 
+**The lower half belongs to the daemon, the top to the user.** `1`, `2` and `3` are what the daemon
+writes to organise its own work — a stale refresh, a retry, a discovery — while `5` and `10` are set
+by a person looking at the item. `USER_PRIORITY_FLOOR` (`src/database.py`) is that boundary, and two
+things depend on it:
+
+* **Only a user request cascades.** When the API fetch re-queues the stages that hang off an item, it
+  inherits the part of `api_priority` at or above the floor and nothing else
+  (`user_requested_priority`, `src/daemon.py`). Inheriting the whole value made a discovery priority
+  (`3`) behave like a request, so a newly discovered item that failed its AppID's **enrichment
+  filters** was queued in the same band as one the filters selected — and since `MAX` never
+  downgrades, those rows stayed there. Migration 21→22 repairs the rows that wrote
+  ([schema-migrations.md](schema-migrations.md#v21--v22-filter-excluded-items-give-up-their-queue-priority)).
+* **A filter-excluded item is still scraped, at backlog.** The enrichment filters choose priority,
+  not membership: an item that does not match is queued at `1` for anything the page can change,
+  and translation is the only stage skipped outright for it. What it must never do is *outrank* an
+  item the filters did select.
+
 ## Known Gaps
 
 These are properties of the current implementation, stated so a reader does not infer behaviour

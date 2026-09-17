@@ -203,3 +203,84 @@ def test_legacy_filter_migration_no_legacy_data(db_path):
     save_app_filter(db_path, 294100)
     tracking = get_app_tracking(db_path, 294100)
     assert tracking["enrichment_filters"] == '[]'
+
+
+# ── what the filters do to the queue priority ───────────────────────────────
+#
+# An item that fails the filters is still scraped -- the filters choose priority,
+# not membership -- but it must not outrank an item they selected. It did: the
+# dependent queues were handed the item's whole pre-fetch `api_priority`, and a
+# newly discovered item carries 3, so every new item the filters excluded landed
+# in the same band as the ones they chose; migration 21->22 repairs the rows that
+# wrote. These tests are the pair that says so, evaluated through the real filter
+# list rather than a patch.
+
+def _daemon_for(db_path, appid=294100):
+    from src.daemon import Daemon
+    return Daemon({
+        "database": {"path": db_path},
+        "api": {"key": "TEST_KEY"},
+        "daemon": {"target_appids": [appid], "batch_size": 1, "request_delay_seconds": 0},
+    })
+
+
+def _flag(daemon, item, api_priority):
+    """Drive the flagging with the item's pre-fetch api_priority, as the fetch does."""
+    from unittest.mock import patch
+    with patch("src.daemon.flag_for_web_scrape") as web, \
+         patch("src.daemon.flag_for_image") as img:
+        daemon._flag_scrape_and_image(item, item, item["workshop_id"], api_priority)
+    return web, img
+
+
+def _item(**over):
+    item = {
+        "workshop_id": 1,
+        "consumer_appid": 294100,
+        "title": "A wallpaper",
+        "steam_updated_at": 1000,
+        "extended_description": None,
+        "preview_url": "https://example.invalid/p.jpg",
+        "tags": ["Video"],
+    }
+    item.update(over)
+    return item
+
+
+def test_an_item_that_fails_the_filters_is_queued_at_backlog(db_path):
+    """A discovered item's priority 3 must not reach this queue.
+
+    Discovery is where an item starts, not something anyone asked for, so it is
+    not inherited: the scrape is queued at the branch's own floor. Before the fix
+    this asserted 3, which is the same band as an item the filters selected.
+    """
+    save_app_filter(db_path, 294100, enrichment_filters=json.dumps(
+        [{"field": "Tags", "op": "contains", "value": "Mature"}]))
+    daemon = _daemon_for(db_path)
+
+    web, img = _flag(daemon, _item(tags=["Video"]), api_priority=3)
+
+    web.assert_called_once_with(db_path, 1, 1)
+    img.assert_called_once_with(db_path, 1, 1)
+
+
+def test_an_item_that_passes_the_filters_is_queued_at_new_item_priority(db_path):
+    save_app_filter(db_path, 294100, enrichment_filters=json.dumps(
+        [{"field": "Tags", "op": "contains", "value": "Mature"}]))
+    daemon = _daemon_for(db_path)
+
+    web, img = _flag(daemon, _item(tags=["Mature"]), api_priority=3)
+
+    web.assert_called_once_with(db_path, 1, 3)
+    img.assert_called_once_with(db_path, 1, 3)
+
+
+def test_a_user_request_still_lifts_an_item_the_filters_exclude(db_path):
+    """Opening a filtered-out item is a request to fetch it now, not a bug."""
+    save_app_filter(db_path, 294100, enrichment_filters=json.dumps(
+        [{"field": "Tags", "op": "contains", "value": "Mature"}]))
+    daemon = _daemon_for(db_path)
+
+    web, _img = _flag(daemon, _item(tags=["Video"]), api_priority=10)
+
+    web.assert_called_once_with(db_path, 1, 10)

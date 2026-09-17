@@ -404,6 +404,53 @@ payloads select them outright) and nothing filters or sorts on them.
 
 ---
 
+### v21 → v22: Filter-excluded items give up their queue priority
+
+No schema change — the whole migration is data. `needs_web_scrape` and
+`needs_image` are priority columns, and the daemon used to hand them the item's
+entire pre-fetch `api_priority`, which is `3` for a newly discovered item. An item
+that fails its AppID's enrichment filters is still scraped (the filters choose
+priority, not membership), so that inheritance put every new item the filters
+excluded into the *same band* as the ones they selected — and `MAX(stored, new)`
+means nothing ever downgrades it again, so those rows could not repair
+themselves.
+
+The daemon no longer inherits a priority the daemon itself set (see
+`user_requested_priority` in `src/daemon.py`); this migration repairs the rows it
+had already written. For every AppID with a readable filter set
+(`enrichment_filters_for`), it walks the items above backlog priority and demotes
+the ones the filters exclude:
+
+| Stored | After | Why |
+|---|---|---|
+| `0` | `0` | Not queued. |
+| `1` | `1` | Already backlog. |
+| `2`, `3` | `1` | The daemon's own bookkeeping: a stage-failure retry, a discovery. |
+| `5`, `10` | `5`, `10` | A person asked for this item. Left alone; see below. |
+
+Only the columns the filter set actually reads are selected alongside the two
+priorities, tags are fetched in batches of 900, and the predicate is
+`_evaluate_filters` — the same function the fetch path uses — rather than an SQL
+translation of the filters. The two evaluators already disagree (SQL search also
+searches each field's `_en` counterpart), and a migration whose answer differed
+from the runtime would leave a queue the runtime immediately re-stamps. An
+unreadable filter set means *enrich everything*, so it demotes nothing: reading a
+malformed list as "excludes everything" would be the far more expensive mistake.
+
+A `5` or a `10` is deliberately untouched. Under both the old rule and the new
+one, nothing but a user action could have written one there, so demoting it would
+overrule a person in order to tidy up after the daemon — and re-queueing an item
+someone is looking at at backlog priority is a worse outcome than leaving one
+stale entry. *Measured live* on 2026-09-17, before the migration: 868,759 items
+sat above backlog priority, of which 760,782 web entries and 668,269 image ones
+belonged to excluded items while 107,365 selected items waited behind them.
+
+`EXPECTED_VERSION` is now module level in `src/database.py` rather than a local
+inside `initialize_database`, so the migration tests can assert the chain reaches
+it without nine files each repeating the number.
+
+---
+
 ## Database Utility Functions
 
 ### `get_connection` (database)

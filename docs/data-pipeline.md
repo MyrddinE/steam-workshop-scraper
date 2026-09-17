@@ -16,8 +16,8 @@ The main loop entry point called repeatedly by `run()`. Each invocation:
 4. Merges API data with existing DB row via `_merge_and_clean_api_data`, which filters to `MERGE_ITEM_KEYS` (derived from `WORKSHOP_ITEM_COLUMNS`), remaps `creator_app_id`/`consumer_app_id` to `creator_appid`/`consumer_appid`, remaps `description` to `short_description`, and remaps the API's `time_created`/`time_updated` to `steam_created_at`/`steam_updated_at`. Unknown API keys are discarded with a log message.
 5. Computes Wilson scores via `wilson_lower` (a binomial-proportion confidence interval using a 95% z-score of 1.96). Sets `wilson_favorite_score` from `(favorited, lifetime_subscriptions)` and `wilson_subscription_score` from `(subscriptions, lifetime_subscriptions)`.
 6. Evaluates enrichment filters via `_should_enrich`. Checks the stored `enrichment_filters` for each AppID against the item using `_evaluate_filters` (an in-memory filter evaluator that mirrors the SQL builder's semantics). If no filters are configured, all items are enriched.
-7. If enrichment is approved, calls `flag_for_web_scrape` at `max(3, inherited_prio)`. Also calls `flag_for_image` at the same priority if `preview_url` is present. Sets `status = 200`. Calls `insert_or_update_item` to persist. The merge sets `api_fetched_at = now_ts` and `api_priority = 0`; `last_fetch_attempted_at` was already stamped on entry.
-8. For enriched items, flags `title` and `short_description` for translation via `flag_field_for_translation` at `max(3, inherited_prio)`. That function inserts into `translation_queue` and also raises the parent row's `translation_priority` (using `MAX`, so it never downgrades); the translator clears it to 0 when the item has no queue entries left. Users with non-ASCII names get `translation_priority = 1` set via `_build_user_record`.
+7. If enrichment is approved, calls `flag_for_web_scrape` at `max(3, requested)` -- and `flag_for_image` at the same priority if `preview_url` is present -- where `requested` is the part of the item's pre-fetch `api_priority` a *user* asked for (`user_requested_priority`; `5` and `10` only). An item the filters exclude is still scraped, but at `max(1, requested)`: the filters choose priority, not membership, and an excluded item must not outrank a selected one ([data-model.md](data-model.md#queue-priorities)). Sets `status = 200`. Calls `insert_or_update_item` to persist. The merge sets `api_fetched_at = now_ts` and `api_priority = 0`; `last_fetch_attempted_at` was already stamped on entry.
+8. For enriched items, flags `title` and `short_description` for translation via `flag_field_for_translation` at `max(3, requested)`. That function inserts into `translation_queue` and also raises the parent row's `translation_priority` (using `MAX`, so it never downgrades); the translator clears it to 0 when the item has no queue entries left. Users with non-ASCII names get `translation_priority = 1` set via `_build_user_record`.
 9. After the batch, refreshes the batch's creator profiles in **one** `get_player_summaries` call: the distinct creators proposed by enriched items whose `users` row is missing or older than `user_staleness_days`. This was one request per item; the "only for enriched items" and staleness rules are unchanged.
 
 **Missing ids**: `get_workshop_details_batch` keys results by each entry's `publishedfileid`, never by position, and ignores duplicate or unrequested ids. A requested id the response omits is reported as `404` — the same not-found the single-item path gives for an empty or `result != 1` entry — so it is settled as a permanent failure instead of being silently skipped at the front of the queue.
@@ -268,7 +268,7 @@ rule; they differ only in which fields they consider and at what priority.
 
 | Trigger | Code path | Fields | Priority | Skips a current translation? |
 |---|---|---|---|---|
-| Daemon enriches an item via the API | `daemon.py`, `_flag_translations` (from `_process_item`) | `title_en`, `short_description_en` | `max(3, inherited)` | Yes |
+| Daemon enriches an item via the API | `daemon.py`, `_flag_translations` (from `_process_item`) | `title_en`, `short_description_en` | `max(3, requested)` | Yes |
 | Web scrape succeeds | `web_worker.py`, `WebScraperThread` | `extended_description_en` | 3 | Yes |
 | Item appears in a list | `bump_translation_for_list` (TUI list load, `POST /api/search`) | all three | 5 | Yes |
 | Item opened in the detail pane | `bump_translation_for_detail` (TUI selection, `GET /api/item/<id>`) | all three | 10 | Yes |
@@ -345,7 +345,7 @@ The `summary_only` SELECT returns: `workshop_id, title, title_en, creator, consu
         [Translated: title_en, etc. populated, translation_priority=0]
 ```
 
-Each thread operates independently. The web server's `_ensure_image_flagged` sets `needs_image=5` for list-viewed items and 10 for the detail view, and the daemon calls `flag_for_image(max(3, inherited_prio))` for newly discovered items with a `preview_url`.
+Each thread operates independently. The web server's `_ensure_image_flagged` sets `needs_image=5` for list-viewed items and 10 for the detail view, and the daemon calls `flag_for_image(max(3, requested))` for newly discovered items with a `preview_url`, where `requested` is the user-requested part of the item's pre-fetch `api_priority` (`user_requested_priority`).
 
 ---
 

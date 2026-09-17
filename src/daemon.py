@@ -21,6 +21,8 @@ from src.database import (
     get_item_details,
     normalize_tags,
     _evaluate_filters,
+    enrichment_filters_for,
+    USER_PRIORITY_FLOOR,
     WORKSHOP_ITEM_COLUMNS,
 )
 from src.steam_api import (
@@ -135,6 +137,22 @@ SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS = 86400
 # check is local, and re-reading the browser's store is a file copy -- and one
 # walk as soon as it is not, which is the first one that can succeed.
 SUBSCRIPTION_RECONCILE_RETRY_SECONDS = 900
+
+
+def user_requested_priority(inherited_prio: int) -> int:
+    """The part of a pre-fetch ``api_priority`` a person asked for, else 0.
+
+    Dependent stages inherit *this* rather than the whole value. Inheriting the
+    whole value made the discovery priority (3) behave like a request, which put
+    every newly discovered item the enrichment filters excluded into the same
+    queue band as the ones they selected -- and those filters are the only thing
+    that decides which items deserve the work. Migration 21->22 returns the rows
+    that mistake wrote to backlog priority; this is what stops it recurring.
+
+    The boundary itself is :data:`src.database.USER_PRIORITY_FLOOR`, because the
+    migration that repairs the rows this wrote has to draw the same line.
+    """
+    return inherited_prio if inherited_prio >= USER_PRIORITY_FLOOR else 0
 
 
 # --- API merge allow-list ----------------------------------------------------
@@ -447,26 +465,12 @@ class Daemon:
         app_tracking = get_app_tracking(self.db_path, appid)
         if app_tracking is None:
             return True
-        enrichment = app_tracking.get("enrichment_filters") or "[]"
-        try:
-            filters = json.loads(enrichment)
-        except (json.JSONDecodeError, TypeError):
-            return True
+        filters = enrichment_filters_for(app_tracking)
         if not filters:
-            # Fallback to legacy columns for backward compat
-            filter_text = (app_tracking.get("filter_text") or "").strip()
-            required_tags = json.loads(app_tracking.get("required_tags") or "[]")
-            excluded_tags = json.loads(app_tracking.get("excluded_tags") or "[]")
-            if not filter_text and not required_tags and not excluded_tags:
-                return True
-            # Convert legacy columns to filter format for evaluation
-            filters = []
-            if filter_text:
-                filters.append({"field": "Title", "op": "contains", "value": filter_text})
-            for tag in required_tags:
-                filters.append({"field": "Tags", "op": "contains", "value": tag})
-            for tag in excluded_tags:
-                filters.append({"field": "Tags", "op": "does_not_contain", "value": tag})
+            # Either the AppID has no filters -- so everything matches -- or the
+            # stored set could not be read, which must not be taken as "excludes
+            # everything". Both mean enrich.
+            return True
         return _evaluate_filters(item, filters)
 
     def _load_initial_filter_state(self):
@@ -801,7 +805,10 @@ class Daemon:
         merged_data = self._merge_and_clean_api_data(api_data, merged_data, item_id, now_ts)
         display_title = merged_data.get('title_en') or merged_data.get('title', 'Unknown Title')
 
-        # Capture the pre-fetch priority to inherit for image/web/translation flagging
+        # Capture the pre-fetch priority. The dependent stages filter it down to
+        # the part a user asked for -- see user_requested_priority -- so the
+        # daemon's own bookkeeping priorities (backlog, retry, discovery) cannot
+        # promote an item the enrichment filters excluded above one they selected.
         inherited_prio = existing_data.get("api_priority", 0)
 
         self._score_wilson(merged_data)
@@ -883,7 +890,17 @@ class Daemon:
 
         Note the mixed sources: the revision comparison is between the pre-fetch
         record and the merged one, so both must be passed.
+
+        ``inherited_prio`` is the item's `api_priority` before the fetch. Only the
+        part of it a person asked for is carried into these queues -- see
+        `user_requested_priority` -- so the item's priority here is
+        `max(default_for_this_branch, requested)`.
         """
+        # The priority a person asked for, or 0. Applied here rather than by the
+        # caller so that every use below shares one answer and a new call site
+        # cannot reintroduce the bug this replaced.
+        requested_prio = user_requested_priority(inherited_prio)
+
         old_steam_updated = existing_data.get("steam_updated_at")
         new_steam_updated = merged_data.get("steam_updated_at")
         revision_unchanged = (old_steam_updated is not None
@@ -906,13 +923,17 @@ class Daemon:
             if description_is_current:
                 merged_data["extended_description"] = existing_data["extended_description"]
             else:
-                flag_for_web_scrape(self.db_path, item_id, max(3, inherited_prio))
+                flag_for_web_scrape(self.db_path, item_id, max(3, requested_prio))
             enriched = True
         elif not description_is_current:
             # Does not match the AppID's enrichment filters, so it is not
             # prioritised -- but it is still scraped for anything the page can
-            # change, which the test above decides.
-            flag_for_web_scrape(self.db_path, item_id, max(1, inherited_prio))
+            # change, which the test above decides. It sits at backlog priority,
+            # which is what this branch always meant: `requested_prio` is zero
+            # unless a person asked for the item, so a newly discovered one is
+            # queued at 1 rather than carrying its discovery priority (3) into
+            # this queue and outranking an item the filters did select.
+            flag_for_web_scrape(self.db_path, item_id, max(1, requested_prio))
 
         # Image work, on the same revision test. Without it every API fetch
         # re-flagged the image, so previews that had not changed were downloaded
@@ -926,7 +947,7 @@ class Daemon:
                 images.blocks_retry(existing_ext)
                 or (revision_unchanged and images.can_render_image(existing_ext))):
             flag_for_image(self.db_path, item_id,
-                           max(3, inherited_prio) if enriched else max(1, inherited_prio))
+                           max(3, requested_prio) if enriched else max(1, requested_prio))
         return enriched
 
     def _flag_translations(self, merged_data: dict, item_id: int,
@@ -941,7 +962,7 @@ class Daemon:
         """
         if not enriched:
             return
-        t_prio = max(3, inherited_prio)
+        t_prio = max(3, user_requested_priority(inherited_prio))
         version = merged_data.get("translate_version")
         steam_updated = merged_data.get("steam_updated_at")
         for field, text, translated in [

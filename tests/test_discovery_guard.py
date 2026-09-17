@@ -15,6 +15,7 @@ from src.database import (
     initialize_database,
     count_fetchable_items,
     count_unscraped_items,
+    EXPECTED_VERSION,
 )
 
 
@@ -138,7 +139,7 @@ def test_migration_16_requeues_stranded_transient_failures(db_path):
             for r in conn.execute("SELECT workshop_id, api_priority FROM workshop_items")}
     conn.close()
 
-    assert version == 21
+    assert version == EXPECTED_VERSION
     assert prio[1] == 1
     assert prio[2] == 1
     assert prio[3] == 1

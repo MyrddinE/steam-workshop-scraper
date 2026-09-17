@@ -118,6 +118,20 @@ VALID_SORT_COLS = {
     "wilson_favorite_score", "wilson_subscription_score",
 }
 
+# The lowest priority a *user request* carries, on the shared queue vocabulary
+# (see the Queue Priorities table in data-model.md). Everything below it belongs
+# to the daemon: 1 backlog, 2 a retry after a stage failure, 3 a newly discovered
+# item. Only 5 (the item was shown in a list) and 10 (it is open in a detail
+# pane) mean a person asked for this item, which is why the dependent stages and
+# the migration that demotes filter-excluded rows both draw the line here.
+USER_PRIORITY_FLOOR = 5
+
+# The terminal schema version the migration chain reaches. Module level rather
+# than local to `initialize_database` because the migration tests assert that
+# the chain reaches it, and a magic number repeated in nine test files is a
+# number that will be wrong after the next migration.
+EXPECTED_VERSION = 22
+
 def _build_text_search_clauses(sql: str, params: list, q_str: str, cols: list[str]) -> tuple[str, list]:
     """Applies positive/negative text search tokens to SQL via LIKE clauses."""
     pos_tokens, neg_tokens = _parse_query(q_str)
@@ -379,6 +393,54 @@ def _evaluate_tag_filter(item: dict, op: str, val) -> bool:
         return len(tag_set) > 0
     return True
 
+def enrichment_filters_for(tracking: dict) -> list[dict] | None:
+    """The enrichment filters stored for an AppID, or ``None`` when unreadable.
+
+    One reader, because two things now have to agree: the daemon's per-item
+    enrichment decision, and the migration that moves the queue priority of items
+    the filters exclude. Two readers would be two answers.
+
+    ``None`` means "cannot tell", which a caller must read as *enrich
+    everything*: a malformed filter list must not silently stop all enrichment,
+    and reading it as "excludes everything" would be the far more expensive
+    mistake. An empty list means what it says -- no filters, so everything
+    matches -- and the legacy `filter_text` / `required_tags` / `excluded_tags`
+    columns are the fallback for rows written before `enrichment_filters`
+    existed.
+    """
+    raw = tracking.get("enrichment_filters") or "[]"
+    try:
+        filters = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(filters, list):
+        # `true`, `{}`, a bare string: valid JSON, but not a filter list.
+        return None
+    if filters:
+        return filters
+
+    filter_text = (tracking.get("filter_text") or "").strip()
+    try:
+        required_tags = json.loads(tracking.get("required_tags") or "[]")
+        excluded_tags = json.loads(tracking.get("excluded_tags") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        # A hand-written legacy column can be malformed. Treat the set as
+        # unreadable rather than raising: this runs inside a migration as well
+        # as on the fetch path, and an exception there would abort the upgrade.
+        return None
+    if not isinstance(required_tags, list) or not isinstance(excluded_tags, list):
+        return None
+
+    filters = []
+    if filter_text:
+        filters.append({"field": "Title", "op": "contains", "value": filter_text})
+    for tag in required_tags:
+        filters.append({"field": "Tags", "op": "contains", "value": tag})
+    for tag in excluded_tags:
+        filters.append({"field": "Tags", "op": "does_not_contain", "value": tag})
+    return filters
+
+
 def _evaluate_filters(item: dict, filters: list[dict]) -> bool:
     """True if an in-memory item dict matches all specified filters.
     Filters use the same format as get_filters() in the TUI search builder."""
@@ -444,6 +506,110 @@ def get_image_path(base_dir: str, workshop_id, ext: str) -> str:
     """
     char1, char2, char3 = get_image_subdirs(workshop_id)
     return os.path.join(base_dir, char1, char2, char3, f"{workshop_id}.{ext}")
+
+def _demote_filtered_out_queue_priorities(conn) -> tuple[int, int]:
+    """Move filter-excluded items back to backlog priority. Returns (web, image).
+
+    An item that fails its AppID's enrichment filters is still scraped -- the
+    filters choose priority, not membership -- but it must not *outrank* an item
+    they did select, and between May and September 2026 it did: the daemon
+    inherited its whole pre-fetch `api_priority` into the dependent queues, and a
+    newly discovered item carries `3`, so every new item the filters excluded was
+    queued in the same band as the ones they chose. *Measured live* on
+    2026-09-17, 868,759 items sat above backlog; 760,782 web entries and 668,269
+    image ones of those belonged to excluded items, with 107,365 selected items
+    waiting behind them.
+
+    The predicate is :func:`_evaluate_filters`, the same one the fetch path uses,
+    rather than an SQL translation of the filters: the two evaluators differ
+    already (the SQL search also searches each field's `_en` counterpart), and a
+    migration that disagreed with the runtime would leave the queue in a state
+    the runtime immediately contradicts.
+
+    Only the daemon's own priorities are demoted, and only downwards: a value of
+    2 or 3 becomes 1, while `0` (not queued), `1`, and anything at or above
+    :data:`USER_PRIORITY_FLOOR` are left exactly as they are. A 5 or a 10 in these
+    columns is a person looking at the item, and under both the old rule and the
+    new one nothing else could have put it there -- so the migration undoes the
+    daemon's bookkeeping, it does not overrule a user. Every AppID with a readable
+    filter set is walked; an AppID that is not a configured target has no
+    enrichment path of its own, so the daemon would treat its items as enriched
+    and re-stamp them on the next fetch -- a no-op there rather than a wrong
+    answer.
+    """
+    cursor = conn.cursor()
+
+    rules = []
+    for row in cursor.execute("SELECT * FROM app_tracking"):
+        tracking = dict(row)
+        filters = enrichment_filters_for(tracking)
+        if tracking.get("appid") is not None and filters:
+            rules.append((tracking["appid"], filters))
+    if not rules:
+        return 0, 0
+
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(workshop_items)")}
+    web_demoted = 0
+    image_demoted = 0
+
+    for appid, filters in rules:
+        # Only the columns these filters actually read, plus the two priorities:
+        # the candidate set is large and the rows carry long text.
+        referenced = {FIELD_NAME_MAP.get(f.get("field"), f.get("field"))
+                      for f in filters if isinstance(f, dict) and f.get("field")}
+        referenced.discard("tags")
+        selected = sorted(c for c in referenced
+                          if c and c.isidentifier() and c in columns)
+        fields = ", ".join(["workshop_id", "needs_web_scrape", "needs_image"] + selected)
+
+        rows = cursor.execute(
+            "SELECT %s FROM workshop_items WHERE consumer_appid = ? "
+            "AND (needs_web_scrape > 1 OR needs_image > 1)" % fields,
+            (appid,),
+        ).fetchall()
+        if not rows:
+            continue
+        logging.info(
+            "Migration 21->22: checking %d item(s) above backlog priority for appid %s...",
+            len(rows), appid,
+        )
+
+        # In batches, so a large library does not need its tags held all at once.
+        for start in range(0, len(rows), 900):
+            batch = rows[start:start + 900]
+            ids = [r["workshop_id"] for r in batch]
+            tags: dict[int, list[str]] = {}
+            for tag_row in cursor.execute(
+                    "SELECT wt.workshop_id AS wid, t.tag_name AS name "
+                    "FROM workshop_tags wt JOIN tags t ON t.tag_id = wt.tag_id "
+                    "WHERE wt.workshop_id IN (%s)" % ",".join("?" * len(ids)), ids):
+                tags.setdefault(tag_row["wid"], []).append(tag_row["name"])
+
+            web_ids = []
+            image_ids = []
+            for row in batch:
+                item = dict(row)
+                item["tags"] = tags.get(row["workshop_id"], [])
+                if _evaluate_filters(item, filters):
+                    continue
+                if 2 <= row["needs_web_scrape"] < USER_PRIORITY_FLOOR:
+                    web_ids.append(row["workshop_id"])
+                if 2 <= row["needs_image"] < USER_PRIORITY_FLOOR:
+                    image_ids.append(row["workshop_id"])
+
+            for column, column_ids in (("needs_web_scrape", web_ids),
+                                       ("needs_image", image_ids)):
+                if column_ids:
+                    cursor.execute(
+                        "UPDATE workshop_items SET %s = 1 WHERE workshop_id IN (%s)"
+                        % (column, ",".join("?" * len(column_ids))), column_ids)
+            web_demoted += len(web_ids)
+            image_demoted += len(image_ids)
+
+    if web_demoted or image_demoted:
+        conn.commit()
+    return web_demoted, image_demoted
+
 
 def initialize_database(db_path: str):
     """
@@ -654,7 +820,6 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 21
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -1507,6 +1672,35 @@ def initialize_database(db_path: str):
             "own_first_subscribed_at stays NULL on every row, because no item has been "
             "observed subscribed yet and a stamp would claim an observation never made.",
             defaulted,
+        )
+
+    if db_version < 22:
+        logging.info("Running migration 21->22: demoting queue priority of filter-excluded items...")
+
+        # The queue flags are priority columns (`needs_web_scrape` and
+        # `needs_image`), and the daemon used to hand them the item's whole
+        # pre-fetch `api_priority` -- so a newly discovered item, which carries 3,
+        # put an item the enrichment filters excluded into the same band as the
+        # ones they selected. The daemon no longer does that; this is the rows it
+        # already stamped that way. It matters because those rows are served
+        # first: measured live, 760,782 web entries and 668,269 image ones from
+        # excluded items were queued ahead of 107,365 items the filters had
+        # chosen.
+        #
+        # `MAX(stored, new)` is why these rows cannot fix themselves: a priority
+        # is never downgraded by a later fetch, so an item stamped 3 stays 3 until
+        # something scrapes it, and the queue that was already a year deep only
+        # gets deeper. Nothing here needs a schema change, so the version bump is
+        # the whole of the schema work.
+        web_demoted, image_demoted = _demote_filtered_out_queue_priorities(conn)
+
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 22")
+        conn.commit()
+        logging.info(
+            "Migration 21->22 complete. Returned %d web and %d image queue entries to "
+            "backlog priority; items the filters select kept the priority they had.",
+            web_demoted, image_demoted,
         )
 
     # Create indexes for faster querying

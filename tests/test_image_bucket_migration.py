@@ -6,7 +6,8 @@ from src.database import (
     initialize_database,
     get_connection,
     get_image_subdirs,
-    get_image_path
+    get_image_path,
+    EXPECTED_VERSION,
 )
 from src.webserver import app, init_webserver
 
@@ -66,7 +67,7 @@ def test_migration_12_to_13(tmp_path):
     conn = get_connection(db_path)
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert version == 21
+    assert version == EXPECTED_VERSION
     
     # 6. Assert files were migrated correctly
     # Case A should be moved

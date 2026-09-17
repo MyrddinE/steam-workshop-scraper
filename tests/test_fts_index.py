@@ -7,7 +7,7 @@ triggers. These tests pin both halves: the repair, and the maintenance.
 """
 import pytest
 
-from src.database import get_connection, initialize_database, insert_or_update_item
+from src.database import get_connection, initialize_database, insert_or_update_item, EXPECTED_VERSION
 
 INDEXED_COLUMNS = (
     "title", "title_en", "short_description", "short_description_en",
@@ -71,7 +71,7 @@ def _drop_fts_triggers(db_path):
 def test_chain_reaches_terminal_schema_version(db_path):
     conn = get_connection(db_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 21
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == EXPECTED_VERSION
     finally:
         conn.close()
 

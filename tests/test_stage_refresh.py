@@ -12,6 +12,8 @@ staleness cycle.
 
 from unittest.mock import patch
 
+import pytest
+
 from src.daemon import Daemon
 
 
@@ -165,15 +167,13 @@ def test_an_unenriched_item_is_scraped_again_when_the_revision_changes(db_path):
     web.assert_called_once()
 
 
-def test_the_scrape_still_borrows_the_api_priority_on_that_path(db_path):
-    """Documented, not endorsed: two queues share one number here.
+def test_a_user_request_still_reaches_the_scrape_queue_on_that_path(db_path):
+    """An item someone opened is fetched now, whatever the filters say.
 
-    ``inherited_prio`` is the item's `api_priority`, so an item opened in the
-    detail pane (api_priority 10) queues its scrape at 10 rather than at the
-    scrape queue's own lowest level. That is how a redundant scrape came to be
-    drawn as pending; the queue itself is now withheld when a scrape cannot
-    help, but the number is still borrowed. Changing that would re-prioritise
-    every scrape, so it is left as it is and written down here.
+    The two queues share one number, so a user-requested priority (10 = open in
+    the detail pane) is inherited by the scrape rather than being flattened to
+    the scrape queue's own lowest level. What changed is which priorities count
+    as a request: see `test_the_discovery_priority_is_not_a_user_request`.
     """
     daemon = _daemon(db_path)
     with patch.object(daemon, "_should_enrich", return_value=False), \
@@ -182,4 +182,54 @@ def test_the_scrape_still_borrows_the_api_priority_on_that_path(db_path):
         daemon._flag_scrape_and_image(_item(extended_description=None),
                                       _item(extended_description=None), 1, 10)
     web.assert_called_once_with(daemon.db_path, 1, 10)
+
+
+# --- which priorities are a request -----------------------------------------
+#
+# The queue vocabulary is shared with the API queue, and its lower half is the
+# daemon's own bookkeeping: 1 backlog, 2 retry after a stage failure, 3 newly
+# discovered. Only 5 (shown in a list) and 10 (open in the detail pane) are a
+# person asking for this item. Inheriting the bookkeeping ones is what put items
+# the enrichment filters excluded into the same band as the ones they selected
+# -- measured live, 760,782 web entries from excluded items queued
+# ahead of 107,365 selected ones.
+
+@pytest.mark.parametrize("daemon_priority", [0, 1, 2, 3])
+def test_the_daemon_priorities_are_not_requests(daemon_priority):
+    from src.daemon import user_requested_priority
+    assert user_requested_priority(daemon_priority) == 0
+
+
+@pytest.mark.parametrize("user_priority", [5, 10])
+def test_the_user_priorities_are_requests(user_priority):
+    from src.daemon import user_requested_priority
+    assert user_requested_priority(user_priority) == user_priority
+
+
+def test_the_discovery_priority_is_not_a_user_request(db_path):
+    """The one-line bug: a filter-excluded new item was queued at 3, not 1.
+
+    Both queues are asserted, because both inherited the discovery priority. The
+    item is given no image yet so the image branch is exercised rather than
+    skipped as already current.
+    """
+    daemon = _daemon(db_path)
+    item = _item(extended_description=None, image_extension=None)
+    with patch.object(daemon, "_should_enrich", return_value=False), \
+         patch("src.daemon.flag_for_image") as img, \
+         patch("src.daemon.flag_for_web_scrape") as web:
+        daemon._flag_scrape_and_image(item, item, 1, 3)
+    web.assert_called_once_with(daemon.db_path, 1, 1)
+    img.assert_called_once_with(daemon.db_path, 1, 1)
+
+
+def test_the_retry_priority_is_not_a_user_request_either(db_path):
+    """2 is `api_priority` only, per the scale, and belongs to the daemon."""
+    daemon = _daemon(db_path)
+    with patch.object(daemon, "_should_enrich", return_value=False), \
+         patch("src.daemon.flag_for_image"), \
+         patch("src.daemon.flag_for_web_scrape") as web:
+        daemon._flag_scrape_and_image(_item(extended_description=None),
+                                      _item(extended_description=None), 1, 2)
+    web.assert_called_once_with(daemon.db_path, 1, 1)
 
