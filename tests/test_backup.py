@@ -1,6 +1,7 @@
 """Tests for verified database backups and the outbox manifest."""
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 from datetime import datetime
@@ -8,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
+from src import backup
 from src.backup import (
     BackupError,
     BackupThread,
@@ -321,3 +323,63 @@ def test_daemon_run_takes_final_snapshot_on_shutdown(tmp_path):
         manifest = json.load(handle)
     assert [entry["path"] for entry in manifest["artifacts"]] == ["db/workshop-backup.db"]
     assert manifest["artifacts"][0]["rows"] == 1
+
+
+# ── artifacts this build does not manage ─────────────────────────────────────
+
+def _plant_stale_artifact(dest: str) -> str:
+    """An artifact from a previous layout, beside the current snapshot."""
+    stale = os.path.join(os.path.dirname(dest), "workshop-backup.db.gz")
+    with open(stale, "wb") as handle:
+        handle.write(b"x" * 2048)
+    return stale
+
+
+def test_a_file_this_build_does_not_manage_is_reported(monkeypatch, db_path, tmp_path, caplog):
+    """Silence is how a file that size goes unnoticed.
+
+    `<outbox>/db/workshop-backup.db.gz` is left from a build that compressed the
+    snapshot onto the same path. No code path writes, reads or removes it, and
+    nothing prunes the outbox, so it stays until someone deletes it by hand --
+    measured live at 672.9 MB against a 1.9 GB current snapshot.
+    """
+    monkeypatch.setattr(backup, "_stale_artifacts_warned", False)
+    dest = _dest(tmp_path)
+    snapshot_database(db_path, dest)
+    stale = _plant_stale_artifact(dest)
+
+    monkeypatch.setattr(backup, "_stale_artifacts_warned", False)
+    with caplog.at_level(logging.WARNING):
+        snapshot_database(db_path, dest)
+
+    assert "does not manage" in caplog.text
+    assert "workshop-backup.db.gz" in caplog.text
+    assert os.path.isfile(stale), "reported, never deleted -- it is a backup"
+
+
+def test_a_clean_snapshot_directory_reports_nothing(monkeypatch, db_path, tmp_path, caplog):
+    monkeypatch.setattr(backup, "_stale_artifacts_warned", False)
+    dest = _dest(tmp_path)
+    snapshot_database(db_path, dest)
+
+    monkeypatch.setattr(backup, "_stale_artifacts_warned", False)
+    with caplog.at_level(logging.WARNING):
+        snapshot_database(db_path, dest)
+
+    assert "does not manage" not in caplog.text, (
+        "the snapshot's own file and its temp must not be reported as foreign")
+
+
+def test_the_stale_artifact_report_is_said_once(monkeypatch, db_path, tmp_path, caplog):
+    """It runs after every snapshot, and the answer does not change."""
+    monkeypatch.setattr(backup, "_stale_artifacts_warned", False)
+    dest = _dest(tmp_path)
+    snapshot_database(db_path, dest)
+    _plant_stale_artifact(dest)
+
+    monkeypatch.setattr(backup, "_stale_artifacts_warned", False)
+    with caplog.at_level(logging.WARNING):
+        snapshot_database(db_path, dest)
+        snapshot_database(db_path, dest)
+
+    assert caplog.text.count("does not manage") == 1

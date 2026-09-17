@@ -133,15 +133,17 @@ The work-queue columns share a vocabulary but not a single distribution. The int
 |---|---|
 | 0 | Idle / not queued. |
 | 1 | Backlog or stale background refresh. |
+| 2 | Retry after a stage failure — `api_priority` only. |
 | 3 | Newly discovered item. |
 | 5 | Visible in a list. |
 | 10 | Open in the detail pane. |
 
 Higher wins, and writers use `MAX(stored, new)` so a flag is never downgraded. The queues do not
-each use every value. One value sits outside the scale: `api_priority = 2` is written by the image
-worker's failure path (`image_worker.py`), making it a worker-specific retry marker rather than
-part of the shared vocabulary. See [live-data-profile.md](live-data-profile.md) for the measured
-distribution of each queue.
+each use every value. `2` is the narrowest of them: it is written only by the image worker's
+download-failure path (`src/image_worker.py:201`) and the web worker's request-failure path
+(`src/web_worker.py:336`), both raising the item's *API* priority so that the refresh which
+re-evaluates it happens soon — above the backlog, below an item someone is looking at. See
+[live-data-profile.md](live-data-profile.md) for the measured distribution of each queue.
 
 ## Known Gaps
 

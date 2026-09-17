@@ -1,4 +1,4 @@
-"""Regression tests for the TUI loose ends in docs/code-issues.md (2, 11, 12, 13)."""
+"""Regression tests for the TUI loose ends in docs/code-issues.md (2, 11, 12, 13, 15)."""
 
 import socket
 import time
@@ -191,3 +191,20 @@ def test_webserver_serves_on_the_port_it_reports(db_path):
         for racer in stolen:
             racer.close()
         busy.close()
+
+
+def test_no_two_widgets_share_an_id():
+    """Two screens answering to one id is how a duplicated handler appeared.
+
+    `StatsScreen` and `SubscriptionQueueScreen` both used `btn-close-sub-queue`.
+    Textual scopes queries per screen, so both worked, which is exactly why it
+    went unnoticed -- the id named the wrong screen and nothing failed.
+    """
+    import collections
+    import re
+    from pathlib import Path
+
+    source = Path("src/tui.py").read_text(encoding="utf-8")
+    ids = re.findall(r'id="([A-Za-z0-9_-]+)"', source)
+    duplicates = sorted(name for name, count in collections.Counter(ids).items() if count > 1)
+    assert not duplicates, f"widget ids must be unique across the app: {duplicates}"

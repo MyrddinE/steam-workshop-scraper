@@ -2509,17 +2509,6 @@ def update_app_tracking(db_path: str, appid: int, last_date: int, window_size: i
     conn.commit()
     conn.close()
 
-def update_app_tracking_page(db_path: str, appid: int, last_page: int) -> None:
-    """Updates the last_page_scanned for a given appid."""
-    conn = get_connection(db_path)
-    conn.execute(
-        "INSERT INTO app_tracking (appid, last_page_scanned) VALUES (?, ?) "
-        "ON CONFLICT(appid) DO UPDATE SET last_page_scanned = excluded.last_page_scanned",
-        (appid, last_page)
-    )
-    conn.commit()
-    conn.close()
-
 def update_app_tracking_cursor(db_path: str, appid: int, cursor: str) -> None:
     """Updates the last_cursor for a given appid."""
     conn = get_connection(db_path)

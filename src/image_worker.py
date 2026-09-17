@@ -145,7 +145,13 @@ class ImageScraperThread(threading.Thread):
                     "workshop_id": wid,
                     "image_extension": ext,
                     "needs_image": 0,
-                    "scrape_version": item.get("steam_updated_at", 0),
+                    # Deliberately not scrape_version. The column records the
+                    # revision the *page* was scraped at, and this worker used to
+                    # write the same value into it on every download -- so an item
+                    # whose page had never been scraped still claimed a scrape at
+                    # its current revision. Nothing reads the column, which is why
+                    # it went unnoticed, but a column that cannot be trusted is
+                    # worse than one that is absent.
                 })
 
                 # Metadata only, and only under the debug switch: the image bytes

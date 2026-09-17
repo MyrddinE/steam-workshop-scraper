@@ -200,7 +200,7 @@ class StatsScreen(Screen):
                 with VerticalScroll(id="tag-stats-scroll"):
                     yield DataTable(id="tag-stats-table")
         yield Footer()
-        yield Button("Close", id="btn-close-sub-queue")
+        yield Button("Close", id="btn-close-stats")
 
     def _compose_chunk(self, name: str):
         """One metric's section: a heading, and the one widget only it writes."""
@@ -216,7 +216,7 @@ class StatsScreen(Screen):
                 yield Static(id=self.CONTENT_IDS[name])
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-close-sub-queue":
+        if event.button.id == "btn-close-stats":
             self.app.pop_screen()
 
     def on_mount(self) -> None:

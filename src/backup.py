@@ -40,6 +40,11 @@ _MANIFEST_LOCK = threading.Lock()
 # How much headroom beyond the source size we want before starting, best-effort.
 _FREE_SPACE_HEADROOM = 16 * 1024 * 1024
 
+# Whether the stale-artifact warning has already been emitted in this process.
+# The check runs after every snapshot and the answer does not change, so it is
+# said once rather than every hour.
+_stale_artifacts_warned = False
+
 
 class BackupError(Exception):
     """Raised when a snapshot cannot be produced or fails verification.
@@ -177,6 +182,63 @@ def verify_snapshot(snapshot_path: str, source_db_path: str) -> dict:
     return {"rows": snapshot_rows, "max_api_fetched_at": row[1]}
 
 
+def _warn_about_stale_artifacts(dest_dir: str, dest_path: str) -> None:
+    """Report files beside the snapshot that this build does not manage.
+
+    The snapshot layout has changed before. ``<outbox>/db/workshop-backup.db.gz``
+    is left over from a build that compressed the snapshot onto the same path;
+    no code path writes, reads or removes it, and nothing prunes the outbox, so
+    it sits there until someone deletes it by hand -- measured live at 672.9 MB
+    against a 1.9 GB current snapshot. Silence about it is how a file that size
+    goes unnoticed.
+
+    Only reports. Deleting a file in someone's outbox is their call, not this
+    module's, and a backup artifact is exactly the kind of thing they may have
+    kept on purpose.
+
+    Warned once per process, because this runs after every snapshot and the
+    answer does not change.
+    """
+    global _stale_artifacts_warned
+    if _stale_artifacts_warned:
+        return
+    _stale_artifacts_warned = True
+
+    base = os.path.basename(dest_path)
+    ours = {base}
+    # The temp file and whatever SQLite leaves beside it while VACUUM INTO runs,
+    # plus the destination's own journal if one is ever created.
+    for suffix in (_TEMP_SUFFIX, _TEMP_SUFFIX + "-journal",
+                   _TEMP_SUFFIX + "-wal", _TEMP_SUFFIX + "-shm", "-journal"):
+        ours.add(base + suffix)
+
+    try:
+        entries = [entry for entry in os.scandir(dest_dir) if entry.is_file()]
+    except OSError as exc:
+        logging.debug("Could not list the snapshot directory %s: %s", dest_dir, exc)
+        return
+
+    stale = []
+    for entry in entries:
+        if entry.name in ours:
+            continue
+        try:
+            stale.append((entry.name, entry.stat().st_size))
+        except OSError:
+            stale.append((entry.name, 0))
+    if not stale:
+        return
+
+    total_mb = sum(size for _name, size in stale) / (1024 * 1024)
+    logging.warning(
+        "The snapshot directory %s holds %d file(s) this build does not manage "
+        "(%.1f MB total): %s. Nothing writes, reads or removes them, so they stay "
+        "until deleted by hand.",
+        dest_dir, len(stale), total_mb,
+        ", ".join(name for name, _size in stale),
+    )
+
+
 def _check_free_space(source_db_path: str, dest_dir: str) -> None:
     """Best-effort warning when the destination volume is too tight.
 
@@ -252,6 +314,7 @@ def snapshot_database(db_path: str, dest_path: str) -> dict:
         raise BackupError(f"could not publish snapshot to {dest_path}: {exc}") from exc
 
     logging.info("Database snapshot written to %s (%s bytes, %s rows)", dest_path, size, stats["rows"])
+    _warn_about_stale_artifacts(dest_dir, dest_path)
     return {
         "bytes": size,
         "sha256": sha256,
