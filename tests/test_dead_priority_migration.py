@@ -76,4 +76,4 @@ def test_the_terminal_version_is_reached(db_path):
     conn = get_connection(db_path)
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert version == 20
+    assert version == 21

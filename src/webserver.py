@@ -7,10 +7,11 @@ import re
 import logging
 import requests
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, get_queued_items, FILTER_SCHEMA, bump_api_priority_for_detail, clear_pending_items
+from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, mark_own_subscribed, get_queued_items, FILTER_SCHEMA, bump_api_priority_for_detail, clear_pending_items
 from src.analysis import view_window_analysis
 from src import images
 from src import metrics
+from src import subscription
 from src.config import login_secure_value, save_config
 from src.daemon_control import DaemonController
 from src.web_worker import WEB_DELAY_DEFAULT
@@ -260,7 +261,7 @@ def api_search():
             sample = results[0] if results else {}
             logging.info(f"[Search] returned {len(results)} items, flagged {image_flagged_count} for image, sample needs_image={sample.get('needs_image')} image_extension={sample.get('image_extension')!r}")
 
-        return jsonify(_with_image_state(results))
+        return jsonify([_attach_subscription(r) for r in _with_image_state(results)])
     except Exception as e:
         logging.exception(f"[Search] Error processing search request")
         return jsonify({"error": str(e)}), 500
@@ -291,6 +292,32 @@ def _detail_payload(workshop_id):
     # a numeric field would round silently in JSON.parse.
     if item.get("creator") is not None:
         item["creator_id"] = str(item["creator"])
+    # The four-state marker is derived here from `src/subscription.py`, once, so
+    # the grid and the detail pane cannot disagree about the same item and the
+    # page's rendering has a single source for the glyph, colour and tooltip.
+    _attach_subscription(item)
+    return item
+
+
+def _attach_subscription(item: dict) -> dict:
+    """Attach the shared subscription marker fields to a payload in place.
+
+    `own_subscribed` / `own_first_subscribed_at` stay on the payload as well, so
+    the raw columns remain inspectable; `subscription_state` and the glyph,
+    colour, class, label and tooltip that accompany it are what the page renders
+    from. They are computed in Python rather than in the page so the page owns no
+    copy of the glyph/colour table: a marker that disagreed with the TUI about
+    what "previously" looks like is the drift the shared module exists to stop.
+    """
+    state = subscription.subscription_state(item)
+    glyph, colour, css, label = subscription.spec(state)
+    item["subscription_state"] = state
+    item["subscription_glyph"] = glyph
+    item["subscription_colour"] = colour
+    item["subscription_class"] = css
+    item["subscription_label"] = label
+    item["subscription_tooltip"] = subscription.tooltip(state)
+    item["subscription_clickable"] = subscription.is_clickable(state)
     return item
 
 
@@ -343,12 +370,14 @@ def api_items():
                w.translate_version, w.is_queued_for_subscription, w.needs_web_scrape,
                w.needs_image, w.translation_priority, w.file_size, w.image_extension,
                w.wilson_subscription_score, w.wilson_favorite_score,
+               w.own_subscribed, w.own_first_subscribed_at,
                w.api_priority,
                u.personaname, u.personaname_en
         FROM workshop_items w LEFT JOIN users u ON w.creator = u.steamid
         WHERE w.workshop_id IN ({placeholders})
     """
-    results = _with_image_state([dict(r) for r in conn.execute(sql, ids).fetchall()])
+    results = [_attach_subscription(r) for r in
+               _with_image_state([dict(r) for r in conn.execute(sql, ids).fetchall()])]
     conn.close()
     return jsonify(results)
 
@@ -596,7 +625,16 @@ def api_toggle_sub(workshop_id):
 
 @app.route('/api/subscribed/<int:workshop_id>', methods=['POST'])
 def api_subscribed(workshop_id):
-    clear_subscription_queue_status(_db_path, workshop_id)
+    """The userscript confirming a subscribe that Steam accepted.
+
+    This is the highest-fidelity signal the project gets: it fires the instant
+    the subscribe lands, so the marker is right before the next reconcile, and
+    the stamp is made from a confirmed subscribe rather than a page scrape.
+    ``mark_own_subscribed`` also clears the queue flag -- there is nothing
+    pending for an item that is now subscribed -- which is what the route used
+    to do alone, throwing the subscription fact away.
+    """
+    mark_own_subscribed(_db_path, workshop_id)
     return jsonify({"ok": True})
 
 

@@ -54,7 +54,7 @@ def test_migration_17_clears_queue_flags_on_dead_rows(db_path):
     conn = get_connection(db_path)
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert version == 20
+    assert version == 21
     assert _queue_flags(db_path, 1) == {
         "needs_web_scrape": 0, "needs_image": 0, "translation_priority": 0,
     }

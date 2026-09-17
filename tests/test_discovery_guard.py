@@ -138,7 +138,7 @@ def test_migration_16_requeues_stranded_transient_failures(db_path):
             for r in conn.execute("SELECT workshop_id, api_priority FROM workshop_items")}
     conn.close()
 
-    assert version == 20
+    assert version == 21
     assert prio[1] == 1
     assert prio[2] == 1
     assert prio[3] == 1

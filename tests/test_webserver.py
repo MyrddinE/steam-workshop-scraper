@@ -1769,6 +1769,7 @@ def test_jump_to_author_sets_the_author_id_filter_and_researches(web_client, tmp
 
 RENDER_DETAIL_DRIVER = """
 const fn = (__FN__);
+const subFn = (__SUB_FN__);
 let html = '';
 global.document = { getElementById: () => ({ set innerHTML(v) { html = v; } }) };
 global._showTranslated = true;
@@ -1779,41 +1780,67 @@ global.wClass = () => 'wilson-low';
 global.fmtSize = () => '1 MB';
 global.sizeClass = () => '';
 global.fmtCount = (n) => String(n || 0);
+global._escapeHtml = (s) => String(s == null ? '' : s);
+global.showSubscriptionMarker = subFn;
 const base = {
   workshop_id: 77, creator: 'Alice', creator_id: '76561198765432109',
   personaname: 'Alice', has_translation: false,
   display_title_original: 'Mod', title: 'Mod',
+  subscription_state: 'never', subscription_glyph: '\\u25cb',
+  subscription_colour: '#808080', subscription_class: 'sub-never',
+  subscription_label: 'Never subscribed', subscription_tooltip: 'never',
+  subscription_clickable: true,
 };
 fn(base);
-const notQueued = html;
-fn(Object.assign({}, base, {is_queued_for_subscription: 1}));
-const queued = html;
+const never = html;
+fn(Object.assign({}, base, {
+  subscription_state: 'subscribed', subscription_glyph: '\\u2605',
+  subscription_colour: '#ffd700', subscription_class: 'sub-subscribed',
+  subscription_label: 'Currently subscribed', subscription_tooltip: 'subscribed',
+  subscription_clickable: false,
+}));
+const subscribed = html;
 fn(Object.assign({}, base, {creator: null, creator_id: null}));
 const noCreator = html;
-console.log(JSON.stringify({notQueued: notQueued, queued: queued, noCreator: noCreator}));
+console.log(JSON.stringify({never: never, subscribed: subscribed, noCreator: noCreator}));
 """
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
-def test_render_detail_wires_the_author_and_queue_affordances(web_client, tmp_path):
-    """renderDetail must offer the jump and the Queue/Unqueue toggle.
+def test_render_detail_wires_the_author_and_subscription_marker(web_client, tmp_path):
+    """renderDetail must offer the jump and draw the subscription marker.
 
     This runs the served function against a stub pane and inspects the HTML it
-    actually builds, so the label branch and the creator guard are exercised
-    rather than merely appearing in the source.
+    actually builds. The old Queue/Unqueue button pair is gone: the marker is
+    the queue control now, so the pane must not carry a second indicator of the
+    same flag.
     """
     client, _ = web_client
-    fn = _extract_function(_served_inline_script(client), "renderDetail")
-    result = _run_node(RENDER_DETAIL_DRIVER.replace("__FN__", fn), tmp_path)
+    script = _served_inline_script(client)
+    fn = _extract_function(script, "renderDetail")
+    sub_fn = _extract_function(script, "showSubscriptionMarker")
+    result = _run_node(RENDER_DETAIL_DRIVER
+                       .replace("__FN__", fn)
+                       .replace("__SUB_FN__", sub_fn), tmp_path)
 
-    assert "jumpToAuthor('76561198765432109')" in result["notQueued"], \
+    assert "jumpToAuthor('76561198765432109')" in result["never"], \
         "the creator must carry the lossless id into the jump"
-    assert "toggleDetailQueue(77)" in result["notQueued"]
-    assert ">Queue</button>" in result["notQueued"]
-    assert ">Unqueue</button>" not in result["notQueued"]
+    # The marker is a real element carrying the glyph the server sent, and it
+    # comes before the title link: it reads as status next to the identity.
+    assert 'data-sub-state="never"' in result["never"]
+    assert ">○</div>" in result["never"]
+    assert result["never"].index('data-sub-state="never"') < result["never"].index("<a href="), \
+        "the marker must precede the title"
+    # subscribed is not clickable, so the pane carries no action for it.
+    assert 'data-sub-state="subscribed"' in result["subscribed"]
+    assert 'data-sub-clickable="0"' in result["subscribed"]
+    assert ">★</div>" in result["subscribed"]
+    assert 'data-sub-clickable="1"' in result["never"]
 
-    assert ">Unqueue</button>" in result["queued"]
-    assert ">Queue</button>" not in result["queued"]
+    # The affordance this replaced must be gone, not merely hidden.
+    for html in result.values():
+        assert ">Queue</button>" not in html
+        assert ">Unqueue</button>" not in html
 
     assert "jumpToAuthor(" not in result["noCreator"], \
         "an item with no creator has nothing to jump to"
@@ -1821,18 +1848,36 @@ def test_render_detail_wires_the_author_and_queue_affordances(web_client, tmp_pa
 
 TOGGLE_QUEUE_DRIVER = """
 const fn = (__FN__);
+const subFn = (__SUB_FN__);
 const rendered = [];
 const classes = new Set();
 let serverQueued = 0;
+// A real-enough marker element: attributes plus a color style, so the driver
+// exercises the same _applySub the page uses rather than a stub.
+function markerEl() {
+  const attrs = {};
+  return {
+    attrs: attrs,
+    style: {},
+    textContent: '',
+    setAttribute: (k, v) => { attrs[k] = String(v); },
+    getAttribute: (k) => (k in attrs ? attrs[k] : null),
+  };
+}
+const marker = markerEl();
 global._currentDetail = {workshop_id: 77, is_queued_for_subscription: 0};
 global.renderDetail = (it) => {
   rendered.push(it.is_queued_for_subscription);
   global._currentDetail = it;
 };
 global.alert = (m) => rendered.push('alert:' + m);
-global.document = { querySelector: () => ({ classList: { toggle: (c, on) => {
-  if (on) classes.add(c); else classes.delete(c);
-} } }) };
+global.document = {
+  querySelector: () => ({
+    querySelector: () => marker,
+    classList: { toggle: (c, on) => { if (on) classes.add(c); else classes.delete(c); } },
+  }),
+};
+global._applySub = subFn;
 global.fetch = async (url) => {
   if (url.indexOf('/api/toggle_sub/') === 0) {
     serverQueued = serverQueued ? 0 : 1;
@@ -1840,14 +1885,18 @@ global.fetch = async (url) => {
   }
   if (url.indexOf('/api/item/') === 0) {
     return {ok: true, status: 200, statusText: 'OK',
-            json: async () => ({workshop_id: 77, is_queued_for_subscription: serverQueued})};
+            json: async () => ({workshop_id: 77, is_queued_for_subscription: serverQueued,
+                                subscription_state: serverQueued ? 'pending' : 'never',
+                                subscription_glyph: serverQueued ? '\\u2606' : '\\u25cb',
+                                subscription_colour: serverQueued ? '#2ecc40' : '#808080',
+                                subscription_tooltip: 'tip', subscription_clickable: true})};
   }
   throw new Error('unexpected url ' + url);
 };
 (async () => {
   await fn(77);
   const afterFirst = global._currentDetail.is_queued_for_subscription;
-  const cellAfterFirst = classes.has('queued');
+  const markerAfterFirst = marker.getAttribute('data-sub-state');
 
   // The cache is deliberately stale (0) while the database says queued (1), as
   // the `s` shortcut would leave it. The read-back must win over any local flip.
@@ -1855,7 +1904,7 @@ global.fetch = async (url) => {
   serverQueued = 1;
   await fn(77);
   const afterExternalQueued = global._currentDetail.is_queued_for_subscription;
-  const cellAfterExternalQueued = classes.has('queued');
+  const markerAfterExternalQueued = marker.getAttribute('data-sub-state');
 
   global.fetch = async (url) => {
     if (url.indexOf('/api/toggle_sub/') === 0) {
@@ -1871,24 +1920,33 @@ global.fetch = async (url) => {
   console.log(JSON.stringify({rendered: rendered, afterFirst: afterFirst,
                               afterExternalQueued: afterExternalQueued,
                               afterServerError: afterServerError,
-                              cellAfterFirst: cellAfterFirst,
-                              cellAfterExternalQueued: cellAfterExternalQueued}));
+                              markerAfterFirst: markerAfterFirst,
+                              markerAfterExternalQueued: markerAfterExternalQueued,
+                              markerText: marker.textContent,
+                              leftoverClasses: [...classes]}));
 })();
 """
 
+# The served _applySub is assigned to global._applySub inside the driver above,
+# after the stub document exists.
+
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
-def test_toggle_queue_reflects_the_databases_state_and_rerenders(web_client, tmp_path):
+def test_toggle_queue_reflects_the_databases_state_and_updates_the_marker(web_client, tmp_path):
     """The toggle must re-render from the stored state, not a flipped guess.
 
     /api/toggle_sub returns only {ok}, and the `s` shortcut and the subscribe
     drain change the same flag behind the pane's back, so the client reads the
-    item back through the read-only route and renders that. A failed toggle must
-    not touch the pane at all.
+    item back through the read-only route and renders that. The grid cell's
+    marker follows the same payload, and a failed toggle must not touch either.
     """
     client, _ = web_client
-    fn = _extract_function(_served_inline_script(client), "toggleDetailQueue")
-    result = _run_node(TOGGLE_QUEUE_DRIVER.replace("__FN__", fn), tmp_path)
+    script = _served_inline_script(client)
+    fn = _extract_function(script, "toggleDetailQueue")
+    sub_fn = _extract_function(script, "_applySub")
+    result = _run_node(TOGGLE_QUEUE_DRIVER
+                       .replace("__FN__", fn)
+                       .replace("__SUB_FN__", sub_fn), tmp_path)
 
     assert result["afterFirst"] == 1
     # The DB said queued while the cached payload still said 0; the read-back
@@ -1899,8 +1957,14 @@ def test_toggle_queue_reflects_the_databases_state_and_rerenders(web_client, tmp
         'alert:Queue update failed: 500 INTERNAL SERVER ERROR',
         'alert:Queue update failed: down',
     ]
-    assert result["cellAfterFirst"] is True, "the grid star follows the pane"
-    assert result["cellAfterExternalQueued"] is False
+    # The cell marker was rewritten from the read-back payload, not from a local
+    # flip of the old `queued` class.
+    assert result["markerAfterFirst"] == "pending"
+    assert result["markerAfterExternalQueued"] == "never"
+    assert result["markerText"] == "\u25cb"
+    assert result["leftoverClasses"] == [], \
+        "the old `queued` class must not be toggled any more"
+    assert result["afterServerError"] == 0, "a rejected toggle must not change the pane"
     assert result["afterServerError"] == 0, "a rejected toggle must not change the pane"
 
 

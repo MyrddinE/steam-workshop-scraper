@@ -20,6 +20,7 @@ WORKSHOP_ITEM_COLUMNS = frozenset({
     "is_queued_for_subscription", "wilson_favorite_score",
     "wilson_subscription_score", "needs_web_scrape",
     "image_extension", "needs_image", "api_priority",
+    "own_subscribed", "own_first_subscribed_at",
 })
 
 # ``users.dt_translated`` was renamed to ``translated_at`` (not
@@ -512,7 +513,15 @@ def initialize_database(db_path: str):
         needs_web_scrape INTEGER DEFAULT 0,
         image_extension TEXT DEFAULT NULL,
         needs_image INTEGER DEFAULT 0,
-        api_priority INTEGER NOT NULL DEFAULT 3
+        api_priority INTEGER NOT NULL DEFAULT 3,
+        -- The owner's (the account whose key and cookies are configured)
+        -- subscription relationship to this item. own_subscribed is reconciled
+        -- from Steam; own_first_subscribed_at is sticky and is the only source
+        -- of the "we have seen this subscribed" state. Neither is the item-wide
+        -- lifetime_subscriptions count above, which cannot be attributed to an
+        -- account.
+        own_subscribed INTEGER DEFAULT 0,
+        own_first_subscribed_at INTEGER DEFAULT NULL
     )
     """)
 
@@ -556,6 +565,8 @@ def initialize_database(db_path: str):
         ("needs_web_scrape", "INTEGER DEFAULT 0"),
         ("image_extension", "TEXT DEFAULT NULL"),
         ("needs_image", "INTEGER DEFAULT 0"),
+        ("own_subscribed", "INTEGER DEFAULT 0"),
+        ("own_first_subscribed_at", "INTEGER DEFAULT NULL"),
     ])
 
     # dt_translated was renamed to translate_version in migration 13->14. A
@@ -643,7 +654,7 @@ def initialize_database(db_path: str):
         conn.commit()
 
     # Schema versioning: run migrations cumulatively from current to expected version
-    EXPECTED_VERSION = 20
+    EXPECTED_VERSION = 21
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
@@ -1467,6 +1478,31 @@ def initialize_database(db_path: str):
             dead_priority_cleared,
         )
 
+    if db_version < 21:
+        logging.info("Running migration 20->21: recording the owner's subscription columns...")
+
+        # The two columns are added by _safe_add_columns above (a fresh database
+        # gets them in CREATE TABLE, an existing one by ALTER). This migration
+        # records the version bump and makes the defaults explicit where SQLite's
+        # ALTER filled a NULL into an INTEGER column that has no NOT NULL. A
+        # pre-existing row placed no subscription claim at all, so it must read
+        # own_subscribed = 0 ("not subscribed") rather than NULL, which the state
+        # derivation would also treat as false -- but only by accident of truthiness,
+        # and a NULL is the wrong thing to leave in a boolean column.
+        cursor.execute(
+            "UPDATE workshop_items SET own_subscribed = 0 WHERE own_subscribed IS NULL"
+        )
+        defaulted = cursor.rowcount
+
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 21")
+        conn.commit()
+        logging.info(
+            "Migration 20->21 complete. Defaulted own_subscribed on %d pre-existing rows; "
+            "own_first_subscribed_at stays NULL, because we have never seen them subscribed.",
+            defaulted,
+        )
+
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON workshop_items (status)")
@@ -1517,6 +1553,144 @@ def clear_subscription_queue_status(db_path: str, workshop_id: int):
     )
     conn.commit()
     conn.close()
+
+
+def mark_own_subscribed(db_path: str, workshop_id: int, seen_at: int | None = None) -> bool:
+    """Record that the owner is subscribed to ``workshop_id`` right now.
+
+    ``own_subscribed`` is set (idempotently), and ``own_first_subscribed_at`` is
+    stamped only when it is still NULL: it is deliberately sticky, because it is
+    the sole source of the "we have seen this subscribed" state and must not move
+    on a later re-subscription.
+
+    The subscription queue flag is cleared in the same statement. There is
+    nothing pending for an item that is now subscribed, and doing it here rather
+    than as a separate call is what keeps ``/api/subscribed`` from having to
+    remember two writes when it already knows the answer.
+
+    Returns True only when this call was the one that set the timestamp, which is
+    what makes the first-seen claim testable.
+    """
+    if seen_at is None:
+        seen_at = int(time.time())
+    conn = get_connection(db_path)
+    try:
+        # Read the stored timestamp *before* the update rather than comparing
+        # afterwards: SQLite reports matched rows, not changed ones, so a
+        # rowcount alone cannot say whether this call was the first to see it.
+        row = conn.execute(
+            "SELECT own_first_subscribed_at FROM workshop_items WHERE workshop_id = ?",
+            (workshop_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        stamped = row[0] is None
+        conn.execute(
+            "UPDATE workshop_items SET own_subscribed = 1, "
+            "is_queued_for_subscription = 0, "
+            "own_first_subscribed_at = COALESCE(own_first_subscribed_at, ?) "
+            "WHERE workshop_id = ?",
+            (seen_at, workshop_id)
+        )
+        conn.commit()
+        return stamped
+    finally:
+        conn.close()
+
+
+def own_subscription_ids(db_path: str, appid: int) -> set[int]:
+    """The ids of this app's items the owner is currently recorded as subscribed to."""
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        "SELECT workshop_id FROM workshop_items "
+        "WHERE consumer_appid = ? AND own_subscribed = 1",
+        (appid,)
+    ).fetchall()
+    conn.close()
+    return {row["workshop_id"] for row in rows}
+
+
+def apply_own_subscriptions(db_path: str, appid: int, subscribed_ids,
+                            seen_at: int | None = None, complete: bool = True) -> dict:
+    """Reconcile one app's ``own_subscribed`` flags against a subscription list.
+
+    ``subscribed_ids`` is the list of the owner's subscriptions for ``appid`` a
+    page walk collected. When ``complete`` is True it must be the *whole* list,
+    because the complement -- every other item of the app -- is then cleared back
+    to not-subscribed. The caller is responsible for establishing that
+    completeness (see ``src.subscription_sync``).
+
+    When ``complete`` is False the list is treated as a partial observation and
+    only the one-way facts are applied: items on it are marked subscribed, their
+    first-seen stamp is set if it is still NULL, and their queue flag is cleared.
+    Nothing is cleared, because a list whose completeness could not be verified
+    is no evidence about the items it omits -- and wrongly clearing
+    ``own_subscribed`` would turn a live subscription into ``previously``.
+
+    Returns ``{"subscribed", "stamped", "cleared", "queued_cleared"}`` counts so
+    the daemon can log what a sync actually did.
+    """
+    if seen_at is None:
+        seen_at = int(time.time())
+    ids = [int(wid) for wid in subscribed_ids]
+
+    conn = get_connection(db_path)
+    try:
+        if ids:
+            placeholders = ",".join("?" * len(ids))
+            queued_cleared = conn.execute(
+                f"UPDATE workshop_items SET is_queued_for_subscription = 0 "
+                f"WHERE workshop_id IN ({placeholders}) AND is_queued_for_subscription = 1",
+                ids
+            ).rowcount
+            stamped = conn.execute(
+                f"UPDATE workshop_items SET own_first_subscribed_at = ? "
+                f"WHERE workshop_id IN ({placeholders}) AND own_first_subscribed_at IS NULL",
+                [seen_at, *ids]
+            ).rowcount
+            conn.execute(
+                f"UPDATE workshop_items SET own_subscribed = 1 WHERE workshop_id IN ({placeholders})",
+                ids
+            )
+        else:
+            queued_cleared = stamped = 0
+
+        if not complete:
+            conn.commit()
+            return {
+                "subscribed": len(ids),
+                "stamped": stamped,
+                "cleared": 0,
+                "queued_cleared": queued_cleared,
+            }
+
+        # The complement of the list. Scoped to this appid so a sync for one app
+        # can never clear another app's flags.
+        if ids:
+            placeholders = ",".join("?" * len(ids))
+            cleared = conn.execute(
+                f"UPDATE workshop_items SET own_subscribed = 0 "
+                f"WHERE consumer_appid = ? AND own_subscribed = 1 "
+                f"AND workshop_id NOT IN ({placeholders})",
+                [appid, *ids]
+            ).rowcount
+        else:
+            cleared = conn.execute(
+                "UPDATE workshop_items SET own_subscribed = 0 "
+                "WHERE consumer_appid = ? AND own_subscribed = 1",
+                (appid,)
+            ).rowcount
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {
+        "subscribed": len(ids),
+        "stamped": stamped,
+        "cleared": cleared,
+        "queued_cleared": queued_cleared,
+    }
 
 
 def get_queued_items(db_path: str) -> list[dict]:
@@ -1798,7 +1972,13 @@ def search_items(db_path: str, query: str = "", appid: int = None,
         cols = ("w.workshop_id, w.title, w.title_en, w.creator, w.consumer_appid, "
                 "w.translate_version, w.is_queued_for_subscription, w.needs_web_scrape, "
                 "w.needs_image, w.translation_priority, w.file_size, w.image_extension, "
-                "w.wilson_subscription_score, w.wilson_favorite_score, u.personaname, u.personaname_en,"
+                "w.wilson_subscription_score, w.wilson_favorite_score, "
+                # Both subscription columns travel with the list rows: the grid
+                # draws its marker from this payload, and a cell that had
+                # own_subscribed without own_first_subscribed_at could not tell
+                # `never` from `previously` after the marker was toggled.
+                "w.own_subscribed, w.own_first_subscribed_at, "
+                "u.personaname, u.personaname_en,"
                 "(SELECT GROUP_CONCAT(t.tag_name, ', ') FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id = w.workshop_id) as tags")
     else:
         cols = ("w.*, u.personaname, u.personaname_en,"

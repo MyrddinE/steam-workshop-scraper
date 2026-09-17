@@ -23,6 +23,19 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .grid-cell.pending-translation .grid-spinner { animation-duration: 2.4s; border-top-color: #7f9a7f; }
 .grid-cell.pending-web .grid-spinner { animation-duration: 9.6s; border-top-color: #8a8a8a; }
 .grid-cell.has-spinner .grid-spinner { display: block; }
+/* The owner's subscription marker, top-right. It mirrors .grid-spinner's
+   placement at the other corner, and it is a real element carrying a real
+   Unicode glyph rather than a pseudo-element: the reader and the TUI see the
+   same characters. Its colour is set inline from the payload, which the server
+   derives from src/subscription.py, so this rule carries only placement. */
+.grid-cell .grid-sub {
+  position: absolute; top: 2px; right: 4px;
+  font-size: .9rem; line-height: 1;
+  background: var(--pico-background-color, #fff);
+  padding: 0 .1em; border-radius: 3px; z-index: 1;
+}
+.grid-cell .grid-sub[data-sub-clickable="1"] { cursor: pointer; }
+.grid-cell .grid-sub[data-sub-clickable="0"] { cursor: default; }
 .grid-cell:hover { border-color: var(--pico-primary-hover-background); }
 .grid-cell:focus-visible { outline: 2px solid #44aa44; outline-offset: 2px; }
 .grid-cell.selected { outline: 2px solid #44aa44; outline-offset: 2px; }
@@ -38,7 +51,6 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .grid-title { font-size: .82rem; font-weight: bold; line-height: 1.2; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .grid-meta { font-size: .7rem; color: var(--pico-muted-color); display: flex; flex-wrap: wrap; gap: .2em .5em; }
 .grid-scores { font-size: .7rem; font-weight: bold; display: flex; gap: .5em; }
-.queued .grid-title::before { content: '\2605 '; color: #44aa44; }
 #right-pane { flex: 0 0 360px; display: flex; flex-direction: column; overflow: hidden; border-left: 1px solid var(--pico-muted-border-color); padding-left: .5rem; }
 #search-builder { flex-shrink: 0; margin-bottom: .5rem; }
 .filter-row { display: flex; gap: .25rem; align-items: center; margin-bottom: .25rem; }
@@ -449,7 +461,6 @@ async function doSearch(reset = true) {
     div.setAttribute('data-wid', item.workshop_id);
     div.setAttribute('tabindex', '0');
     if (idx === 0) div.setAttribute('data-batch-first', '1');
-    if (item.is_queued_for_subscription) div.classList.add('queued');
     div.innerHTML = `${imgHtml}
       <div class="grid-title">${title}</div>
       <div class="grid-meta"><span class="${sizeClass(item.file_size)}">${size}</span></div>
@@ -457,8 +468,16 @@ async function doSearch(reset = true) {
         <span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}" data-wilson="wilson_subscription" data-score="${item.wilson_subscription_score ?? ''}">S ${wss!=null?wss+'%':'—'}</span>
         <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}" data-wilson="wilson_favorite" data-score="${item.wilson_favorite_score ?? ''}">F ${wfs!=null?wfs+'%':'—'}</span>
       </div>
+      <div class="grid-sub"></div>
       <div class="grid-spinner"></div>`;
     _applyPending(div, item);
+    // The marker is written into the DOM rather than attached as a handler
+    // closure so the `s` shortcut can update an existing cell in place without
+    // a re-render, and so showSubscriptionMarker is the one writer.
+    _applySub(div.querySelector('.grid-sub'), item);
+    // The cell opens the detail pane. The marker sits inside it, so the
+    // marker's own click must stop propagation or a queue toggle would also
+    // drag the pane to the item.
     div.onclick = () => showDetail(item.workshop_id);
     grid.appendChild(div);
   });
@@ -546,6 +565,56 @@ function _applyPending(el, item) {
   el.classList.toggle('has-spinner', stage !== null);
 }
 
+// ── the owner's subscription marker ──────────────────────────────────────────
+//
+// Four states (subscribed / pending / previously / never), with glyph, colour,
+// tooltip and clickability all computed by the server from src/subscription.py
+// and carried on the payload. The page deliberately holds no table of its own:
+// the TUI draws the same four states from the same module, and a contract test
+// holds this template to it. `subscription_state` is only used to set the
+// data attribute the click reads, because a handler needs to know whether the
+// click does anything without re-parsing its own text.
+function showSubscriptionMarker(item) {
+  return `<div class="grid-sub" data-sub-state="${item.subscription_state}"`
+    + ` data-sub-clickable="${item.subscription_clickable ? 1 : 0}"`
+    + ` data-wid="${item.workshop_id}"`
+    + ` style="color: ${item.subscription_colour}"`
+    + ` title="${_escapeHtml(item.subscription_tooltip)}"`
+    // The handler lives on the element itself, like every other cell control on
+    // this page. It must be called with the element: the `s` shortcut updates a
+    // cell in place and has no event to hand it.
+    + ` onclick="onSubMarkerClick(event, this)">`
+    + `${item.subscription_glyph}</div>`;
+}
+
+function _applySub(el, item) {
+  if (!el) return;
+  el.setAttribute('data-sub-state', item.subscription_state);
+  el.setAttribute('data-sub-clickable', item.subscription_clickable ? '1' : '0');
+  el.setAttribute('data-wid', item.workshop_id);
+  el.style.color = item.subscription_colour;
+  // The glyph is real text, not CSS content, so the reader (and a test) can see
+  // which of the four states a row is in.
+  el.textContent = item.subscription_glyph;
+  // title is an HTML attribute, so the tooltip travels through the same escape
+  // the rest of the pane's text uses.
+  el.setAttribute('title', item.subscription_tooltip);
+}
+
+// Clicking the marker toggles the queue for the three states that have an
+// action. `subscribed` sends nothing: the only action available would be an
+// unsubscribe, and an accidental unsubscribe is not wanted.
+function onSubMarkerClick(event, el) {
+  // The cell underneath opens the detail pane, so a click on the marker must
+  // stop propagating or a queue toggle would also open the pane.
+  if (event) event.stopPropagation();
+  el = el || (event && event.currentTarget);
+  if (!el) return;
+  if (el.getAttribute('data-sub-clickable') !== '1') return;
+  const wid = parseInt(el.getAttribute('data-wid'), 10);
+  if (!isNaN(wid)) toggleDetailQueue(wid);
+}
+
 function _listNeedsPoll(items) {
   for (const item of items) {
     if (_pendingStage(item) !== null) return true;
@@ -585,6 +654,10 @@ function _startListPoll(filters, sortBy, sortOrder) {
           if (ph && _imageState(item) !== 'absent') ph.outerHTML = _imageCellHtml(item);
         }
         _applyPending(el, item);
+        // The poll also carries the subscription columns, and /api/subscribed
+        // may have stamped them behind this cell's back, so the marker is
+        // refreshed from the same payload.
+        _applySub(el.querySelector('.grid-sub'), item);
         const wfs = item.wilson_favorite_score != null ? (item.wilson_favorite_score*100).toFixed(1) : null;
         const wss = item.wilson_subscription_score != null ? (item.wilson_subscription_score*100).toFixed(1) : null;
         const scores = el.querySelector('.grid-scores');
@@ -720,12 +793,12 @@ function renderDetail(item) {
   const toggle = item.has_translation
     ? `<button onclick="toggleTranslation();return false;">${_showTranslated ? 'Show Original' : 'Show Translation'}</button>`
     : '';
-  // Mirrors the TUI's btn-queue-sub/btn-unqueue-sub pair, whose visibility is
-  // driven by is_queued_for_subscription. The state comes straight from the item
-  // payload, so the 3-second translation poll re-rendering the pane cannot lose
-  // it the way a class toggled on the old DOM would.
-  const queueBtn = `<button onclick="toggleDetailQueue(${item.workshop_id});return false;">`
-    + (item.is_queued_for_subscription ? 'Unqueue' : 'Queue') + '</button>';
+  // The subscription marker is the queue control now: it sits immediately
+  // before the title, where it reads as status next to the item's identity, and
+  // clicking it toggles the queue for the three states that have an action.
+  // The old Queue/Unqueue button pair is gone rather than kept beside it -- two
+  // indicators of the same flag is exactly what this replaced.
+  const subMarker = showSubscriptionMarker(item);
   // Matches the TUI, which notes a pending translation only while there is no
   // stored one yet.
   const notice = ((item.translation_priority || 0) > 0 && !item.translate_version)
@@ -733,7 +806,7 @@ function renderDetail(item) {
     : '';
 
   pane.innerHTML = `
-    <h2><a href="${url}" target="_blank" title="${tooltip}">${title}</a></h2>
+    <h2>${subMarker}<a href="${url}" target="_blank" title="${tooltip}">${title}</a></h2>
     <p>by ${creatorHtml} &mdash; <small>Workshop ID: ${item.workshop_id}</small></p>
     <p class="stat-wilson"><span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}" data-wilson="wilson_subscription" data-score="${item.wilson_subscription_score ?? ''}" title="${_subTitleText}">Subscriber Score: ${wss!=null?wss+'%':'N/A'}</span> &nbsp; <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}" data-wilson="wilson_favorite" data-score="${item.wilson_favorite_score ?? ''}" title="${_favTitleText}">Favorite Score: ${wfs!=null?wfs+'%':'N/A'}</span></p>
     <div class="stat-row"><span class="stat-label">Created:</span> ${created}</div>
@@ -743,7 +816,7 @@ function renderDetail(item) {
     <div class="stat-row"><span class="stat-label">Subs:</span> ${fmtCount(subs)} / ${fmtCount(lsubs)}</div>
     <div class="stat-row"><span class="stat-label">Favs:</span> ${fmtCount(favs)} / ${fmtCount(lfavs)}</div>
     <div class="stat-row"><span class="stat-label">Tags:</span> <small>${tags}</small></div>
-    <p>${queueBtn} <button onclick="doSubscribe(${item.workshop_id}, ${item.consumer_appid || 0});return false;">Subscribe</button> ${toggle}</p>
+    <p><button onclick="doSubscribe(${item.workshop_id}, ${item.consumer_appid || 0});return false;">Subscribe</button> ${toggle}</p>
     ${notice}
     ${desc ? '<div style="border-left:3px solid var(--pico-muted-border-color);padding-left:.5rem;margin-top:.5rem">'+desc+'</div>' : ''}
   `;
@@ -774,11 +847,15 @@ async function toggleDetailQueue(wid) {
     if (!detail.ok) return;
     const item = await detail.json();
     if (item.error) return;
-    if (_currentDetail && _currentDetail.workshop_id === wid) renderDetail(item);
-    // Keep the matching grid cell's queued star in step, as pressing `s` on that
-    // cell would.
+    if (_currentDetail && _currentDetail.workshop_id === wid) {
+      _currentDetail = item;
+      renderDetail(item);
+    }
+    // Keep the matching grid cell's marker in step, as pressing `s` on that
+    // cell would. _applySub is the one writer, so the cell shows whatever the
+    // server said rather than a locally flipped guess.
     const cell = document.querySelector(`#results-grid .grid-cell[data-wid="${wid}"]`);
-    if (cell) cell.classList.toggle('queued', !!item.is_queued_for_subscription);
+    if (cell) _applySub(cell.querySelector('.grid-sub'), item);
   } catch (e) { console.debug('Queue state refresh failed', e); }
 }
 
@@ -1149,9 +1226,10 @@ document.addEventListener('keydown', e => {
 
   if (e.key === 's' || e.key === 'S') {
     e.preventDefault();
-    fetch('/api/toggle_sub/' + wid, {method:'POST'}).then(() => {
-      document.activeElement.classList.toggle('queued');
-    });
+    // The marker is the queue control in both places now, so the shortcut runs
+    // the same read-back path as a click on it: the old local `queued` class
+    // flip could disagree with the server, and it drew a second indicator.
+    toggleDetailQueue(wid);
     return;
   }
 

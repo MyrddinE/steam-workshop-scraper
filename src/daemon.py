@@ -45,6 +45,7 @@ from src.daemon_state import StateStore, state_path_for
 from src import pacing
 from src import images
 from src import capture
+from src.subscription_sync import reconcile_own_subscriptions
 
 # API statuses the fetch path has an explicit branch for. Anything else is
 # captured as evidence and then treated as temporary by _settle_api_failure; it
@@ -110,6 +111,15 @@ API_DELAY_FLOOR = 0.01
 # observed batch cadence. The sweep still runs on the first batch after startup,
 # so a long-idle daemon does not sit on a stale queue.
 STALE_SWEEP_INTERVAL_SECONDS = 3600
+
+# The owner's subscriptions are reconciled once per appid at startup and then on
+# this cadence. Daily is the right order for it: the list only moves when a
+# human subscribes or unsubscribes, the one moment that matters (a subscribe the
+# userscript confirmed) is stamped immediately by /api/subscribed, and a walk is
+# a handful of page fetches against Steam's budget. Like the staleness sweep,
+# this is a housekeeping task on the per-batch path, so it runs on the first
+# batch and is guarded by a monotonic interval afterwards.
+SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS = 86400
 
 
 # --- API merge allow-list ----------------------------------------------------
@@ -241,6 +251,11 @@ class Daemon:
         self.target_appids = config.get("daemon", {}).get("target_appids")
         if not self.target_appids or not isinstance(self.target_appids, list):
             raise ValueError("Configuration error: 'daemon.target_appids' must be provided as a list.")
+
+        # Monotonic timestamp of the last subscription reconcile; None means
+        # "never", so the first batch after startup reconciles each target appid.
+        # See SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS.
+        self._last_subscription_reconcile = None
         
         # Pre-load initial filter state to avoid false positives on startup
         self._load_initial_filter_state()
@@ -410,6 +425,7 @@ class Daemon:
     def process_batch(self):
         """Process one batch: housekeeping, acquire work, then process each item."""
         self._maybe_promote_stale_items()
+        self._maybe_reconcile_subscriptions()
 
         items_to_scrape = self._acquire_batch()
         if items_to_scrape is None:
@@ -484,6 +500,40 @@ class Daemon:
             return
         self._last_stale_sweep = now
         self._promote_stale_items()
+
+    def _maybe_reconcile_subscriptions(self) -> None:
+        """Reconcile the owner's subscriptions onto every target appid, daily.
+
+        Guarded by a monotonic interval for the same reason the staleness sweep
+        is: it is a handful of network round trips, and the per-batch path runs
+        every few seconds. It runs on the first batch after startup, so a daemon
+        that has just come up does not sit on last week's markers.
+        """
+        now = time.monotonic()
+        if (self._last_subscription_reconcile is not None
+                and now - self._last_subscription_reconcile
+                < SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS):
+            return
+        self._last_subscription_reconcile = now
+        self.reconcile_subscriptions()
+
+    def reconcile_subscriptions(self) -> None:
+        """Run one reconcile per target appid.
+
+        A failed reconcile is a log line, never an exception: this is
+        housekeeping on the fetch loop, and a Steam page that did not load must
+        not stop scraping. ``reconcile_own_subscriptions`` itself is also
+        non-raising, so the guard here is for anything around it (the appid list,
+        a database error) and keeps the contract testable from either side.
+        """
+        for appid in self.target_appids or []:
+            try:
+                reconcile_own_subscriptions(self.db_path, appid, self.config)
+            except Exception as exc:
+                logging.warning(
+                    "Subscription reconcile for appid %s failed; housekeeping skipped "
+                    "this app: %s", appid, exc,
+                )
 
     def _promote_stale_items(self) -> None:
         """Periodic sweep: promote stale items from API priority 0 to 1.

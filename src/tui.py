@@ -17,6 +17,7 @@ from src.analysis import view_window_analysis
 from src import metrics
 from src import images
 from src import pending
+from src import subscription
 from src.config import ConfigError, load_config, save_config
 from src.daemon_control import DaemonController
 import os
@@ -827,12 +828,15 @@ class DetailsPane(VerticalScroll):
     def compose(self) -> ComposeResult:
         with Horizontal(id="details-buttons-row"):
             with Horizontal(id="top-left-buttons"):
-                yield Button("Queue", id="btn-queue-sub", classes="details-button")
-                yield Button("Unqueue", id="btn-unqueue-sub", classes="details-button")
                 yield Button("Show Original", id="btn-toggle-translation", classes="details-button")
             yield Button("jump", id="btn-jump-author", variant="primary")
 
         with Horizontal(id="title-creator-row"):
+            # The subscription marker sits immediately before the title, the same
+            # convention the web detail pane uses. It replaces the old
+            # btn-queue-sub/btn-unqueue-sub pair: the marker *is* the control, and
+            # two indicators of one flag is what this removed.
+            yield Label("", id="item-sub-marker")
             yield Label("", id="item-title")
             yield Label("", id="item-creator")
         
@@ -897,11 +901,11 @@ class DetailsPane(VerticalScroll):
         if not self.item_data:
             self.query_one("#detail-content", Markdown).update("Select an item to see details.")
             self.query_one("#item-title", Label).update("")
+            self.query_one("#item-sub-marker", Label).update("")
+            self.query_one("#item-sub-marker", Label).display = False
             self.query_one("#item-creator", Label).update("")
             self.query_one("#btn-toggle-translation").display = False
             self.query_one("#btn-jump-author").display = False
-            self.query_one("#btn-queue-sub").display = False
-            self.query_one("#btn-unqueue-sub").display = False
             
             for stat in ["id", "created", "updated", "tags", "size", "views", "subs", "favs"]:
                 self.query_one(f"#stat-{stat}", Label).display = False
@@ -909,10 +913,15 @@ class DetailsPane(VerticalScroll):
             return
 
         item = self.item_data
-        
-        is_queued = bool(item.get("is_queued_for_subscription", 0))
-        self.query_one("#btn-queue-sub").display = not is_queued
-        self.query_one("#btn-unqueue-sub").display = is_queued
+
+        # The marker and its colour come from src/subscription.py, the same table
+        # the web grid and pane render from.
+        sub_state = subscription.subscription_state(item)
+        sub_glyph, sub_colour, _css, _label = subscription.spec(sub_state)
+        sub_marker = self.query_one("#item-sub-marker", Label)
+        sub_marker.update(f"[{sub_colour}]{sub_glyph}[/]")
+        sub_marker.tooltip = subscription.tooltip(sub_state)
+        sub_marker.display = True
         
         display_translated = self.show_translated and item.get("translate_version")
         title = item.get("title_en") if display_translated and item.get("title_en") else item.get("title", "N/A")
@@ -1035,16 +1044,28 @@ class WorkshopItem(ListItem):
         frame = (self._tick // multiplier) % len(self.BRAILLE)
         return f"[{colour}]{self.BRAILLE[frame]}[/]"
 
+    def _subscription_marker(self) -> str:
+        """This item's subscription marker as Textual markup.
+
+        The glyph and colour come from `src/subscription.py`, the same table the
+        web grid and detail pane render from, so the two front ends cannot
+        disagree about why a row looks the way it does. Not clickable: there is
+        no click affordance in the TUI yet, and the keyboard toggle stays the way
+        to change it.
+        """
+        state = subscription.subscription_state(self.item_data)
+        glyph, colour, _css, _label = subscription.spec(state)
+        return f"[{colour}]{glyph}[/]"
+
     def compose(self) -> ComposeResult:
         wid = self.item_data.get("workshop_id", "N/A")
         title = self.item_data.get("title_en") or self.item_data.get("title", "Unknown Title")
         creator = self.item_data.get("personaname_en") or self.item_data.get("personaname") or self.item_data.get("creator", "Unknown Creator")
-        is_queued = self.item_data.get("is_queued_for_subscription", 0)
-        prefix = "[green]*[/green] " if is_queued else "  "
         spin = self._spinner()
+        marker = self._subscription_marker()
 
-        yield Label(f"{prefix}[b]{title}[/b] ({wid})")
-        yield Label(f"  By: {creator}   {spin}")
+        yield Label(f"[b]{title}[/b] ({wid})")
+        yield Label(f"  By: {creator}   {spin} {marker}")
 
     async def refresh_item(self) -> None:
         """Re-compose the item to reflect any changes in item_data."""
@@ -1797,8 +1818,6 @@ class ScraperApp(App):
             self.notify("Fetch-new triggered! The daemon will scan recently-updated items on its next cycle.")
         elif event.button.id == "btn-update-visible":
             await self.action_update_visible()
-        elif event.button.id in ("btn-queue-sub", "btn-unqueue-sub"):
-            await self.action_toggle_queue()
         elif event.button.id == "btn-execute-search":
             await self.execute_search()
         elif event.button.id == "btn-save-filter":

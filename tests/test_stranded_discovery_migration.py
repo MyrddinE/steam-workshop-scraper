@@ -66,7 +66,7 @@ def test_migration_18_to_19_requeues_never_attempted_rows(db_path):
 
     initialize_database(db_path)
 
-    assert _version(db_path) == 20
+    assert _version(db_path) == 21
     # 1 was discovered and never attempted: the migration's whole purpose.
     assert _row(db_path, 1)["api_priority"] == 1
     # 2 has a (if odd) fetch time, so it is not part of the stranded population.
