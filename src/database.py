@@ -1483,12 +1483,16 @@ def initialize_database(db_path: str):
 
         # The two columns are added by _safe_add_columns above (a fresh database
         # gets them in CREATE TABLE, an existing one by ALTER). This migration
-        # records the version bump and makes the defaults explicit where SQLite's
-        # ALTER filled a NULL into an INTEGER column that has no NOT NULL. A
-        # pre-existing row placed no subscription claim at all, so it must read
-        # own_subscribed = 0 ("not subscribed") rather than NULL, which the state
-        # derivation would also treat as false -- but only by accident of truthiness,
-        # and a NULL is the wrong thing to leave in a boolean column.
+        # records the version bump and does one defensive thing. `own_subscribed`
+        # is a boolean, and a NULL in it is the wrong value: the state derivation
+        # would read it as false, but only by accident of truthiness.
+        #
+        # SQLite fills existing rows from the column's DEFAULT when it ALTERs, so
+        # with `DEFAULT 0` declared in both schema places there is normally nothing
+        # to fix and the UPDATE below matches no rows. It is kept anyway because it
+        # costs one scan and the alternative is trusting that the default was always
+        # declared -- which is the assumption that produced issue 20, where
+        # `CREATE TABLE` and `ALTER` disagreed about `api_priority`'s default.
         cursor.execute(
             "UPDATE workshop_items SET own_subscribed = 0 WHERE own_subscribed IS NULL"
         )
@@ -1498,8 +1502,10 @@ def initialize_database(db_path: str):
         cursor.execute("PRAGMA user_version = 21")
         conn.commit()
         logging.info(
-            "Migration 20->21 complete. Defaulted own_subscribed on %d pre-existing rows; "
-            "own_first_subscribed_at stays NULL, because we have never seen them subscribed.",
+            "Migration 20->21 complete. own_subscribed needed defaulting on %d row(s) "
+            "(normally none -- the column default already covers them); "
+            "own_first_subscribed_at stays NULL on every row, because no item has been "
+            "observed subscribed yet and a stamp would claim an observation never made.",
             defaulted,
         )
 
