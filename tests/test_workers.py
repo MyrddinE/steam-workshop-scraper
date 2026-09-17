@@ -202,6 +202,9 @@ def _run_image_worker(db_path, response=None, error=None, images_root=None):
             stack.enter_context(patch("src.image_worker.requests.get",
                                       return_value=response))
         stack.enter_context(patch("src.image_worker.time.sleep"))
+        # `pacing.wait` measures its deadline against the real monotonic clock,
+        # so stubbing sleep alone leaves it spinning for the delay in real time.
+        stack.enter_context(patch("src.pacing.wait"))
         if images_root is not None:
             stack.enter_context(patch(
                 "src.image_worker.get_image_path",
@@ -807,3 +810,40 @@ def test_translator_thread_lifecycle(tmp_path):
     thread.start()
     thread.join(timeout=2)
     assert not thread.is_alive()
+
+
+def test_a_downloaded_image_does_not_rewrite_the_scrape_version(db_path, tmp_path):
+    """`scrape_version` is the revision the *page* was scraped at.
+
+    The image worker wrote the item's `steam_updated_at` into it on every
+    download, so an item whose page had never been scraped still claimed a
+    scrape at its current revision. Nothing reads the column, which is why it
+    went unnoticed -- but a column that cannot be trusted is worse than one that
+    is absent, and the web worker is the writer that gives it its meaning.
+    """
+    from src.database import get_connection, insert_or_update_item
+
+    # Already scraped, at a revision older than the one the worker will see.
+    insert_or_update_item(db_path, {
+        "workshop_id": 5, "scrape_version": 999, "needs_image": 1,
+        "preview_url": "http://example.com/img.jpg", "steam_updated_at": 1,
+    })
+
+    _run_image_worker(db_path, response=_FakeImageResponse(
+        status_code=200,
+        headers={"Content-Type": "image/jpeg"},
+        body=b"\xff\xd8\xff" + b"x" * 64,
+    ), images_root=str(tmp_path / "images"))
+
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT scrape_version, image_extension FROM workshop_items WHERE workshop_id = 5"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row["image_extension"], "the download itself still succeeded"
+    assert row["scrape_version"] == 999, \
+        "an image download must leave the page's scrape revision alone"
+
