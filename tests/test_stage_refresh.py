@@ -127,3 +127,59 @@ def test_a_real_image_is_still_refetched_when_the_revision_changes(db_path):
     """The gate must not become a blanket refusal to refresh anything."""
     img, _ = _flag(_daemon(db_path), _item(image_extension="jpg"), _item(steam_updated_at=2000))
     img.assert_called_once()
+
+
+# --- the unenriched path had no change detection at all ---------------------
+#
+# `_should_enrich` false means the item does not match its AppID's enrichment
+# filters. That branch queued a scrape unconditionally, so every API refresh
+# re-queued one for items whose stored description was already at the item's
+# current revision -- measured live at 120 of the 570 items queued for a scrape.
+
+def _flag_unenriched(daemon, existing, merged, inherited_prio=10):
+    """Drive `_flag_scrape_and_image` down the non-matching branch."""
+    with patch.object(daemon, "_should_enrich", return_value=False), \
+         patch("src.daemon.flag_for_image") as img, \
+         patch("src.daemon.flag_for_web_scrape") as web:
+        daemon._flag_scrape_and_image(merged, existing, 1, inherited_prio)
+    return img, web
+
+
+def test_an_unenriched_item_with_a_current_description_is_not_rescraped(db_path):
+    """The regression: no revision test on this path, so the queue never drained."""
+    _img, web = _flag_unenriched(_daemon(db_path), _item(), _item())
+    web.assert_not_called()
+
+
+def test_an_unenriched_item_with_no_description_is_still_scraped(db_path):
+    """The test is the revision, not a reason to stop scraping altogether."""
+    _img, web = _flag_unenriched(_daemon(db_path), _item(extended_description=None),
+                                 _item(extended_description=None))
+    web.assert_called_once()
+
+
+def test_an_unenriched_item_is_scraped_again_when_the_revision_changes(db_path):
+    """A changed item may have gained a description the stored one lacks."""
+    _img, web = _flag_unenriched(_daemon(db_path), _item(steam_updated_at=1000),
+                                 _item(steam_updated_at=2000))
+    web.assert_called_once()
+
+
+def test_the_scrape_still_borrows_the_api_priority_on_that_path(db_path):
+    """Documented, not endorsed: two queues share one number here.
+
+    ``inherited_prio`` is the item's `api_priority`, so an item opened in the
+    detail pane (api_priority 10) queues its scrape at 10 rather than at the
+    scrape queue's own lowest level. That is how a redundant scrape came to be
+    drawn as pending; the queue itself is now withheld when a scrape cannot
+    help, but the number is still borrowed. Changing that would re-prioritise
+    every scrape, so it is left as it is and written down here.
+    """
+    daemon = _daemon(db_path)
+    with patch.object(daemon, "_should_enrich", return_value=False), \
+         patch("src.daemon.flag_for_image"), \
+         patch("src.daemon.flag_for_web_scrape") as web:
+        daemon._flag_scrape_and_image(_item(extended_description=None),
+                                      _item(extended_description=None), 1, 10)
+    web.assert_called_once_with(daemon.db_path, 1, 10)
+

@@ -689,15 +689,28 @@ class Daemon:
                               and old_steam_updated == new_steam_updated)
 
         appid = merged_data.get("consumer_appid")
+        # The stored description is still the current one, so no scrape can
+        # improve it. This is the same test on both branches below: the
+        # unenriched path used to queue unconditionally, so every API refresh
+        # re-queued a scrape for items whose description was already at the
+        # item's revision -- measured live at 120 of the 570 queued scrapes.
+        # Worse, that path inherits the item's *api_priority* as the scrape's
+        # priority, so merely opening a detail pane (api_priority 10) queued a
+        # high-priority scrape that could not change anything.
+        description_is_current = (
+            revision_unchanged and existing_data.get("extended_description") is not None)
+
         enriched = False
         if self._should_enrich(appid, merged_data):
-            if revision_unchanged and existing_data.get("extended_description") is not None:
+            if description_is_current:
                 merged_data["extended_description"] = existing_data["extended_description"]
-                enriched = True
             else:
                 flag_for_web_scrape(self.db_path, item_id, max(3, inherited_prio))
-                enriched = True
-        else:
+            enriched = True
+        elif not description_is_current:
+            # Does not match the AppID's enrichment filters, so it is not
+            # prioritised -- but it is still scraped for anything the page can
+            # change, which the test above decides.
             flag_for_web_scrape(self.db_path, item_id, max(1, inherited_prio))
 
         # Image work, on the same revision test. Without it every API fetch
