@@ -63,6 +63,7 @@ MAX_VARIANTS_PER_GROUP = 5
 # Bytes of a response body written to the .body file.
 MAX_BODY_BYTES = 64 * 1024
 
+
 GROUP_STATE_NAME = "_group.json"
 _TEMP_SUFFIX = ".tmp"
 
@@ -201,12 +202,20 @@ def image_capture_active() -> bool:
 
 
 def record_web_scrape(workshop_id, url, scrape_data) -> bool:
-    """Save one web scrape, success or failure, while the budget lasts.
+    """Save one web scrape, success or failure. Unbounded, on purpose.
 
     Deliberately not deduplicated: the question is what a *working* page looks
     like, and one sample of that is worth more than several of the same failure.
     Both states are needed to tell the two apart, which is why the successes are
-    saved too — the failure capture by definition only ever holds misses.
+    saved too — the failure capture by definition only ever holds misses. By the
+    same argument nothing is thinned or dropped: a sample trimmed before anyone
+    has looked at it just means collecting the evidence twice.
+
+    That makes this a *session* switch rather than a resident one. There is no
+    budget here and no retention anywhere in the outbox, so the directory grows
+    for as long as the switch is left on — measured live at about 73 KB per
+    scrape, roughly a gigabyte a day at the web worker's current pace. The
+    failure capture is the opposite case: it runs for weeks, so its caps stay.
     """
     global _scrape_capture
     if not scrape_data:
