@@ -299,3 +299,39 @@ All three, at the moment they were introduced: 19 and 20 by the "queued nowhere 
 count, 17 by the "dead but still queued" count. Both are single statements. They survived as long as
 they did because every stage reported success, so the only signal was a coverage figure drifting
 downwards over weeks.
+
+---
+
+## Discovery logging: mark what is being enriched, not what is not
+
+**Status: Under discussion.** Agreed in principle, deliberately not started.
+
+A discovery line carries a red `ignored` marker when the item failed its enrichment filters, and
+nothing at all when it did not (`src/daemon.py:815`):
+
+```
+[A:2063560223] "gwiezdny papiesz" — ignored
+[A:2063564494] "NSX"
+```
+
+The marker is therefore on almost every line, and says the least interesting thing about it.
+*Measured live* on 2026-09-17 over the last 6 MB of `scraper.log`: **53,523 of 54,057** discovery
+lines (**99.0%**) carried it, while 534 (1.0%) did not. A red word that appears 99% of the time is
+decoration; the informative event is the one item in a hundred that is about to have its page and
+preview fetched, and that is the one currently unmarked.
+
+Invert it: drop the `ignored` marker, and append `enriching` in green (`\033[32m`) when
+`_flag_scrape_and_image` returns true — which is exactly "met the filter and is queued for additional
+details", since that return value is what gates the web-scrape and image queues. One line changes,
+and the web log viewer needs nothing: its SGR table already renders 32 as `#98c379`
+(`templates/index.html:1519`). The TUI's pane needs nothing either, but for a different reason —
+`_poll_tail` writes the raw line into a `RichLog` (`src/tui.py:678`) and nothing in the TUI decodes
+ANSI, so no marker colour has ever reached that pane.
+
+The old wording is also load-bearing in three places that would move with it:
+
+* `src/daemon_runner.py:39` explains the em-dash encoding trap by naming the "ignored" marker, and
+  the example line it describes would no longer exist.
+* `tests/test_daemon_runner.py:146` and `tests/test_webserver.py:1985` use an `ignored` line as a
+  *sample* — one for the reader's encoding, one for SGR decoding. Neither depends on which word is
+  used, but both comments read as if they did, which is how a stale example outlives its subject.
