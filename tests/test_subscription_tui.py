@@ -15,10 +15,16 @@ from unittest.mock import patch
 
 import pytest
 from textual.content import Content
-from textual.widgets import Label, ListView
+from textual.widgets import Label, ListView, Static
 
-from src import subscription
-from src.tui import DetailsPane, ScraperApp
+from src import subscription, subscribe_engine
+from src.database import (
+    initialize_database,
+    insert_or_update_item,
+    mark_own_subscribed,
+    toggle_subscription_queue_status,
+)
+from src.tui import DetailsPane, ScraperApp, SubscriptionQueueScreen
 from tests.conftest import ASYNC_PAUSE
 
 
@@ -155,3 +161,189 @@ async def test_the_keyboard_toggle_updates_the_marker(tmp_path):
     _plain, after_spans = _spans(after)
     assert subscription.colour(subscription.PENDING) in [s.style for s in after_spans]
     assert subscription.glyph(subscription.PENDING) in pane_marker
+
+
+# --- the list marker follows the database, whoever wrote it -----------------
+
+
+def _seed_queued(db_path: str, workshop_id: int = 5, title: str = "Item") -> None:
+    initialize_database(db_path)
+    insert_or_update_item(
+        db_path, {"workshop_id": workshop_id, "title": title, "status": 200})
+    toggle_subscription_queue_status(db_path, workshop_id)
+
+
+def _list_row_markup(app: ScraperApp, index: int = 0) -> str:
+    list_view = app.query_one("#results-list", ListView)
+    return _markup_of(list_view.children[index].query(Label)[1])
+
+
+@pytest.mark.asyncio
+async def test_the_list_marker_follows_a_subscribe_that_lands_behind_it(tmp_path):
+    """The writer need not be this UI: the shared table is re-read.
+
+    This is issue 33's fix in the web grid, repeated here. The row's marker is
+    built from the item data captured when the row was made and nothing on the
+    two-second detail-pane timer re-reads the list, so a subscribe landed by the
+    daemon's reconcile -- or by the web UI in another process -- used to leave
+    the green pending outline in place until a search or a scroll rebuilt it.
+    """
+    db_path = str(tmp_path / "behind.db")
+    _seed_queued(db_path)
+    config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
+
+    with patch('src.tui.load_config', return_value=config):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+            before = _list_row_markup(app)
+            assert subscription.glyph(subscription.PENDING) in before
+
+            # No callback in this process runs: the daemon's daily reconcile (or
+            # the web UI) stamps the subscription straight into the shared table.
+            mark_own_subscribed(db_path, 5)
+
+            app._start_subscription_poll()
+            await pilot.pause(ASYNC_PAUSE * 2)
+            after = _list_row_markup(app)
+            armed = app._sub_poll_timer
+
+    assert subscription.glyph(subscription.SUBSCRIBED) in after, after
+    _plain, spans = _spans(after)
+    assert subscription.colour(subscription.SUBSCRIBED) in [s.style for s in spans]
+    assert armed is None, "the poll must stop once no rendered row is pending"
+
+
+@pytest.mark.asyncio
+async def test_the_poll_stops_when_no_rendered_row_is_pending(tmp_path):
+    """A settled list costs no database reads: the poll must not stay armed."""
+    db_path = str(tmp_path / "settled.db")
+    initialize_database(db_path)
+    insert_or_update_item(db_path, {"workshop_id": 5, "title": "Item", "status": 200})
+    config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
+
+    with patch('src.tui.load_config', return_value=config):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+            never_armed = app._sub_poll_timer
+            # Even when armed by hand, one tick with nothing pending stops it.
+            app._start_subscription_poll()
+            await pilot.pause(ASYNC_PAUSE * 2)
+            after_tick = app._sub_poll_timer
+
+    assert never_armed is None
+    assert after_tick is None
+
+
+@pytest.mark.asyncio
+async def test_the_poll_re_arms_itself_while_a_row_is_still_pending(tmp_path):
+    """Stopping is the exception, not the rule: a pending row keeps it armed."""
+    db_path = str(tmp_path / "still_pending.db")
+    _seed_queued(db_path)
+    config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
+
+    with patch('src.tui.load_config', return_value=config):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+            app._stop_subscription_poll()
+            app._start_subscription_poll()
+            await pilot.pause(ASYNC_PAUSE * 2)
+            armed = app._sub_poll_timer
+            markup = _list_row_markup(app)
+
+    assert armed is not None, "a still-pending row must keep the poll running"
+    _plain, spans = _spans(markup)
+    assert subscription.colour(subscription.PENDING) in [s.style for s in spans]
+
+
+@pytest.mark.asyncio
+async def test_a_pass_result_moves_an_on_screen_row_without_the_next_tick(tmp_path):
+    """The queue's own outcome redraws the list row immediately.
+
+    The poll is what catches the other writers; the pass's callback is only the
+    fast path for a row already on screen, so this test stops the poll first and
+    shows the row still moves.
+    """
+    db_path = str(tmp_path / "immediate.db")
+    _seed_queued(db_path)
+    config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
+
+    def fake_pass(items, **kwargs):
+        outcomes = []
+        for item in items:
+            # The real engine records the subscription before returning, so the
+            # read-back in `_apply_result` sees the new state.
+            mark_own_subscribed(db_path, item["workshop_id"])
+            outcome = subscribe_engine.SubscribeOutcome(
+                item["workshop_id"], subscribe_engine.SUBSCRIBED, subscribed=True)
+            outcomes.append(outcome)
+            kwargs["on_result"](outcome)
+        return outcomes
+
+    with patch('src.tui.load_config', return_value=config), \
+         patch('src.subscribe_engine.run_subscription_pass', side_effect=fake_pass):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+            app._stop_subscription_poll()
+            await pilot.press("l")
+            await pilot.pause(ASYNC_PAUSE)
+            await pilot.click("#btn-subscribe-queue")
+            await pilot.pause(ASYNC_PAUSE * 3)
+            after = _list_row_markup(app)
+
+    assert subscription.glyph(subscription.SUBSCRIBED) in after, after
+
+
+# --- the queue screen's own rows carry the real marker ----------------------
+
+
+def test_the_queue_row_builder_draws_the_items_real_state():
+    """The row used to hardcode `pending` whatever the item's state was."""
+    subscribed = {
+        "workshop_id": 5, "title": "Item",
+        "own_subscribed": 1, "is_queued_for_subscription": 0,
+        "own_first_subscribed_at": 1000,
+    }
+    line = SubscriptionQueueScreen._row_text(subscribed)
+    plain, spans = str(line), [span.style for span in line.spans]
+    assert subscription.glyph(subscription.SUBSCRIBED) in plain
+    assert subscription.colour(subscription.SUBSCRIBED) in spans
+
+
+@pytest.mark.asyncio
+async def test_the_queue_row_marker_follows_the_pass_outcome(tmp_path):
+    """A completed subscribe must move the queue row's own glyph, not just its
+    status word and the final tally."""
+    db_path = str(tmp_path / "queue_outcome.db")
+    _seed_queued(db_path)
+    config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
+
+    def fake_pass(items, **kwargs):
+        outcomes = []
+        for item in items:
+            mark_own_subscribed(db_path, item["workshop_id"])
+            outcome = subscribe_engine.SubscribeOutcome(
+                item["workshop_id"], subscribe_engine.SUBSCRIBED, subscribed=True)
+            outcomes.append(outcome)
+            kwargs["on_result"](outcome)
+        return outcomes
+
+    with patch('src.tui.load_config', return_value=config), \
+         patch('src.subscribe_engine.run_subscription_pass', side_effect=fake_pass):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+            await pilot.press("l")
+            await pilot.pause(ASYNC_PAUSE)
+            screen = app.screen
+            before = str(screen.query_one("#sub-item-5", Static).render())
+            await pilot.click("#btn-subscribe-queue")
+            await pilot.pause(ASYNC_PAUSE * 3)
+            after = str(screen.query_one("#sub-item-5", Static).render())
+
+    assert subscription.glyph(subscription.PENDING) in before
+    assert subscription.glyph(subscription.SUBSCRIBED) in after, after
+    assert subscription.glyph(subscription.PENDING) not in after, after

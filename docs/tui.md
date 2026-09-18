@@ -111,6 +111,8 @@ The TUI marker is **not clickable** — there is no click affordance in the TUI,
 
 `previously` can only mean "we have seen this account subscribed"; Steam exposes no per-account subscription history, so the marker carries that limitation in its tooltip. See [data-model.md](data-model.md) for the two columns behind it and [web-ui.md](web-ui.md) for the shared table.
 
+**A rendered row follows the database, not the write that changed it.** A row's marker is built from the item data captured when the row was made, so a subscribe landing behind it would leave the green `pending` outline in place until a search or a scroll rebuilt the list. `ScraperApp._start_subscription_poll` is the fix, and it is the web grid's `_startListPoll` in TUI form: a one-shot `set_timer` re-reads only the rendered rows whose marker is still `pending`, replaces just their subscription columns from the database, and redraws those rows. Its own tick re-arms it only while some rendered row is still pending, so a settled list costs no reads at all; a new search, a row toggled into `pending` from the keyboard, and a pass result each arm it. Because the reader is the shared database and no writer is hooked, all three writers are covered — the TUI's own subscribe pass, the web UI's routes, and the daemon's daily reconcile. The pass's result callback additionally calls `ScraperApp.refresh_subscription_rows` for the item it just reported, so a row on screen moves at once rather than at the poll's next tick; that is the fast path, not the mechanism. The stage spinner keeps its own 0.15 s tick (`_tick_spinners`), which is a cosmetic redraw and does not re-read the database.
+
 ### Infinite Scroll
 
 A watcher on `list_view.scroll_y` checks if the user is within 5 pixels of the bottom. If so, triggers `load_more_items()` via `self.run_worker()`. Items are fetched in pages of 50 with `summary_only=True` to minimize data transfer.
@@ -324,3 +326,25 @@ the engine's fetch and POST seams are patched. See
 [data-pipeline.md](data-pipeline.md#subscribe-engine-browser-free) for the engine's semantics and
 [future-plans.md](future-plans.md#retiring-the-subscribe-confirmation-read) for the planned retirement
 of the confirmation read.
+
+**Each row's marker is the item's real state**, read back from the database after the engine reports an
+outcome and rendered through `src/subscription.py`, the same table the list row and the detail pane
+use. Before that the row changed only its status word and the final tally: every row drew the green
+`pending` outline whatever happened, including a row whose subscribe had just been confirmed. A
+confirmed subscribe moves that row to the yellow ★; an outcome that leaves the item queued (throttled,
+refused, a disagreement) leaves it on the green ☆, which is what `mark_own_subscribed` not being called
+means. `get_queued_items` now carries the three subscription columns so the screen can draw that state
+rather than assuming it.
+
+**Watching the queue drain.** While the pass runs, the screen ticks four times a second (the web
+overlay's cadence) and gives every row still waiting an estimated whole number of seconds until the
+engine reaches it, shown as `~24s`; the row the engine is reading now carries `subscribing...` in place
+of a countdown, and a reported outcome drops the countdown and keeps its status word. The estimate is
+deliberately an estimate, not a promise: the pass can be refused, throttled or cancelled after it is
+drawn, and the screen's own status line says so. It is built from the configured web delay — the same
+`daemon.web_delay_seconds` the engine reads through `src.web_worker.configured_web_delay` — times
+**two**, because each item costs two gated page reads (the pre-read and the confirmation read) while
+the subscribe POST is an XHR and pays no interval. The delay is read fresh on every tick, so a throttle
+that doubles the engine's `WebInterval` mid-pass moves the estimate with it. This differs from the web
+overlay's countdown on purpose; see
+[web-ui.md](web-ui.md#subscribe-feature) for why the two cover different flows.

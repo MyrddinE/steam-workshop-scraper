@@ -2009,15 +2009,48 @@ def apply_own_subscriptions(db_path: str, appid: int, subscribed_ids,
 
 
 def get_queued_items(db_path: str) -> list[dict]:
-    """Retrieves all items currently queued for subscription."""
+    """Retrieves all items currently queued for subscription.
+
+    The subscription columns travel with the row so each front end can render
+    the shared state from ``src/subscription.py``: the TUI's queue screen draws
+    each row's real marker from them, and the web overlay ignores the extras.
+    """
     conn = get_connection(db_path)
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT workshop_id, title, title_en FROM workshop_items WHERE is_queued_for_subscription = 1 ORDER BY title"
+        "SELECT workshop_id, title, title_en, is_queued_for_subscription, "
+        "own_subscribed, own_first_subscribed_at "
+        "FROM workshop_items WHERE is_queued_for_subscription = 1 ORDER BY title"
     )
     items = [dict(row) for row in cursor.fetchall()]
     conn.close()
     return items
+
+
+def get_subscription_states(db_path: str, workshop_ids) -> dict[int, dict]:
+    """The shared subscription columns for a batch of items, keyed by id.
+
+    The TUI's list poll re-reads only the rendered rows whose marker is still
+    ``pending``; one query answers the whole batch, the same way the web grid's
+    poll reads its rows back through one ``/api/items`` call, so the poll costs
+    one read rather than one per row. The three columns are exactly the inputs
+    ``src.subscription.subscription_state`` resolves.
+    """
+    ids = [int(wid) for wid in workshop_ids]
+    if not ids:
+        return {}
+    conn = get_connection(db_path)
+    try:
+        placeholders = ",".join("?" * len(ids))
+        rows = conn.execute(
+            "SELECT workshop_id, own_subscribed, is_queued_for_subscription, "
+            f"own_first_subscribed_at FROM workshop_items "
+            f"WHERE workshop_id IN ({placeholders})",
+            ids,
+        ).fetchall()
+    finally:
+        conn.close()
+    return {row["workshop_id"]: dict(row) for row in rows}
 
 def insert_or_update_item(db_path: str, item_data: dict) -> bool:
     """
