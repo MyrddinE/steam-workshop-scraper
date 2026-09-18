@@ -23,3 +23,14 @@ openai:
 logging:
   level: "INFO"
   file: "scraper.log"
+
+# Optional. Windows only. Steam workshop *content* folders to check in addition
+# to the ones discovered from Steam's own install (the registry's SteamPath and
+# its libraryfolders.vdf). Each entry is the root that holds
+# <consumer_appid>/<workshop_id>/ folders:
+#   <library>\steamapps\workshop\content
+# Use single quotes or double the backslashes in double-quoted YAML.
+# steam:
+#   workshop_content_dirs:
+#     - 'D:\SteamLibrary\steamapps\workshop\content'
+

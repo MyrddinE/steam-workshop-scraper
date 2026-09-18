@@ -335,6 +335,24 @@ def test_merge_and_clean_sets_api_priority_zero(mock_config):
         assert result["api_fetched_at"] == now
 
 
+def test_the_api_merge_never_carries_the_downloaded_latch(mock_config):
+    """`downloaded_at` is local state, so the merge neither keeps nor sets it.
+
+    It is absent from the cleaned record whether it arrived on the API payload
+    (where it is not a Steam field) or on the stored row. `insert_or_update_item`
+    only writes the columns it is handed, so leaving it out of the merge is what
+    keeps the folder scan the column's only writer.
+    """
+    with patch('src.database.initialize_database'), \
+         patch('src.daemon.save_config'):
+        daemon = Daemon(mock_config)
+        result = daemon._merge_and_clean_api_data(
+            {"title": "Test", "downloaded_at": 1},
+            {"workshop_id": 1, "downloaded_at": 99},
+            1, 1000000)
+        assert "downloaded_at" not in result
+
+
 @patch('src.database.initialize_database')
 @patch('src.daemon.save_config')
 @patch('src.daemon.get_next_items_to_scrape')

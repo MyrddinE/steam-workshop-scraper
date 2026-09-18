@@ -136,16 +136,24 @@ There is deliberately **no single-creator mode and no Return button**. The TUI n
 ### The subscription marker (queue / unqueue)
 
 `renderDetail` draws the owner's subscription marker immediately before the title, and the grid
-cell draws the same marker at its top-right. It has four states, resolved by
+cell draws the same marker at its top-right. The subscription-queue overlay draws it on each row
+too, from the same `/api/queued` payload. It has five states, resolved by
 `subscription.subscription_state(item)` and rendered from the one table in `src/subscription.py`
 (which the TUI reads too — see [tui.md](tui.md)):
 
 | State | Glyph | Colour | Meaning | Click |
 |---|---|---|---|---|
+| `downloaded` | ★ | deep green | the owner is subscribed and Steam has the item on disk | nothing |
 | `subscribed` | ★ | solid yellow | the owner is subscribed now | nothing |
 | `pending` | ☆ | green | queued to subscribe | un-queues |
 | `previously` | ☆ | yellow | we have seen the owner subscribed, and they are not now | queues |
 | `never` | ○ | gray | never seen subscribed | queues |
+
+`downloaded` requires **both** `own_subscribed` and the local `downloaded_at` latch, so a timestamp
+left behind by a cleared subscription cannot claim the green star. The latch is written only by
+`src/workshop_folders` (a periodic scan that finds the item's folder on disk) and cleared only when
+the item leaves the owner's subscription list — so an unplugged drive or a moved library never takes
+the green away. See [data-pipeline.md](data-pipeline.md) and [data-model.md](data-model.md).
 
 There is exactly one such indicator: the old `queued` CSS class and its `★` prefix on `.grid-title`
 are gone, and the pane's `Queue` / `Unqueue` button pair is replaced by the marker itself. The
@@ -170,6 +178,12 @@ direct `POST /api/subscribe/<id>` route, and none of those touches the DOM. The 
 re-reads such a cell: it keeps re-reading any row whose subscription marker is still `pending`, so
 the marker moves to `subscribed` on its own next tick ([Image Polling](#image-polling)).
 
+One transition is deliberately not a poll trigger: a cell already at `subscribed` is not re-read
+when the folder scan later stamps `downloaded_at`, so its star turns green when the row is next
+rendered (a new search or a rebuilt grid) rather than on a timer. Polling every subscribed row for
+ever, just to catch a download, would cost a request per second on a settled view; the marker is
+correct whenever it is drawn, which is the same promise the TUI's marker poll makes.
+
 The marker sits inside the cell that opens the detail pane, so its click handler stops propagation:
 without that, toggling the queue would also drag the pane to the item.
 
@@ -187,6 +201,27 @@ per-account subscription history — `lifetime_subscriptions` is an item-wide co
 `EnumerateUserSubscribedFiles` is publisher-key-only — so on the day the marker shipped there were
 zero `previously` markers regardless of real history, and they fill in over time. The marker's
 tooltip says this rather than implying a complete record.
+
+### Opening the downloaded item's folder (Windows only)
+
+When the pane's item is in the `downloaded` state, `Open Folder` in `#detail-buttons` opens the
+item's workshop folder — and the `o` key does the same for the focused grid cell, beside the `s` and
+`l` shortcuts. The button is **visible but disabled** for anything not downloaded, with the reason in
+its label (`Open Folder (not downloaded)`) and title, so the affordance is discoverable rather than
+invisible; the key path shows the same refusal as an alert. The button and the shortcut are rendered
+**only on Windows** (`open_folder_enabled`, computed by the server from
+`src.workshop_folders`), so off Windows the page does not advertise an action that cannot happen.
+
+The click POSTs to `POST /api/open_folder/<id>`, which uses the same shared helper as the TUI. **The
+folder opens in Explorer on the host running the server, not in the browser** — the click travels to
+the server and the window appears on that machine's desktop, which is the only desktop that has the
+Steam library. The route refuses off Windows, for an item that is not in the `downloaded` state, and
+when the folder is not on disk at click time (an unplugged drive, a moved library, Steam cleaned up);
+the last case names the places it looked and changes nothing, so a stale marker is warned about
+rather than launching anything into an error. A refusal is **400** with `{ok: false, message}`; a
+success is **200** with `{ok: true, folder, message}`. The helper stamps no timestamps and clears
+none — the only clearer of the green state is the subscription walk in
+[data-pipeline.md](data-pipeline.md).
 
 ### Translated and original text
 
@@ -395,6 +430,10 @@ It refuses before spending a request when the set has no `steamLoginSecure` (**4
 ### `/api/toggle_sub/<id>` — POST
 
 Flips `is_queued_for_subscription` for one item and answers `{ok: true}`. It is the route behind both the `s` shortcut on a grid cell and the detail pane's Queue/Unqueue button. It returns no new state, so the detail pane reads the item back through the read-only `/api/item/<id>` route to label its button.
+
+### `/api/open_folder/<id>` — POST
+
+Windows only. Opens the item's downloaded workshop folder in Explorer **on the host running the server** (the browser's own machine is not involved), through the shared `src.workshop_folders.open`. It refuses with **400** `{ok: false, message}` when the platform is not Windows, when the item is not in the `downloaded` state (`own_subscribed` and `downloaded_at` both set), and when the folder is not on disk at click time — naming the folders it looked in, and changing nothing. A success is **200** `{ok: true, folder, message}`. The route is not rendered into the page off Windows, and no state is written or cleared either way.
 
 ### `/api/sessionid` — POST
 

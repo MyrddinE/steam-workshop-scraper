@@ -197,6 +197,55 @@ def test_every_other_item_of_the_appid_is_cleared(sync_env):
     assert _row(db_path, 4)["own_subscribed"] == 0
 
 
+def test_the_downloaded_latch_is_cleared_with_the_subscription(sync_env):
+    """Leaving the subscription list is the one event that clears the latch.
+
+    `downloaded_at` is set only by the folder scan and has no other clearer, so
+    the walk's complement branch has to take it in the same transaction as
+    `own_subscribed`; otherwise the item would keep the green star for ever.
+    """
+    db_path, configure = sync_env
+    _items(db_path, 1, 2)
+    apply_own_subscriptions(db_path, 294100, {1, 2})
+    conn = get_connection(db_path)
+    conn.execute("UPDATE workshop_items SET downloaded_at = 99 WHERE workshop_id IN (1, 2)")
+    conn.commit()
+    conn.close()
+    configure({1: _page([1], 1)})
+
+    counts = subscription_sync.reconcile_own_subscriptions(db_path, 294100, {})
+
+    assert counts["downloads_cleared"] == 1
+    assert _row(db_path, 1)["downloaded_at"] == 99, "an id the walk saw keeps its latch"
+    assert _row(db_path, 2)["downloaded_at"] is None
+    assert _row(db_path, 2)["own_subscribed"] == 0
+
+
+def test_a_partial_read_never_clears_the_downloaded_latch(sync_env, monkeypatch):
+    """An unverified list is no evidence, so it must not clear the green either."""
+    db_path, configure = sync_env
+    _items(db_path, 1, 2)
+    apply_own_subscriptions(db_path, 294100, {1, 2})
+    conn = get_connection(db_path)
+    conn.execute("UPDATE workshop_items SET downloaded_at = 99")
+    conn.commit()
+    conn.close()
+    configure({})
+    session = subscription_sync.web_scraper._get_session()
+
+    def get(url, **kwargs):
+        return _FakeResponse(_page([1], 2))
+
+    monkeypatch.setattr(session, "get", get)
+
+    counts = subscription_sync.reconcile_own_subscriptions(db_path, 294100, {})
+
+    assert counts["cleared"] == 0
+    assert counts["downloads_cleared"] == 0
+    assert _row(db_path, 2)["downloaded_at"] == 99
+
+
+
 def test_the_url_is_the_my_form_with_the_subscriptions_filter(sync_env):
     db_path, configure = sync_env
     _items(db_path, 1)

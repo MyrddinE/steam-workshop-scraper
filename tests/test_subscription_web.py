@@ -27,6 +27,8 @@ import pytest
 from src.webserver import app, init_webserver
 from src.database import get_connection, initialize_database, insert_or_update_item
 from src import subscription
+from src import workshop_folders
+import src.webserver as webserver
 
 TEMPLATE = Path("templates/index.html")
 NODE = shutil.which("node")
@@ -66,6 +68,7 @@ def test_the_item_payload_carries_the_whole_marker(web_client):
 
 
 @pytest.mark.parametrize("columns,state", [
+    ({"own_subscribed": 1, "downloaded_at": 1000}, subscription.DOWNLOADED),
     ({"own_subscribed": 1, "own_first_subscribed_at": 1000}, subscription.SUBSCRIBED),
     ({"is_queued_for_subscription": 1}, subscription.PENDING),
     ({"own_first_subscribed_at": 1000}, subscription.PREVIOUSLY),
@@ -113,6 +116,149 @@ def test_the_items_payload_carries_the_marker(web_client):
 
     assert rows[0]["subscription_state"] == subscription.PREVIOUSLY
     assert rows[0]["subscription_glyph"] == subscription.glyph(subscription.PREVIOUSLY)
+
+
+def test_the_items_payload_carries_the_downloaded_latch(web_client):
+    """Without the latch on the payload a subscribed cell could only ever be yellow."""
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 3, "title": "C", "status": 200,
+                                    "own_subscribed": 1, "downloaded_at": 1000})
+
+    rows = client.post('/api/items', json={"ids": [3]}).get_json()
+
+    assert rows[0]["downloaded_at"] == 1000
+    assert rows[0]["subscription_state"] == subscription.DOWNLOADED
+    assert rows[0]["subscription_glyph"] == subscription.glyph(subscription.DOWNLOADED)
+
+
+def test_the_queued_payload_carries_the_whole_marker(web_client):
+    """The queue overlay is a marker surface too, so /api/queued derives it."""
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 4, "title": "D", "status": 200,
+                                    "is_queued_for_subscription": 1,
+                                    "own_subscribed": 1, "downloaded_at": 1000})
+
+    rows = client.get('/api/queued').get_json()
+
+    assert rows[0]["subscription_state"] == subscription.DOWNLOADED
+    assert rows[0]["subscription_glyph"] == subscription.glyph(subscription.DOWNLOADED)
+    assert rows[0]["subscription_colour"] == subscription.colour(subscription.DOWNLOADED)
+    assert rows[0]["subscription_tooltip"] == subscription.tooltip(subscription.DOWNLOADED)
+
+
+# --- opening a downloaded item's folder -------------------------------------
+
+
+def _enable_open_folder(monkeypatch, db_path, content_dir, launcher):
+    """Point the server's global helper at a Windows build with a fake launcher.
+
+    No test may open Explorer: the launcher is always injected, and the folder is
+    checked against a temp content directory rather than a real Steam library.
+    """
+    service = workshop_folders.WorkshopFolders(
+        db_path, {"steam": {"workshop_content_dirs": [str(content_dir)]}},
+        platform="win32", launcher=launcher)
+    monkeypatch.setattr(webserver, "_workshop_folders", service)
+    return service
+
+
+def _green_item(db_path, wid=7, *, content_dir, make_folder=True):
+    insert_or_update_item(db_path, {
+        "workshop_id": wid, "title": "T", "status": 200, "consumer_appid": 294100,
+        "own_subscribed": 1, "downloaded_at": 1000,
+    })
+    if make_folder:
+        (content_dir / "294100" / str(wid)).mkdir(parents=True)
+
+
+def test_open_folder_refuses_off_windows(web_client):
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 7, "title": "T", "status": 200,
+                                    "own_subscribed": 1, "downloaded_at": 1000})
+
+    resp = client.post('/api/open_folder/7')
+
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["ok"] is False
+    assert "Windows" in body["message"]
+
+
+def test_open_folder_refuses_an_item_that_is_not_downloaded(web_client, monkeypatch,
+                                                            tmp_path):
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 7, "title": "T", "status": 200,
+                                    "consumer_appid": 294100, "own_subscribed": 1})
+    launched = []
+    _enable_open_folder(monkeypatch, db_path, tmp_path / "content", launched.append)
+
+    resp = client.post('/api/open_folder/7')
+
+    assert resp.status_code == 400
+    assert resp.get_json()["ok"] is False
+    assert launched == []
+
+
+def test_open_folder_warns_and_changes_nothing_when_the_folder_is_gone(
+        web_client, monkeypatch, tmp_path):
+    client, db_path = web_client
+    content = tmp_path / "content"
+    _green_item(db_path, content_dir=content, make_folder=False)
+    launched = []
+    _enable_open_folder(monkeypatch, db_path, content, launched.append)
+
+    resp = client.post('/api/open_folder/7')
+
+    body = resp.get_json()
+    assert resp.status_code == 400
+    assert body["ok"] is False
+    assert str(content) in body["message"], "the warning names where it looked"
+    assert launched == [], "nothing may be launched into an error"
+    assert _row(db_path, 7)["downloaded_at"] == 1000, "the refusal changes no state"
+
+
+def test_open_folder_launches_the_folder_on_the_server_host(web_client, monkeypatch,
+                                                            tmp_path):
+    client, db_path = web_client
+    content = tmp_path / "content"
+    _green_item(db_path, content_dir=content)
+    launched = []
+    _enable_open_folder(monkeypatch, db_path, content, launched.append)
+
+    resp = client.post('/api/open_folder/7')
+
+    body = resp.get_json()
+    assert resp.status_code == 200
+    assert body["ok"] is True
+    assert launched == [str(content / "294100" / "7")]
+    assert _row(db_path, 7)["downloaded_at"] == 1000
+
+
+def test_open_folder_reports_an_unknown_item(web_client, monkeypatch, tmp_path):
+    client, db_path = web_client
+    launched = []
+    _enable_open_folder(monkeypatch, db_path, tmp_path / "content", launched.append)
+
+    resp = client.post('/api/open_folder/999')
+
+    assert resp.status_code == 400
+    assert resp.get_json()["ok"] is False
+    assert launched == []
+
+
+def test_the_open_folder_control_is_rendered_only_on_windows(web_client, monkeypatch,
+                                                             tmp_path):
+    client, db_path = web_client
+
+    off = client.get('/').data.decode()
+    assert '<button id="btn-open-folder"' not in off
+    assert "e.key === 'o'" not in off, "off Windows the shortcut is not bound"
+
+    _enable_open_folder(monkeypatch, db_path, tmp_path / "content", lambda path: None)
+    on = client.get('/').data.decode()
+    assert '<button id="btn-open-folder"' in on
+    assert "e.key === 'o'" in on
+    assert "open_folder_enabled" not in on
 
 
 # --- the stamp --------------------------------------------------------------

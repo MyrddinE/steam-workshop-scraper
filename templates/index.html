@@ -167,6 +167,10 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
       <button onclick="fetch('/api/fetch_new',{method:'POST'}).then(()=>alert('Fetch-new triggered!'))">Fetch New</button>
       <button onclick="doUpdateVisible()">Update Visible</button>
       <button id="btn-clear-pending" onclick="doClearPending()" title="Delete items that were never successfully scraped">Clear Pending</button>
+      {% if open_folder_enabled %}
+      <button id="btn-open-folder" onclick="openFolderFromDetail()" disabled
+              title="Only a subscribed item Steam has downloaded can be opened.">Open Folder (not downloaded)</button>
+      {% endif %}
     </div>
   </div>
 </main>
@@ -645,6 +649,38 @@ function onSubMarkerClick(event, el) {
   if (!isNaN(wid)) toggleDetailQueue(wid);
 }
 
+// ── opening a downloaded item's folder ───────────────────────────────────────
+//
+// Windows-only: the button is not rendered and the `o` shortcut is not bound
+// off Windows, and the route refuses anyway. Explorer opens on the host running
+// the server, not in the browser, because the POST is handled there.
+function _refreshOpenFolderButton(item) {
+  const btn = document.getElementById('btn-open-folder');
+  if (!btn) return;
+  const green = !!item && item.subscription_state === 'downloaded';
+  btn.disabled = !green;
+  btn.textContent = green ? 'Open Folder' : 'Open Folder (not downloaded)';
+  btn.title = green
+    ? "Open this item's workshop folder in Explorer on the machine running the server."
+    : 'Only a subscribed item Steam has downloaded can be opened.';
+}
+
+async function openFolder(wid) {
+  try {
+    const resp = await fetch('/api/open_folder/' + wid, {method: 'POST'});
+    const data = await resp.json().catch(() => ({}));
+    // The route reports refusals (not green, folder missing, not Windows) with
+    // a message; showing it is the same "say why" the disabled button carries.
+    if (!data.ok) alert(data.message || 'Could not open the folder.');
+  } catch (e) {
+    alert('Open folder failed: ' + e.message);
+  }
+}
+
+function openFolderFromDetail() {
+  if (_currentDetail) openFolder(_currentDetail.workshop_id);
+}
+
 function _listNeedsPoll(items) {
   for (const item of items) {
     // A stage spinner moves on its own; a subscription marker moves when a
@@ -871,6 +907,9 @@ function renderDetail(item) {
     ${notice}
     ${desc ? '<div style="border-left:3px solid var(--pico-muted-border-color);padding-left:.5rem;margin-top:.5rem">'+desc+'</div>' : ''}
   `;
+  // The folder control lives in the static bottom bar, so it follows whichever
+  // item the pane is showing.
+  _refreshOpenFolderButton(item);
 }
 
 // /api/toggle_sub answers only {ok: true} and says nothing about which way the
@@ -1299,6 +1338,15 @@ document.addEventListener('keydown', e => {
     return;
   }
 
+  {% if open_folder_enabled %}
+  if (e.key === 'o' || e.key === 'O') {
+    e.preventDefault();
+    // The focused cell's item, the same one `s` acts on.
+    openFolder(wid);
+    return;
+  }
+  {% endif %}
+
   let nextIdx = idx;
   if (e.key === 'ArrowRight') nextIdx = idx + 1;
   else if (e.key === 'ArrowLeft') nextIdx = idx - 1;
@@ -1341,6 +1389,8 @@ async function _startAutoSubscribe() {
       <span class="spinner"></span>
       <span class="countdown"></span>
       <span>${it.title_en || it.title || 'Untitled'}</span>
+      <span class="sub-queue-sub" style="color: ${it.subscription_colour}"
+            title="${_escapeHtml(it.subscription_tooltip || '')}">${it.subscription_glyph || ''}</span>
     </div>
   `).join('');
 

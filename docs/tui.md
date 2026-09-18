@@ -105,7 +105,32 @@ Every value that comes from Steam goes through `escape_markup` in `src/tui.py`, 
 
 ### The subscription marker
 
-The row's second line shows the owner's subscription marker next to the pending spinner, and the detail pane shows the same marker immediately before the title — the convention the web pane uses too. `_subscription_marker` and `DetailsPane.update_content` both read `src/subscription.py`, which owns the four states (`subscribed`, `pending`, `previously`, `never`), their precedence, and the glyph/colour for each, so the TUI and the web grid cannot disagree about why the same row looks the way it does. The marker replaces the old leading `*` prefix on the title line for `is_queued_for_subscription`; there is only one indicator.
+The row's second line shows the owner's subscription marker next to the pending spinner, and the detail pane shows the same marker immediately before the title — the convention the web pane uses too. `_subscription_marker` and `DetailsPane.update_content` both read `src/subscription.py`, which owns the five states (`downloaded`, `subscribed`, `pending`, `previously`, `never`), their precedence, and the glyph/colour for each, so the TUI and the web grid cannot disagree about why the same row looks the way it does. The marker replaces the old leading `*` prefix on the title line for `is_queued_for_subscription`; there is only one indicator. `downloaded` is a solid `★` in a deeper green than `pending`'s outline, and it requires both `own_subscribed` and the local `downloaded_at` latch, so a stray timestamp cannot claim it.
+
+**The subscription queue screen draws the same five states** — `SubscriptionQueueScreen._row_text` reads the shared table from the row `get_queued_items` returns, so a completed subscribe moves that row's glyph too.
+
+**The downloaded marker (and opening the folder).** Windows only. On its own
+`DOWNLOAD_SCAN_INTERVAL_SECONDS` (60 s) timer the TUI runs
+`src/workshop_folders.scan`, which stamps `downloaded_at` for subscribed,
+unconfirmed items whose folder Steam has on disk; the marker turns green on the
+next render. The timer skips the scan entirely while `self._daemon_controller`
+can see a daemon running, because the daemon runs the same scan and two of them
+would stat the same folders in parallel. Off Windows the scan is a no-op and the
+whole affordance is absent.
+
+The action that opens the folder is available two ways while an item is green:
+the plain `o` key, built into `ScraperApp.BINDINGS` only on Windows, acting on
+the highlighted list item exactly like `s`; and the `Open Folder` button beside
+`Show Original` in the detail pane. The button is **visible but disabled** for
+any item that is not `downloaded`, with the reason in its label
+(`Open Folder (not downloaded)`) and tooltip, so the affordance is discoverable
+rather than invisible; the key shows the same refusal as a notification rather
+than doing nothing. Both call `ScraperApp.open_folder_for` →
+`src/workshop_folders.open`, which owns every guard — Windows only, the item must
+be green, and the folder must still be on disk — and changes no state when it
+refuses. If the folder is gone at click time (an unplugged drive, a moved
+library, Steam cleaned up) the notification names the places that were looked in
+and the marker is left alone; nothing is launched into an error.
 
 The TUI marker is **not clickable** — there is no click affordance in the TUI, and `s` remains the way to change the state. The detail pane's old `btn-queue-sub` / `btn-unqueue-sub` pair is gone for the same reason: the marker *is* that control now.
 
