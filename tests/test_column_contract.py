@@ -66,6 +66,20 @@ def test_ignored_keys_are_the_excluded_ones_plus_result(fresh_columns):
     assert MERGE_IGNORED_KEYS == MERGE_EXCLUDED_KEYS | {"result"}
 
 
+def test_the_downloaded_latch_is_a_column_but_not_a_merge_key(fresh_columns):
+    """`downloaded_at` is local state, not a Steam field.
+
+    Like `own_subscribed` it is a real column the schema carries, but unlike
+    every API-provided column it must never be written by the merge: only
+    `src.workshop_folders` stamps it and only the subscription walk clears it, so
+    a stray API key of that name could otherwise claim the green star.
+    """
+    assert "downloaded_at" in WORKSHOP_ITEM_COLUMNS
+    assert "downloaded_at" in fresh_columns
+    assert "downloaded_at" in MERGE_EXCLUDED_KEYS
+    assert "downloaded_at" not in MERGE_ITEM_KEYS
+
+
 def test_migrated_from_old_schema_matches_fresh(fresh_columns, tmp_path):
     """A database upgraded from the pre-rename schema ends up with the exact same
     workshop_items columns as a brand-new one.

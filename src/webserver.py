@@ -16,6 +16,7 @@ from src import session_health
 from src import subscribe_engine
 from src import subscription
 from src import web_scraper
+from src import workshop_folders
 from src.config import login_secure_value, save_config
 from src.daemon_control import DaemonController
 from src.firefox_cookies import steam_login_secure
@@ -67,15 +68,25 @@ _images_dir = "images"
 _sessionid = ""
 _config_path = "config.yaml"
 _daemon_controller = None
+# The shared folder helper. Created by init_webserver; None until then, which is
+# what makes the open-folder route refuse (the feature is off) rather than
+# raising on an uninitialised server.
+_workshop_folders = None
 
 
 def init_webserver(db_path: str, config: dict, config_path: str = "config.yaml",
                    daemon_controller: DaemonController | None = None):
     global _db_path, _config, _images_dir, _config_path, _daemon_controller
+    global _workshop_folders
     _db_path = db_path
     _config = config
     _config_path = config_path
     _images_dir = os.path.join(os.path.dirname(os.path.abspath(db_path)), "images")
+    # One locator for this server process. It resolves the Steam libraries once
+    # and only re-resolves on a miss, so the open-folder route costs one
+    # directory check and no registry read per click.
+    _workshop_folders = workshop_folders.WorkshopFolders(db_path, config)
+    _workshop_folders.log_status()
     # A controller passed by the TUI is shared with its daemon manager; used
     # standalone, this module builds its own from the config path.
     _daemon_controller = daemon_controller or DaemonController(config_path, config=config)
@@ -199,8 +210,13 @@ def index():
     # display a number the decay rule would immediately raise to the floor.
     web_delay = float((_config.get("daemon", {}) or {}).get("web_delay_seconds", WEB_DELAY_DEFAULT))
     import json as _json
+    # The open-folder control is Windows-only, so the page is told whether to
+    # render it at all: off Windows the button and the `o` shortcut are absent,
+    # not merely inert.
     return render_template('index.html', web_delay=web_delay,
-                           filter_schema_json=_json.dumps(FILTER_SCHEMA))
+                           filter_schema_json=_json.dumps(FILTER_SCHEMA),
+                           open_folder_enabled=bool(
+                               _workshop_folders and _workshop_folders.enabled()))
 
 
 @app.route('/userscript/<path:filename>')
@@ -384,7 +400,7 @@ def api_items():
                w.translate_version, w.is_queued_for_subscription, w.needs_web_scrape,
                w.needs_image, w.translation_priority, w.file_size, w.image_extension,
                w.wilson_subscription_score, w.wilson_favorite_score,
-               w.own_subscribed, w.own_first_subscribed_at,
+               w.own_subscribed, w.own_first_subscribed_at, w.downloaded_at,
                w.api_priority,
                u.personaname, u.personaname_en
         FROM workshop_items w LEFT JOIN users u ON w.creator = u.steamid
@@ -851,8 +867,31 @@ def api_update_visible():
 
 @app.route('/api/queued')
 def api_queued():
-    items = get_queued_items(_db_path)
+    # The queue overlay draws each row's real marker from this payload, the same
+    # table the grid and the TUI's queue screen read; without the derived fields
+    # the overlay could not draw `downloaded` or any other state.
+    items = [_attach_subscription(item) for item in get_queued_items(_db_path)]
     return jsonify(items)
+
+
+@app.route('/api/open_folder/<int:workshop_id>', methods=['POST'])
+def api_open_folder(workshop_id):
+    """Open a downloaded item's workshop folder in Explorer.
+
+    Explorer is opened **on the host running the server**, not in the browser:
+    the click travels here as a POST and the folder opens on this machine's
+    desktop. The shared helper owns every guard -- Windows only, the item must
+    be in the ``downloaded`` state, and the folder must still be on disk -- and
+    a refusal names the reason so the page can show it. Nothing is launched when
+    the folder is missing, and no route here changes the item's state.
+    """
+    helper = _workshop_folders
+    if helper is None:
+        return jsonify({"ok": False, "folder": None,
+                        "message": "The folder helper is not initialised on this server."}), 400
+    result = helper.open(workshop_id)
+    status = 200 if result["ok"] else 400
+    return jsonify(result), status
 
 
 @app.route('/api/pause', methods=['POST'])

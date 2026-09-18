@@ -49,6 +49,7 @@ from src import capture
 from src import crash
 from src import session_health
 from src.subscription_sync import reconcile_own_subscriptions
+from src.workshop_folders import WorkshopFolders, DOWNLOAD_SCAN_INTERVAL_SECONDS
 
 # API statuses the fetch path has an explicit branch for. Anything else is
 # captured as evidence and then treated as temporary by _settle_api_failure; it
@@ -168,12 +169,18 @@ def user_requested_priority(inherited_prio: int) -> int:
 # snapshot back over it, so a translator drain that landed while the API fetch
 # was in flight would be undone and leave a priority with no queue row behind
 # it. Excluding it leaves the column to the code that owns it.
+#
+# downloaded_at is local state, not an API field: only src.workshop_folders
+# writes it and only the subscription walk clears it. Excluding it keeps the
+# merge from carrying it at all -- the column is simply not in the statement --
+# so a stray API key under that name can never set the green star.
 MERGE_EXCLUDED_KEYS = frozenset({
     "is_queued_for_subscription",
     "needs_web_scrape",
     "image_extension",
     "needs_image",
     "translation_priority",
+    "downloaded_at",
 })
 
 # Keys retained from an API merge into the item record:
@@ -379,6 +386,16 @@ class Daemon:
         # "never", so the first batch after startup reconciles each target appid.
         # See SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS.
         self._last_subscription_reconcile = None
+
+        # The downloaded-star scan: local checks that a subscribed item's folder
+        # is on disk, so its marker can turn solid green. The locator resolves
+        # the Steam libraries once per process and only re-resolves on a miss,
+        # and the scan itself is on a monotonic clock (see
+        # DOWNLOAD_SCAN_INTERVAL_SECONDS) because the per-batch path runs every
+        # few seconds. One startup line says why it is off when it cannot work.
+        self.workshop_folders = WorkshopFolders(self.db_path, self.config)
+        self.workshop_folders.log_status()
+        self._last_download_scan = None
         
         # Pre-load initial filter state to avoid false positives on startup
         self._load_initial_filter_state()
@@ -550,6 +567,7 @@ class Daemon:
         """Process one batch: housekeeping, acquire work, then process each item."""
         self._maybe_promote_stale_items()
         self._maybe_reconcile_subscriptions()
+        self._maybe_scan_downloaded_items()
 
         items_to_scrape = self._acquire_batch()
         if items_to_scrape is None:
@@ -694,6 +712,31 @@ class Daemon:
                     "Subscription reconcile for appid %s failed; housekeeping skipped "
                     "this app: %s", appid, exc,
                 )
+
+    def _maybe_scan_downloaded_items(self) -> None:
+        """Stamp subscribed items Steam has downloaded, at most once a minute.
+
+        Guarded by a monotonic interval for the same reason the staleness sweep
+        is: the per-batch path runs every few seconds, and the scan's answer only
+        changes when a download finishes. The scan itself is one query plus a
+        directory check per unconfirmed subscribed item; it only ever writes, so
+        a missing folder, an unplugged drive or a moved library changes nothing.
+
+        A failure is a log line, never an exception: this is housekeeping on the
+        fetch loop, and a Steam library that cannot be read must not stop
+        scraping. Off Windows (or with no Steam install to read)
+        ``WorkshopFolders.scan`` returns without a database access or a log line.
+        """
+        now = time.monotonic()
+        if (self._last_download_scan is not None
+                and now - self._last_download_scan < DOWNLOAD_SCAN_INTERVAL_SECONDS):
+            return
+        self._last_download_scan = now
+        try:
+            self.workshop_folders.scan()
+        except Exception as exc:
+            logging.warning(
+                "Downloaded-item scan failed; housekeeping skipped this pass: %s", exc)
 
     def _promote_stale_items(self) -> None:
         """Periodic sweep: promote stale items from API priority 0 to 1.

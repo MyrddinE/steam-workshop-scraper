@@ -4,7 +4,7 @@ The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_
 
 ---
 
-## Current Schema (v25)
+## Current Schema (v26)
 
 The application-level reference for every table and column is
 [data-model.md](data-model.md); the timestamp conventions are in
@@ -37,6 +37,9 @@ Primary key: `workshop_id INTEGER PRIMARY KEY` (aliased from rowid). Columns:
 | needs_image | INTEGER | Priority for image download (same scale as needs_web_scrape) |
 | image_extension | TEXT | File extension of downloaded image (e.g., "jpg"), NULL if not downloaded |
 | is_queued_for_subscription | INTEGER | Subscription queue flag, set by the TUI and web UI and cleared when the userscript reports an outcome. Transient: reads 0 when nothing is queued |
+| own_subscribed | INTEGER | Whether the owner (the account whose key and cookies are configured) is subscribed to this item right now. Reconciled from Steam; not the item-wide `subscriptions` count |
+| own_first_subscribed_at | INTEGER | When we first *saw* the owner subscribed; sticky, and the only source of the `previously` state |
+| downloaded_at | INTEGER | Local latch: when this app first saw Steam's downloaded copy of a subscribed item on disk (v26). Set only by `src/workshop_folders`, cleared only beside `own_subscribed` when the item leaves the subscription list. NULL means not confirmed on disk |
 
 The `CREATE TABLE` statement still declares the historical names (`dt_found`, `dt_updated`,
 `dt_attempted`, `dt_translated`, `time_created`, `time_updated`) and a legacy `tags` column. A fresh
@@ -616,6 +619,43 @@ measured for the plan.
 
 Adding the index left `translation_priority` alone: it already had
 `idx_translation_priority`, and the translation breakdown continues to use it.
+
+---
+
+### v25 → v26: The local `downloaded_at` latch
+
+Adds one column behind the `downloaded` subscription marker:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `downloaded_at` | INTEGER DEFAULT NULL | When this app first saw Steam's downloaded copy of a subscribed item on disk. NULL means the subscription (if any) has not been confirmed on disk. |
+
+Like `own_subscribed`, the column is added by `_safe_add_columns(cursor,
+"workshop_items", [...])`: a fresh database gets it from `CREATE TABLE`, an
+existing one from `ALTER TABLE`, and a pre-existing row is left NULL.
+
+**It is local state with one writer and one clearer.** `src.workshop_folders`
+stamps it when a periodic scan finds the item's folder
+(`<library>/steamapps/workshop/content/<consumer_appid>/<workshop_id>/`) for an
+item that is `own_subscribed = 1` and not yet confirmed; the scan never clears.
+The only clearer is the subscription walk in `src.database.apply_own_subscriptions`,
+in the same transaction that clears `own_subscribed` when the item leaves the
+owner's subscription list. A missing folder, an unplugged drive or a moved
+library therefore cannot take the green star away, and re-subscribing re-earns
+the stamp on the next scan because the files are usually still on disk.
+
+No data is written by the migration itself: no item has been observed downloaded
+on the run that introduces the column, and inventing a stamp would claim an
+observation never made — the same rule migration 20→21 followed for
+`own_first_subscribed_at`.
+
+The column is deliberately **excluded from the API merge allow-list**
+(`daemon.MERGE_EXCLUDED_KEYS`), like the queue-owned columns: it is not a Steam
+field, and keeping it out of the merge means a stray API key of that name can
+never set the marker. No index is added; the scan's predicate is
+`own_subscribed = 1 AND downloaded_at IS NULL` over the owner's subscriptions,
+which is a small set, and the columns are read with the row by the grid and
+detail payloads.
 
 ---
 

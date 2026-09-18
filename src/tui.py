@@ -22,6 +22,7 @@ from src import pending
 from src import subscription
 from src import subscribe_engine
 from src import crash
+from src import workshop_folders
 from src.web_worker import configured_web_delay
 from src.config import ConfigError, load_config, save_config
 from src.daemon_control import DaemonController
@@ -1109,6 +1110,12 @@ class DetailsPane(VerticalScroll):
         with Horizontal(id="details-buttons-row"):
             with Horizontal(id="top-left-buttons"):
                 yield Button("Show Original", id="btn-toggle-translation", classes="details-button")
+                # Windows-only, like the `o` binding it duplicates. It is present
+                # but disabled while the item is not green, so the affordance is
+                # discoverable with the reason rather than invisible.
+                if self._folder_service() is not None and self._folder_service().enabled():
+                    yield Button("Open Folder", id="btn-open-folder",
+                                 classes="details-button", disabled=True)
             yield Button("jump", id="btn-jump-author", variant="primary")
 
         with Horizontal(id="title-creator-row"):
@@ -1145,6 +1152,16 @@ class DetailsPane(VerticalScroll):
     def on_mount(self) -> None:
         """Setup background refresh to catch translation updates."""
         self.set_interval(2.0, self.refresh_data)
+
+    def _folder_service(self):
+        """The app's folder helper, or None in a bare pane (markup tests)."""
+        return getattr(self.app, "workshop_folders", None)
+
+    def _open_folder_button(self) -> Button | None:
+        try:
+            return self.query_one("#btn-open-folder", Button)
+        except Exception:
+            return None
 
     @db_poll.guard_db_poll("detail pane poll")
     async def refresh_data(self) -> None:
@@ -1193,6 +1210,9 @@ class DetailsPane(VerticalScroll):
             self.query_one("#item-creator", Label).update("")
             self.query_one("#btn-toggle-translation").display = False
             self.query_one("#btn-jump-author").display = False
+            open_btn = self._open_folder_button()
+            if open_btn is not None:
+                open_btn.display = False
             
             for stat in ["id", "created", "updated", "tags", "size", "views", "subs", "favs"]:
                 self.query_one(f"#stat-{stat}", Label).display = False
@@ -1209,6 +1229,21 @@ class DetailsPane(VerticalScroll):
         sub_marker.update(f"[{sub_colour}]{sub_glyph}[/]")
         sub_marker.tooltip = subscription.tooltip(sub_state)
         sub_marker.display = True
+
+        # The folder control follows the marker: enabled only for the green
+        # `downloaded` state, and disabled with the reason when it is not. The
+        # keyboard path says the same thing through a notification.
+        open_btn = self._open_folder_button()
+        if open_btn is not None:
+            open_btn.display = True
+            is_downloaded = sub_state == subscription.DOWNLOADED
+            open_btn.disabled = not is_downloaded
+            open_btn.label = "Open Folder" if is_downloaded else "Open Folder (not downloaded)"
+            open_btn.tooltip = (
+                "Open this item's workshop folder in Explorer on the machine running "
+                "the app." if is_downloaded else
+                "Only a subscribed item Steam has downloaded can be opened."
+            )
         
         display_translated = self.show_translated and item.get("translate_version")
         title = item.get("title_en") if display_translated and item.get("title_en") else item.get("title", "N/A")
@@ -1529,12 +1564,16 @@ class DatabaseCommands(Provider):
                     help=f"Action: {label}",
                 )
 
-class ScraperApp(App):
-    """A Terminal GUI for searching the Steam Workshop database."""
+def app_bindings(platform: str | None = None) -> list[tuple[str, str, str]]:
+    """The app's key bindings, with the folder key only where it can work.
 
-    COMMANDS = {SystemCommandsProvider, DatabaseCommands}
-
-    BINDINGS = [
+    Opening a downloaded item's folder is a Windows-only feature, so the plain
+    ``o`` binding is built into the list only on Windows. Off Windows the key is
+    absent rather than present-and-inert: the front ends must not advertise an
+    action that cannot happen. Factored out of the class so the conditional is
+    testable on a non-Windows machine.
+    """
+    bindings = [
         ("ctrl+q", "quit", "Quit"),
         ("ctrl+d", "show_daemon", "Daemon"),
         ("ctrl+r", "show_stats", "Stats"),
@@ -1548,6 +1587,17 @@ class ScraperApp(App):
         ("ctrl+question_mark", "show_analysis", "Analysis"),
         ("ctrl+b", "subscribe", "Subscribe"),
     ]
+    if workshop_folders.is_windows(platform):
+        bindings.append(("o", "open_folder", "Open Folder"))
+    return bindings
+
+
+class ScraperApp(App):
+    """A Terminal GUI for searching the Steam Workshop database."""
+
+    COMMANDS = {SystemCommandsProvider, DatabaseCommands}
+
+    BINDINGS = app_bindings()
 
     CSS = """
     #_default {
@@ -1799,6 +1849,12 @@ class ScraperApp(App):
         # server both drive the daemon through it, so a start from either UI is
         # visible to the other.
         self._daemon_controller = DaemonController(self.config_path, config=self.config)
+        # The downloaded-star folder helper: one locator for this process, shared
+        # with the embedded web server through module-level discovery caching. The
+        # detail pane reads `enabled()` to decide whether to draw its button, and
+        # the periodic scan below uses it. One startup line says why it is off.
+        self.workshop_folders = workshop_folders.WorkshopFolders(self.db_path, self.config)
+        self.workshop_folders.log_status()
         self._start_webserver()
         self.current_item_creator = None
         self.pause_lock_file = ".pauselock"
@@ -1896,6 +1952,13 @@ class ScraperApp(App):
 
         # Animate braille spinner on pending items
         self.set_interval(0.15, self._tick_spinners)
+
+        # The downloaded-star scan, on the daemon's own cadence. It is skipped
+        # while this process can see a daemon running, because the daemon runs
+        # the same scan and two of them would check the same folders in
+        # parallel. Off Windows the scan is a no-op and reads nothing.
+        self.set_interval(workshop_folders.DOWNLOAD_SCAN_INTERVAL_SECONDS,
+                          self._maybe_scan_downloaded_items)
 
     def _check_scroll_bottom(self, scroll_y: float) -> None:
         self.save_state()
@@ -2012,13 +2075,30 @@ class ScraperApp(App):
                 continue
             moved = False
             for column in ("own_subscribed", "is_queued_for_subscription",
-                           "own_first_subscribed_at"):
+                           "own_first_subscribed_at", "downloaded_at"):
                 value = fresh.get(column)
                 if data.get(column) != value:
                     data[column] = value
                     moved = True
             if moved:
                 await child.refresh_item()
+
+    @db_poll.guard_db_poll("downloaded-item scan")
+    def _maybe_scan_downloaded_items(self) -> None:
+        """Stamp subscribed items Steam has downloaded, unless a daemon will.
+
+        The daemon runs the same scan, so this TUI's copy is skipped while the
+        controller can see a daemon: two scans would stat the same folders in
+        parallel for one answer. The interval is the daemon's
+        (``DOWNLOAD_SCAN_INTERVAL_SECONDS``), because it is the same work.
+
+        The read/write is guarded like every unattended database callback: a
+        transient lock skips this tick, and the next one is the retry. Off
+        Windows the scan returns without touching the database.
+        """
+        if self._daemon_controller.is_running():
+            return
+        self.workshop_folders.scan()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -2292,6 +2372,12 @@ class ScraperApp(App):
 
             self.call_after_refresh(setup_author_filter)
 
+        elif event.button.id == "btn-open-folder":
+            # Acts on the pane's item, the same one the marker describes; the
+            # `o` key acts on the highlighted list item.
+            detail = self.query_one("#item-details", DetailsPane)
+            self.open_folder_for(detail.workshop_id)
+
         elif event.button.id == "btn-toggle-translation":
             self.action_toggle_translation()
 
@@ -2380,6 +2466,36 @@ class ScraperApp(App):
         
         # Scroll to keep highlight visible if needed
         # list_view.scroll_to_widget(item)
+
+    async def action_open_folder(self) -> None:
+        """Open the highlighted item's folder, like ``s`` acts on the highlighted item.
+
+        Windows-only: the binding that reaches here is only built on Windows, so
+        this is never invoked elsewhere. When the item is not green the same
+        refusal the disabled button carries is shown as a notification, rather
+        than the key silently doing nothing.
+        """
+        list_view = self.query_one("#results-list", ListView)
+        item = list_view.highlighted_child
+        if not item or not hasattr(item, "item_data"):
+            self.notify("No item highlighted to open.", severity="warning")
+            return
+        self.open_folder_for(item.item_data.get("workshop_id"))
+
+    def open_folder_for(self, workshop_id) -> None:
+        """Run the shared open action and report its result.
+
+        The shared helper owns every guard -- Windows only, the item must be in
+        the ``downloaded`` state, the folder must still be on disk -- and changes
+        no state when it refuses. This only turns the result into a notification:
+        an info line for a folder that opened, a warning for a refusal.
+        """
+        if not workshop_id:
+            self.notify("No item selected to open.", severity="warning")
+            return
+        result = self.workshop_folders.open(workshop_id)
+        severity = "information" if result["ok"] else "warning"
+        self.notify(result["message"], severity=severity)
 
     async def action_add_and_row(self) -> None:
         self.query_one("#search-builder", SearchBuilder).add_row("AND")

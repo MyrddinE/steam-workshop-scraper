@@ -70,6 +70,33 @@ The project uses relative paths for database, config, images, PID file, and paus
 
 ---
 
+## The downloaded-item marker and "Open Folder" (Windows only)
+
+Finding Steam's downloaded copy of a subscribed item is the one feature that is
+deliberately absent everywhere but Windows, and "absent" is meant literally: off
+Windows there is no `o` binding (`src.tui.app_bindings`), no `Open Folder`
+button in the TUI detail pane or in the web page, and the scan is a no-op that
+reads nothing. The web `POST /api/open_folder/<id>` route still exists and
+refuses with a clear message, because a route cannot be un-registered per
+platform, but nothing in either front end advertises it.
+
+The reason is that every input is Windows-only: Steam's install path comes from
+`HKCU\Software\Valve\Steam`'s `SteamPath` read with `winreg`, and the folder is
+opened with `os.startfile`, which exists only on Windows. `src/workshop_folders`
+isolates both behind injectable seams (`read_steam_path`, the launcher) so the
+whole feature is testable on Linux, and degrades to nothing — no error, one
+startup line naming the reason — when there is no registry entry, no Steam
+install, or no readable `libraryfolders.vdf`. On a non-Windows platform, or a
+Steam install that cannot be read, every item keeps its ordinary subscription
+marker.
+
+`steam.workshop_content_dirs` in the config is the escape hatch for a library
+that discovery cannot see (a network drive, a moved folder); its entries are
+added to whatever discovery found, never instead of it. See
+[config-security.md](config-security.md).
+
+---
+
 ## `tail -f` for Log Viewing
 
 The TUI's `DaemonManagerScreen` used to spawn `tail -f <logfile>` and pipe it into a RichLog; it was disabled as too slow for large logs, and `tail -f` does not exist on Windows natively (WSL or Git Bash only). The pane now polls `DaemonController.tail_log` in-process every two seconds (`src/tui.py:593`), which reads a bounded 64 KiB window on every platform and needs no external utility.

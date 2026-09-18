@@ -369,9 +369,9 @@ def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
         counts = apply_own_subscriptions(db_path, appid, ids, seen_at=seen_at)
         logging.info(
             "Subscription reconcile for appid %s (steamid %s): %d subscribed, %d newly "
-            "stamped, %d unstamped, %d queued flags cleared.",
+            "stamped, %d unstamped, %d queued flags cleared, %d downloaded latches cleared.",
             appid, cookie.steamid or "unknown", counts["subscribed"], counts["stamped"],
-            counts["cleared"], counts["queued_cleared"],
+            counts["cleared"], counts["queued_cleared"], counts["downloads_cleared"],
         )
         return counts
 

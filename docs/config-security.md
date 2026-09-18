@@ -74,6 +74,16 @@ Deep-merges the in-memory config into the disk file, preserving keys not present
 |---|---|---|---|
 | `database.path` | string | `"workshop.db"` | SQLite database file path. |
 
+### `steam`
+
+Windows only: how the downloaded-item marker and the "open folder" action find
+Steam's workshop content. On any other platform, or with no Steam install to
+read, the feature is off and every item stays without a `downloaded` marker.
+
+| Key | Type | Default | Purpose |
+|---|---|---|---|
+| `steam.workshop_content_dirs` | list[string] | `[]` | Extra workshop *content* roots (`<library>\steamapps\workshop\content`) to check **in addition to** the ones discovered from Steam's install. Discovery reads `SteamPath` from `HKCU\Software\Valve\Steam` and parses that install's `libraryfolders.vdf` (both `<steam>/steamapps/` and the older `<steam>/config/`), so this key is only needed for a library those files do not name — a network drive, a moved folder, or a Steam install the app cannot read. An entry is the folder that holds `<consumer_appid>\<workshop_id>\`, not the library root. A bare string is accepted as a one-entry list. |
+
 ### `logging`
 
 | Key | Type | Default | Purpose |

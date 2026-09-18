@@ -20,7 +20,7 @@ WORKSHOP_ITEM_COLUMNS = frozenset({
     "is_queued_for_subscription", "wilson_favorite_score",
     "wilson_subscription_score", "needs_web_scrape",
     "image_extension", "needs_image", "api_priority",
-    "own_subscribed", "own_first_subscribed_at",
+    "own_subscribed", "own_first_subscribed_at", "downloaded_at",
 })
 
 # ``users.dt_translated`` was renamed to ``translated_at`` (not
@@ -134,7 +134,7 @@ USER_PRIORITY_FLOOR = 5
 # than local to `initialize_database` because the migration tests assert that
 # the chain reaches it, and a magic number repeated in nine test files is a
 # number that will be wrong after the next migration.
-EXPECTED_VERSION = 25
+EXPECTED_VERSION = 26
 
 def _build_text_search_clauses(sql: str, params: list, q_str: str, cols: list[str]) -> tuple[str, list]:
     """Applies positive/negative text search tokens to SQL via LIKE clauses."""
@@ -699,7 +699,13 @@ def initialize_database(db_path: str):
         -- lifetime_subscriptions count above, which cannot be attributed to an
         -- account.
         own_subscribed INTEGER DEFAULT 0,
-        own_first_subscribed_at INTEGER DEFAULT NULL
+        own_first_subscribed_at INTEGER DEFAULT NULL,
+        -- Local latch: when this app first saw Steam's downloaded copy of a
+        -- subscribed item on disk. Set only by src.workshop_folders, cleared
+        -- only beside own_subscribed when the item leaves the owner's
+        -- subscription list, and never derived from Steam data. NULL means the
+        -- subscription (if any) has not been confirmed on disk.
+        downloaded_at INTEGER DEFAULT NULL
     )
     """)
 
@@ -744,6 +750,7 @@ def initialize_database(db_path: str):
         ("needs_image", "INTEGER DEFAULT 0"),
         ("own_subscribed", "INTEGER DEFAULT 0"),
         ("own_first_subscribed_at", "INTEGER DEFAULT NULL"),
+        ("downloaded_at", "INTEGER DEFAULT NULL"),
     ])
 
     # dt_translated was renamed to translate_version in migration 13->14. A
@@ -1833,6 +1840,25 @@ def initialize_database(db_path: str):
             "Migration 24->25 complete. Indexed the web, image and API fetch queues."
         )
 
+    if db_version < 26:
+        logging.info("Running migration 25->26: adding the local downloaded-at latch...")
+
+        # `downloaded_at` records when this app first saw Steam's downloaded copy
+        # of a subscribed item on disk. It is added by `_safe_add_columns` above
+        # (a fresh database gets it from CREATE TABLE, an existing one by ALTER),
+        # so this migration normally only records the version bump.
+        #
+        # Every pre-existing row is left NULL on purpose: the latch is a local
+        # observation, and no item has been observed downloaded yet on the run
+        # that introduces the column. The first scan after startup fills it in
+        # for items that are both subscribed and on disk.
+        cursor.execute("PRAGMA user_version = 26")
+        conn.commit()
+        logging.info(
+            "Migration 25->26 complete. downloaded_at stays NULL on every row; the "
+            "first folder scan fills it in for subscribed items Steam has on disk."
+        )
+
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON workshop_items (status)")
@@ -1965,8 +1991,17 @@ def apply_own_subscriptions(db_path: str, appid: int, subscribed_ids,
     is no evidence about the items it omits -- and wrongly clearing
     ``own_subscribed`` would turn a live subscription into ``previously``.
 
-    Returns ``{"subscribed", "stamped", "cleared", "queued_cleared"}`` counts so
-    the daemon can log what a sync actually did.
+    **The downloaded latch is cleared here and only here.** ``downloaded_at`` is
+    set by one writer (``src.workshop_folders``, which only ever stamps) and
+    cleared by one event: the item leaving the owner's subscription list, in the
+    same transaction that clears ``own_subscribed`` below. A missing folder, an
+    unplugged drive or a moved library must never take the green star away, and a
+    confirmed item is never revisited by the scan, so this is the sole clearing
+    path. Re-subscribing re-earns the stamp on the next scan, because the files
+    are usually still on disk.
+
+    Returns ``{"subscribed", "stamped", "cleared", "queued_cleared",
+    "downloads_cleared"}`` counts so the daemon can log what a sync actually did.
     """
     if seen_at is None:
         seen_at = int(time.time())
@@ -2000,12 +2035,25 @@ def apply_own_subscriptions(db_path: str, appid: int, subscribed_ids,
                 "stamped": stamped,
                 "cleared": 0,
                 "queued_cleared": queued_cleared,
+                "downloads_cleared": 0,
             }
 
         # The complement of the list. Scoped to this appid so a sync for one app
         # can never clear another app's flags.
+        #
+        # downloaded_at is cleared in the same transaction as own_subscribed --
+        # leaving the subscription list is the one event that takes the green
+        # star away. The separate statement is what makes the count of cleared
+        # latches measurable; the two run in one transaction, so a reader never
+        # sees a subscribed item whose latch is already gone.
         if ids:
             placeholders = ",".join("?" * len(ids))
+            downloads_cleared = conn.execute(
+                f"UPDATE workshop_items SET downloaded_at = NULL "
+                f"WHERE consumer_appid = ? AND own_subscribed = 1 "
+                f"AND downloaded_at IS NOT NULL AND workshop_id NOT IN ({placeholders})",
+                [appid, *ids]
+            ).rowcount
             cleared = conn.execute(
                 f"UPDATE workshop_items SET own_subscribed = 0 "
                 f"WHERE consumer_appid = ? AND own_subscribed = 1 "
@@ -2013,6 +2061,12 @@ def apply_own_subscriptions(db_path: str, appid: int, subscribed_ids,
                 [appid, *ids]
             ).rowcount
         else:
+            downloads_cleared = conn.execute(
+                "UPDATE workshop_items SET downloaded_at = NULL "
+                "WHERE consumer_appid = ? AND own_subscribed = 1 "
+                "AND downloaded_at IS NOT NULL",
+                (appid,)
+            ).rowcount
             cleared = conn.execute(
                 "UPDATE workshop_items SET own_subscribed = 0 "
                 "WHERE consumer_appid = ? AND own_subscribed = 1",
@@ -2028,6 +2082,7 @@ def apply_own_subscriptions(db_path: str, appid: int, subscribed_ids,
         "stamped": stamped,
         "cleared": cleared,
         "queued_cleared": queued_cleared,
+        "downloads_cleared": downloads_cleared,
     }
 
 
@@ -2036,13 +2091,14 @@ def get_queued_items(db_path: str) -> list[dict]:
 
     The subscription columns travel with the row so each front end can render
     the shared state from ``src/subscription.py``: the TUI's queue screen draws
-    each row's real marker from them, and the web overlay ignores the extras.
+    each row's real marker from them, and the web overlay renders the same
+    marker from the same payload.
     """
     conn = get_connection(db_path)
     cursor = conn.cursor()
     cursor.execute(
         "SELECT workshop_id, title, title_en, is_queued_for_subscription, "
-        "own_subscribed, own_first_subscribed_at "
+        "own_subscribed, own_first_subscribed_at, downloaded_at "
         "FROM workshop_items WHERE is_queued_for_subscription = 1 ORDER BY title"
     )
     items = [dict(row) for row in cursor.fetchall()]
@@ -2056,7 +2112,7 @@ def get_subscription_states(db_path: str, workshop_ids) -> dict[int, dict]:
     The TUI's list poll re-reads only the rendered rows whose marker is still
     ``pending``; one query answers the whole batch, the same way the web grid's
     poll reads its rows back through one ``/api/items`` call, so the poll costs
-    one read rather than one per row. The three columns are exactly the inputs
+    one read rather than one per row. The four columns are exactly the inputs
     ``src.subscription.subscription_state`` resolves.
     """
     ids = [int(wid) for wid in workshop_ids]
@@ -2067,7 +2123,7 @@ def get_subscription_states(db_path: str, workshop_ids) -> dict[int, dict]:
         placeholders = ",".join("?" * len(ids))
         rows = conn.execute(
             "SELECT workshop_id, own_subscribed, is_queued_for_subscription, "
-            f"own_first_subscribed_at FROM workshop_items "
+            f"own_first_subscribed_at, downloaded_at FROM workshop_items "
             f"WHERE workshop_id IN ({placeholders})",
             ids,
         ).fetchall()
@@ -2348,7 +2404,9 @@ def search_items(db_path: str, query: str = "", appid: int = None,
                 # draws its marker from this payload, and a cell that had
                 # own_subscribed without own_first_subscribed_at could not tell
                 # `never` from `previously` after the marker was toggled.
-                "w.own_subscribed, w.own_first_subscribed_at, "
+                # downloaded_at travels too, or the grid could not draw the
+                # `downloaded` state for a row that is already subscribed.
+                "w.own_subscribed, w.own_first_subscribed_at, w.downloaded_at, "
                 "u.personaname, u.personaname_en,"
                 "(SELECT GROUP_CONCAT(t.tag_name, ', ') FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id = w.workshop_id) as tags")
     else:

@@ -1,16 +1,19 @@
-"""The owner's subscription state: which of the four a row is in, and why.
+"""The owner's subscription state: which of the five a row is in, and why.
 
-There are four answers to "does this account subscribe to this item?" --
-subscribed, pending, previously, never -- and both front ends draw them with
-real Unicode glyphs from one table in `src/subscription.py`. The TUI renders
-that table into Textual markup and the web renders it into a positioned element,
-so the two mechanisms are not remotely alike; the shared table is what stops
-them disagreeing about why the same row looks the way it does.
+There are five answers to "does this account subscribe to this item?" --
+downloaded, subscribed, pending, previously, never -- and both front ends draw
+them with real Unicode glyphs from one table in `src/subscription.py`. The TUI
+renders that table into Textual markup and the web renders it into a positioned
+element, so the two mechanisms are not remotely alike; the shared table is what
+stops them disagreeing about why the same row looks the way it does.
 
 The decisions pinned here are the ones easy to "fix" back:
 
-* **Precedence.** ``subscribed`` beats ``pending`` (there is nothing left to
-  queue), ``pending`` beats ``previously``, and ``previously`` beats ``never``.
+* **Precedence.** ``downloaded`` beats ``subscribed``, which beats ``pending``
+  (there is nothing left to queue), which beats ``previously``, which beats
+  ``never``.
+* **``downloaded`` needs both flags.** A stray ``downloaded_at`` beside a
+  cleared ``own_subscribed`` must not claim the green star.
 * **The sticky timestamp is the only source of ``previously``.** A row whose
   ``own_subscribed`` has been cleared still reads ``previously`` because we saw
   it once, and a stale timestamp beside a set ``own_subscribed`` reads
@@ -36,12 +39,13 @@ def _item(**over) -> dict:
         "own_subscribed": 0,
         "own_first_subscribed_at": None,
         "is_queued_for_subscription": 0,
+        "downloaded_at": None,
     }
     item.update(over)
     return item
 
 
-# --- the four states --------------------------------------------------------
+# --- the five states --------------------------------------------------------
 
 def test_a_never_seen_item_is_never():
     assert subscription.subscription_state(_item()) == subscription.NEVER
@@ -50,6 +54,11 @@ def test_a_never_seen_item_is_never():
 def test_a_current_subscription_is_subscribed():
     assert subscription.subscription_state(
         _item(own_subscribed=1, own_first_subscribed_at=1000)) == subscription.SUBSCRIBED
+
+
+def test_a_subscribed_downloaded_item_is_downloaded():
+    assert subscription.subscription_state(
+        _item(own_subscribed=1, downloaded_at=1000)) == subscription.DOWNLOADED
 
 
 def test_a_queued_item_is_pending():
@@ -64,6 +73,25 @@ def test_a_seen_but_unsubscribed_item_is_previously():
 
 
 # --- the precedence ---------------------------------------------------------
+
+def test_a_downloaded_item_beats_a_bare_subscription():
+    assert subscription.subscription_state(
+        _item(own_subscribed=1, downloaded_at=1000)) == subscription.DOWNLOADED
+
+
+def test_a_stray_downloaded_timestamp_without_the_flag_is_not_downloaded():
+    """The latch is a green claim only beside a live subscription.
+
+    ``downloaded_at`` is cleared with ``own_subscribed`` by the subscription
+    walk, but a timestamp that survived some other path -- an old row, a manual
+    edit -- must not draw the green star on its own.
+    """
+    assert subscription.subscription_state(_item(downloaded_at=1000)) == subscription.NEVER
+    assert subscription.subscription_state(
+        _item(downloaded_at=1000, own_first_subscribed_at=5)) == subscription.PREVIOUSLY
+    assert subscription.subscription_state(
+        _item(downloaded_at=1000, is_queued_for_subscription=1)) == subscription.PENDING
+
 
 def test_a_subscribed_item_with_a_stale_queue_flag_is_subscribed():
     """There is nothing pending for an item that is already subscribed."""
@@ -86,14 +114,16 @@ def test_a_stale_timestamp_beside_a_set_flag_is_subscribed():
 
 def test_the_precedence_order_is_declared_strongest_first():
     assert subscription.PRECEDENCE == (
-        subscription.SUBSCRIBED, subscription.PENDING,
+        subscription.DOWNLOADED, subscription.SUBSCRIBED, subscription.PENDING,
         subscription.PREVIOUSLY, subscription.NEVER)
 
 
-def test_queued_beats_previously_and_subscribed_beats_pending():
+def test_each_adjacent_pair_of_the_stated_precedence():
     """Each adjacent pair of the stated precedence, in one place."""
-    assert (subscription.subscription_state(_item(own_subscribed=1, is_queued_for_subscription=1))
-            == subscription.SUBSCRIBED)
+    assert (subscription.subscription_state(_item(own_subscribed=1, downloaded_at=1))
+            == subscription.DOWNLOADED)
+    assert (subscription.subscription_state(
+        _item(own_subscribed=1, is_queued_for_subscription=1)) == subscription.SUBSCRIBED)
     assert (subscription.subscription_state(_item(is_queued_for_subscription=1, own_first_subscribed_at=9))
             == subscription.PENDING)
     assert (subscription.subscription_state(_item(own_first_subscribed_at=9))
@@ -108,17 +138,35 @@ def test_every_state_has_a_spec_and_a_tooltip():
 
 
 def test_the_glyphs_are_the_real_unicode_characters():
-    assert subscription.glyph(subscription.SUBSCRIBED) == "\u2605"   # ★
-    assert subscription.glyph(subscription.PENDING) == "\u2606"      # ☆
-    assert subscription.glyph(subscription.PREVIOUSLY) == "\u2606"   # ☆
-    assert subscription.glyph(subscription.NEVER) == "\u25cb"        # ○
+    assert subscription.glyph(subscription.DOWNLOADED) == "\u2605"  # ★
+    assert subscription.glyph(subscription.SUBSCRIBED) == "\u2605"  # ★
+    assert subscription.glyph(subscription.PENDING) == "\u2606"     # ☆
+    assert subscription.glyph(subscription.PREVIOUSLY) == "\u2606"  # ☆
+    assert subscription.glyph(subscription.NEVER) == "\u25cb"       # ○
 
 
 def test_the_colours_follow_the_stated_table():
+    assert subscription.colour(subscription.DOWNLOADED) == "#00a651"  # deep green
     assert subscription.colour(subscription.SUBSCRIBED) == "#ffd700"  # solid yellow
     assert subscription.colour(subscription.PENDING) == "#2ecc40"     # green
     assert subscription.colour(subscription.PREVIOUSLY) == "#ffd700"  # yellow
     assert subscription.colour(subscription.NEVER) == "#808080"       # gray
+
+
+def test_downloaded_is_a_solid_star_in_a_green_of_its_own():
+    """★ green must not be mistakable for ☆ green or ★ yellow."""
+    assert (subscription.glyph(subscription.DOWNLOADED)
+            == subscription.glyph(subscription.SUBSCRIBED))
+    assert (subscription.colour(subscription.DOWNLOADED)
+            != subscription.colour(subscription.PENDING))
+    assert (subscription.colour(subscription.DOWNLOADED)
+            != subscription.colour(subscription.SUBSCRIBED))
+
+
+def test_the_downloaded_label_and_tooltip_say_what_it_means():
+    assert subscription.label(subscription.DOWNLOADED) == "Subscribed, and downloaded"
+    assert (subscription.tooltip(subscription.DOWNLOADED)
+            == "You are subscribed to this item and Steam has downloaded it.")
 
 
 def test_pending_and_previously_share_a_glyph_but_not_a_colour():
@@ -142,14 +190,18 @@ def test_only_the_three_actionable_states_are_clickable():
     assert subscription.is_clickable(subscription.PENDING)
     assert subscription.is_clickable(subscription.PREVIOUSLY)
     assert subscription.is_clickable(subscription.NEVER)
-    # An accidental unsubscribe is not wanted, so subscribed does nothing.
+    # An accidental unsubscribe is not wanted, so subscribed does nothing; the
+    # downloaded state is the same subscription seen from disk, so it is inert
+    # too (its action is the separate open-folder button and key).
     assert not subscription.is_clickable(subscription.SUBSCRIBED)
+    assert not subscription.is_clickable(subscription.DOWNLOADED)
     assert set(subscription.CLICKABLE) == {
         subscription.PENDING, subscription.PREVIOUSLY, subscription.NEVER}
 
 
 def test_every_css_class_is_distinct():
-    assert len({subscription.css_class(s) for s in subscription.PRECEDENCE}) == 4
+    assert len({subscription.css_class(s) for s in subscription.PRECEDENCE}) == len(
+        subscription.PRECEDENCE)
 
 
 def test_an_unknown_state_is_a_loud_error():

@@ -15,16 +15,17 @@ from unittest.mock import patch
 
 import pytest
 from textual.content import Content
-from textual.widgets import Label, ListView, Static
+from textual.widgets import Button, Label, ListView, Static
 
 from src import subscription, subscribe_engine
 from src.database import (
+    get_connection,
     initialize_database,
     insert_or_update_item,
     mark_own_subscribed,
     toggle_subscription_queue_status,
 )
-from src.tui import DetailsPane, ScraperApp, SubscriptionQueueScreen
+from src.tui import DetailsPane, ScraperApp, SubscriptionQueueScreen, app_bindings
 from tests.conftest import ASYNC_PAUSE
 
 
@@ -39,6 +40,7 @@ def _spans(markup: str):
 
 
 @pytest.mark.parametrize("columns,state", [
+    ({"own_subscribed": 1, "downloaded_at": 1000}, subscription.DOWNLOADED),
     ({"own_subscribed": 1, "own_first_subscribed_at": 1000}, subscription.SUBSCRIBED),
     ({"is_queued_for_subscription": 1}, subscription.PENDING),
     ({"own_first_subscribed_at": 1000}, subscription.PREVIOUSLY),
@@ -70,6 +72,7 @@ async def test_the_tui_list_row_draws_each_state(tmp_path, columns, state):
 
 
 @pytest.mark.parametrize("columns,state", [
+    ({"own_subscribed": 1, "downloaded_at": 1000}, subscription.DOWNLOADED),
     ({"own_subscribed": 1, "own_first_subscribed_at": 1000}, subscription.SUBSCRIBED),
     ({"is_queued_for_subscription": 1}, subscription.PENDING),
     ({"own_first_subscribed_at": 1000}, subscription.PREVIOUSLY),
@@ -311,6 +314,104 @@ def test_the_queue_row_builder_draws_the_items_real_state():
     plain, spans = str(line), [span.style for span in line.spans]
     assert subscription.glyph(subscription.SUBSCRIBED) in plain
     assert subscription.colour(subscription.SUBSCRIBED) in spans
+
+
+def test_the_queue_row_builder_draws_the_downloaded_state():
+    """The queue screen is one of the marker's surfaces, so it draws green too."""
+    downloaded = {
+        "workshop_id": 5, "title": "Item",
+        "own_subscribed": 1, "is_queued_for_subscription": 0,
+        "own_first_subscribed_at": 1000, "downloaded_at": 2000,
+    }
+    line = SubscriptionQueueScreen._row_text(downloaded)
+    plain, spans = str(line), [span.style for span in line.spans]
+    assert subscription.glyph(subscription.DOWNLOADED) in plain
+    assert subscription.colour(subscription.DOWNLOADED) in spans
+
+
+# --- opening a downloaded item's folder (Windows only) ----------------------
+
+
+def test_the_open_folder_binding_is_declared_only_on_windows():
+    """Off Windows the key must be absent, not present-and-inert."""
+    assert ("o", "open_folder", "Open Folder") in app_bindings("win32")
+    assert ("o", "open_folder", "Open Folder") not in app_bindings("linux")
+    assert ("o", "open_folder", "Open Folder") not in app_bindings("darwin")
+
+
+@pytest.mark.asyncio
+async def test_the_open_folder_button_is_absent_off_windows(tmp_path):
+    db_path = str(tmp_path / "off_windows.db")
+    initialize_database(db_path)
+    config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
+
+    with patch("src.workshop_folders.is_windows", return_value=False), \
+         patch("src.tui.load_config", return_value=config):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+            pane = app.query_one("#item-details", DetailsPane)
+            ids = {widget.id for widget in pane.query("*")}
+
+    assert "btn-open-folder" not in ids
+
+
+@pytest.mark.asyncio
+async def test_the_open_button_and_key_act_only_on_a_downloaded_item(tmp_path):
+    """The control is disabled with the reason until the star is green.
+
+    The key path shows the same refusal as a notification instead of doing
+    nothing, and when the latch lands the button enables and the shared helper
+    opens the folder through the injected launcher -- no Explorer in the test.
+    """
+    db_path = str(tmp_path / "open.db")
+    initialize_database(db_path)
+    content = tmp_path / "content"
+    folder = content / "294100" / "5"
+    folder.mkdir(parents=True)
+    insert_or_update_item(db_path, {
+        "workshop_id": 5, "title": "Item", "status": 200,
+        "consumer_appid": 294100, "own_subscribed": 1,
+    })
+    config = {"database": {"path": db_path},
+              "steam": {"workshop_content_dirs": [str(content)]},
+              "logging": {"level": "INFO"}}
+    launched = []
+
+    with patch("src.workshop_folders.is_windows", return_value=True), \
+         patch("src.tui.load_config", return_value=config):
+        app = ScraperApp()
+        app.workshop_folders._launcher = launched.append
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+            list_view = app.query_one("#results-list", ListView)
+            list_view.index = 0
+            await pilot.pause(ASYNC_PAUSE)
+            pane = app.query_one("#item-details", DetailsPane)
+
+            button = pane.query_one("#btn-open-folder", Button)
+            assert button.disabled is True, "subscribed but not confirmed on disk"
+            assert "not downloaded" in str(button.label)
+
+            with patch.object(app, "notify") as notify:
+                await app.action_open_folder()
+            assert launched == [], "a non-green item must not open anything"
+            assert notify.called, "the key must say why, not do nothing"
+
+            # The scan stamps the latch; the pane's own refresh re-reads it.
+            conn = get_connection(db_path)
+            conn.execute("UPDATE workshop_items SET downloaded_at = 123 WHERE workshop_id = 5")
+            conn.commit()
+            conn.close()
+            await pane.refresh_data()
+            await pilot.pause(ASYNC_PAUSE)
+
+            button = pane.query_one("#btn-open-folder", Button)
+            assert button.disabled is False
+            await app.action_open_folder()
+            await pilot.pause(ASYNC_PAUSE)
+
+    assert launched == [str(folder)], "the key opens the folder the helper resolves"
 
 
 @pytest.mark.asyncio

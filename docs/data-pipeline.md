@@ -9,8 +9,9 @@ The data pipeline moves a Steam Workshop item from initial discovery through enr
 ### `process_batch` (daemon)
 
 The main loop entry point called repeatedly by `run()`. Before it takes any work it runs the daemon's
-housekeeping — the staleness sweep (`_maybe_promote_stale_items`) and the subscription reconcile
-(`_maybe_reconcile_subscriptions`), each guarded by its own clock — and both of those run for certain on
+housekeeping — the staleness sweep (`_maybe_promote_stale_items`), the subscription reconcile
+(`_maybe_reconcile_subscriptions`) and the downloaded-item folder scan
+(`_maybe_scan_downloaded_items`), each guarded by its own clock — and all three run for certain on
 the **first batch after a restart**, which is why a fresh daemon can be minutes away from its first API
 fetch while its scraper, image and discovery threads are already working. Each invocation then:
 
@@ -38,6 +39,30 @@ It is floored at `API_DELAY_FLOOR = 0.01 s` and has **no ceiling**. One was kept
 
 Promotes successfully-fetched items whose `api_fetched_at` is older than `item_staleness_days` from `api_priority = 0` back to `1`, returning them to the fetch queue. It is a full-table UPDATE, so `_maybe_promote_stale_items` runs it at most once per `STALE_SWEEP_INTERVAL_SECONDS` (1 hour, monotonic clock) instead of on every batch; the first batch after startup always sweeps, so a long-idle daemon does not sit on a stale queue.
 
+### `_scan_downloaded_items` (daemon, via `src.workshop_folders`)
+
+Marks a subscribed item as downloaded once Steam has its folder on disk, so both front ends can draw
+the solid green `downloaded` star. The scan selects exactly the items that are `own_subscribed = 1 AND
+downloaded_at IS NULL` — subscribed and not yet confirmed — and for each one checks
+`<library>/steamapps/workshop/content/<consumer_appid>/<workshop_id>/`, stamping `downloaded_at` when it
+exists. **It only ever writes.** A missing folder, an unplugged drive or a moved library leaves the
+marker alone, and a confirmed item is never revisited; the only clearer is the subscription walk
+(`apply_own_subscriptions`), in the same transaction that clears `own_subscribed` when the item leaves
+the owner's subscription list. Re-subscribing re-earns the stamp on the next scan, because the files are
+usually still on disk.
+
+The libraries are discovered once per process — `SteamPath` from the registry, then every `path` in
+the install's `libraryfolders.vdf`, in both the current `<steam>/steamapps/` and older
+`<steam>/config/` locations, with `steam.workshop_content_dirs` added on top — and re-resolved only
+when a lookup finds nothing, so a second drive that appears later is picked up without re-reading the
+registry on every check. `_maybe_scan_downloaded_items` guards the scan on a monotonic
+`DOWNLOAD_SCAN_INTERVAL_SECONDS` (60 s) clock, like the staleness sweep, because the per-batch path runs
+every few seconds; the scan changed nothing logs nothing, and a changing scan logs one line with its
+counts. The TUI runs the same scan on the same interval but skips it while its daemon controller can see
+a daemon, so the two processes never scan in parallel. On a machine where the feature cannot work (not
+Windows, no Steam, no readable library file) every function is inert and every item keeps its ordinary
+marker; one startup line says why it is off, and nothing logs per check.
+
 ### `reconcile_own_subscriptions` (daemon)
 
 Brings the owner's subscription flags in line with Steam. It walks
@@ -45,7 +70,9 @@ Brings the owner's subscription flags in line with Steam. It walks
 AppID and, for every id it sees, stamps `own_subscribed = 1`, sets the sticky `own_first_subscribed_at`
 while that is still NULL, and clears `is_queued_for_subscription` — there is nothing left to queue for an
 item that is already subscribed. An id the walk does *not* see is evidence only about the pages that were
-read, so an incomplete walk unstamps nothing.
+read, so an incomplete walk unstamps nothing. A **complete** walk that does not see an item clears both
+its `own_subscribed` and its `downloaded_at` latch in one transaction: leaving the subscription list is
+the one event that takes the green `downloaded` star away, and it is the only clearer the latch has.
 
 `_maybe_reconcile_subscriptions` guards it on a monotonic clock: `SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS`
 (24 hours) normally, and `SUBSCRIPTION_RECONCILE_RETRY_SECONDS` (900 s) while a session problem is
