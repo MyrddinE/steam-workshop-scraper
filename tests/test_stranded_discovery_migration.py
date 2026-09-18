@@ -48,6 +48,23 @@ def _row(db_path, workshop_id):
     return dict(row)
 
 
+def _translation_queue_row(db_path, workshop_id):
+    """Give the translation mirror a queue row, so it means "queued".
+
+    Migration 22->23 clears a `translation_priority` with nothing in
+    `translation_queue`, so a fixture that means "the translation queue is
+    separate work and must survive" has to seed both halves of the pair.
+    """
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT INTO translation_queue (item_type, item_id, field, original_text, priority, queued_at) "
+        "VALUES ('item', ?, 'title_en', 'テスト', 7, 1)",
+        (workshop_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
 def _version(db_path):
     conn = get_connection(db_path)
     version = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -81,6 +98,7 @@ def test_migration_18_to_19_requeues_never_attempted_rows(db_path):
 
 def test_migration_18_to_19_does_not_touch_the_other_queue_flags(db_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 0, **STRANDED_WORK})
+    _translation_queue_row(db_path, 1)
     _age_to_v17(db_path)
 
     initialize_database(db_path)

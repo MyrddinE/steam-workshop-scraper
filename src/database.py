@@ -130,7 +130,7 @@ USER_PRIORITY_FLOOR = 5
 # than local to `initialize_database` because the migration tests assert that
 # the chain reaches it, and a magic number repeated in nine test files is a
 # number that will be wrong after the next migration.
-EXPECTED_VERSION = 22
+EXPECTED_VERSION = 23
 
 def _build_text_search_clauses(sql: str, params: list, q_str: str, cols: list[str]) -> tuple[str, list]:
     """Applies positive/negative text search tokens to SQL via LIKE clauses."""
@@ -1703,6 +1703,47 @@ def initialize_database(db_path: str):
             web_demoted, image_demoted,
         )
 
+    if db_version < 23:
+        logging.info("Running migration 22->23: repairing stranded translation-queue mirrors...")
+
+        # `translation_priority` is a mirror of `translation_queue`: it is raised
+        # when a field is queued and the translator zeroes it when the item's
+        # last queue row is deleted. Before this version
+        # `flag_field_for_translation` wrote the queue row and the mirror on two
+        # separate connections, so a translator drain landing between them could
+        # delete the row and zero the mirror, after which the helper's second
+        # statement raised the mirror again from `MAX(0, priority)`. The item was
+        # then permanently drawn as having translation work with nothing queued
+        # behind it, because every producer skips a translation that is already
+        # current, so nothing ever re-queues the field to clear it. The helper is
+        # now a single transaction; this repairs the rows the old one stranded.
+        #
+        # Only `workshop_items`: a user's name translation is tracked on
+        # `users.translation_priority` and never gets `translation_queue` rows,
+        # so that mirror is not expected to match this table. Only the high
+        # direction is repaired -- a queue row whose mirror is zero still has its
+        # work picked up, because the translator selects on the queue, not the
+        # mirror -- and dead rows are not special-cased: a mirror with nothing
+        # queued is wrong for them too.
+        cursor.execute(
+            "UPDATE workshop_items SET translation_priority = 0 "
+            "WHERE translation_priority > 0 "
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM translation_queue q "
+            "WHERE q.item_type = 'item' AND q.item_id = workshop_items.workshop_id"
+            ")"
+        )
+        stranded_mirrors = cursor.rowcount
+
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 23")
+        conn.commit()
+        logging.info(
+            "Migration 22->23 complete. Cleared the translation mirror on %d item(s) "
+            "with no field left in translation_queue.",
+            stranded_mirrors,
+        )
+
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON workshop_items (status)")
@@ -2572,7 +2613,18 @@ def translation_is_current(translated_text, translate_version, steam_updated_at)
 
 def flag_field_for_translation(db_path: str, item_type: str, item_id: int, field: str, text: str, priority: int):
     """Inserts a field into translation_queue, or bumps its priority. Never downgrades.
-    Also bumps translation_priority on the parent item/user table."""
+    Also bumps translation_priority on the parent item/user table.
+
+    The queue row and the parent mirror are written in ONE transaction on ONE
+    connection. Splitting them was a live defect: the translator drains the
+    queue on its own thread, so a drain landing between the two writes deleted
+    the row and zeroed the mirror, and the second write then raised the mirror
+    again with nothing queued behind it. The item read as permanently pending
+    and no producer would re-queue it, because the translation it now had was
+    current. Holding the write lock across both statements makes the pair
+    atomic: a drain either happens before the row is re-queued (mirror raised,
+    row present) or after it (row deleted, mirror zeroed).
+    """
     if not text or text.isascii():
         return
     conn = get_connection(db_path)
@@ -2598,13 +2650,10 @@ def flag_field_for_translation(db_path: str, item_type: str, item_id: int, field
             "VALUES (?, ?, ?, ?, ?, ?)",
             (item_type, item_id, field, text, priority, int(time.time()))
         )
-    conn.commit()
-    conn.close()
     # Sync translation_priority on the parent — use MAX so multiple fields
     # each set their priority without downgrading
     table = "users" if item_type == "user" else "workshop_items"
     id_col = "workshop_id" if table == "workshop_items" else "steamid"
-    conn = get_connection(db_path)
     conn.execute(
         f"UPDATE {table} SET translation_priority = MAX(translation_priority, ?) WHERE {id_col} = ?",
         (priority, item_id)

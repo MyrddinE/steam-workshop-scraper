@@ -451,6 +451,54 @@ it without nine files each repeating the number.
 
 ---
 
+### v22 → v23: Stranded translation-queue mirrors
+
+No schema change — the whole migration is data. `translation_priority` is a
+mirror of `translation_queue`: a producer raises it when it queues a field, and
+the translator zeroes it when the item's last queue row is deleted. Before this
+version `flag_field_for_translation` wrote the queue row and the mirror on **two
+separate connections**, so the translator — which drains the queue on its own
+thread — could delete the row and zero the mirror between the two commits, after
+which the helper's second statement raised the mirror again from
+`MAX(0, priority)`.
+
+An item left that way reads as permanently pending in both front ends and nothing
+can clear it: every producer skips a translation that is already current, so the
+field that was just translated is never re-queued, and the translator only looks
+at `translation_queue`, which is empty. *Measured live* on 2026-09-16: 39 items
+carried `translation_priority >= 5` with every non-empty source field translated
+at the item's current `steam_updated_at` and no field left to translate.
+
+```sql
+UPDATE workshop_items SET translation_priority = 0
+WHERE translation_priority > 0
+  AND NOT EXISTS (
+      SELECT 1 FROM translation_queue q
+      WHERE q.item_type = 'item' AND q.item_id = workshop_items.workshop_id
+  )
+```
+
+Only `workshop_items` is touched. A user's name translation lives on
+`users.translation_priority` and never gets `translation_queue` rows, so that
+mirror is not expected to match this table. Only the high direction is repaired:
+a queue row whose mirror is zero still has its work picked up, because the
+translator selects on the queue and not on the mirror, so re-raising it would
+be a separate decision. Dead rows are not special-cased — a mirror with nothing
+queued is wrong for them too, and `status = -1` is the dead flag, not
+`translation_priority`.
+
+The helper change in the same release makes the two writes one transaction, so
+the interleaving cannot recur: while the helper holds the write lock, the
+translator can only drain before it (row re-queued, mirror raised) or after it
+(row deleted, mirror zeroed). The daemon's API merge also drops
+`translation_priority` now: it is a read-modify-write around the API call, and a
+snapshot carried through it could undo a drain the same way. Migration tests that
+seeded a translation priority without a queue row were updated to seed both
+halves of the pair, since that was the inconsistency this migration exists to
+remove.
+
+---
+
 ## Database Utility Functions
 
 ### `get_connection` (database)

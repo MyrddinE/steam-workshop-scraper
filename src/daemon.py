@@ -158,14 +158,22 @@ def user_requested_priority(inherited_prio: int) -> int:
 
 # --- API merge allow-list ----------------------------------------------------
 # Item columns that are owned by the queue-flagging helpers rather than by the
-# API merge. They must NOT survive a merge: flag_for_web_scrape / flag_for_image
-# set them explicitly between the merge and the insert, so carrying a stale value
-# through the merge would clobber the flag that was just set.
+# API merge. They must NOT survive a merge: a stale value would clobber a flag
+# just set, or resurrect one whose queue has already drained.
+#
+# flag_for_web_scrape / flag_for_image set their columns explicitly between the
+# merge and the insert. translation_priority is different only in timing: it is
+# written by flag_field_for_translation, which _flag_translations calls after
+# the insert. Carrying the pre-fetch snapshot through the merge would write that
+# snapshot back over it, so a translator drain that landed while the API fetch
+# was in flight would be undone and leave a priority with no queue row behind
+# it. Excluding it leaves the column to the code that owns it.
 MERGE_EXCLUDED_KEYS = frozenset({
     "is_queued_for_subscription",
     "needs_web_scrape",
     "image_extension",
     "needs_image",
+    "translation_priority",
 })
 
 # Keys retained from an API merge into the item record:

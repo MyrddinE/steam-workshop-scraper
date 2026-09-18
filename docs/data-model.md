@@ -94,7 +94,7 @@ Tags are not a column on `workshop_items`. They live in `tags(tag_id, tag_name)`
 | `api_priority` | Steam API fetch queue. |
 | `needs_web_scrape` | HTML scrape queue. |
 | `needs_image` | Preview image download queue. |
-| `translation_priority` | Translation queue mirror. Kept in step with `translation_queue` by `flag_field_for_translation` (which takes the `MAX` of the stored and new priority). |
+| `translation_priority` | Translation queue mirror. Raised together with the `translation_queue` row by `flag_field_for_translation` (which takes the `MAX` of the stored and new priority) **in one transaction**, and zeroed by the translator when the item's last queue row is deleted. A priority above `0` therefore means the item has at least one queued field; migration 22→23 cleared the rows that disagreed. |
 
 ## `users`
 

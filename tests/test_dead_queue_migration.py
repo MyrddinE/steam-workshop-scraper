@@ -43,6 +43,23 @@ def _queue_flags(db_path, workshop_id):
     return dict(row)
 
 
+def _translation_queue_row(db_path, workshop_id):
+    """Give a live mirror a queue row to mirror.
+
+    Migration 22->23 clears a `translation_priority` with nothing in
+    `translation_queue`, so a fixture that means "this item is genuinely
+    queued" has to seed both halves of the pair.
+    """
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT INTO translation_queue (item_type, item_id, field, original_text, priority, queued_at) "
+        "VALUES ('item', ?, 'title_en', 'テスト', 3, 1)",
+        (workshop_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
 def test_migration_17_clears_queue_flags_on_dead_rows(db_path):
     insert_or_update_item(db_path, {
         "workshop_id": 1, "status": -1, "api_priority": 0, **DEAD_FLAGS,
@@ -65,6 +82,7 @@ def test_migration_17_leaves_live_rows_queued(db_path):
     insert_or_update_item(db_path, {
         "workshop_id": 1, "status": 200, "api_priority": 0, **DEAD_FLAGS,
     })
+    _translation_queue_row(db_path, 1)
     _age_to_v16(db_path)
 
     initialize_database(db_path)
