@@ -83,7 +83,9 @@ The one-id spelling of the batch call, kept for existing callers. Returns `{stat
 
 ### `_merge_and_clean_api_data` (daemon)
 
-Merges API response data into the existing DB row. Applies column-name remapping (`creator_app_id` → `creator_appid`, `description` → `short_description`, `time_created`/`time_updated` → `steam_created_at`/`steam_updated_at`). Filters to `MERGE_ITEM_KEYS` (derived from `WORKSHOP_ITEM_COLUMNS`) to prevent unknown API columns from polluting the DB, and discards known-but-handled-externally keys (for example `needs_web_scrape`, `image_extension`, `needs_image`). Normalizes tags via `normalize_tags`. On the success path it stamps `api_fetched_at = now_ts` and `api_priority = 0`.
+Merges API response data into the existing DB row. Applies column-name remapping (`creator_app_id` → `creator_appid`, `description` → `short_description`, `time_created`/`time_updated` → `steam_created_at`/`steam_updated_at`). Filters to `MERGE_ITEM_KEYS` (derived from `WORKSHOP_ITEM_COLUMNS`) to prevent unknown API columns from polluting the DB, and discards known-but-handled-externally keys (for example `needs_web_scrape`, `image_extension`, `needs_image`, `translation_priority`). Normalizes tags via `normalize_tags`. On the success path it stamps `api_fetched_at = now_ts` and `api_priority = 0`.
+
+The queue-owned columns are dropped rather than carried because the merge is a read-modify-write: the existing row is read before the API call and written back after it, so a queue flag that changed while the request was in flight would be overwritten by the stale snapshot. `needs_web_scrape` and `needs_image` are set explicitly between the merge and the insert; `translation_priority` is written by `flag_field_for_translation` just after the insert, so the merge must leave the column untouched.
 
 ### `_should_enrich` (daemon)
 
@@ -336,6 +338,8 @@ Sets `translation_priority` on a `workshop_items` or `users` row. Used by the da
 ### `flag_field_for_translation` (database)
 
 Inserts or bumps an entry in `translation_queue`, and also raises the parent row's `translation_priority` via `MAX`. Checks if the field already exists in the queue; if so, bumps its priority (never downgrades). If new, inserts with the given priority and `queued_at = now`.
+
+**Both writes happen in one transaction on one connection.** They used to run on two connections, and the translator drains the queue on its own thread: a drain landing between them deleted the row and zeroed the mirror, after which the second write raised the mirror again with nothing queued behind it. The item then read as permanently pending, because every producer skips a translation that is already current, so nothing ever re-queued the field to clear it. Migration 22→23 repairs the rows the old helper stranded.
 
 ### `bump_translation_for_list` / `bump_translation_for_detail` (database)
 

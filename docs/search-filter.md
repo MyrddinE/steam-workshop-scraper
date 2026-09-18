@@ -23,7 +23,6 @@ Maps user-facing field names (shown in TUI and Web UI dropdowns) to database col
 | Views | views |
 | Workshop ID | workshop_id |
 | AppID | consumer_appid |
-| Language ID | language |
 | Subscriber Score | wilson_subscription_score |
 | Favorite Score | wilson_favorite_score |
 | Full Text | full_text |
@@ -237,7 +236,7 @@ Validates the sort column against `VALID_SORT_COLS`, then builds `ORDER BY w.{co
 
 Three operator categories:
 - **text**: `contains, does_not_contain, is, is_not, is_empty, is_not_empty` — for Title, Description, Filename, Tags, Full Text
-- **numeric**: text ops + `gt, lt, gte, lte, percentile` — for File Size, Subs, Favs, Views, Language ID, Subscriber Score, Favorite Score
+- **numeric**: text ops + `gt, lt, gte, lte, percentile` — for File Size, Subs, Favs, Views, Subscriber Score, Favorite Score
 - **id**: `is, is_not` — for Author ID, Workshop ID, AppID
 
 The `updateOps` function switches operator options when the field dropdown changes. Percentile values are clamped to 0-99 on blur (via capture-phase event listener) and in `getFilters()`.

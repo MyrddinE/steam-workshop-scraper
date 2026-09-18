@@ -38,6 +38,22 @@ def _row(db_path, workshop_id):
     return dict(row)
 
 
+def _translation_queue_row(db_path, workshop_id):
+    """Give the translation mirror a queue row, so it means "queued".
+
+    Migration 22->23 clears a `translation_priority` with nothing in
+    `translation_queue`, so this fixture has to seed both halves of the pair.
+    """
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT INTO translation_queue (item_type, item_id, field, original_text, priority, queued_at) "
+        "VALUES ('item', ?, 'title_en', 'テスト', 3, 1)",
+        (workshop_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
 def test_migration_18_requeues_descriptionless_done_rows(db_path):
     """A row marked done with no description is work that was never done."""
     insert_or_update_item(db_path, {
@@ -106,6 +122,7 @@ def test_migration_18_touches_no_other_queue(db_path):
         "needs_image": 10, "api_priority": 3, "translation_priority": 3,
         "extended_description": None,
     })
+    _translation_queue_row(db_path, 1)
     _age_to_v17(db_path)
 
     initialize_database(db_path)

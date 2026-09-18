@@ -3,6 +3,16 @@ import pytest
 from src.database import search_items, compute_wilson_cutoffs, get_connection
 
 
+# The fixture's Chinese items are identified by their non-ASCII source text.
+# They used to carry language = 6 as the marker, but that column could never be
+# populated from any Steam response and was dropped in migration 23->24, so the
+# tests select the same population from the text that actually distinguishes it.
+# Same predicate as metrics._IS_ASCII, inverted.
+_NON_ASCII_TITLE = (
+    "length(CAST(COALESCE(title, '') AS BLOB)) != length(COALESCE(title, ''))"
+)
+
+
 # ── Tag operators (contains, does_not_contain) ────────────────────────────────
 
 def test_tag_contains_matches(deterministic_db):
@@ -92,9 +102,12 @@ def test_fts_contains_chinese(deterministic_db):
     assert len(result) > 0
     conn = get_connection(deterministic_db)
     for r in result:
-        row = conn.execute("SELECT language FROM workshop_items WHERE workshop_id=?", (r["workshop_id"],)).fetchone()
+        row = conn.execute(
+            f"SELECT {_NON_ASCII_TITLE} AS non_ascii FROM workshop_items WHERE workshop_id=?",
+            (r["workshop_id"],),
+        ).fetchone()
         if row:
-            assert row["language"] == 6
+            assert row["non_ascii"]
     conn.close()
 
 
@@ -108,11 +121,13 @@ def test_fts_contains_translation(deterministic_db):
     has_en = has_raw = False
     for r in result:
         row = conn.execute(
-            "SELECT title_en, language FROM workshop_items WHERE workshop_id=?", (r["workshop_id"],)
+            f"SELECT title_en, {_NON_ASCII_TITLE} AS non_ascii "
+            "FROM workshop_items WHERE workshop_id=?",
+            (r["workshop_id"],),
         ).fetchone()
-        if row and row["language"] == 6 and row["title_en"]:
+        if row and row["non_ascii"] and row["title_en"]:
             has_en = True
-        elif row and row["language"] != 6:
+        elif row and not row["non_ascii"]:
             has_raw = True
     conn.close()
     assert has_raw  # English items match directly
@@ -412,9 +427,11 @@ def test_zero_views_items_exist(deterministic_db):
     assert cnt > 0
 
 
-def test_chinese_items_have_language_6(deterministic_db):
+def test_chinese_items_have_non_ascii_titles(deterministic_db):
     conn = get_connection(deterministic_db)
-    cnt = conn.execute("SELECT COUNT(*) FROM workshop_items WHERE language = 6").fetchone()[0]
+    cnt = conn.execute(
+        f"SELECT COUNT(*) FROM workshop_items WHERE {_NON_ASCII_TITLE}"
+    ).fetchone()[0]
     conn.close()
     assert cnt > 0
 
@@ -422,7 +439,7 @@ def test_chinese_items_have_language_6(deterministic_db):
 def test_translated_items_have_en_fields(deterministic_db):
     conn = get_connection(deterministic_db)
     cnt = conn.execute(
-        "SELECT COUNT(*) FROM workshop_items WHERE title_en IS NOT NULL AND language = 6"
+        f"SELECT COUNT(*) FROM workshop_items WHERE title_en IS NOT NULL AND {_NON_ASCII_TITLE}"
     ).fetchone()[0]
     conn.close()
     assert cnt > 0

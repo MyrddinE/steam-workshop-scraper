@@ -4,7 +4,7 @@ The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_
 
 ---
 
-## Current Schema (v20)
+## Current Schema (v24)
 
 The application-level reference for every table and column is
 [data-model.md](data-model.md); the timestamp conventions are in
@@ -28,7 +28,6 @@ Primary key: `workshop_id INTEGER PRIMARY KEY` (aliased from rowid). Columns:
 | first_seen_at, api_fetched_at, last_fetch_attempted_at, scrape_version, translate_version | INTEGER | Our clocks and the two stored Steam version keys |
 | subscriptions, lifetime_subscriptions | INTEGER | Current and lifetime subscriber counts |
 | favorited, lifetime_favorited, views | INTEGER | Engagement metrics |
-| language | INTEGER | Steam language ID. Dead: NULL in the live database |
 | visibility, banned, ban_reason, app_name, file_type | Various | Steam metadata |
 | status | INTEGER | 200 = fetched, -1 = dead, 500 = retry, NULL = discovered but never fetched |
 | api_priority | INTEGER | Steam API fetch queue priority |
@@ -123,7 +122,6 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 | idx_extended_description | extended_description | Extended description search |
 | idx_extended_description_en | extended_description_en | Translated extended description search |
 | idx_filename | filename | Filename search |
-| idx_language | language | Language ID search |
 | idx_file_size | file_size | File Size sort |
 | idx_subscriptions | subscriptions | "Subs" sort |
 | idx_favorited | favorited | "Favs" sort |
@@ -160,7 +158,7 @@ Adds `needs_image` and `image_extension` columns. Sets `needs_image = 1` for ite
 
 ### v4 → v5: FTS5 full-text search
 
-Creates `workshop_fts` virtual table (content-sync with `workshop_items`). Populates via `INSERT INTO workshop_fts(workshop_fts) VALUES ('rebuild')`. Adds indexes on `_en` translated fields, `filename`, `language`, and `file_size`.
+Creates `workshop_fts` virtual table (content-sync with `workshop_items`). Populates via `INSERT INTO workshop_fts(workshop_fts) VALUES ('rebuild')`. Adds indexes on the `_en` translated fields, `filename`, and `file_size`.
 
 ### v5 → v6: Normalized tag schema
 
@@ -448,6 +446,99 @@ belonged to excluded items while 107,365 selected items waited behind them.
 `EXPECTED_VERSION` is now module level in `src/database.py` rather than a local
 inside `initialize_database`, so the migration tests can assert the chain reaches
 it without nine files each repeating the number.
+
+---
+
+### v22 → v23: Stranded translation-queue mirrors
+
+No schema change — the whole migration is data. `translation_priority` is a
+mirror of `translation_queue`: a producer raises it when it queues a field, and
+the translator zeroes it when the item's last queue row is deleted. Before this
+version `flag_field_for_translation` wrote the queue row and the mirror on **two
+separate connections**, so the translator — which drains the queue on its own
+thread — could delete the row and zero the mirror between the two commits, after
+which the helper's second statement raised the mirror again from
+`MAX(0, priority)`.
+
+An item left that way reads as permanently pending in both front ends and nothing
+can clear it: every producer skips a translation that is already current, so the
+field that was just translated is never re-queued, and the translator only looks
+at `translation_queue`, which is empty. *Measured live* on 2026-09-16: 39 items
+carried `translation_priority >= 5` with every non-empty source field translated
+at the item's current `steam_updated_at` and no field left to translate.
+
+```sql
+UPDATE workshop_items SET translation_priority = 0
+WHERE translation_priority > 0
+  AND NOT EXISTS (
+      SELECT 1 FROM translation_queue q
+      WHERE q.item_type = 'item' AND q.item_id = workshop_items.workshop_id
+  )
+```
+
+Only `workshop_items` is touched. A user's name translation lives on
+`users.translation_priority` and never gets `translation_queue` rows, so that
+mirror is not expected to match this table. Only the high direction is repaired:
+a queue row whose mirror is zero still has its work picked up, because the
+translator selects on the queue and not on the mirror, so re-raising it would
+be a separate decision. Dead rows are not special-cased — a mirror with nothing
+queued is wrong for them too, and `status = -1` is the dead flag, not
+`translation_priority`.
+
+The helper change in the same release makes the two writes one transaction, so
+the interleaving cannot recur: while the helper holds the write lock, the
+translator can only drain before it (row re-queued, mirror raised) or after it
+(row deleted, mirror zeroed). The daemon's API merge also drops
+`translation_priority` now: it is a read-modify-write around the API call, and a
+snapshot carried through it could undo a drain the same way. Migration tests that
+seeded a translation priority without a queue row were updated to seed both
+halves of the pair, since that was the inconsistency this migration exists to
+remove.
+
+---
+
+### v23 → v24: Drop the never-populated `language` column
+
+Removes a Steam-provided column that had no source. `language` was added
+expecting the API to return it, but no response this project consumes can:
+
+* `ISteamRemoteStorage/GetPublishedFileDetails` — the detail endpoint the daemon
+  calls — has no language field in its response message. The recorded real-world
+  body in `tests/test_steam_api.py` carries none.
+* The request protocol does have a `language` field, but it is the **viewer's**
+  localization parameter: it selects the language the returned `title` and
+  `description` are rendered in. The client would set it and never read it back,
+  so it is not a property of the item and cannot be stored as one.
+* The HTML page parse (`scrape_extended_details`) extracts only the description
+  and tags. `QueryFiles` is asked for the fields the merge consumes and no
+  language is among them.
+* *Measured live*: NULL for all 1,725,544 rows of the 2026-09-12 snapshot
+  ([live-data-profile.md](live-data-profile.md)).
+
+So the column advertised data Steam does not provide, drew a permanently
+`Language: N/A` line in the web tooltip, and backed a `Language ID` filter that
+could never match. The migration drops the index that referenced the column and
+then the column itself, following migration 5→6's pattern for the legacy `tags`
+column (`ALTER TABLE ... DROP COLUMN` after the dependent index is gone; SQLite
+3.53 is in use, so no table rebuild is needed):
+
+```sql
+DROP INDEX IF EXISTS idx_language;
+ALTER TABLE workshop_items DROP COLUMN language;
+```
+
+The drop is guarded on `PRAGMA table_info` so it is idempotent and resumable: a
+fresh database never grows the column (it was removed from `CREATE TABLE`, from
+`_safe_add_columns`, and from the index list in migration 4→5), and a database
+that already dropped it skips cleanly. `ALTER TABLE ... DROP COLUMN` is not
+metadata-only internally, so the migration commits it and checkpoints the WAL
+before continuing, the same rule migrations 13→14 and 14→15 follow.
+
+`language` is removed from `WORKSHOP_ITEM_COLUMNS`, so it is no longer in the
+API merge allow-list either, and the `Language ID` filter alias is gone
+(`FIELD_NAME_MAP`). A saved filter that named it now falls through as an unknown
+field and is ignored rather than erroring, which is what it effectively did
+already: no row ever matched.
 
 ---
 
