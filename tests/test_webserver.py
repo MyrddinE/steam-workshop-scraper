@@ -1,13 +1,19 @@
 import pytest
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
+import base64
+from unittest.mock import MagicMock
 import lxml.html
+from src import session_health
+from src import webserver
 from src.webserver import app, init_webserver
 from src.database import initialize_database, insert_or_update_item, normalize_tags, get_image_subdirs, get_connection
 from src import metrics
+from src import web_scraper
 
 
 @pytest.fixture
@@ -547,6 +553,257 @@ def test_api_subscribe_no_session(web_client):
     resp = client.post('/api/subscribe/1')
     assert resp.status_code == 400
     assert resp.get_json()["success"] == -1
+
+
+# --- /api/subscribe/<id>: the credential source and the request shape -------
+#
+# This route is the only server-side subscribe. Its credential and its CSRF
+# token must come from one read of the cookie source, it must refuse before
+# spending a request when either half is missing or locally expired, and a
+# Steam confirmation must be recorded rather than dropped. The network is the
+# shared scraper session, replaced here with a recorder.
+
+# Fixed expiries: `session_cookie.parse` compares against the wall clock, and
+# these are on the right side of any plausible run date, so no test waits or
+# depends on when it runs.
+_FUTURE_EXPIRY = 4_102_444_800   # 2100-01-01
+_PAST_EXPIRY = 1_000_000_000     # 2001-09-09
+
+
+def _login_cookie(expires_at, steamid="76561198000000000"):
+    """A `steamLoginSecure` value whose token states its own expiry.
+
+    The three-segment shape a browser stores -- steamid, `%7C%7C`, then a token
+    carrying `exp` -- because that is what `src/session_cookie.py` reads.
+    """
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"exp": expires_at}).encode()).decode().rstrip("=")
+    return f"{steamid}%7C%7CeyJhbGciOiJub25lIn0.{payload}.c2ln"
+
+
+@pytest.fixture
+def subscribe_env(tmp_path, monkeypatch):
+    """A database with item 1, plus the route's two seams replaced.
+
+    `_get_session` is the request seam now that the route shares the scraper's
+    session, so the recorder lives on it. `requests.post` is replaced with a
+    tripwire rather than a recorder: a return to a bare call fails loudly
+    instead of silently passing. The cookie source is replaced with a set the
+    test dictates -- the route must read that entry point, so a route taking
+    the token from anywhere else is caught here.
+    """
+    db_path = str(tmp_path / "subscribe.db")
+    initialize_database(db_path)
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "T", "status": 200,
+                                    "consumer_appid": 294100})
+    config = {"database": {"path": db_path}, "daemon": {"target_appids": [294100]},
+              "session": {}}
+    init_webserver(db_path, config)
+    monkeypatch.setattr(webserver, "_sessionid", "")
+
+    state = {"cookies": {}, "payload": {"success": 1}, "calls": []}
+
+    monkeypatch.setattr(webserver.web_scraper, "_build_workshop_cookies",
+                        lambda config: dict(state["cookies"]))
+
+    class _Session:
+        def post(self, url, **kwargs):
+            state["calls"].append({"url": url, **kwargs})
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = state["payload"]
+            return resp
+
+    monkeypatch.setattr(webserver.web_scraper, "_get_session", lambda: _Session())
+
+    def _bare_post(*args, **kwargs):
+        raise AssertionError("the route used a bare requests.post, not the shared session")
+
+    monkeypatch.setattr(webserver.requests, "post", _bare_post)
+    return db_path, state
+
+
+def _post_subscribe(client, wid=1):
+    return client.post(f'/api/subscribe/{wid}')
+
+
+def _item_row(db_path, wid=1):
+    conn = get_connection(db_path)
+    row = conn.execute("SELECT * FROM workshop_items WHERE workshop_id=?", (wid,)).fetchone()
+    conn.close()
+    return dict(row)
+
+
+def test_subscribe_token_comes_from_the_built_cookie_set(subscribe_env, monkeypatch):
+    """(a) The form token is the built set's, even when a global is pushed."""
+    _, state = subscribe_env
+    state["cookies"] = {"sessionid": "FROM_COOKIES",
+                        "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
+    monkeypatch.setattr(webserver, "_sessionid", "PUSHED_GLOBAL")
+    webserver._config.setdefault("session", {})["id"] = "CONFIG_ID"
+    client = app.test_client()
+
+    resp = _post_subscribe(client)
+
+    assert resp.status_code == 200
+    call = state["calls"][0]
+    assert call["data"]["sessionid"] == "FROM_COOKIES"
+    assert call["cookies"]["sessionid"] == "FROM_COOKIES"
+
+
+def test_subscribe_pushed_global_is_the_fallback(subscribe_env, monkeypatch):
+    """(b) A built set with no sessionid still uses the pushed global."""
+    _, state = subscribe_env
+    state["cookies"] = {"steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
+    monkeypatch.setattr(webserver, "_sessionid", "PUSHED_GLOBAL")
+
+    resp = _post_subscribe(app.test_client())
+
+    assert resp.status_code == 200
+    call = state["calls"][0]
+    assert call["data"]["sessionid"] == "PUSHED_GLOBAL"
+    assert call["cookies"]["sessionid"] == "PUSHED_GLOBAL"
+
+
+@pytest.mark.parametrize("cookies", [
+    {"steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)},   # no CSRF token
+    {"sessionid": "TOK"},                                  # no login cookie
+])
+def test_subscribe_refuses_without_a_complete_credential(subscribe_env, cookies):
+    """(c) Half a credential answers 400 with the remedy, and sends nothing."""
+    _, state = subscribe_env
+    state["cookies"] = cookies
+
+    resp = _post_subscribe(app.test_client())
+
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["success"] == -1
+    assert "session.login_secure" in body["message"]
+    assert state["calls"] == []
+
+
+def test_subscribe_refuses_an_expired_credential_before_the_request(subscribe_env):
+    """(d) A locally expired token answers 400, records it, and sends nothing."""
+    db_path, state = subscribe_env
+    expired = _login_cookie(_PAST_EXPIRY)
+    state["cookies"] = {"sessionid": "TOK", "steamLoginSecure": expired}
+
+    resp = _post_subscribe(app.test_client())
+
+    expected = session_health.evaluate_login(expired)
+    assert expected, "the fixture token must actually read as expired"
+    assert resp.status_code == 400
+    assert resp.get_json()["message"] == expected
+    assert state["calls"] == []
+    recorded = session_health.read(db_path)
+    assert recorded and recorded["detail"] == expected
+
+
+def test_subscribe_success_marks_the_item_and_clears_the_session_problem(subscribe_env):
+    """(e) `success: 1` stamps the subscribe and clears a recorded problem."""
+    db_path, state = subscribe_env
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "T", "status": 200,
+                                    "consumer_appid": 294100,
+                                    "is_queued_for_subscription": 1})
+    session_health.record_rejected(db_path, "an older problem")
+    state["cookies"] = {"sessionid": "TOK",
+                        "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
+    state["payload"] = {"success": 1}
+
+    resp = _post_subscribe(app.test_client())
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {"success": 1}
+    row = _item_row(db_path)
+    assert row["own_subscribed"] == 1
+    assert row["is_queued_for_subscription"] == 0
+    assert session_health.read(db_path) is None
+
+
+@pytest.mark.parametrize("success", [2, 15])
+def test_subscribe_session_error_answers_are_recorded(subscribe_env, success):
+    """(f) Steam's session-expired answers record a session problem."""
+    db_path, state = subscribe_env
+    state["cookies"] = {"sessionid": "TOK",
+                        "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
+    state["payload"] = {"success": success}
+
+    resp = _post_subscribe(app.test_client())
+
+    recorded = session_health.read(db_path)
+    assert recorded, "a session error must leave a problem for the banner"
+    assert "sign in to steam" in recorded["detail"].lower()
+    # The response itself is untouched: the TUI still reads Steam's own body.
+    assert resp.status_code == 200
+    assert resp.get_json() == {"success": success}
+
+
+def test_subscribe_item_error_branches_are_unchanged(subscribe_env):
+    """(g) The 404 no-item and 400 no-AppID branches still answer, send nothing."""
+    db_path, state = subscribe_env
+    state["cookies"] = {"sessionid": "TOK",
+                        "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": "No appid", "status": 200,
+                                    "consumer_appid": None})
+    client = app.test_client()
+
+    missing = _post_subscribe(client, wid=999)
+    no_appid = _post_subscribe(client, wid=2)
+
+    assert missing.status_code == 404
+    assert missing.get_json()["message"] == "Item not found."
+    assert no_appid.status_code == 400
+    assert no_appid.get_json()["message"] == "Item has no AppID."
+    assert state["calls"] == []
+
+
+def test_subscribe_item_error_branches_are_logged(subscribe_env, caplog):
+    """An attempt that fails on the item must not be invisible in the log.
+
+    Every other branch on this route logs; these two did not, and the log is
+    the only durable record of a diagnostic run. The responses and statuses are
+    pinned separately so the logging cannot have changed them.
+    """
+    db_path, state = subscribe_env
+    state["cookies"] = {"sessionid": "TOK",
+                        "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": "No appid", "status": 200,
+                                    "consumer_appid": None})
+    client = app.test_client()
+
+    with caplog.at_level(logging.WARNING):
+        _post_subscribe(client, wid=999)
+        _post_subscribe(client, wid=2)
+
+    assert "No item row for workshop_id=999" in caplog.text
+    assert "Item 2 has no AppID" in caplog.text
+
+
+def test_subscribe_request_shape_matches_the_scrape_path(subscribe_env):
+    """The POST shares the session, the project UA, and the full cookie jar.
+
+    The hardcoded Chrome UA and the two-name cookie dict were the request-side
+    half of why this route never worked; the scrape path had already been
+    corrected, and this pins the subscribe call to the same identity.
+    """
+    _, state = subscribe_env
+    built = {"sessionid": "TOK", "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY),
+             "browserid": "BROWSER", "steamCountry": "US", "timezoneOffset": "0"}
+    state["cookies"] = built
+
+    resp = _post_subscribe(app.test_client())
+
+    assert resp.status_code == 200
+    call = state["calls"][0]
+    assert call["url"] == "https://steamcommunity.com/sharedfiles/subscribe"
+    assert call["headers"]["User-Agent"] == web_scraper.USER_AGENT
+    assert call["headers"]["Accept-Language"]
+    # The whole built set, not the two hand-picked names the old code sent.
+    assert call["cookies"] == built
+    # The fetch metadata of a same-origin XHR, not of a navigation.
+    assert call["headers"]["Sec-Fetch-Site"] == "same-origin"
+    assert call["headers"]["Sec-Fetch-Mode"] != "navigate"
 
 
 def test_waitress_queue_monkeypatch_tiered_logging():

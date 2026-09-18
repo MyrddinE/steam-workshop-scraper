@@ -13,6 +13,7 @@ from src import images
 from src import metrics
 from src import session_health
 from src import subscription
+from src import web_scraper
 from src.config import login_secure_value, save_config
 from src.daemon_control import DaemonController
 from src.firefox_cookies import steam_login_secure
@@ -580,14 +581,60 @@ def _ensure_image_flagged(workshop_id, priority):
     return False
 
 
+# The remedy both pre-flight refusals name: the operator reading it is holding a
+# browser, so it points at the two things that put a credential where this
+# process can find it, not at the branch that noticed one was missing.
+_SUBSCRIBE_REMEDY = (
+    "Sign in to Steam in the browser the daemon reads cookies from, or "
+    "configure session.login_secure."
+)
+_SUBSCRIBE_NO_SESSION_MESSAGE = "No Steam session configured. " + _SUBSCRIBE_REMEDY
+_SUBSCRIBE_NO_LOGIN_MESSAGE = "No Steam login cookie is available. " + _SUBSCRIBE_REMEDY
+# Steam answers 2 and 15 to a subscribe whose session is no longer accepted or
+# not permitted; both are recorded as a session problem with the remedy.
+_SUBSCRIBE_SESSION_REJECTED_DETAIL = (
+    "Steam refused the subscribe request, so the saved login cookie is no "
+    "longer accepted. " + _SUBSCRIBE_REMEDY
+)
+
+
 @app.route('/api/subscribe/<int:workshop_id>', methods=['POST'])
 def api_subscribe(workshop_id):
-    global _sessionid
-    sid = _sessionid or _config.get("session", {}).get("id", "")
-    logging.info(f"[Subscribe] request for workshop_id={workshop_id}, sessionid={'set' if sid else 'missing'}")
+    """Subscribe to an item against Steam directly, with no browser tab.
+
+    The cookies and the CSRF token come from one read of the cookie source, so
+    the credential and the token cannot belong to different sessions; a Steam
+    ``sessionid`` from one login beside the credential of another is rejected in
+    a way that looks like an ordinary failure (``web_scraper._session_id``). The
+    pushed ``_sessionid`` global and the configured id are only a fallback for a
+    cookie set that carries no ``sessionid``, which is what keeps the
+    userscript-driven flow working exactly as before.
+    """
+    cookies = web_scraper._build_workshop_cookies(_config)
+    sid = cookies.get("sessionid") or _sessionid or _config.get("session", {}).get("id", "")
+    # The request has to carry whatever token the form field uses, so a fallback
+    # taken from the global or the config is put back into the cookie set.
+    if sid and not cookies.get("sessionid"):
+        cookies["sessionid"] = sid
+    login = cookies.get("steamLoginSecure", "")
+    logging.info(
+        f"[Subscribe] request for workshop_id={workshop_id}, "
+        f"sessionid={'set' if sid else 'missing'}, login={'set' if login else 'missing'}")
+    # Refuse before spending a request: without either half of the pair Steam
+    # answers anonymously, which can never subscribe. The message names the
+    # remedy, because the person reading it is holding a browser.
     if not sid:
-        logging.warning(f"[Subscribe] No sessionid available — userscript may not have pushed one")
-        return jsonify({"success": -1, "message": "No Steam session configured."}), 400
+        logging.warning(f"[Subscribe] No sessionid available — refusing before the request")
+        return jsonify({"success": -1, "message": _SUBSCRIBE_NO_SESSION_MESSAGE}), 400
+    if not login:
+        logging.warning(f"[Subscribe] No steamLoginSecure available — refusing before the request")
+        return jsonify({"success": -1, "message": _SUBSCRIBE_NO_LOGIN_MESSAGE}), 400
+
+    problem = session_health.evaluate_login(login)
+    if problem:
+        logging.warning(f"[Subscribe] Refusing expired login for workshop_id={workshop_id}: {problem}")
+        session_health.record_rejected(_db_path, problem)
+        return jsonify({"success": -1, "message": problem}), 400
 
     conn = get_connection(_db_path)
     row = conn.execute(
@@ -597,16 +644,44 @@ def api_subscribe(workshop_id):
     conn.close()
 
     if not row:
+        logging.warning(f"[Subscribe] No item row for workshop_id={workshop_id} — cannot subscribe")
         return jsonify({"success": -1, "message": "Item not found."}), 404
 
     appid = row["consumer_appid"]
     if not appid:
+        logging.warning(f"[Subscribe] Item {workshop_id} has no AppID — cannot subscribe")
         return jsonify({"success": -1, "message": "Item has no AppID."}), 400
 
-    login = login_secure_value(_config)
     logging.info(f"[Subscribe] POSTing to Steam: id={workshop_id}, appid={appid}, sessionid={sid[:6]}..., login={'set' if login else 'missing'}")
+    # One identity for the whole process: the UA is the project's own, derived
+    # from the installed Firefox, because the cookies in the jar came from that
+    # browser. A subscribe claiming to be Chrome beside Firefox cookies is the
+    # kind of contradiction this project removed from the scrape path.
+    headers = {
+        "User-Agent": web_scraper.USER_AGENT,
+        "Accept": "*/*",
+        "Accept-Language": web_scraper.BROWSER_HEADERS["Accept-Language"],
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://steamcommunity.com",
+        "Referer": f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}",
+        # The fetch metadata of a same-origin XHR/form POST, not of a
+        # navigation: `BROWSER_HEADERS` describes a top-level page load
+        # (`navigate`/`document`) and copying it here would be a lie.
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+        # Inferred, not measured: Steam's community front-end posts this endpoint
+        # through jQuery, which sets this header, but no capture of this request
+        # exists in this repository. Named as inferred so it is not read as an
+        # observation.
+        "X-Requested-With": "XMLHttpRequest",
+    }
     try:
-        resp = requests.post(
+        # The shared session, so the TCP connection and TLS handshake are reused
+        # the way a browser reuses them; a fresh handshake per call is itself a
+        # non-browser signal (`src/web_scraper.py`).
+        session = web_scraper._get_session()
+        resp = session.post(
             "https://steamcommunity.com/sharedfiles/subscribe",
             data={
                 "id": str(workshop_id),
@@ -614,20 +689,23 @@ def api_subscribe(workshop_id):
                 "include_dependencies": "false",
                 "sessionid": sid,
             },
-            cookies={
-                "sessionid": sid,
-                "steamLoginSecure": login,
-            },
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Origin": "https://steamcommunity.com",
-                "Referer": f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-            },
+            cookies=cookies,
+            headers=headers,
             timeout=15,
         )
         data = resp.json()
         logging.info(f"[Subscribe] Steam response: status={resp.status_code}, body={data}")
+        success = data.get("success")
+        # Steam's "the session is gone / not permitted" answers are the same ones
+        # the TUI maps to a session warning; recording them here is what makes
+        # the web UI's banner say it too, without a scrape having to notice.
+        if success in (2, 15):
+            session_health.record_rejected(_db_path, _SUBSCRIBE_SESSION_REJECTED_DETAIL)
+        elif success == 1:
+            # The confirmation is the same fact `/api/subscribed/<id>` stamps for
+            # the browser bridge: mark it subscribed and clear the queue flag.
+            mark_own_subscribed(_db_path, workshop_id)
+            session_health.record_accepted(_db_path)
         return jsonify(data)
     except Exception as e:
         logging.warning(f"[Subscribe] failed for workshop_id={workshop_id}: {e}")

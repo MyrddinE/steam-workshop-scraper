@@ -327,7 +327,9 @@ Saves the current enrichment filters to `app_tracking` for the configured AppID.
 
 ### `/api/subscribe/<id>` — POST
 
-Proxies a Steam Workshop subscribe request using stored session credentials.
+Performs the subscribe against Steam directly, with no browser tab, and returns Steam's JSON body unchanged — the TUI reads `success` and `message` from it. The request shares the scraper's session and presents the project's own Firefox User-Agent, and both its cookie jar and the form's `sessionid` come from one `web_scraper._build_workshop_cookies` read: the signed-in Firefox profile's whole `steamcommunity.com` set when `session.read_firefox_cookies` is on, otherwise the configured `sessionid`/`login_secure` pair. The pushed `_sessionid` global and `session.id` are a fallback only when that set carries no `sessionid`, so the userscript-driven flow is unchanged.
+
+It refuses before spending a request when the set has no CSRF token or no `steamLoginSecure` (**400**, with a message naming the remedy: sign in to Steam in the browser the daemon reads cookies from, or configure `session.login_secure`), and when `session_health.evaluate_login` says the credential's own token has expired (**400**, the reason recorded through `session_health.record_rejected` so the [session warning](#the-session-warning) shows it). A Steam `success` of `2` or `15` — the answers the TUI reads as session expired / permission denied — is recorded as a session problem the same way, while the response body is passed through untouched. A `success` of `1` records the confirmation with `mark_own_subscribed`, setting `own_subscribed` and clearing `is_queued_for_subscription` exactly as `/api/subscribed/<id>` does, and clears any recorded session problem. A missing item still answers **404** `Item not found.`, an item with no AppID still **400** `Item has no AppID.`, and a transport failure still **502**. Each of those refusals logs the `workshop_id` and the reason.
 
 ### `/api/toggle_sub/<id>` — POST
 
