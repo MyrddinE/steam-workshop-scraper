@@ -236,6 +236,170 @@ def test_clicking_the_marker_routes_the_three_actionable_states(web_client, tmp_
         "every marker click must stop propagation, including the inert one"
 
 
+# --- the grid cell follows a subscribe that lands ---------------------------
+#
+# /api/subscribed/<id> stamps `own_subscribed` and clears the queue flag
+# immediately, but the cell is only re-read by _startListPoll. A row queued only
+# for subscription has no stage spinner, so the poll's id set used to miss it
+# and the cell kept the green `pending` marker after the subscribe had landed.
+# These drive the served functions under node: what the poll actually asks
+# /api/items for, and whether the poll is started for such a row at all.
+
+POLL_NEEDS_DRIVER = """
+const _pendingStage = (__STAGE__);
+const listNeedsPoll = (__LIST__);
+const item = (over) => Object.assign(
+  {needs_image: 0, image_extension: 'jpg', translation_priority: 0, needs_web_scrape: 0},
+  over);
+console.log(JSON.stringify({
+  stage: listNeedsPoll([item({needs_web_scrape: 5})]),
+  subscription: listNeedsPoll([item({subscription_state: 'pending'})]),
+  subscribed: listNeedsPoll([item({subscription_state: 'subscribed'})]),
+  never: listNeedsPoll([item({subscription_state: 'never'})]),
+}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_a_row_queued_only_for_subscription_is_polled(web_client, tmp_path):
+    """A row with no stage spinner still has a marker that can move.
+
+    The subscription marker changes the moment a subscribe lands, so the poll
+    must be started for a row whose only outstanding state is the queue entry --
+    otherwise the cell is never re-read and keeps the pending marker.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = (POLL_NEEDS_DRIVER
+              .replace("__STAGE__", _extract_function(script, "_pendingStage"))
+              .replace("__LIST__", _extract_function(script, "_listNeedsPoll")))
+    result = _run_node(driver, tmp_path)
+
+    assert result["stage"] is True, "a stage spinner still starts the poll"
+    assert result["subscription"] is True, \
+        "a row queued only for subscription must start the poll too"
+    assert result["subscribed"] is False, "nothing to re-read once subscribed"
+    assert result["never"] is False, "nothing to re-read when settled"
+
+
+POLL_SCOPE_DRIVER = """
+let _listPollTimer = null;
+const _stopListPoll = () => {};
+const startFn = (__START__);
+
+function marker(state) {
+  return {getAttribute: (k) => (k === 'data-sub-state' ? state : null)};
+}
+function cell(wid, classes, subState) {
+  const set = new Set(classes);
+  return {
+    wid: wid,
+    classList: {contains: (c) => set.has(c)},
+    querySelector: (sel) => (sel === '.grid-sub' && subState ? marker(subState) : null),
+    getAttribute: (k) => (k === 'data-wid' ? String(wid) : null),
+  };
+}
+const cells = [
+  cell(11, ['grid-cell', 'has-spinner'], null),   // a stage marker
+  cell(22, ['grid-cell'], 'pending'),             // queued only for subscription
+  cell(33, ['grid-cell'], 'subscribed'),          // settled
+];
+// The selectors the poll uses: '.grid-cell[data-wid]' and the old
+// '.grid-cell.has-spinner[data-wid]'. Emulated so the driver fails on the id
+// the page asks for, not on the fake's selector support.
+function matches(c, sel) {
+  if (sel.indexOf('.grid-cell') !== -1 && !c.classList.contains('grid-cell')) return false;
+  if (sel.indexOf('.has-spinner') !== -1 && !c.classList.contains('has-spinner')) return false;
+  if (sel.indexOf('[data-wid]') !== -1 && c.getAttribute('data-wid') == null) return false;
+  return true;
+}
+const grid = {querySelectorAll: (sel) => cells.filter((c) => matches(c, sel))};
+global.document = {getElementById: () => grid};
+let scheduled = null;
+global.setTimeout = (fn) => { scheduled = fn; return 1; };
+let fetched = null;
+global.fetch = async (url, opts) => {
+  fetched = JSON.parse(opts.body).ids;
+  return {json: async () => []};
+};
+(async () => {
+  startFn([], '', '');
+  await scheduled();
+  console.log(JSON.stringify({fetched: fetched}));
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_the_poll_re_reads_a_row_queued_only_for_subscription(web_client, tmp_path):
+    """The poll's id set must not be limited to rows with a stage spinner.
+
+    Driving one tick shows the ids the page actually posts to /api/items: the
+    spinner row and the queued row, and not the settled one. Refreshing the
+    cell here rather than at each writer is what stops one write path -- the
+    userscript's /api/subscribed, the page's own cancel/clear handlers, the
+    direct /api/subscribe route -- being able to bypass the refresh.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = POLL_SCOPE_DRIVER.replace("__START__",
+                                       _extract_function(script, "_startListPoll"))
+    result = _run_node(driver, tmp_path)
+
+    assert result["fetched"] and sorted(result["fetched"]) == [11, 22], \
+        "the poll must re-read the spinner row and the queued row"
+
+
+TOGGLE_STARTS_POLL_DRIVER = """
+const _applySub = () => {};
+let started = 0;
+var _startListPoll = () => { started += 1; };
+let queued = 0;
+global._currentDetail = {workshop_id: 77};
+global.renderDetail = () => {};
+global.alert = () => {};
+global.document = {querySelector: () => null};
+global.fetch = async (url) => {
+  if (url.indexOf('/api/toggle_sub/') === 0) {
+    return {ok: true, status: 200, statusText: 'OK'};
+  }
+  if (url.indexOf('/api/item/') === 0) {
+    queued = queued ? 0 : 1;
+    return {ok: true, status: 200, statusText: 'OK',
+            json: async () => ({workshop_id: 77,
+                                subscription_state: queued ? 'pending' : 'never'})};
+  }
+  throw new Error('unexpected url ' + url);
+};
+const fn = (__FN__);
+(async () => {
+  await fn(77);
+  const afterQueue = started;
+  await fn(77);
+  const afterUnqueue = started;
+  console.log(JSON.stringify({afterQueue: afterQueue, afterUnqueue: afterUnqueue}));
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_queueing_a_row_starts_the_poll(web_client, tmp_path):
+    """A row queued after the search rendered must be watched too.
+
+    _listNeedsPoll only runs when a batch is rendered, so a marker clicked into
+    `pending` afterwards would otherwise never be re-read and the subscribe
+    landing would leave the stale marker the poll exists to clear.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = TOGGLE_STARTS_POLL_DRIVER.replace(
+        "__FN__", _extract_function(script, "toggleDetailQueue"))
+    result = _run_node(driver, tmp_path)
+
+    assert result["afterQueue"] == 1, "queueing a marker must start the list poll"
+    assert result["afterUnqueue"] == 1, "un-queueing must not start it again"
+
+
 # --- the template's own source ----------------------------------------------
 
 def test_the_template_has_one_subscription_indicator():

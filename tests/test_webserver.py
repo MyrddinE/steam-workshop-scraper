@@ -2187,6 +2187,9 @@ global.document = {
   }),
 };
 global._applySub = subFn;
+// Queueing a row starts the list poll that re-reads its marker; this driver is
+// about the toggle itself, so the poll is stubbed rather than run.
+global._startListPoll = () => {};
 global.fetch = async (url) => {
   if (url.indexOf('/api/toggle_sub/') === 0) {
     serverQueued = serverQueued ? 0 : 1;

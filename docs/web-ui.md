@@ -74,16 +74,32 @@ When `doSearch(reset=true)` clears the grid (`innerHTML = ''`), the old sentinel
 
 ### `_startListPoll`
 
-An adaptive-timeout poll that updates grid cells as images and translations arrive:
-- Collects workshop_ids from DOM elements with `.grid-img-placeholder`
-- POSTs to `/api/items` (bulk ID lookup)
-- For each returned item: updates title text, then replaces the placeholder with `_imageCellHtml(item)` — the `<img>` once a real extension arrives, or the red failure cell once the server reports a final answer — and appends `.` to pending text for visual progress
-- Delay: `max(1, log2(pending_count))` seconds → speeds up as images arrive
-- Stops when no pending placeholders remain in the DOM
+An adaptive-timeout poll that keeps a rendered cell's markers in step with the database:
+- Collects workshop_ids from rendered cells (`.grid-cell[data-wid]`) whose row is not settled: one
+  with a stage spinner (`.has-spinner`), or one whose subscription marker is still `pending`. The
+  subscription queue is deliberately not a stage, so a row queued only to subscribe has no spinner;
+  selecting on `has-spinner` alone missed it, and a subscribe landing behind the cell's back left the
+  green `pending` marker on it.
+- POSTs to `/api/items` (read-only bulk ID lookup)
+- For each returned item: updates the title, replaces the image placeholder with `_imageCellHtml(item)`
+  when the server has an answer, re-applies the stage marker (`_applyPending`) and the subscription
+  marker (`_applySub`), and rewrites the Wilson scores
+- Delay: `max(1, log2(pending_count))` seconds → speeds up as work lands
+- Stops when no rendered row needs re-reading
 
-### Dot Animation
+**Reading the database rather than hooking each writer.** The poll is the one path that notices a
+subscription change, so every writer of the flag is covered by one refresh: the userscript bridge's
+`POST /api/subscribed/<id>`, this page's own cancel/clear calls to the same route, and the direct
+`POST /api/subscribe/<id>` route (which stamps on Steam `success == 1`). The autosubscribe verifier
+reads the same queue exit to mark the overlay's rows, independently of the grid. Because
+`_listNeedsPoll` only runs when a batch is rendered, `toggleDetailQueue` also starts the poll on the
+transition into `pending`, so a marker clicked into the queue after the search is watched too.
 
-Each poll cycle appends a `.` to the placeholder text via `ph.textContent += '.'`. This gives visual feedback that the poll is iterating over the cell. When an image arrives, the entire placeholder div is replaced by an `<img>`, so dots naturally clear. The failure cell is exempt: it holds a `<span>` with the status, not pending text, so `_stopListPoll` skips `.grid-img-failed` rather than overwriting an answer with "no image".
+### Stopping the poll
+
+`_stopListPoll` clears the timer and resets any image placeholder still reading `pending` back to
+`no image`. The failure cell (`.grid-img-failed`) is exempt: it holds a status answer, not pending
+text, so an answer is never overwritten with "no image".
 
 ### `_startDetailPoll`
 
@@ -139,6 +155,12 @@ the subscribe drain's `/api/subscribed` calls change the same flag behind the pa
 guess could show the wrong state. Rendering from the item payload is also what lets the 3-second
 translation poll re-render the pane without reverting the toggle. A failed request alerts and leaves
 the pane alone.
+
+The click is not the only writer. A subscribe can land behind a rendered cell through
+`POST /api/subscribed/<id>` (the userscript bridge, or this page's cancel/clear calls) or through the
+direct `POST /api/subscribe/<id>` route, and none of those touches the DOM. The list poll is what
+re-reads such a cell: it keeps re-reading any row whose subscription marker is still `pending`, so
+the marker moves to `subscribed` on its own next tick ([Image Polling](#image-polling)).
 
 The marker sits inside the cell that opens the detail pane, so its click handler stops propagation:
 without that, toggling the queue would also drag the pane to the item.
