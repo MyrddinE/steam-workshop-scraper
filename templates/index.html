@@ -571,12 +571,28 @@ function _pendingStage(item) {
   return null;
 }
 
+// What the stage's marker means, in words, for its title. The wording is kept
+// in src/pending.py beside the stage's speed and colour -- the TUI draws the
+// same state and has no hover, so a table that lived only here could describe
+// it differently. tests/test_pending.py holds this copy to that table.
+function _pendingLabel(stage) {
+  if (stage === 'image') return 'Waiting for the image';
+  if (stage === 'translation') return 'Waiting for the translation';
+  if (stage === 'web') return 'Waiting for the web scrape';
+  return '';
+}
+
 function _applyPending(el, item) {
   const stage = _pendingStage(item);
   ['image', 'translation', 'web'].forEach(function(name) {
     el.classList.toggle('pending-' + name, stage === name);
   });
   el.classList.toggle('has-spinner', stage !== null);
+  // The marker is the only part of the row that knows which stage is set, so
+  // the wording goes on it here; an empty label clears a stale tooltip when the
+  // stage is gone.
+  const spinner = el.querySelector('.grid-spinner');
+  if (spinner) spinner.title = _pendingLabel(stage);
 }
 
 // ── the owner's subscription marker ──────────────────────────────────────────
@@ -631,7 +647,9 @@ function onSubMarkerClick(event, el) {
 
 function _listNeedsPoll(items) {
   for (const item of items) {
-    if (_pendingStage(item) !== null) return true;
+    // A stage spinner moves on its own; a subscription marker moves when a
+    // subscribe lands, which the database records and only this poll re-reads.
+    if (_pendingStage(item) !== null || item.subscription_state === 'pending') return true;
   }
   return false;
 }
@@ -644,9 +662,18 @@ function _startListPoll(filters, sortBy, sortOrder) {
     try {
       const grid = document.getElementById('results-grid');
       const pending = [];
-      grid.querySelectorAll('.grid-cell.has-spinner[data-wid]').forEach(el => {
-        const wid = parseInt(el.getAttribute('data-wid'), 10);
-        pending.push(wid);
+      // A stage spinner needs re-reading, but so does a row whose subscription
+      // marker is still `pending`: a subscribe can land behind the cell's back
+      // and that row has no spinner to be found by. Deciding here from the
+      // rendered state means the marker is refreshed from the database, so no
+      // writer of the flag -- the userscript's /api/subscribed, this page's own
+      // cancel/clear calls, or /api/subscribe -- can bypass the refresh.
+      grid.querySelectorAll('.grid-cell[data-wid]').forEach(el => {
+        const sub = el.querySelector('.grid-sub');
+        if (el.classList.contains('has-spinner') ||
+            (sub && sub.getAttribute('data-sub-state') === 'pending')) {
+          pending.push(parseInt(el.getAttribute('data-wid'), 10));
+        }
       });
       if (!pending.length) { _stopListPoll(); return; }
 
@@ -866,6 +893,11 @@ async function toggleDetailQueue(wid) {
     // server said rather than a locally flipped guess.
     const cell = document.querySelector(`#results-grid .grid-cell[data-wid="${wid}"]`);
     if (cell) _applySub(cell.querySelector('.grid-sub'), item);
+    // A row queued here now carries a marker that can change without this
+    // pane's help: the subscribe lands in the database. The list poll is what
+    // re-reads such a cell, and a row queued after the search rendered was
+    // never seen by _listNeedsPoll, so the transition starts it.
+    if (item.subscription_state === 'pending') _startListPoll([], '', '');
   } catch (e) { console.debug('Queue state refresh failed', e); }
 }
 

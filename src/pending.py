@@ -9,8 +9,13 @@ visual noise; the same item's marker is therefore slow and grey.
 The TUI and the web draw this with entirely different mechanisms -- a braille
 glyph advanced by a Textual timer, and a CSS-animated ring -- so the mapping
 from state to appearance lives here, once. A contract test holds the template's
-durations and colours to this table, because two front ends that disagree about
-why an item looks pending is worse than either being wrong on its own.
+durations, colours and wording to this table, because two front ends that
+disagree about why an item looks pending is worse than either being wrong on
+its own.
+
+The wording lives beside the speed and colour even though only the web marker
+has a hover to show it: the TUI draws the same state, and a description kept
+only in the template could drift from this one.
 
 **Fastest stage wins when an item owes several.** A marker that is about to
 clear should say so rather than being hidden behind a slower stage; the slow,
@@ -32,15 +37,17 @@ from src import images
 # One rotation of the base marker. Every stage is a multiple of this.
 BASE_ROTATION_SECONDS = 0.6
 
-# (stage, period multiplier, colour), fastest first. The order is the
-# precedence: the first pending stage in this sequence is the one drawn.
+# (stage, period multiplier, colour, wording), fastest first. The order is the
+# precedence: the first pending stage in this sequence is the one drawn. The
+# wording is what the web marker puts in its `title`; the TUI has no hover and
+# draws none, but it names the same stage.
 STAGES = (
-    ("image", 1, "#44aa44"),
-    ("translation", 4, "#7f9a7f"),
-    ("web", 16, "#8a8a8a"),
+    ("image", 1, "#44aa44", "Waiting for the image"),
+    ("translation", 4, "#7f9a7f", "Waiting for the translation"),
+    ("web", 16, "#8a8a8a", "Waiting for the web scrape"),
 )
 
-STAGE_NAMES = tuple(stage for stage, _multiplier, _colour in STAGES)
+STAGE_NAMES = tuple(stage for stage, _multiplier, _colour, _label in STAGES)
 
 
 def _is_pending(stage: str, item: dict) -> bool:
@@ -61,7 +68,7 @@ def pending_stage(item: dict) -> str | None:
 
     The first pending stage in :data:`STAGES` order, so the fastest wins.
     """
-    for stage, _multiplier, _colour in STAGES:
+    for stage, _multiplier, _colour, _label in STAGES:
         if _is_pending(stage, item):
             return stage
     return None
@@ -69,9 +76,17 @@ def pending_stage(item: dict) -> str | None:
 
 def stage_spec(stage: str) -> tuple[int, str]:
     """``(period multiplier, colour)`` for ``stage``."""
-    for name, multiplier, colour in STAGES:
+    for name, multiplier, colour, _label in STAGES:
         if name == stage:
             return multiplier, colour
+    raise ValueError(f"unknown stage {stage!r}")
+
+
+def stage_label(stage: str) -> str:
+    """What ``stage`` is waiting on, for the web marker's ``title``."""
+    for name, _multiplier, _colour, label in STAGES:
+        if name == stage:
+            return label
     raise ValueError(f"unknown stage {stage!r}")
 
 

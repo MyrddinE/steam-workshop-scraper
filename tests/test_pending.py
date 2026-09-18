@@ -139,6 +139,19 @@ def test_an_unknown_stage_is_a_loud_error():
         pending._is_pending("nonsense", _item())
 
 
+# --- the wording -----------------------------------------------------------
+
+def test_every_stage_has_a_wording():
+    """The marker's meaning must be recoverable without knowing the colours."""
+    for stage in pending.STAGE_NAMES:
+        assert pending.stage_label(stage).strip(), f"{stage} needs a wording"
+
+
+def test_an_unknown_stage_has_no_wording():
+    with pytest.raises(ValueError):
+        pending.stage_label("nonsense")
+
+
 # --- the two front ends must agree -----------------------------------------
 
 def _css_rule(selector: str) -> str:
@@ -185,3 +198,24 @@ def test_the_page_clears_every_stage_class_before_setting_one():
     for stage in pending.STAGE_NAMES:
         assert f"'pending-' + name" in js or f"pending-{stage}" in js
     assert "has-spinner', stage !== null" in js
+
+
+@pytest.mark.parametrize("stage", pending.STAGE_NAMES)
+def test_the_template_mirrors_the_wording(stage):
+    """The wording, per stage, taken from the shared table.
+
+    The web marker is the only one with a hover, but the wording still lives in
+    `src/pending.py` beside the speed and colour: the TUI draws the same state,
+    and a table kept only in the page would let the two describe it differently.
+    """
+    assert pending.stage_label(stage) in _js_function("_pendingLabel"), \
+        f"{stage} must be worded {pending.stage_label(stage)!r}, matching src/pending.py"
+
+
+def test_the_marker_carries_the_wording_as_its_title():
+    """The stage the marker just set is what the tooltip must name."""
+    js = _js_function("_applyPending")
+    assert "grid-spinner" in js, "the wording goes on the marker element"
+    assert "title" in js
+    assert "_pendingLabel(stage)" in js, \
+        "the label must come from the stage _pendingStage just returned"

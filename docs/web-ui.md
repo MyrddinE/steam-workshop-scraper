@@ -32,7 +32,7 @@ Two layers of validation: a capture-phase `blur` event listener on the document 
 1. `doSearch(reset=true)` fetches `/api/search` with the current filters, sort, and pagination state
 2. Results are rendered as `.grid-cell` divs inside `#results-grid`
 3. Each cell shows: preview image, or "pending"/"no image" when nothing has been recorded, or — when the server has already answered for that preview — the answer itself drawn in red at half the cell's height (a `404`, a `410`, or the content type it served instead). Plus title (2-line clamp), file size (color-coded via `sizeClass`), and Wilson subscriber/favorite scores (color-coded via `wClass`)
-4. A pending marker in the corner names the stage the item is waiting on, by speed and colour: image rotates at 1x and is vivid green, translation 4x slower and mid green, the web scrape 16x slower and grey. `_pendingStage` picks the **fastest** stage that is pending, so a marker about to clear is never hidden behind a slower one, and the slow grey marker — which may stay for hours — is the quietest thing on the cell. `_applyPending` sets one `pending-<stage>` class, clearing the others. The durations and colours are mirrored from `src/pending.py`, and `tests/test_pending.py` fails if the two disagree. `api_priority` is deliberately not a stage: a list only shows items the API has already returned, so a pending refresh is not content anyone is waiting on.
+4. A pending marker in the corner names the stage the item is waiting on, by speed, colour and — on hover — a `title`: image rotates at 1x and is vivid green, translation 4x slower and mid green, the web scrape 16x slower and grey. `_pendingStage` picks the **fastest** stage that is pending, so a marker about to clear is never hidden behind a slower one, and the slow grey marker — which may stay for hours — is the quietest thing on the cell. `_applyPending` sets one `pending-<stage>` class, clearing the others, and writes the stage's wording onto the marker's `title`. The durations, colours and wording are mirrored from `src/pending.py`, and `tests/test_pending.py` fails if any of them disagree — the wording is kept in the shared table rather than the template, because the TUI draws the same state and a page-local description could drift from it. `api_priority` is deliberately not a stage: a list only shows items the API has already returned, so a pending refresh is not content anyone is waiting on.
 4. `_placeSentinel()` handles infinite scroll by checking whether the first item of the batch is visible and placing or removing the scroll sentinel accordingly
 
 ### State Persistence
@@ -74,16 +74,32 @@ When `doSearch(reset=true)` clears the grid (`innerHTML = ''`), the old sentinel
 
 ### `_startListPoll`
 
-An adaptive-timeout poll that updates grid cells as images and translations arrive:
-- Collects workshop_ids from DOM elements with `.grid-img-placeholder`
-- POSTs to `/api/items` (bulk ID lookup)
-- For each returned item: updates title text, then replaces the placeholder with `_imageCellHtml(item)` — the `<img>` once a real extension arrives, or the red failure cell once the server reports a final answer — and appends `.` to pending text for visual progress
-- Delay: `max(1, log2(pending_count))` seconds → speeds up as images arrive
-- Stops when no pending placeholders remain in the DOM
+An adaptive-timeout poll that keeps a rendered cell's markers in step with the database:
+- Collects workshop_ids from rendered cells (`.grid-cell[data-wid]`) whose row is not settled: one
+  with a stage spinner (`.has-spinner`), or one whose subscription marker is still `pending`. The
+  subscription queue is deliberately not a stage, so a row queued only to subscribe has no spinner;
+  selecting on `has-spinner` alone missed it, and a subscribe landing behind the cell's back left the
+  green `pending` marker on it.
+- POSTs to `/api/items` (read-only bulk ID lookup)
+- For each returned item: updates the title, replaces the image placeholder with `_imageCellHtml(item)`
+  when the server has an answer, re-applies the stage marker (`_applyPending`) and the subscription
+  marker (`_applySub`), and rewrites the Wilson scores
+- Delay: `max(1, log2(pending_count))` seconds → speeds up as work lands
+- Stops when no rendered row needs re-reading
 
-### Dot Animation
+**Reading the database rather than hooking each writer.** The poll is the one path that notices a
+subscription change, so every writer of the flag is covered by one refresh: the userscript bridge's
+`POST /api/subscribed/<id>`, this page's own cancel/clear calls to the same route, and the direct
+`POST /api/subscribe/<id>` route (which stamps on Steam `success == 1`). The autosubscribe verifier
+reads the same queue exit to mark the overlay's rows, independently of the grid. Because
+`_listNeedsPoll` only runs when a batch is rendered, `toggleDetailQueue` also starts the poll on the
+transition into `pending`, so a marker clicked into the queue after the search is watched too.
 
-Each poll cycle appends a `.` to the placeholder text via `ph.textContent += '.'`. This gives visual feedback that the poll is iterating over the cell. When an image arrives, the entire placeholder div is replaced by an `<img>`, so dots naturally clear. The failure cell is exempt: it holds a `<span>` with the status, not pending text, so `_stopListPoll` skips `.grid-img-failed` rather than overwriting an answer with "no image".
+### Stopping the poll
+
+`_stopListPoll` clears the timer and resets any image placeholder still reading `pending` back to
+`no image`. The failure cell (`.grid-img-failed`) is exempt: it holds a status answer, not pending
+text, so an answer is never overwritten with "no image".
 
 ### `_startDetailPoll`
 
@@ -139,6 +155,12 @@ the subscribe drain's `/api/subscribed` calls change the same flag behind the pa
 guess could show the wrong state. Rendering from the item payload is also what lets the 3-second
 translation poll re-render the pane without reverting the toggle. A failed request alerts and leaves
 the pane alone.
+
+The click is not the only writer. A subscribe can land behind a rendered cell through
+`POST /api/subscribed/<id>` (the userscript bridge, or this page's cancel/clear calls) or through the
+direct `POST /api/subscribe/<id>` route, and none of those touches the DOM. The list poll is what
+re-reads such a cell: it keeps re-reading any row whose subscription marker is still `pending`, so
+the marker moves to `subscribed` on its own next tick ([Image Polling](#image-polling)).
 
 The marker sits inside the cell that opens the detail pane, so its click handler stops propagation:
 without that, toggling the queue would also drag the pane to the item.
