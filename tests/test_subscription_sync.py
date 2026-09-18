@@ -499,6 +499,26 @@ def test_a_stale_queue_flag_is_cleared_when_the_item_is_found_subscribed(sync_en
     assert _row(db_path, 2)["is_queued_for_subscription"] == 0
 
 
+def test_an_item_the_walk_never_saw_keeps_its_queue_flag(sync_env):
+    """The queue clear is bounded to the ids the walk actually saw.
+
+    A complete read says the owner is not subscribed to the omitted item, but
+    that is a fact about ``own_subscribed`` only. The omitted item may still be
+    waiting for its own subscribe, and clearing its flag here would drop that
+    work silently.
+    """
+    db_path, configure = sync_env
+    _items(db_path, 1, 2, is_queued_for_subscription=1)
+    configure({1: _page([1], 1)})          # only id 1 is in this account's list
+
+    counts = subscription_sync.reconcile_own_subscriptions(db_path, 294100, {})
+
+    assert counts["queued_cleared"] == 1
+    assert _row(db_path, 1)["is_queued_for_subscription"] == 0
+    assert _row(db_path, 2)["is_queued_for_subscription"] == 1, \
+        "an item the walk did not see must stay queued"
+
+
 def test_another_appids_items_are_untouched(sync_env):
     db_path, configure = sync_env
     _items(db_path, 1, appid=294100)
