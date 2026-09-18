@@ -117,6 +117,18 @@ API_DELAY_FLOOR = 0.01
 # so a long-idle daemon does not sit on a stale queue.
 STALE_SWEEP_INTERVAL_SECONDS = 3600
 
+# How much fetchable work `seed_database` wants outstanding. It is both the
+# guard threshold -- a pass returns at once while the queue is already at it --
+# and the per-run fill target the cursor loop stops at.
+#
+# It is 200 because the fetch loop drains the queue between discovery passes.
+# The earlier target of 100 was small enough that every pass found the queue
+# already at or above it and skipped, so the refill raced the drain instead of
+# leading it: the buffer was a level the drain kept crossing, not headroom above
+# it. 200 sits clear of that crossing, and at the request page size of 100 it is
+# two pages of fresh items per pass.
+DISCOVERY_TARGET_NEW = 200
+
 # How long the discovery thread waits between passes. It is a check interval, not
 # a rate: `seed_database` returns at once while the fetchable queue is already at
 # its target, so the nap costs nothing and waking often keeps the queue topped up
@@ -1259,7 +1271,7 @@ class Daemon:
         except Exception as e:
             logging.error(f"Final failure-capture flush failed: {e}")
 
-    def seed_database(self, target_new: int = 100):
+    def seed_database(self, target_new: int = DISCOVERY_TARGET_NEW):
         """
         Discovers workshop items via IPublishedFileService/QueryFiles API
         using cursor-based pagination (unlimited depth).
