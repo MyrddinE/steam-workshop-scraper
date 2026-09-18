@@ -36,6 +36,13 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 }
 .grid-cell .grid-sub[data-sub-clickable="1"] { cursor: pointer; }
 .grid-cell .grid-sub[data-sub-clickable="0"] { cursor: default; }
+/* The author box that stands in for the filter rows in author mode. Hidden by
+   default; showing it hides #filter-rows and #filter-buttons instead. */
+.author-bar { display: none; align-items: center; gap: .4rem; padding: .35rem .5rem; border: 1px solid var(--pico-primary); border-radius: 4px; }
+.author-bar-label { color: var(--pico-muted-color); white-space: nowrap; }
+#author-mode-name { flex: 1; font-weight: bold; overflow-wrap: anywhere; }
+#author-list { display: flex; flex-direction: column; gap: .25rem; max-height: 60vh; overflow-y: auto; }
+#author-list button { width: auto; margin: 0; text-align: left; font-variant-numeric: tabular-nums; }
 .grid-cell:hover { border-color: var(--pico-primary-hover-background); }
 .grid-cell:focus-visible { outline: 2px solid #44aa44; outline-offset: 2px; }
 .grid-cell.selected { outline: 2px solid #44aa44; outline-offset: 2px; }
@@ -120,6 +127,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
     <button id="btn-daemon" style="padding:.2rem .6rem;font-size:.8rem;width:auto;margin:0">&#x2699; Daemon</button>
     <button id="btn-stats" style="padding:.2rem .6rem;font-size:.8rem;width:auto;margin:0" title="Statistics">&#x1F4CA; Stats</button>
     <button id="btn-analysis" style="padding:.2rem .6rem;font-size:.8rem;width:auto;margin:0" title="View window analysis">&#x1F4C8; Analysis</button>
+    <button id="btn-authors" style="padding:.2rem .6rem;font-size:.8rem;width:auto;margin:0" title="Browse creators and view everything by one">&#x1F464; Creators</button>
     <span id="port-display"></span>
   </span>
 </header>
@@ -137,8 +145,19 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
   </div>
   <div id="right-pane">
     <div id="search-builder">
+      <!-- The author box, shown in place of the filter rows and their buttons
+           while the view is pinned to one creator. It is the web half of the
+           TUI's single-creator mode: the filter area is replaced, the sort menus
+           below are left alone, and Return puts back the snapshot the jump
+           took. The named creator is the whole state: the view is otherwise the
+           search it re-ran. -->
+      <div id="author-mode-bar" class="author-bar">
+        <span class="author-bar-label">Author:</span>
+        <span id="author-mode-name"></span>
+        <button id="btn-return-author" title="Leave author mode and restore the filters it replaced">Return</button>
+      </div>
       <div id="filter-rows"></div>
-      <div style="display:flex;gap:.25rem;margin-top:.25rem">
+      <div id="filter-buttons" style="display:flex;gap:.25rem;margin-top:.25rem">
         <button id="btn-search" style="flex:2">Search</button>
         <button id="btn-save-filter" title="Save for scraper">&#x1F4BE;</button>
         <button id="btn-and" style="flex:1">AND</button>
@@ -233,6 +252,18 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
     </div>
     <div id="analysis-summary"></div>
     <div id="analysis-table-host"></div>
+  </div>
+</div>
+
+<!-- Every creator the database holds, from /api/authors. The route had no
+     client before this; the item jump only reaches a creator whose item is
+     already on screen, so this is the way to reach one that is not. -->
+<div id="author-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;overflow-y:auto;padding:2rem">
+  <div style="max-width:600px;margin:0 auto">
+    <h2>Creators</h2>
+    <p id="author-list-status" style="color:var(--pico-muted-color)">Loading&hellip;</p>
+    <div id="author-list"></div>
+    <button id="author-close" class="secondary" style="margin-top:1rem">Close</button>
   </div>
 </div>
 
@@ -899,28 +930,161 @@ function toggleTranslation() {
   if (_currentDetail) renderDetail(_currentDetail);
 }
 
-// Web equivalent of the TUI's `btn-jump-author`: set an Author ID "is" filter to
-// the item's creator and re-run the search. It adds an ordinary filter row
-// through addRow rather than replacing the builder's contents, which is why
-// there is no single-creator mode here: removing the author row and searching
-// again restores the previous view, with no in-memory snapshot that a detail
-// re-render could lose and no Return button to keep in step.
+// ── author mode ───────────────────────────────────────────────────────────
+// The web half of the TUI's single-creator mode (`is_single_creator_mode`,
+// `action_return_from_creator`, `btn-return`). A jump replaces the filter rows
+// with one `Author ID is <creator>` row and re-runs the search; the sort menus,
+// which are not part of the filter builder, are left alone, exactly as the TUI
+// leaves its sort alone. Return puts back the snapshot the jump took, so a
+// return is the view the click interrupted and not an approximation of it.
+//
+// The snapshot is in memory on purpose. localStorage already holds the
+// committed view for a reload, but author mode deliberately does not write it:
+// `_saveViewState` is a no-op while `_authorMode` is set, so the stored view
+// stays the one Return restores even if the search or the scroll listener runs
+// between the jump and the Return.
+let _authorMode = false;
+let _preJumpView = null;
+
+function _authorModeActive() {
+  return _authorMode;
+}
+
+// What the jump replaces. Every field is one the view actually holds, so
+// restoring them all is restoring the view: filters, sort, the Subscribed
+// overlay, the open item and the scroll position.
+function _viewSnapshot() {
+  const grid = document.getElementById('results-grid');
+  return {
+    filters: getFilters(),
+    sort_by: document.getElementById('sort-by').value,
+    sort_order: document.getElementById('sort-order').value,
+    subscribed: _overlayValue(),
+    selected: _selectedWid,
+    scroll: (grid && grid.scrollTop) ? grid.scrollTop : 0,
+  };
+}
+
+function _setAuthorModeUi(on, creator) {
+  const bar = document.getElementById('author-mode-bar');
+  const name = document.getElementById('author-mode-name');
+  const rows = document.getElementById('filter-rows');
+  const buttons = document.getElementById('filter-buttons');
+  const save = document.getElementById('btn-save-filter');
+  if (bar) bar.style.display = on ? 'flex' : 'none';
+  if (rows) rows.style.display = on ? 'none' : '';
+  if (buttons) buttons.style.display = on ? 'none' : 'flex';
+  // Save Filter is hidden in the TUI's single-creator mode, because the author
+  // row is not a filter set the user assembled and saving it would overwrite
+  // the scraper's stored filter with one they never chose.
+  if (save) save.style.display = on ? 'none' : '';
+  if (name) name.textContent = on ? String(creator) : '';
+}
+
+// The item jump and the author list both enter the mode through here. It is the
+// TUI's `btn-jump-author` handler: snapshot what the jump is about to replace,
+// replace it, and re-run the search.
 function jumpToAuthor(creator) {
   if (creator == null || creator === '') return;
-  const container = document.getElementById('filter-rows');
-  let row = null;
-  container.querySelectorAll('.filter-row').forEach(r => {
-    if (r.querySelector('.field-select').value === 'Author ID') row = r;
-  });
-  if (row) {
-    // Reuse an existing Author ID row instead of stacking a second one that
-    // would contradict it (an item cannot be by two creators at once).
-    row.querySelector('.op-select').value = 'is';
-    row.querySelector('.value-input').value = String(creator);
-  } else {
-    addRow(undefined, {field: 'Author ID', op: 'is', value: String(creator)});
+  if (!_authorMode) {
+    _preJumpView = _viewSnapshot();
   }
+  _authorMode = true;
+  // A reset search clears the open item; with the snapshot held separately the
+  // old id would only send the render hunting for a row that is not there.
+  _selectedWid = null;
+  _setAuthorModeUi(true, creator);
+
+  const container = document.getElementById('filter-rows');
+  container.innerHTML = '';
+  addRow(undefined, {field: 'Author ID', op: 'is', value: String(creator)});
+  _syncSubscribedOverlay();
   doSearch(true);
+}
+
+// Return from author mode: the TUI's `action_return_from_creator`. The snapshot
+// is applied through the same `_restoreView` a reload of a saved view uses, so
+// the return re-opens the item and the scroll position the jump interrupted and
+// not merely the filters. Clearing the flag first makes the view writable again,
+// which is the order the TUI uses -- a return with no snapshot still leaves a
+// usable page.
+async function returnFromAuthor() {
+  const state = _preJumpView;
+  _preJumpView = null;
+  _authorMode = false;
+  _setAuthorModeUi(false, '');
+
+  if (state) {
+    _applyFilters(state.filters);
+    if (state.sort_by) document.getElementById('sort-by').value = state.sort_by;
+    if (state.sort_order) document.getElementById('sort-order').value = state.sort_order;
+    _applySubscribedOverlay(state.subscribed);
+  }
+  _syncSubscribedOverlay();
+  await doSearch(true);
+  if (state) await _restoreView(state);
+}
+
+// ── the creator list ──────────────────────────────────────────────────────
+// `/api/authors` is the server's own list of every distinct creator, in the
+// order `src.database.get_all_authors` returns them (`ORDER BY creator`). The
+// item jump only reaches a creator whose item is already on screen; this is the
+// entry point for one that is not. The TUI has no list of its own, so this page
+// is the one place that endpoint is consumed.
+function _closeAuthorList() {
+  const overlay = document.getElementById('author-overlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
+async function showAuthorList() {
+  const overlay = document.getElementById('author-overlay');
+  const list = document.getElementById('author-list');
+  const status = document.getElementById('author-list-status');
+  if (!overlay || !list) return;
+  list.innerHTML = '';
+  if (status) status.textContent = 'Loading\u2026';
+  overlay.style.display = 'block';
+  let authors;
+  try {
+    const resp = await fetch('/api/authors');
+    authors = await resp.json();
+  } catch (e) {
+    if (status) status.textContent = 'Could not load creators: ' + e.message;
+    return;
+  }
+  if (!status) return;
+  if (!Array.isArray(authors) || !authors.length) {
+    status.textContent = 'No creators in the database.';
+    return;
+  }
+  status.textContent = authors.length + (authors.length === 1 ? ' creator' : ' creators');
+  // Built as elements rather than an HTML string: `dataset.author` sets the ID
+  // as text, so a creator value can never be read as markup or break out of the
+  // attribute the way string interpolation could.
+  authors.forEach(function(a) {
+    const button = document.createElement('button');
+    button.dataset.author = String(a);
+    button.textContent = String(a);
+    list.appendChild(button);
+  });
+}
+
+function _initAuthorList() {
+  const list = document.getElementById('author-list');
+  const open = document.getElementById('btn-authors');
+  const close = document.getElementById('author-close');
+  if (open) open.onclick = showAuthorList;
+  if (close) close.onclick = _closeAuthorList;
+  if (list) {
+    list.onclick = function(event) {
+      // Closest, not event.target: the label inside the button is the likely
+      // target, and a text node has no dataset of its own.
+      const button = event.target.closest('button[data-author]');
+      if (!button) return;
+      _closeAuthorList();
+      jumpToAuthor(button.dataset.author);
+    };
+  }
 }
 
 function renderDetail(item) {
@@ -1029,7 +1193,7 @@ function renderDetail(item) {
     <div class="stat-row"><span class="stat-label">Subs:</span> ${fmtCount(subs)} / ${fmtCount(lsubs)}</div>
     <div class="stat-row"><span class="stat-label">Favs:</span> ${fmtCount(favs)} / ${fmtCount(lfavs)}</div>
     <div class="stat-row"><span class="stat-label">Tags:</span> <small>${tags}</small></div>
-    <p><button onclick="doSubscribe(${item.workshop_id}, ${item.consumer_appid || 0});return false;">Subscribe</button> ${toggle}</p>
+    <p><button onclick="doSubscribe(${item.workshop_id});return false;">Subscribe</button> ${toggle}</p>
     ${notice}
     ${desc ? '<div style="border-left:3px solid var(--pico-muted-border-color);padding-left:.5rem;margin-top:.5rem">'+desc+'</div>' : ''}
   `;
@@ -1209,26 +1373,44 @@ function _userscriptPresent() {
   return true;
 }
 
-async function doSubscribe(wid, appid) {
-  if (!appid) { alert('Item has no AppID — cannot subscribe.'); return; }
-
-  if (!_userscriptPresent()) {
-    const ok = confirm(
-      'To subscribe directly from this page, install the Subscribe Bridge userscript:\n\n' +
-      '1. Install Tampermonkey from your browser\'s extension store\n' +
-      '2. Click OK to open the userscript — Tampermonkey will offer to install it\n' +
-      '3. Visit steamcommunity.com once to capture your session\n\n' +
-      'The userscript auto-clicks the Subscribe button on the Steam page.'
-    );
-    if (ok) window.open(US_RAW_URL, '_blank');
-    return;
+// Subscribe for real: POST /api/subscribe/<id>, which reads the item page on
+// the server, takes that page's own CSRF token, posts to Steam and records the
+// answer. No tab is opened and the userscript is not involved -- the bridge is
+// still installed and still works (its routes and its version meta are
+// untouched), it is simply no longer the path this button takes.
+//
+// The route paces its page read on the shared interval and leaves the POST
+// exempt, so the wait is inside the call. Nothing is added on top of it here.
+async function doSubscribe(wid) {
+  try {
+    const resp = await fetch('/api/subscribe/' + wid, {method: 'POST'});
+    const data = await resp.json();
+    if (data && data.success === 1) {
+      // The route already stamped `own_subscribed`; read the item back so the
+      // grid cell and the detail pane show the state the record now holds,
+      // exactly as a queue toggle does, rather than a locally flipped guess.
+      await refreshItemState(wid);
+      return;
+    }
+    alert('Subscribe failed: ' + ((data && data.message) || resp.status + ' ' + resp.statusText));
+  } catch (e) {
+    alert('Subscribe failed: ' + e.message);
   }
+}
 
-  const w = window.open(
-    'https://steamcommunity.com/sharedfiles/filedetails/?id=' + wid + '&autosubscribe=true&callback_origin=' + encodeURIComponent(location.origin),
-    'subtab_' + wid
-  );
-  if (w) { w.blur(); window.focus(); }
+// Re-read one item and let the pane and its grid cell render from the payload.
+// `/api/item/<id>` is read-only, so this cannot re-arm the fetch queue.
+async function refreshItemState(wid) {
+  try {
+    const resp = await fetch('/api/item/' + wid);
+    if (!resp.ok) return;
+    const item = await resp.json();
+    if (item.error) return;
+    if (_currentDetail && _currentDetail.workshop_id === wid) renderDetail(item);
+    const cell = document.querySelector(`#results-grid .grid-cell[data-wid="${wid}"]`);
+    if (cell) _applySub(cell.querySelector('.grid-sub'), item);
+    if (item.subscription_state === 'pending') _startListPoll([], '', '');
+  } catch (e) { console.debug('Item state refresh failed', e); }
 }
 
 // ── View state persistence ────────────────────────────────────────────────
@@ -1285,6 +1467,11 @@ function _loadViewState() {
 
 function _saveViewState() {
   if (_restoringView) return;
+  // Author mode does not own the persisted view. The stored entry is the view
+  // Return restores, so a search or a scroll while the mode is on must not
+  // overwrite it with the author's filter set -- that would make the return a
+  // reload away from being wrong.
+  if (_authorMode) return;
   try {
     const grid = document.getElementById('results-grid');
     localStorage.setItem(VIEW_STATE_KEY, JSON.stringify({
@@ -1515,6 +1702,19 @@ let _subScheduleIv = null;
 let _subCanceled = false;
 let _subThrottleStopped = false;
 
+// Drain the queue through `/api/subscribe/<id>`, one item at a time.
+//
+// The route does the whole job now -- it reads the item page, takes that page's
+// CSRF token, posts and records the answer -- so this no longer opens Steam tabs
+// for the userscript to fill in. What it still owns is the pacing the route
+// cannot impose on its caller: the loop awaits each call before starting the
+// next, so two items are never in flight at once, and it adds no delay of its
+// own. The route's page read already waits out the shared web interval (the POST
+// is exempt), so a second helper delay here would double the cost per item.
+//
+// `_subPollIv` still re-reads the queue so the rows reflect the database rather
+// than this loop's own bookkeeping, and the pass still pauses the daemon while
+// it runs.
 async function _startAutoSubscribe() {
   const resp = await fetch('/api/queued');
   const items = await resp.json();
@@ -1543,13 +1743,18 @@ async function _startAutoSubscribe() {
   await fetch('/api/pause', {method:'POST'});
 
   _subCanceled = false;
-  const stepDelay = WEB_DELAY * 1000;
+  // The daemon is paused for the pass, so release it on every exit path: a
+  // cancel, a throttle stop, and the normal end.
+  const finish = async () => {
+    await fetch('/api/resume', {method:'POST'});
+  };
+
   const startTime = Date.now();
   const verified = new Set();
-  const opened = new Set();
-  const callbackOrigin = encodeURIComponent(location.origin);
 
-  // Poll for verification — marks items done/failed when userscript reports back
+  // Poll for the marker — the loop below marks each call's own answer, but the
+  // database is the authority on the row, and the userscript bridge can still
+  // move the same flag behind this pass's back.
   _subPollIv = setInterval(async () => {
     try {
       const [qresp, fresp] = await Promise.all([
@@ -1560,35 +1765,30 @@ async function _startAutoSubscribe() {
       const failures = await fresp.json();
       const queuedIds = new Set(queued.map(q => q.workshop_id));
       const failedIds = new Set(failures);
-      let changed = false;
       items.forEach(item => {
         if (!queuedIds.has(item.workshop_id) && !verified.has(item.workshop_id)) {
           verified.add(item.workshop_id);
           const row = list.querySelector(`[data-wid="${item.workshop_id}"]`);
           if (row) row.classList.add(failedIds.has(item.workshop_id) ? 'failed' : 'done');
-          changed = true;
         }
       });
 
       progress.textContent = verified.size + ' / ' + items.length;
 
-      const scheduleDone = opened.size >= items.length;
-      const allDone = verified.size >= items.length;
-
-      if (allDone) {
+      if (verified.size >= items.length) {
         clearInterval(_subPollIv);
         _subPollIv = null;
-        await fetch('/api/resume', {method:'POST'});
-        setTimeout(() => { overlay.style.display = 'none'; }, 2000);
+        // A cancelled pass keeps its overlay up until the user closes it; only
+        // a pass this loop finished on its own dismisses itself.
+        if (!_subCanceled) setTimeout(() => { overlay.style.display = 'none'; }, 2000);
         return;
       }
 
-      // Show "Clear Failed" if schedule finished + grace period passed + stuck items remain
-      if (scheduleDone && !_subCanceled) {
-        var grace = Date.now() - startTime > (items.length * stepDelay) + 15000;
-        var stuck = items.length - verified.size;
-        if (grace && stuck > 0) {
-          var cb = document.getElementById('sub-clear-failed');
+      // Show "Clear Failed" if the pass ended early and unverified items remain.
+      if (_subScheduleIv === null && !_subCanceled) {
+        const stuck = items.length - verified.size;
+        if (stuck > 0) {
+          const cb = document.getElementById('sub-clear-failed');
           if (cb) {
             cb.textContent = 'Clear Failed (' + stuck + ')';
             cb.style.display = '';
@@ -1598,70 +1798,80 @@ async function _startAutoSubscribe() {
     } catch(e) { console.debug('Autosubscribe poll error', e); /* continue */ }
   }, 1000);
 
-  // Stop launching tabs while Steam is refusing us. Checked once per tab opened,
-  // so it costs one request per attempt rather than a poll.
+  // Stop the pass while Steam is refusing us. Checked once per item, so it
+  // costs one request per attempt rather than a poll. The route is still the
+  // thing that records a throttle; this only stops the caller spending calls
+  // into it, and it has to release the daemon itself or the pause outlives the
+  // pass -- the poll's normal release only runs when every item is verified.
   async function _checkSubThrottle() {
     try {
-      const resp = await fetch('/api/sub_health');
-      const health = await resp.json();
-      if (!health.throttled_at) return;
+      const hresp = await fetch('/api/sub_health');
+      const health = await hresp.json();
+      if (!health.throttled_at) return false;
       const since = (Date.now() / 1000) - health.throttled_at;
-      if (since >= health.retry_after) return;
-      // A subscribe pass pauses the daemon for its duration, and the daemon is
-      // only released when the pass ends -- either every item was verified, or
-      // the user cancelled. Stopping the tabs early ends the pass too, so the
-      // release has to happen here or the daemon stays paused indefinitely.
+      if (since >= health.retry_after) return false;
       _subThrottleStopped = true;
-      if (_subScheduleIv) { clearInterval(_subScheduleIv); _subScheduleIv = null; }
+      _subCanceled = true;
       if (_subPollIv) { clearInterval(_subPollIv); _subPollIv = null; }
+      // The release is written here as well as in the drain's own `finally`,
+      // because this early stop happens with the pass still mid-loop and
+      // leaving the daemon paused is the failure mode that matters.
       await fetch('/api/resume', {method:'POST'});
+      await finish();
       const cancelBtn = document.getElementById('sub-cancel');
       if (cancelBtn) cancelBtn.textContent = 'Close';
-      const p = document.getElementById('sub-progress');
-      if (p) {
-        p.textContent = 'Steam is throttling subscription requests. Stopped opening tabs, and ' +
-          'released the daemon. The rest stay queued and can be retried in about ' +
-          Math.ceil((health.retry_after - since) / 60) + ' minute(s).';
-      }
-    } catch (e) { console.debug('sub_health check failed', e); /* keep the drain running */ }
+      progress.textContent = 'Steam is throttling subscription requests. Stopped after ' +
+        verified.size + ' of ' + items.length + ', and released the daemon. The rest stay ' +
+        'queued and can be retried in about ' +
+        Math.ceil((health.retry_after - since) / 60) + ' minute(s).';
+      return true;
+    } catch (e) { console.debug('sub_health check failed', e); /* keep the drain running */ return false; }
   }
 
-  // Countdown + tab-open loop
+  // The schedule is one awaited request per item and nothing else: no timer
+  // spaces them, because the route's own page read is the interval.
   _subScheduleIv = setInterval(() => {
-    if (_subCanceled) return;  // stop launching new tabs on cancel
-    const elapsed = Math.floor((Date.now() - startTime) / 1000);
-
-    items.forEach((item, i) => {
-      const row = list.querySelector(`[data-wid="${item.workshop_id}"]`);
-      if (!row) return;
-      const countdown = row.querySelector('.countdown');
-      if (!countdown) return;
-
-      const openAt = i * Math.ceil(stepDelay / 1000);
-      if (opened.has(item.workshop_id)) {
-        countdown.textContent = '';
-        return;
-      }
-
-      if (elapsed >= openAt) {
-        opened.add(item.workshop_id);
-        const w = window.open(
-          'https://steamcommunity.com/sharedfiles/filedetails/?id=' + item.workshop_id + '&autosubscribe=true&callback_origin=' + callbackOrigin,
-          'subtab_' + item.workshop_id
-        );
-        if (w) { w.blur(); window.focus(); }
-        countdown.textContent = '';
-        _checkSubThrottle();
-      } else {
-        countdown.textContent = (openAt - elapsed) + 's';
-      }
-    });
-
-    if (opened.size >= items.length) {
-      clearInterval(_subScheduleIv);
-      _subScheduleIv = null;
-    }
+    const done = verified.size;
+    const row = list.querySelectorAll('.sub-queue-item')[done];
+    const countdown = row ? row.querySelector('.countdown') : null;
+    if (!countdown) return;
+    countdown.textContent = Math.floor((Date.now() - startTime) / 1000) + 's';
   }, 250);
+
+  try {
+    for (const item of items) {
+      if (_subCanceled) break;
+      const row = list.querySelector(`[data-wid="${item.workshop_id}"]`);
+      const countdown = row ? row.querySelector('.countdown') : null;
+      if (countdown) countdown.textContent = '…';
+      // Sequential on purpose: the next page read must not start until this
+      // call has returned, or the two reads overlap on one shared interval.
+      let data = null;
+      let status = 0, statusText = '';
+      try {
+        const sresp = await fetch('/api/subscribe/' + item.workshop_id, {method:'POST'});
+        status = sresp.status;
+        statusText = sresp.statusText;
+        data = await sresp.json();
+      } catch (e) {
+        console.debug('Subscribe call failed', e);
+      }
+      if (countdown) countdown.textContent = '';
+      verified.add(item.workshop_id);
+      if (row) row.classList.add(data && data.success === 1 ? 'done' : 'failed');
+      progress.textContent = verified.size + ' / ' + items.length;
+      if (!(data && data.success === 1)) {
+        console.debug('Subscribe refused for ' + item.workshop_id + ': ' +
+                      ((data && data.message) || status + ' ' + statusText));
+      }
+      if (await _checkSubThrottle()) break;
+    }
+  } finally {
+    if (_subScheduleIv) { clearInterval(_subScheduleIv); _subScheduleIv = null; }
+    // Released even if the loop threw: leaving the daemon paused would be worse
+    // than any single failed subscribe.
+    await finish();
+  }
 }
 
 document.getElementById('sub-cancel').onclick = () => {
@@ -2265,6 +2475,8 @@ function _closeAnalysisPanel() {
 document.getElementById('btn-analysis').onclick = _openAnalysisPanel;
 document.getElementById('analysis-close').onclick = _closeAnalysisPanel;
 document.getElementById('analysis-recalc').onclick = _runAnalysis;
+_initAuthorList();
+document.getElementById('btn-return-author').onclick = returnFromAuthor;
 
 loadState();
 _refreshSessionWarning();

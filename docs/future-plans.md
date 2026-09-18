@@ -48,9 +48,9 @@ reading markup — the distinction proved to matter, because three endpoints exi
 | TUI feature | Web UI | Evidence |
 |---|---|---|
 | Statistics screen (`ctrl+r`) | Present | Both front ends stream the metrics as independent chunks: the TUI `StatsScreen` and the web `#stats-overlay` panel. The bare link to the raw JSON endpoint is gone, and each metric appears as soon as it is ready rather than waiting for the slowest. |
-| Analysis screen (`ctrl+?`) | Not present | The endpoint returns data, but the client never calls it. |
+| Analysis screen (`ctrl+?`) | Present | The `#analysis-overlay` panel calls `/api/analysis` and renders the bucket table, with the bucket width defaulting to the TUI's seven days. |
 | Tag statistics | Present | The panel renders a tag summary from the `tag_counts` metric. It is the most expensive single statistic (a 9.2M-row join); the owner has decided it stays because they want the results. |
-| Author list and jump-to-author | Partial | Jump-to-author is present: the creator in the detail pane sets an `Author ID`/`is` filter and re-runs, matching the TUI. No single-creator mode is needed, because the web builder's rows are individually removable, so deleting the author row restores the previous view. The author *list* (`/api/authors`) is still unused — the jump needs only the item's own `creator_id`. |
+| Author list and jump-to-author | Present | Jump-to-author enters the same single-creator mode the TUI has — filters replaced, sort kept, `Return` restoring an in-memory snapshot (`jumpToAuthor`, `returnFromAuthor`). The author *list* is now consumed by a creator picker the TUI does not have; `/api/authors` existed with no client before it. See [web-ui.md](web-ui.md#the-creator-list) for why the list earns its place and [tui.md](tui.md#jump-to-author) for the one-sided position. |
 | Daemon start/stop/restart (`ctrl+d`) | Present | Both UIs drive one shared `DaemonController`. Routes: `/api/daemon`, `/api/daemon/start`, `/stop`, `/restart`, `/log`. |
 | Daemon log view | Present | Both sides poll one `DaemonController.tail_log` incrementally — the web panel through `/api/daemon/log`, the TUI's pane through `_poll_tail` on a two-second timer (`src/tui.py:614`) — and every read is bounded to `TAIL_BYTES`, so neither scans the file. The subprocess-based `_start_tail` is gone. |
 | Translation toggle (`ctrl+w`) | Present | Both language variants ship in the detail payload, so switching costs no request. The toggle appears only when `translate_version` is set, as in the TUI. |
@@ -186,8 +186,8 @@ metric at a time. Two further problems compounded this:
    perform database maintenance, even when that maintenance is idempotent. *(Still open: it now runs
    once per tag-metric arrival rather than on every screen update.)*
 7. **Decide the fate of the three unused endpoints.** Build the missing UI for them, or delete them.
-   *(Partly done: the web statistics panel consumes the tag metric, and the web view window analysis
-   panel now consumes `/api/analysis`; the author endpoint still has no client.)*
+   *(Landed: the web statistics panel consumes the tag metric, the web view window analysis panel
+   consumes `/api/analysis`, and the creator picker consumes `/api/authors`.)*
 
 ### Queue indexes
 
@@ -410,16 +410,17 @@ The old wording is also load-bearing in three places that would move with it:
 
 ## Removing the browser bridge from the subscribe path
 
-**Status: Partly landed.** The captured evidence arrived: two real subscribes were run against
-production, captured end to end, and the browser-free engine that replaces the bridge's job now
-exists in `src/subscribe_engine.py` and drives the TUI's subscription queue. What remains is the Web
-UI's adoption of that engine and the removal of the bridge itself.
+**Status: The Web UI half has landed; removing the bridge has not.** The captured evidence arrived:
+two real subscribes were run against production, captured end to end, and the browser-free engine
+that replaces the bridge's job exists in `src/subscribe_engine.py` and drives the TUI's subscription
+queue and, through `/api/subscribe/<id>`, the Web UI's Subscribe button and queue drain. What remains
+is the removal of the bridge itself, deliberately deferred until the new path has been proven in use.
 
-The Web UI cannot subscribe on its own today, and that is the only reason the Tampermonkey bridge exists: the server could not build a working Steam session request, so a browser tab did the subscribing and reported the outcome back. Everything the bridge compensates for is now addressed on the server side — the credential comes from one read (`web_scraper._build_workshop_cookies`, which is also where the CSRF token now comes from), the request presents the same identity as every scrape, and `/api/subscribe/<id>` records the confirmation instead of discarding it. That is the same route the TUI has always called.
+The Web UI could not subscribe on its own, and that was the only reason the Tampermonkey bridge exists: the server could not build a working Steam session request, so a browser tab did the subscribing and reported the outcome back. Everything the bridge compensates for is now addressed on the server side — the credential comes from one read (`web_scraper._build_workshop_cookies`, which is also where the CSRF token now comes from), the request presents the same identity as every scrape, and `/api/subscribe/<id>` records the confirmation instead of discarding it. That is the same route the TUI has always called, and the Web UI now calls it too: `doSubscribe` POSTs it, and `_startAutoSubscribe` drains the queue through it one awaited call at a time, so the flow opens no tab. **The bridge is still installed and still works** — the userscript, `/api/sessionid`, `/api/subscribed`, the verification poll and the throttle endpoints are untouched — it has simply stopped being the path the Web UI takes, so the new one can be observed before anything is deleted.
 
-Once captures of real traffic confirm that path, the bridge becomes removable along with everything that exists to serve it: the userscript, the `autosubscribe=true` tab flow, the `/api/sessionid` token push, the verification poll against `/api/queued` and `/api/sub_failures`, and the throttle-reporting endpoints. The subscribe action in the Web UI then becomes one request to the route the TUI uses, and the grid's marker updates from the same response.
+Once that observation is done, the bridge becomes removable along with everything that exists to serve it: the userscript, the `autosubscribe=true` tab flow, the `/api/sessionid` token push, the verification poll against `/api/queued` and `/api/sub_failures`, and the throttle-reporting endpoints. The subscribe action in the Web UI is already one request to the route the TUI uses, and the grid's marker updates from the read-back that follows it.
 
-One thing this must not quietly drop: the tab flow spread many subscribes across a browser session and reported throttle pages separately, and the replacement needs equivalent pacing rather than a burst of server-side POSTs. The project already has the machinery — the shared AIMD delay and the per-account budget — so this is a matter of routing subscribe through it, not of inventing something. The engine does exactly that: both of its page reads wait the shared `daemon.web_delay_seconds` and feed their outcome back into it, while the subscribe POST is the click and is deliberately exempt (it is an XHR, not a page load).
+One thing this must not quietly drop: the tab flow spread many subscribes across a browser session and reported throttle pages separately, and the replacement needs equivalent pacing rather than a burst of server-side POSTs. The project already has the machinery — the shared AIMD delay and the per-account budget — so this is a matter of routing subscribe through it, not of inventing something. The engine does exactly that: both of its page reads wait the shared `daemon.web_delay_seconds` and feed their outcome back into it, while the subscribe POST is the click and is deliberately exempt (it is an XHR, not a page load). The Web UI's drain adds no client-side delay and never has two calls in flight, so the interval is paid once per item inside the route.
 
 ---
 

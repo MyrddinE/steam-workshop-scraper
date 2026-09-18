@@ -97,7 +97,8 @@ The TUI is an interface for exploring the scraped data, built with the `Textual`
 * **Dynamic details pane**:
   * **BBCode-to-Markdown**: Converts Steam's BBCode into Markdown for display.
   * **Translation toggle**: Toggles between the original and translated text for translated items.
-  * **Author jump**: Re-runs the search for all items by the currently viewed creator.
+  * **Author jump**: Re-runs the search for all items by the currently viewed creator, as a
+    single-creator mode that replaces the filters and can be returned from.
 * **Command palette**: A searchable menu for actions such as clearing the database or managing
   filters.
 
