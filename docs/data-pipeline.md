@@ -8,7 +8,11 @@ The data pipeline moves a Steam Workshop item from initial discovery through enr
 
 ### `process_batch` (daemon)
 
-The main loop entry point called repeatedly by `run()`. Each invocation:
+The main loop entry point called repeatedly by `run()`. Before it takes any work it runs the daemon's
+housekeeping — the staleness sweep (`_maybe_promote_stale_items`) and the subscription reconcile
+(`_maybe_reconcile_subscriptions`), each guarded by its own clock — and both of those run for certain on
+the **first batch after a restart**, which is why a fresh daemon can be minutes away from its first API
+fetch while its scraper, image and discovery threads are already working. Each invocation then:
 
 1. Calls `get_next_items_to_scrape` to retrieve up to `batch_size` items due for processing. Selection is `api_priority > 0` and `status` not `-1`, ordered by `api_priority DESC, api_fetched_at ASC`, so never-successfully-fetched items (`api_fetched_at IS NULL`) come first within a priority band.
 2. If no items are available, waits for the discovery thread to refill the queue. Discovery is no longer the main loop's job: it runs on its own thread (see [threading.md](threading.md)) so that the queue is refilled while the loop is still draining it, rather than only after it has drained. The wait is woken by the thread's signal instead of polling the database, and still gives up after ten minutes so the outer loop re-checks.
@@ -33,6 +37,31 @@ It is floored at `API_DELAY_FLOOR = 0.01 s` and has **no ceiling**. One was kept
 ### `_promote_stale_items` (daemon)
 
 Promotes successfully-fetched items whose `api_fetched_at` is older than `item_staleness_days` from `api_priority = 0` back to `1`, returning them to the fetch queue. It is a full-table UPDATE, so `_maybe_promote_stale_items` runs it at most once per `STALE_SWEEP_INTERVAL_SECONDS` (1 hour, monotonic clock) instead of on every batch; the first batch after startup always sweeps, so a long-idle daemon does not sit on a stale queue.
+
+### `reconcile_own_subscriptions` (daemon)
+
+Brings the owner's subscription flags in line with Steam. It walks
+`steamcommunity.com/my/myworkshopfiles/?browsefilter=mysubscriptions` a page at a time for each target
+AppID and, for every id it sees, stamps `own_subscribed = 1`, sets the sticky `own_first_subscribed_at`
+while that is still NULL, and clears `is_queued_for_subscription` — there is nothing left to queue for an
+item that is already subscribed. An id the walk does *not* see is evidence only about the pages that were
+read, so an incomplete walk unstamps nothing.
+
+`_maybe_reconcile_subscriptions` guards it on a monotonic clock: `SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS`
+(24 hours) normally, and `SUBSCRIPTION_RECONCILE_RETRY_SECONDS` (900 s) while a session problem is
+recorded, because the day's walk has already run by the time an operator fixes the login. **It runs on the
+first batch after startup**, so a daemon that has just come up does not present markers from whenever it
+last ran. The login cookie is re-read from the browser first — a local file copy that writes nothing when
+the browser's copy has not moved — and a walk that cannot authenticate ends there and records why in
+`.daemon_state.yaml`; [web-ui.md](web-ui.md#the-session-warning) carries the operator-facing half.
+
+Every page is a web read, so it waits the shared adaptive interval (`configured_web_delay` → `pacing.wait`)
+exactly as the scraper's own reads do. It only waits: a reconcile is not rate-seeking, so it never moves
+that delay. Its cost is therefore `pages × (interval + the request)`, and because it runs before the first
+batch acquires any work, it is what a restarted daemon waits for. *Measured live* on 2026-09-18: 157
+subscriptions came back ten to a page and took **16 gated reads over 114 s** with the delay at its 6 s
+floor — which is where a freshly started daemon's first two minutes went, with the daemon log showing
+scrapes and previews throughout and no API fetch until the walk finished.
 
 ### `seed_database` (daemon)
 
