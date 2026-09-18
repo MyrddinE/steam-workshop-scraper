@@ -2207,6 +2207,10 @@ global.sizeClass = () => '';
 global.fmtCount = (n) => String(n || 0);
 global._escapeHtml = (s) => String(s == null ? '' : s);
 global.showSubscriptionMarker = subFn;
+// The open-folder control lives in the static bottom bar, so renderDetail only
+// asks a separate helper to enable/disable it; this test is about the pane's own
+// HTML, so the helper is stubbed like the other collaborators above.
+global._refreshOpenFolderButton = () => {};
 const base = {
   workshop_id: 77, creator: 'Alice', creator_id: '76561198765432109',
   personaname: 'Alice', has_translation: false,
