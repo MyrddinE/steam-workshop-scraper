@@ -1046,7 +1046,18 @@ class Daemon:
 
         enriched = False
         queued = False
-        if self._should_enrich(appid, merged_data):
+        # The merge deliberately drops the columns the queue and the folder scan
+        # own (MERGE_EXCLUDED_KEYS) so a pre-fetch snapshot cannot clobber them.
+        # Those are also the columns a `Subscribed` enrichment filter reads, and
+        # a missing key evaluates as NULL rather than raising -- `never`, a false
+        # `queued`, a false `downloaded`. Evaluate against the merged record with
+        # the pre-fetch values overlaid for exactly those columns, as a copy: the
+        # stored record must not carry them back through the merge.
+        filter_item = dict(merged_data)
+        for column in MERGE_EXCLUDED_KEYS:
+            filter_item.setdefault(column, existing_data.get(column))
+
+        if self._should_enrich(appid, filter_item):
             if description_is_current:
                 merged_data["extended_description"] = existing_data["extended_description"]
             else:

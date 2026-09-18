@@ -1616,8 +1616,11 @@ const values = {
   'results-grid': {scrollTop: 777},
   'sort-by': {value: 'subscriptions'},
   'sort-order': {value: 'DESC'},
+  'subscribed-overlay': {value: 'never'},
 };
 global.document = {getElementById: (id) => values[id]};
+const SUBSCRIBED_VALUES = ['any', 'never', 'currently', 'previously', 'queued', 'downloaded'];
+const _subscribedOverlayEl = () => values['subscribed-overlay'];
 const out = {};
 saveFn();
 out.stored = JSON.parse(store[key]);
@@ -1670,6 +1673,7 @@ def test_view_state_round_trips_and_rejects_stale_or_malformed_entries(web_clien
         "filters": [{"field": "Subs", "op": "gte", "value": "100"}],
         "sort_by": "subscriptions",
         "sort_order": "DESC",
+        "subscribed": "never",
         "selected": 42,
         "scroll": 777,
     }
@@ -1688,6 +1692,10 @@ def test_view_state_round_trips_and_rejects_stale_or_malformed_entries(web_clien
     assert out["filtered"]["filters"] == [{"field": "Title", "op": "contains", "value": "5"}]
     assert out["filtered"]["selected"] == 7
     assert out["filtered"]["scroll"] == 0
+    # A stored view that predates the overlay, or carries a value this build
+    # does not know, reads back as the no-constraint default rather than hiding
+    # rows.
+    assert out["filtered"]["subscribed"] == "any"
     assert out["wroteWhileRestoring"] is False, \
         "a restore in progress must not overwrite the state it is reading"
 
@@ -1704,6 +1712,10 @@ global._applyFilters = (f) => { out.applied = f; filterRows.children.length = f.
 global.addRow = () => { out.addedRow = (out.addedRow || 0) + 1; };
 global.doSearch = async () => { out.searches = (out.searches || 0) + 1; };
 global._restoreView = async (s) => { out.restored = s; };
+// The overlay control is DOM-backed; loadState only hands it a value and then
+// syncs its greyed-out state once the builder rows are drawn.
+global._applySubscribedOverlay = (v) => { out.subscribed = v; };
+global._syncSubscribedOverlay = () => {};
 const emit = console.log.bind(console);
 global.console = {debug: () => {}, warn: () => {}, error: () => {}, log: emit};
 const fetches = [];
@@ -1711,7 +1723,7 @@ global.fetch = async (url) => {
   fetches.push(url);
   return {json: async () => ({
     filters: [{field: 'Subs', op: 'gte', value: '9'}],
-    sort_by: 'views', sort_order: 'ASC',
+    sort_by: 'views', sort_order: 'ASC', subscribed_overlay: 'previously',
   })};
 };
 global.document = {getElementById: (id) => {
@@ -1723,13 +1735,16 @@ global.document = {getElementById: (id) => {
 (async () => {
   await fn();
   out.local = {applied: out.applied, sort_by: sortBy.value, sort_order: sortOrder.value,
+               subscribed: out.subscribed,
                fetches: fetches.slice(), searches: out.searches, restored: out.restored,
                addedRow: out.addedRow || 0};
   local = null;
   out.applied = null; out.searches = 0; out.restored = null; out.addedRow = 0;
+  out.subscribed = null;
   fetches.length = 0; sortBy.value = ''; sortOrder.value = ''; filterRows.children.length = 0;
   await fn();
   out.tui = {applied: out.applied, sort_by: sortBy.value, sort_order: sortOrder.value,
+             subscribed: out.subscribed,
              fetches: fetches.slice(), searches: out.searches, restored: out.restored,
              addedRow: out.addedRow || 0};
   emit(JSON.stringify(out));
@@ -1749,7 +1764,8 @@ def test_browser_state_wins_over_the_tui_seed_on_load(web_client, tmp_path):
     script = _served_inline_script(client)
     local = {
         "filters": [{"field": "Title", "op": "contains", "value": "x"}],
-        "sort_by": "title", "sort_order": "DESC", "selected": 5, "scroll": 120,
+        "sort_by": "title", "sort_order": "DESC", "subscribed": "queued",
+        "selected": 5, "scroll": 120,
     }
     driver = (LOAD_STATE_DRIVER
               .replace("__FN__", _extract_function(script, "loadState"))
@@ -1761,6 +1777,8 @@ def test_browser_state_wins_over_the_tui_seed_on_load(web_client, tmp_path):
     assert out["local"]["applied"] == local["filters"]
     assert out["local"]["sort_by"] == "title"
     assert out["local"]["sort_order"] == "DESC"
+    assert out["local"]["subscribed"] == "queued", \
+        "the browser's own overlay value is restored with the rest of its view"
     assert out["local"]["restored"] == local, "the saved view drives the restore"
     assert out["local"]["searches"] == 1
 
@@ -1769,6 +1787,8 @@ def test_browser_state_wins_over_the_tui_seed_on_load(web_client, tmp_path):
     assert out["tui"]["applied"] == [{"field": "Subs", "op": "gte", "value": "9"}]
     assert out["tui"]["sort_by"] == "views"
     assert out["tui"]["sort_order"] == "ASC"
+    assert out["tui"]["subscribed"] == "previously", \
+        "the TUI's saved overlay is the first-visit seed, beside its sort and filters"
     assert out["tui"]["restored"] is None, "there is nothing of the browser's own to restore"
     assert out["tui"]["searches"] == 1
 

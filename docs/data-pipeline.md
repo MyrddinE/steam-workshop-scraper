@@ -150,6 +150,16 @@ The queue-owned columns are dropped rather than carried because the merge is a r
 
 Checks whether an item passes the enrichment filter for its AppID. Reads `enrichment_filters` from `app_tracking` (a JSON array of filter dicts in the same format as the TUI search builder). Feeds the item dict through `_evaluate_filters`, which uses `_evaluate_single_filter` for each criterion and `_evaluate_tag_filter` for tag-based filters. Returns True if no filters are configured for the AppID (enrich everything).
 
+**A `Subscribed` row can now be saved as an enrichment filter**, so the daemon
+evaluates it in memory against four columns. The merge above deliberately drops
+`is_queued_for_subscription` and `downloaded_at` (they are in `MERGE_EXCLUDED_KEYS`),
+so the merged record alone would read them as NULL and a `queued`/`downloaded`
+filter would silently answer "no match". `_flag_scrape_and_image` therefore
+overlays the pre-fetch record's values for exactly those columns on a copy before
+calling `_should_enrich`, and never writes them back. Migration 21→22's demotion
+walk calls the same `_evaluate_filters` and expands the field's virtual column to
+all four when it selects the columns to load — see [search-filter.md](search-filter.md).
+
 ### Failure classification (daemon)
 
 `_settle_api_failure` turns a non-success outcome into a queue decision. `404` is permanent: the failure is logged, the item is marked dead (`status = -1`) and it is removed from **every** queue — `api_priority`, `needs_web_scrape`, `needs_image` and `translation_priority` are all cleared, because a dead item can never complete and a queue flag left set would strand it in a queue that never drains. Everything else is temporary — `500` (including every id of a request that failed and was settled as `500`), transport exceptions, and any status no branch handles. Those keep the item queued at one priority level lower, floored at `1`, because priority `0` means "not queued" and clearing it is what previously stranded transient failures with nothing able to bring them back. Unhandled statuses are captured as evidence and never fall through to the success path.

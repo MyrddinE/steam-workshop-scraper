@@ -168,7 +168,11 @@ things depend on it:
 * **A filter-excluded item is still scraped, at backlog.** The enrichment filters choose priority,
   not membership: an item that does not match is queued at `1` for anything the page can change,
   and translation is the only stage skipped outright for it. What it must never do is *outrank* an
-  item the filters did select.
+  item the filters did select. An enrichment filter can be a `Subscribed` row over
+  `own_subscribed` / `own_first_subscribed_at` / `is_queued_for_subscription` / `downloaded_at`;
+  both in-memory readers (the daemon's decision and migration 21→22's demotion walk) load all four
+  columns for it — see [search-filter.md](search-filter.md) and
+  [data-pipeline.md](data-pipeline.md).
 
 ## Known Gaps
 

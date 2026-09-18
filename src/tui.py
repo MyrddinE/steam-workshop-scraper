@@ -13,7 +13,7 @@ from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, L
 from textual.containers import Horizontal, Vertical, VerticalScroll, Center, Grid
 from textual.reactive import reactive
 from textual.worker import Worker, WorkerState
-from src.database import search_items, get_all_authors, initialize_database, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, get_connection, FILTER_SCHEMA, ALL_FILTER_FIELDS, bump_api_priority_for_list, bump_api_priority_for_detail, get_subscription_states
+from src.database import search_items, get_all_authors, initialize_database, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, get_connection, FILTER_SCHEMA, ALL_FILTER_FIELDS, bump_api_priority_for_list, bump_api_priority_for_detail, get_subscription_states, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES
 from src.analysis import view_window_analysis
 from src import metrics
 from src import db_poll
@@ -31,6 +31,32 @@ import yaml
 import threading
 import webbrowser
 import datetime
+
+# Field types and enum values from the central schema. The builder's value
+# control is an Input for every free-text field and a Select for an enum one
+# (`Subscribed` is the only one), so the decision and the choices both come from
+# FILTER_SCHEMA rather than a second copy of the field list here.
+_FIELD_TYPES = {f["field"]: f["type"] for f in FILTER_SCHEMA}
+_FIELD_VALUES = {f["field"]: list(f.get("values", [])) for f in FILTER_SCHEMA}
+
+SUBSCRIBED_OVERLAY_TOOLTIP = (
+    "Disabled because the filter builder already has a Subscribed row. Two "
+    "constraints on the same field are redundant or contradictory."
+)
+
+
+def _enum_value_options(field: str, op) -> list[tuple[str, str]]:
+    """The choices an enum value control offers, with ``any`` dropped for is_not.
+
+    ``is_not any`` would match nothing, so it is not offered as a choice. A value
+    that arrives from a saved filter is preserved separately by the row's
+    ``_sync_value_control``.
+    """
+    values = _FIELD_VALUES.get(field, [])
+    if op == "is_not":
+        values = [v for v in values if v != "any"]
+    return [(v, v) for v in values]
+
 
 def escape_markup(value) -> str:
     """Escape Steam-derived text before interpolating it into Rich markup.
@@ -1181,6 +1207,12 @@ class DetailsPane(VerticalScroll):
             yield Label("", id="item-sub-marker")
             yield Label("", id="item-title")
             yield Label("", id="item-creator")
+
+        # The sticky first-seen-subscribed stamp, beside the marker that reads
+        # from the same column. Hidden entirely when it is NULL: an item never
+        # seen subscribed must not gain a dated line implying an observation
+        # nobody made.
+        yield Label("", id="item-sub-at")
         
         yield Label("", id="wilson-scores")
         yield Static(classes="blank-line")
@@ -1262,6 +1294,8 @@ class DetailsPane(VerticalScroll):
             self.query_one("#item-title", Label).update("")
             self.query_one("#item-sub-marker", Label).update("")
             self.query_one("#item-sub-marker", Label).display = False
+            self.query_one("#item-sub-at", Label).update("")
+            self.query_one("#item-sub-at", Label).display = False
             self.query_one("#item-creator", Label).update("")
             self.query_one("#btn-toggle-translation").display = False
             self.query_one("#btn-jump-author").display = False
@@ -1284,6 +1318,19 @@ class DetailsPane(VerticalScroll):
         sub_marker.update(f"[{sub_colour}]{sub_glyph}[/]")
         sub_marker.tooltip = subscription.tooltip(sub_state)
         sub_marker.display = True
+
+        # The date the account was first seen subscribed, worded with the
+        # marker's own "subscribed" vocabulary and formatted by the pane's
+        # shared `format_ts`. There is no separate history to show, so an item
+        # that has never been seen subscribed shows no line at all.
+        sub_at = item.get("own_first_subscribed_at")
+        sub_at_label = self.query_one("#item-sub-at", Label)
+        if sub_at:
+            sub_at_label.update(f"[b]Subscribed at:[/b] {format_ts(sub_at)}")
+            sub_at_label.display = True
+        else:
+            sub_at_label.update("")
+            sub_at_label.display = False
 
         # The folder control follows the marker: enabled only for the green
         # `downloaded` state, and disabled with the reason when it is not. The
@@ -1458,6 +1505,17 @@ class SearchRow(Horizontal):
         self.field_ops_map = field_ops_map  # {field_name: [op_names]}
         self.is_first = is_first
         self.initial_filter = initial_filter or {}
+        # A restored filter whose value an enum control does not offer (a legacy
+        # or API-written value) is kept as an extra option so the row displays
+        # and round-trips it. It is never added to a fresh row's choices.
+        init_field = self.initial_filter.get("field")
+        init_value = self.initial_filter.get("value")
+        self._enum_pending = (
+            init_value if _FIELD_TYPES.get(init_field) == "enum"
+            and isinstance(init_value, str) and init_value else None
+        )
+        self._enum_value = self._enum_pending
+        self._extra_enum_values = {self._enum_pending} if self._enum_pending else set()
 
     def _ops_for_field(self, field: str) -> list[str]:
         return self.field_ops_map.get(field, ["contains", "does_not_contain"])
@@ -1476,8 +1534,15 @@ class SearchRow(Horizontal):
             
         yield Select(op_options, prompt="Op", id="op-select", classes="row-op", value=op)
         
+        # Both value controls are mounted and one is hidden, rather than
+        # swapping widgets on every field change: a mounted row keeps its id and
+        # its place in the row's own layout. The enum control is a Select from
+        # the schema's values, so `Subscribed` can only be one of them; the
+        # free-text control stays an Input for every other field.
         val = self.initial_filter.get("value", "")
         yield Input(placeholder="Value", id="value-input", classes="row-input", value=val)
+        enum_options = _enum_value_options(field, op) or [("—", "")]
+        yield Select(enum_options, value=enum_options[0][1], id="value-select", classes="row-input")
         
         yield Button("AND", id="btn-and", variant="default", classes="row-btn")
         yield Button("OR", id="btn-or", variant="default", classes="row-btn")
@@ -1486,6 +1551,53 @@ class SearchRow(Horizontal):
         else:
             # Placeholder to keep alignment
             yield Static("", classes="row-btn-remove")
+
+    def on_mount(self) -> None:
+        self._sync_value_control(restoring=True)
+
+    def _sync_value_control(self, restoring: bool = False) -> None:
+        """Shows the value control the current field/operator calls for.
+
+        The enum control's choices depend on the operator as well as the field:
+        `any` is dropped for `is_not`, so `is_not any` cannot be built. A value
+        restored from a saved filter that is not among the choices is kept as an
+        extra option, so a stored filter displays and round-trips instead of
+        being silently rewritten; a value the user picked is dropped when the
+        operator no longer offers it.
+        """
+        try:
+            field = self.query_one("#field-select", Select).value
+            op = self.query_one("#op-select", Select).value
+            inp = self.query_one("#value-input", Input)
+            sel = self.query_one("#value-select", Select)
+        except Exception:
+            return
+        is_enum = _FIELD_TYPES.get(field) == "enum"
+        inp.display = not is_enum
+        sel.display = is_enum
+        if not is_enum:
+            return
+        if self._enum_pending is not None:
+            # A restored value wins until the mount-time sync has applied it,
+            # even if a Change message beats on_mount to this handler.
+            desired = self._enum_pending
+            if restoring:
+                self._enum_pending = None
+        else:
+            current = sel.value
+            desired = current if isinstance(current, str) and current else self._enum_value
+        options = _enum_value_options(field, op)
+        offered = [v for _, v in options]
+        for extra in self._extra_enum_values:
+            if extra not in offered:
+                options.append((extra, extra))
+                offered.append(extra)
+        sel.set_options(options)
+        if desired is not None and desired in offered:
+            sel.value = desired
+        elif offered:
+            sel.value = offered[0]
+        self._enum_value = sel.value if isinstance(sel.value, str) else None
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "field-select":
@@ -1508,6 +1620,11 @@ class SearchRow(Horizontal):
             except Exception:
                 logging.debug("Widget not ready during mount")
                 pass # Overlay might not be ready during initial mount
+            self._sync_value_control()
+        elif event.select.id == "op-select":
+            self._sync_value_control()
+        elif event.select.id == "value-select":
+            self._enum_value = event.value if isinstance(event.value, str) else None
 
     def on_input_blurred(self, event: Input.Blurred) -> None:
         if event.control.id == "value-input":
@@ -1539,6 +1656,19 @@ class SearchBuilder(VerticalScroll):
         new_row = SearchRow(self.fields, self.field_ops)
         self.mount(new_row)
         new_row.logic = logic
+        self._sync_overlay_state()
+
+    def _sync_overlay_state(self) -> None:
+        """Ask the app to re-apply the grey-out rule after a builder change.
+
+        The overlay lives beside the sort controls, not in the builder, but its
+        enabled state is decided by the builder's rows. Deferring to the next
+        refresh lets the rows that were just mounted be composed before the rule
+        reads them.
+        """
+        sync = getattr(self.app, "_sync_subscribed_overlay", None)
+        if sync is not None:
+            self.app.call_after_refresh(sync)
 
     def set_filters(self, filters: list[dict]) -> None:
         """Populates the builder with a given list of filters."""
@@ -1547,6 +1677,7 @@ class SearchBuilder(VerticalScroll):
             
         if not filters:
             self.mount(SearchRow(self.fields, self.field_ops, is_first=True))
+            self._sync_overlay_state()
             return
 
         for i, f in enumerate(filters):
@@ -1555,16 +1686,22 @@ class SearchBuilder(VerticalScroll):
             if not is_first:
                 row.logic = f.get("logic", "AND")
             self.mount(row)
+        self._sync_overlay_state()
 
     def get_filters(self) -> list[dict]:
         filters = []
         rows = self.query(SearchRow)
         for i, row in enumerate(rows):
             op = row.query_one("#op-select", Select).value
-            val = row.query_one("#value-input", Input).value
             field = row.query_one("#field-select", Select).value
             if not isinstance(field, str) or not isinstance(op, str) or not field.strip() or not op.strip():
                 continue  # skip unconfigured rows (Sentinel.BLANK etc.)
+            if _FIELD_TYPES.get(field) == "enum":
+                val = row.query_one("#value-select", Select).value
+                if not isinstance(val, str) or not val:
+                    continue  # a blank enum control is an unconfigured row
+            else:
+                val = row.query_one("#value-input", Input).value
             if op == "percentile":
                 try:
                     v = int(float(val))
@@ -1792,8 +1929,12 @@ class ScraperApp(App):
         padding: 0 1;
         background: $boost;
     }
-    .sort-select { width: 60%; }
-    .sort-order { width: 40%; }
+    .sort-select { width: 1fr; }
+    .sort-order { width: 10; }
+    /* The Subscribed overlay shares the sort row: a label and its own Select, so
+       it sits with the controls it behaves like rather than in the builder. */
+    .overlay-label { width: 12; height: 1; margin-top: 1; margin-bottom: 1; }
+    .overlay-select { width: 1fr; }
 
     #details-container {
         width: 60%;
@@ -1974,6 +2115,13 @@ class ScraperApp(App):
                 "filters": filters,
                 "sort_by": sort_by,
                 "sort_order": sort_order,
+                # The overlay is view state, not a builder row: it travels with
+                # sort_by/sort_order so a reload, a builder change and the
+                # single-creator jump's restore all keep it. It is written raw,
+                # so a value chosen while the control was greyed out (the builder
+                # holds a Subscribed row) is not lost; the search ignores it
+                # while it is greyed out.
+                "subscribed_overlay": self._subscribed_overlay_value(),
                 "scroll_y": list_view.scroll_y,
                 "selected_workshop_id": selected_id
             }
@@ -1981,6 +2129,57 @@ class ScraperApp(App):
         except Exception as exc:
             pass
             logging.debug("TUI state save skipped: %s", exc)
+
+    # --- the Subscribed overlay control -------------------------------------
+    #
+    # A labelled Select ("Subscribed:") next to the sort controls. It ANDs one
+    # predicate onto every search in addition to the builder's rows, and it is
+    # deliberately not a row: changing the builder does not clear it, it never
+    # appears in the builder, and "Save Filter for Scraper" does not write it.
+    # `any` is its off switch, so it has no separate enable control.
+
+    def _subscribed_overlay_value(self) -> str:
+        """The control's own value, kept even while the control is greyed out."""
+        try:
+            value = self.query_one("#subscribed-overlay", Select).value
+        except Exception:
+            return "any"
+        return value if isinstance(value, str) and value in SUBSCRIBED_VALUES else "any"
+
+    def _builder_has_subscribed_row(self) -> bool:
+        """Whether any builder row constrains the Subscribed field."""
+        try:
+            builder = self.query_one("#search-builder", SearchBuilder)
+        except Exception:
+            return False
+        for row in builder.query(SearchRow):
+            try:
+                if row.query_one("#field-select", Select).value == SUBSCRIBED_FIELD:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _effective_subscribed_overlay(self) -> str:
+        """What the next search applies: `any` while the builder owns the field.
+
+        A greyed-out overlay is ignored rather than ANDed: the builder row is the
+        constraint the user can see, and silently ANDing a hidden second one is
+        how a search comes back empty with no visible reason.
+        """
+        if self._builder_has_subscribed_row():
+            return "any"
+        return self._subscribed_overlay_value()
+
+    def _sync_subscribed_overlay(self) -> None:
+        """Greys the overlay out while the builder has a Subscribed row."""
+        try:
+            overlay = self.query_one("#subscribed-overlay", Select)
+        except Exception:
+            return
+        blocked = self._builder_has_subscribed_row()
+        overlay.disabled = blocked
+        overlay.tooltip = SUBSCRIBED_OVERLAY_TOOLTIP if blocked else None
 
     def on_mount(self) -> None:
         """Initialize the UI and recover state."""
@@ -1992,13 +2191,19 @@ class ScraperApp(App):
                     self.query_one("#sort-by", Select).value = self._initial_state["sort_by"]
                 if "sort_order" in self._initial_state:
                     self.query_one("#sort-order", Select).value = self._initial_state["sort_order"]
+                overlay_value = self._initial_state.get("subscribed_overlay")
+                if overlay_value in SUBSCRIBED_VALUES:
+                    self.query_one("#subscribed-overlay", Select).value = overlay_value
                 if "filters" in self._initial_state:
                     builder = self.query_one("#search-builder", SearchBuilder)
                     builder.set_filters(self._initial_state["filters"])
             except Exception:
                 logging.debug("Failed to restore filter state from initial load")
                 pass
-                
+
+        # The builder's rows mount asynchronously, so the grey-out rule is
+        # applied once they are composed rather than immediately here.
+        self.call_after_refresh(self._sync_subscribed_overlay)
         self.call_after_refresh(self.execute_search)
         
         # Watch the scroll_y property to trigger infinite loading
@@ -2185,9 +2390,16 @@ class ScraperApp(App):
             ("Fetched Time", "api_fetched_at"),
             ("Subscriber Score", "wilson_subscription_score"),
             ("Favorite Score", "wilson_favorite_score"),
+            ("Subscribed at", "own_first_subscribed_at"),
         ]
         
+        # The Subscribed overlay sits with the sort controls, as it does in the
+        # web UI. Its value is a view-level constraint ANDed onto whatever the
+        # builder says; `any` means no constraint.
         sort_container = Horizontal(
+            Label("Subscribed:", classes="overlay-label"),
+            Select([(v, v) for v in SUBSCRIBED_VALUES], value="any",
+                   id="subscribed-overlay", classes="overlay-select"),
             Select(sort_options, value="title", id="sort-by", classes="sort-select"),
             Select([("ASC", "ASC"), ("DESC", "DESC")], value="ASC", id="sort-order", classes="sort-order"),
             id="sort-container"
@@ -2226,6 +2438,9 @@ class ScraperApp(App):
         pass  # search only on explicit "Execute Search" click
 
     async def on_select_changed(self, event: Select.Changed) -> None:
+        # A field change may have added or removed the builder's Subscribed row,
+        # which decides whether the overlay is usable.
+        self._sync_subscribed_overlay()
         # Save state when sort/filter changes, but don't auto-search
         if event.value is not None and self._has_restored_state:
             self.save_state()
@@ -2257,7 +2472,9 @@ class ScraperApp(App):
         except Exception:
             logging.debug("Search builder not accessible during percentile computation")
             return
-        self._wilson_cutoffs = compute_wilson_cutoffs(self.db_path, filters)
+        self._wilson_cutoffs = compute_wilson_cutoffs(
+            self.db_path, filters,
+            subscribed_overlay=self._effective_subscribed_overlay())
 
     async def load_more_items(self) -> None:
         """Fetches the next chunk of items from the database."""
@@ -2283,7 +2500,8 @@ class ScraperApp(App):
             sort_order=sort_order,
             summary_only=True,
             limit=50,
-            offset=self.current_offset
+            offset=self.current_offset,
+            subscribed_overlay=self._effective_subscribed_overlay()
         )
         
         list_view = self.query_one("#results-list", ListView)
@@ -2375,11 +2593,13 @@ class ScraperApp(App):
         elif event.button.id in ("btn-and", "btn-or"):
             logic = "AND" if event.button.id == "btn-and" else "OR"
             self.query_one("#search-builder", SearchBuilder).add_row(logic)
+            self.call_after_refresh(self._sync_subscribed_overlay)
         
         elif event.button.id == "btn-remove":
             row = event.button.parent
             if isinstance(row, SearchRow):
-                row.remove()
+                await row.remove()
+            self._sync_subscribed_overlay()
 
         elif event.button.id == "btn-return":
             self.action_return_from_creator()
@@ -2423,6 +2643,10 @@ class ScraperApp(App):
 
             # Use call_after_refresh to ensure selects are populated
             def setup_author_filter():
+                # The overlay is a view control, not a builder row, so the jump
+                # leaves its value alone; only its enabled state can change,
+                # because the author row is not a Subscribed row.
+                self._sync_subscribed_overlay()
                 self.run_worker(self.execute_search())
 
             self.call_after_refresh(setup_author_filter)
@@ -2461,6 +2685,7 @@ class ScraperApp(App):
         builder.set_filters(filters)
 
         def after_restore() -> None:
+            self._sync_subscribed_overlay()
             self.save_state()
             self.run_worker(self.execute_search())
 

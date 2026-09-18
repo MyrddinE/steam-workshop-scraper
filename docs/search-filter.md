@@ -1,6 +1,6 @@
 # Search & Filter System
 
-The search and filter system translates user-facing field names, operators, and values into SQLite WHERE clauses. It supports text matching, numeric comparisons, JSON tag queries (via junction table), full-text search (via FTS5), percentile filtering, and dual-field (original + translated) search.
+The search and filter system translates user-facing field names, operators, and values into SQLite WHERE clauses. It supports text matching, numeric comparisons, JSON tag queries (via junction table), full-text search (via FTS5), percentile filtering, enum (chosen-value) filtering, and dual-field (original + translated) search.
 
 ---
 
@@ -26,8 +26,42 @@ Maps user-facing field names (shown in TUI and Web UI dropdowns) to database col
 | Subscriber Score | wilson_subscription_score |
 | Favorite Score | wilson_favorite_score |
 | Full Text | full_text |
+| Subscribed | subscribed_state (virtual: the predicate spans `own_subscribed`, `own_first_subscribed_at`, `is_queued_for_subscription`, `downloaded_at`) |
 
 Fields not in the map fall through to the raw name (used by tests that pass DB column names directly).
+
+### The `Subscribed` field (the one `"enum"`)
+
+Every other field takes free text. `Subscribed` is chosen from a list, so its
+schema entry carries `"type": "enum"` and `"values"`, and both front ends build a
+Select/`<select>` for its value control (`is`/`is_not` are the only operators).
+Its `db_col` is the virtual `subscribed_state`, because no single column answers
+the question: the value selects one of six predicates over four existing columns.
+
+`SUBSCRIBED_FILTERS` is the single value table both evaluators read — `sql` is
+the fragment the SELECT path uses and `matches` is the same predicate over an
+in-memory row. Writing the six cases once is deliberate: they span four columns,
+and a second copy in `_evaluate_single_filter` is exactly how the SQL search and
+the daemon's in-memory decision would drift apart.
+
+| value | matches |
+|---|---|
+| `any` | everything — no constraint |
+| `never` | `own_first_subscribed_at IS NULL` — never seen subscribed (which includes queued items: they have never *been* subscribed) |
+| `currently` | `COALESCE(own_subscribed, 0) = 1` |
+| `previously` | `own_first_subscribed_at IS NOT NULL AND COALESCE(own_subscribed, 0) = 0` |
+| `queued` | `COALESCE(is_queued_for_subscription, 0) = 1` |
+| `downloaded` | `downloaded_at IS NOT NULL` — the latch added with the green star |
+
+`is_not` is the exact complement of `is`, applied in one place
+(`_build_subscribed_clause` / `_evaluate_subscribed_filter`) rather than spelled
+out per value, so `is_not never` is `currently` or `previously`, and so on. The
+front ends **omit `any` from the value list while the operator is `is_not`**: a
+NOT over "everything" matches nothing, so the combination is not offered. It is
+still well defined if a saved filter or an API call carries it — `is_not any`
+matches nothing in both evaluators, the same as any unknown value (`is` matches
+nothing, `is_not` matches everything), keeping the pair complementary instead of
+one side silently matching the whole table.
 
 ### `_EN_FIELDS` (database)
 
@@ -58,11 +92,19 @@ The main entry point for all searches. Accepts filters as a list of dicts with k
    - Percentile filters (op="percentile") — handled separately after the base WHERE clause is built
    - Tag filters (field maps to "tags") — routed through `_build_json_tag_clause`
    - Full Text (field maps to "full_text") — routed through `_build_fts_clause`
+   - Enum filters (field maps to `subscribed_state`) — routed through `_build_subscribed_clause`
    - Dual-field (field in `_EN_FIELDS` and operator in `_TEXT_OPS`) — expanded to search both columns
    - All others — routed through `_build_filter_clause`
 3. **Base WHERE clause**: Non-percentile filters produce the base clause, wrapped in `AND (...)`.
 4. **Percentile thresholds**: For each percentile filter, calls `_compute_percentile_threshold` with the base (non-percentile) filters. The threshold subquery runs NTILE(100) on the filtered dataset and returns the minimum score at the target bucket. Adds `db_col >= threshold` as a literal comparison.
 5. **Sort, Limit, Offset**: Appends `ORDER BY w.{col}`, `LIMIT`, `OFFSET`.
+6. **Overlay**: `search_items` also takes `subscribed_overlay`, the `Subscribed` view control's value. It is ANDed as one extra `AND (...)` *outside* the builder's parenthesised group, so an OR row cannot pull back what the overlay excluded, and it is kept out of the `filters` list so it can never be written by "Save Filter for Scraper". `any` (or no value) adds nothing; an unknown value adds nothing, because a view control must not silently hide the whole library. `compute_wilson_cutoffs` takes it too, so the percentiles describe the same population the grid shows.
+
+### `subscribed_overlay_clause` (database)
+
+Builds the single overlay predicate from the same `SUBSCRIBED_FILTERS` table. The
+overlay is always a positive selection (`is`), which is why it has no operator;
+the field's own builder rows carry `is`/`is_not`.
 
 ### `_build_filter_clause` (database)
 
@@ -82,6 +124,10 @@ Converts a single operator-value pair into a SQL clause and parameter list. Supp
 | is_not_empty | `(col IS NOT NULL AND col != '')` |
 
 Unrecognized operators return `("", [])` and are silently skipped.
+
+A `db_col` of `subscribed_state` is handed to `_build_subscribed_clause` before
+the operator table below is consulted; the enum's `is`/`is_not` are answered from
+`SUBSCRIBED_FILTERS`, not by the generic `col = ?` / `col != ?` cases.
 
 ### `_build_json_tag_clause` (database)
 
@@ -202,7 +248,15 @@ When computing Wilson score percentile cutoffs for display coloring, any filter 
 
 ### `_evaluate_filters` (database)
 
-Used by the daemon's `_should_enrich` to check whether an in-memory item dict passes the enrichment filters. Iterates each filter, calls `_evaluate_single_filter`, returns False if any filter fails. The item dict contains API response fields (not DB columns) — tags are checked via `_evaluate_tag_filter`.
+Used by the daemon's `_should_enrich` to check whether an in-memory item dict passes the enrichment filters, and by migration 21→22's demotion walk. Iterates each filter, calls `_evaluate_single_filter`, returns False if any filter fails.
+
+**A saved enrichment filter can now be a `Subscribed` row**, so both in-memory
+sites read the four columns that field needs. The daemon's merged record drops
+the queue-owned columns by design (`MERGE_EXCLUDED_KEYS`), so `_flag_scrape_and_image`
+overlays the pre-fetch record's values for exactly those columns on a copy before
+evaluating — never back onto the record it stores. The demotion walk selects only
+the columns a filter references and expands the virtual `subscribed_state` to all
+four, so its rows carry what the predicate reads.
 
 ### `_evaluate_single_filter` (database)
 
@@ -210,6 +264,7 @@ Checks a single filter criterion against an in-memory item dict. Mirrors `_build
 - Text operators (`contains`, `does_not_contain`, `is`, `is_not`, `is_empty`, `is_not_empty`)
 - Numeric operators (`gt`, `lt`, `gte`, `lte`) with type coercion (item and value both cast to int)
 - Tags routing to `_evaluate_tag_filter`
+- The `Subscribed` field routing to `_evaluate_subscribed_filter`, which reads the same `SUBSCRIBED_FILTERS` table the SQL clause is built from
 - Percentile operator (always returns True — percentile needs dataset context, not single-item evaluation)
 
 ### `_evaluate_tag_filter` (database)
@@ -222,7 +277,13 @@ Checks whether an item's tags (parsed from JSON) match a filter. Used by `_evalu
 
 ### `VALID_SORT_COLS` (database)
 
-Whitelist of columns that can appear in `ORDER BY`. Any sort column not in this set produces an empty sort clause (no sorting). Contains: `title, file_size, subscriptions, favorited, views, workshop_id, steam_created_at, steam_updated_at, api_fetched_at, wilson_favorite_score, wilson_subscription_score`.
+Whitelist of columns that can appear in `ORDER BY`. Any sort column not in this set produces an empty sort clause (no sorting). Contains: `title, file_size, subscriptions, favorited, views, workshop_id, steam_created_at, steam_updated_at, api_fetched_at, wilson_favorite_score, wilson_subscription_score, own_first_subscribed_at`.
+
+`own_first_subscribed_at` is the sticky first-seen-subscribed stamp (the only
+subscription timestamp there is), labelled **Subscribed at** in both sort
+dropdowns. NULL means never subscribed; SQLite orders NULL below every value, so
+descending leaves the never-subscribed rows last. A test pins that behaviour
+rather than assuming it.
 
 ### `_build_sort_clause` (database)
 
@@ -238,9 +299,27 @@ Three operator categories:
 - **text**: `contains, does_not_contain, is, is_not, is_empty, is_not_empty` — for Title, Description, Filename, Tags, Full Text
 - **numeric**: text ops + `gt, lt, gte, lte, percentile` — for File Size, Subs, Favs, Views, Subscriber Score, Favorite Score
 - **id**: `is, is_not` — for Author ID, Workshop ID, AppID
+- **enum**: `is, is_not` — for Subscribed, whose value control is a `<select>` of the schema's `values` (`any` omitted while the operator is `is_not`) rather than a free-text input
 
-The `updateOps` function switches operator options when the field dropdown changes. Percentile values are clamped to 0-99 on blur (via capture-phase event listener) and in `getFilters()`.
+The `updateOps` function switches operator options when the field dropdown
+changes; `updateValueControl` then swaps the value control between an `<input>`
+and a `<select>` to match the field's type. Percentile values are clamped to 0-99
+on blur (via capture-phase event listener) and in `getFilters()`.
+
+**The `Subscribed:` overlay** is a separate control beside the sort menus, not a
+builder row: changing the builder does not clear it, it never appears in the
+builder, and it is not written by "Save for scraper". It is greyed out (with a
+tooltip saying why) whenever the builder holds a `Subscribed` row, and while it is
+greyed out it contributes nothing to the search — ANDing a hidden second
+constraint on the same field is how a result silently comes back empty. Its value
+is persisted with the view (`view.state.v1` in the browser, `subscribed_overlay`
+in `.tui_state.yaml`), so a reload and the author jump's restore keep it.
 
 ### TUI (`tui.py`)
 
-Same operator/field definitions in `SearchBuilder.operators` and `SearchRow.on_select_changed`. The `SearchRow.compose` method determines field type at mount and on field change. Percentile values are clamped on blur via `Input.Blurred` event handler with a `_clamp_percentile` helper, and again in `get_filters()`.
+Same operator/field definitions in `SearchBuilder.operators` and `SearchRow.on_select_changed`. `SearchRow` mounts both an `Input` and a `Select` for the value and shows the one the field's type calls for (`_sync_value_control`); the Select's options come from the schema's `values`, with `any` dropped for `is_not`. A value restored from a saved filter that the choice list does not offer (a legacy or API-written value) is kept as an extra option so the row displays and round-trips it. Percentile values are clamped on blur via `Input.Blurred` event handler with a `_clamp_percentile` helper, and again in `get_filters()`.
+
+The `Subscribed:` overlay sits with the sort controls (`#subscribed-overlay`).
+`ScraperApp._sync_subscribed_overlay` greys it out while a builder row names the
+field, and `_effective_subscribed_overlay` returns `any` in that state so the
+search ignores it.

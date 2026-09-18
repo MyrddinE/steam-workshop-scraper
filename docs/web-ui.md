@@ -21,7 +21,32 @@ On viewports < 768px, the layout stacks vertically with the right pane below.
 
 ### Filter Builder
 
-Uses the same field/operator/value structure as the TUI. Operator options change dynamically when the field dropdown changes (`updateOps`). Three operator categories (text, numeric, id) with `percentile` added to numeric for score-based filtering. Logic buttons (AND/OR) set `data-logic` attributes on filter rows.
+Uses the same field/operator/value structure as the TUI. Operator options change dynamically when the field dropdown changes (`updateOps`). Three operator categories (text, numeric, id) plus an enum category, with `percentile` added to numeric for score-based filtering. Logic buttons (AND/OR) set `data-logic` attributes on filter rows.
+
+**The value control follows the field's type.** `updateValueControl` builds an
+`<input>` for every free-text field and a `<select>` of the schema's `values` for
+an enum one (`Subscribed` is the only one), swapping the element in place so the
+row keeps its slot and flex width. The enum choice list drops `any` while the
+operator is `is_not` (a NOT over "everything" matches nothing); a value restored
+from a saved view that the list does not offer is added as an extra option so the
+view round-trips instead of being rewritten.
+
+### The `Subscribed:` overlay
+
+A labelled `<select id="subscribed-overlay">` beside the sort menus, defaulting to
+`any` (no constraint) so the dropdown is its own on/off switch — there is no
+separate checkbox. `doSearch` sends its value as `subscribed` beside `filters`, and
+the server ANDs it as one predicate outside the builder's group (so an OR row
+cannot undo it). It is deliberately not a builder row: changing the builder does
+not clear it, `getFilters()` never returns it, and "Save for scraper" posts only
+the builder's rows.
+
+`_syncSubscribedOverlay` greys the control out (with a `title` giving the reason)
+whenever a builder row names `Subscribed`, because a second constraint on the same
+field is redundant or contradictory and silently ANDing two of them can empty the
+result with no visible reason. While greyed out, `_overlayValue()` returns `any`,
+so it contributes nothing. The overlay also travels to `loadCutoffs`, so the
+percentiles describe the same population the grid shows.
 
 ### Percentile Validation
 
@@ -37,9 +62,9 @@ Two layers of validation: a capture-phase `blur` event listener on the document 
 
 ### State Persistence
 
-The TUI saves filter/sort state to `.tui_state.yaml`, which the web UI reads through `GET /api/state`. That file is the TUI's: it has the TUI's shape (`scroll_y`, `selected_workshop_id`) and is rewritten on the TUI's schedule, so writing the browser's view back into it would have the two front ends overwriting fields the other does not understand. The browser therefore keeps its own view in `localStorage` under `view.state.v1` — filter rows, `sort_by`, `sort_order`, the open item and the grid's scroll position.
+The TUI saves filter/sort state to `.tui_state.yaml`, which the web UI reads through `GET /api/state`. That file is the TUI's: it has the TUI's shape (`scroll_y`, `selected_workshop_id`) and is rewritten on the TUI's schedule, so writing the browser's view back into it would have the two front ends overwriting fields the other does not understand. The browser therefore keeps its own view in `localStorage` under `view.state.v1` — filter rows, `sort_by`, `sort_order`, the `Subscribed:` overlay value, the open item and the grid's scroll position.
 
-The entry is versioned and shape-checked like the statistics panel's ordering entry (`_loadViewState`): a wrong `v`, a non-list `filters`, or an unreadable value reads back as "no state" rather than reaching the builder. Fields the current schema no longer has are dropped, and a stored value is coerced to the string the text input holds.
+The entry is versioned and shape-checked like the statistics panel's ordering entry (`_loadViewState`): a wrong `v`, a non-list `filters`, or an unreadable value reads back as "no state" rather than reaching the builder. Fields the current schema no longer has are dropped, a stored value is coerced to the string the value control holds, and a stored `subscribed` value the current build does not know reads back as `any` (no constraint) rather than hiding rows.
 
 **Precedence is one-sided.** A browser that has been to the page before has its own record of what the user was doing, so local state wins outright and `/api/state` is not even fetched. Only when there is no usable entry — a first visit, cleared storage, or a rejected shape — does the page seed from the TUI's saved state.
 
@@ -119,7 +144,16 @@ The browser's polls and the TUI's polls read the same database, and the same tra
 
 ### `renderDetail`
 
-Builds the detail view HTML inline. Shows: title (linked to Steam), creator (a jump-to-author button), workshop ID, Wilson scores (color-coded), created date, file size (color-coded), updated date (if different from created), views (via `fmtCount`), subscriptions/favorites (current/lifetime via `fmtCount`), tags (comma-separated from junction table or legacy JSON), Queue/Unqueue and Subscribe buttons, and description text (BBCode-to-HTML converted server-side).
+Builds the detail view HTML inline. Shows: title (linked to Steam), creator (a jump-to-author button), workshop ID, Wilson scores (color-coded), the `Subscribed at` line when `own_first_subscribed_at` is set, created date, file size (color-coded), updated date (if different from created), views (via `fmtCount`), subscriptions/favorites (current/lifetime via `fmtCount`), tags (comma-separated from junction table or legacy JSON), Queue/Unqueue and Subscribe buttons, and description text (BBCode-to-HTML converted server-side).
+
+**Subscribed at** is rendered as a `.stat-row` directly beneath the marker/title
+line, formatted with the same `toISOString().slice(0,10)` convention the pane's
+created/updated dates use. It is the sticky first-seen-subscribed stamp the
+`Subscribed at` sort reads, worded with the marker's own "subscribed" vocabulary.
+When `own_first_subscribed_at` is NULL the row is omitted entirely — an item never
+seen subscribed must not gain a dated line implying an observation nobody made.
+The stamp is on the payload because `_detail_payload` returns every `w.*` column
+of the item `get_item_details` reads.
 
 Stats are in a single-column vertical layout (`.stat-row`), not the previous two-column grid.
 
@@ -391,7 +425,7 @@ screen's own description is in [tui.md](tui.md#subscription-queue-sl-keys).
 
 ### `/api/search` — POST
 
-Main search endpoint. Accepts `{filters, sort_by, sort_order, offset, limit}`. Server-side bumps web/image/translation priorities and re-queries priority fields to include updated values. Returns 50 items with summary fields.
+Main search endpoint. Accepts `{filters, subscribed, sort_by, sort_order, offset, limit}`. `subscribed` is the `Subscribed:` overlay value and is ANDed as one predicate outside the builder's group; `any` or a value the build does not know adds nothing. Server-side bumps web/image/translation priorities and re-queries priority fields to include updated values. Returns 50 items with summary fields. `sort_by` accepts the `VALID_SORT_COLS` whitelist, including `own_first_subscribed_at` (**Subscribed at**; descending leaves never-subscribed rows last).
 
 ### `/api/item/<id>` — GET
 
@@ -409,11 +443,11 @@ Bulk ID lookup. Accepts `{ids: [1, 2, 3]}`. Returns the same summary fields as `
 
 ### `/api/cutoffs` — POST
 
-Wilson score percentile thresholds. Accepts `{filters}` (excluding percentile filters). Returns `{wilson_favorite_p99, wilson_favorite_p90, ...}`.
+Wilson score percentile thresholds. Accepts `{filters, subscribed}` (filters excluding percentile filters). The overlay is included so the percentiles describe the same population the grid shows. Returns `{wilson_favorite_p99, wilson_favorite_p90, ...}`.
 
 ### `/api/state` — GET
 
-Reads `.tui_state.yaml` for filter/sort state restoration. The client uses this as the **first-visit seed only**: once the browser has its own `view.state.v1` entry, this route is not called at all.
+Reads `.tui_state.yaml` for filter/sort state restoration. The client uses this as the **first-visit seed only**: once the browser has its own `view.state.v1` entry, this route is not called at all. The seed includes the TUI's `subscribed_overlay` value as well as `filters`, `sort_by` and `sort_order`.
 
 ### `/api/clear_pending` — POST
 
@@ -421,7 +455,7 @@ Deletes every pending item — those with no status or a 404 status and no succe
 
 ### `/api/save_filter` — POST
 
-Saves the current enrichment filters to `app_tracking` for the configured AppID. When no target AppID is configured it answers **400** with `{"error": "No target AppID configured"}`; the client shows that message and only reports success on a 2xx, so a rejected save is never presented as a stored one.
+Saves the current enrichment filters to `app_tracking` for the configured AppID. The body is `getFilters()` — the builder's rows only. The `Subscribed:` overlay is view state and is deliberately not written here, so what the scraper enriches with stays the set the builder shows. When no target AppID is configured it answers **400** with `{"error": "No target AppID configured"}`; the client shows that message and only reports success on a 2xx, so a rejected save is never presented as a stored one.
 
 ### `/api/subscribe/<id>` — POST
 
