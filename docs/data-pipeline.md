@@ -125,12 +125,12 @@ A daemon thread that picks up items from `get_next_web_scrape_item`, ordered by 
 | `RATE_LIMITED` | the body reports "too many requests" | untouched | the delay doubles, at once |
 | `ITEM_MISSING` | HTTP 404/410, or the page's item-error wording | `needs_web_scrape = 0` | no back-off |
 | `ITEM_PAGE_WITHOUT_DESCRIPTION` | `workshopItem` present, `highlightContent` absent | `needs_web_scrape = 0` | neutral: neither success nor failure |
-| `GATE` | no item markup, plus an age-check, sign-in or error marker | untouched | no back-off; `_retry_if_gated` has already retried if the cookie changed |
+| `GATE` | no item markup, plus an age-check, sign-in or error marker | untouched | no back-off; `_refresh_login_cookie_if_gated` has already re-read the login cookie if the page looked gated |
 | `UNKNOWN` | a transport failure, a 5xx, or a page that is neither the item's nor a recognised condition | untouched (a transport failure also raises `api_priority` to 2) | grows `web_delay` |
 
 A 5xx is `UNKNOWN` whatever its body says: the status is a server fault with no attributable cause, so it keeps the back-off.
 
-**A missing item.** A live probe found that the Workshop serves its item-error page with **HTTP 200**, not 404 — a well-formed but absent id returned "There was a problem accessing the item", and a malformed id returned "That item does not exist" — so the status is not trusted and the wording is matched as well (`looks_like_missing_item`). The worker clears `needs_web_scrape` but deliberately does **not** mark the row dead: existence is the API's call, and the API makes it on its own 404. Clearing the flag is the conservative move — the API re-flags the item while its description is still missing if Steam ever serves it again — and it is what stops a gone item spinning in the queue at full pace now that it no longer backs off. Both the status (when there is one) and the matched wording are logged, and the page is captured as evidence, because there was no capture of this page before. A definitive HTTP 404/410 is not retried as a gate — no credential materialises a gone item — while the HTTP 200 wording still gets the one session-recovery retry, since there the status proves nothing.
+**A missing item.** A live probe found that the Workshop serves its item-error page with **HTTP 200**, not 404 — a well-formed but absent id returned "There was a problem accessing the item", and a malformed id returned "That item does not exist" — so the status is not trusted and the wording is matched as well (`looks_like_missing_item`). The worker clears `needs_web_scrape` but deliberately does **not** mark the row dead: existence is the API's call, and the API makes it on its own 404. Clearing the flag is the conservative move — the API re-flags the item while its description is still missing if Steam ever serves it again — and it is what stops a gone item spinning in the queue at full pace now that it no longer backs off. Both the status (when there is one) and the matched wording are logged, and the page is captured as evidence, because there was no capture of this page before. A definitive HTTP 404/410 does not even earn the cookie refresh — no credential materialises a gone item — while the HTTP 200 wording still re-reads the cookie, since there the status proves nothing.
 
 **Dynamic delay**: The shape is shared with the other queues (`src/pacing.py`) even though the unit is not: a page scrape is one request per item and cannot be batched, so the worker keeps its own `web_delay_seconds`. Every refusal doubles the delay and healthy operation halves it for every 600 s it has been running, so the web scraper recovers over the same wall-clock window as the API and the image worker. The old per-item 100-success / 2-failure compounding rule is gone: a success count is a different amount of time at every delay, so it made the worker recover faster the faster it was already going.
 
@@ -138,11 +138,13 @@ Only an **unknown** outcome — a transport failure, a 5xx, or a page that is ne
 
 The decay stops at a **6.0 s floor** (raised from 1.0 s): the same Steam budget is shared with the owner's own hand-browsing, so when scrapes start failing the worker has to back off far enough that the Workshop is still usable manually while the daemon runs. The starting default is the floor. There is **no ceiling** any more — it went with the fixed 300 s pause, which was a second pacing rule that could not converge: the same pause however often the throttle recurred, and no slower a rate afterwards. A rate that moves on every refusal needs no separate rule, and it cannot run away (see the API rule above).
 
+**One owner for the interval.** `web_delay_seconds` is the web interval's only owner. The scraper used to enforce a second, fixed 5 s gate of its own — `_WEB_DELAY`/`_rate_limit()` inside `scrape_extended_details`, movable only through `set_web_delay()`, which had no callers — so every worker scrape paid the adaptive delay *and* the fixed one, and a re-scrape that bypassed the worker's pacing was spaced by the fixed gate alone. That gate is removed; the scraper now sends as soon as it is called, and any caller that needs spacing gates itself on the configured `web_delay_seconds` through `pacing.wait`, as the worker does.
+
 **Throttling**: Steam answers many requests with **HTTP 200** and its ordinary Workshop shell
 carrying "too many requests", so the status code proves nothing and the page is otherwise
 indistinguishable from a content miss. It is detected separately and treated as a spent request
-budget rather than a bad item: the item's priority is left alone, no retry is attempted, and the
-worker pauses for minutes instead of seconds.
+budget rather than a bad item: the item's priority is left alone, no immediate retry is attempted,
+and the delay doubles at once, so a sustained throttle backs off geometrically.
 
 The owner's hypothesis is that this page is **bot deterrence** — a reply that *says* "throttled"
 to discourage automated clients — rather than a genuine per-account budget that refills over
@@ -158,17 +160,20 @@ the signed-in markers is therefore caused by the throttling, not by a bad cookie
 page must not be read as evidence that the session has lapsed.
 
 **Gated pages**: A miss whose body carries no item markup but does look like an error page, an age
-check or a sign-in wall is classified `GATE`. If the login cookie actually changed, `_retry_if_gated`
-already retried once with the fresh credential; a merely broken page cannot double the request rate
-because nothing is retried unless the cookie changed. The item keeps its queue place and the delay is
-left alone, since a slower pace cannot fix a session that is not working.
+check or a sign-in wall is classified `GATE`. `_refresh_login_cookie_if_gated` has already re-read the
+login cookie when the page looked gated or signed out, so the next request carries the freshest
+credential. Nothing is re-scraped immediately: the miss goes through `classify_scrape` and takes the
+ordinary `GATE` path, which leaves the item queued in its place and the delay alone (a slower pace
+cannot fix a session that is not working), and the queue retries it under the worker's own adaptive
+delay. A merely broken page therefore cannot double the request rate either.
 
 The two checks are evaluated **independently**, and neither shadows the other. They overlap by
 construction: a throttle page is not the item page, so it lacks the signed-in markers too, and
-reading that overlap as "signed out" would refresh and then retry into a reply that may be
-reporting a spent budget. Only the network retry is suppressed by throttling. The cookie is still
-re-read, because that is a local file copy that spends no network budget, and it means the next
-request that does go out carries the freshest credential.
+reading that overlap as "signed out" would wrongly skip a refresh that spends no network budget. A
+throttle page still gets the cookie re-read — a local file copy — so the next request that does go
+out carries the freshest credential, but it makes **no claim about the session**: the page is
+anonymous because the budget is spent, not because the login is bad, so it neither raises the
+sign-in warning nor clears one.
 
 **Misses**: the throttle outcome outranks the other page outcomes, so a throttled page is paused and
 never read as a genuine absence. Otherwise a miss is neither a blanket failure nor an empty success:
@@ -196,6 +201,11 @@ the caller must test the description and not the dict. On any miss the dict also
 `body`, `http_status` and `final_url` so the caller can capture it; on a successful parse `body` is
 `None`, since there is no reason to retain a few hundred KB of HTML on the happy path. The caller
 stores only `description`; the `tags` key is discarded.
+
+The function paces nothing itself: it sends the request as soon as it is called. The interval between
+requests belongs to the caller and is owned by the configured `web_delay_seconds` — the worker sleeps
+it through `pacing.wait`, and any other caller must do the same (see [One owner for the
+interval](#web-scraping-phase)).
 
 **Browser-faithful requests.** The HTTP request is deliberately shaped to match a real Firefox top-level navigation, measured from a HAR capture of a signed-in item load. Both request sites (`scrape_extended_details` and `discover_items_by_date_html`) send one shared header mapping:
 

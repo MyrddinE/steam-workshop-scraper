@@ -3,14 +3,10 @@ import requests
 import re
 import sys
 import threading
-import time
 import requests.utils
 import logging
 from src.config import load_config, login_secure_value
 from src.firefox_cookies import browser_cookies, firefox_version
-
-_last_web_call = 0.0
-_WEB_DELAY = 5.0
 
 # The selectors scrape_extended_details depends on. Named so a selector miss can
 # be captured against the exact selector that failed.
@@ -168,19 +164,6 @@ _GATE_MARKERS = (
     "apphub_Login", "Please sign in",
 )
 TAGS_SELECTOR = '.workshopTags a'
-
-
-def set_web_delay(seconds: float):
-    global _WEB_DELAY
-    _WEB_DELAY = seconds
-
-
-def _rate_limit():
-    global _last_web_call
-    elapsed = time.time() - _last_web_call
-    if 0 < elapsed < _WEB_DELAY:
-        time.sleep(_WEB_DELAY - elapsed)
-    _last_web_call = time.time()
 
 
 # Steam answers an over-budget request with HTTP 200 and its ordinary Workshop
@@ -449,9 +432,12 @@ def scrape_extended_details(item_url: str, keep_body: bool = False) -> dict | No
     cookie jar and no form data for a GET -- so a capture records what went on
     the wire rather than a re-derived guess at it. The jar is the same object
     handed to the session, so the two cannot drift apart.
+
+    It applies no pacing of its own: the request goes out as soon as it is
+    called, and spacing between requests is the caller's, owned by the
+    configured ``web_delay_seconds`` (see ``src/web_worker.py``).
     """
     session = _get_session()
-    _rate_limit()
     cookies = _workshop_cookies_or_empty()
     request = {
         "method": "GET",

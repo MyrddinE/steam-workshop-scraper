@@ -309,7 +309,7 @@ def test_a_description_marker_without_the_template_is_not_a_genuine_absence():
     assert looks_like_item_page_without_description('<div id="highlightContent">d</div>') is False
 
 
-# --- the worker's refresh-and-retry ---------------------------------------
+# --- the worker's login-cookie refresh on a gated miss ---------------------
 
 def _worker_with(refresh):
     from src.web_worker import WebScraperThread
@@ -317,30 +317,45 @@ def _worker_with(refresh):
     return thread
 
 
-def test_a_gated_miss_retries_only_if_the_cookie_changed():
-    """A broken page must not double the request rate."""
+def test_a_gated_miss_refreshes_the_cookie_and_makes_no_second_request():
+    """The refresh is a local file read; the request itself is never repeated.
+
+    A gated page and a changed layout are indistinguishable from the selector
+    alone, and only the cookie can be refreshed for free, so that is all this
+    does. The miss goes through `classify_scrape` and the queue retries it under
+    the worker's own adaptive delay, which is the only spacing a request pays.
+    """
     item = {"workshop_id": 1}
     miss = {"description": None, "body": "<title>Steam Community :: Error</title>"}
-    with patch("src.web_worker.scrape_extended_details", return_value=miss) as scrape:
-        _worker_with(lambda: True)._retry_if_gated(item, "u", miss)
-        assert scrape.call_count == 1, "changed cookie: retried once"
-
+    refreshed = []
     with patch("src.web_worker.scrape_extended_details") as scrape:
-        _worker_with(lambda: False)._retry_if_gated(item, "u", miss)
-        assert scrape.call_count == 0, "unchanged cookie: no retry"
+        _worker_with(lambda: refreshed.append(1) or True)._refresh_login_cookie_if_gated(item, miss)
+    assert refreshed == [1], "the gated miss must refresh the login cookie"
+    assert scrape.call_count == 0, "and must not re-scrape"
 
 
-def test_a_normal_miss_is_not_retried():
+def test_an_unchanged_cookie_does_not_earn_a_request_either():
+    """Neither the refresh's answer nor a broken page buys a second request."""
     item = {"workshop_id": 1}
-    miss = {"description": None, "body": "<div class='account_pulldown'>me</div>"}
+    miss = {"description": None, "body": "<title>Steam Community :: Error</title>"}
     with patch("src.web_worker.scrape_extended_details") as scrape:
-        _worker_with(lambda: True)._retry_if_gated(item, "u", miss)
+        _worker_with(lambda: False)._refresh_login_cookie_if_gated(item, miss)
         assert scrape.call_count == 0
 
 
-def test_no_configured_source_means_no_retry():
+def test_a_normal_miss_refreshes_nothing_and_requests_nothing():
+    item = {"workshop_id": 1}
+    miss = {"description": None, "body": "<div class='account_pulldown'>me</div>"}
+    refreshed = []
+    with patch("src.web_worker.scrape_extended_details") as scrape:
+        _worker_with(lambda: refreshed.append(1) or True)._refresh_login_cookie_if_gated(item, miss)
+    assert refreshed == [], "a signed-in page is not evidence of a stale cookie"
+    assert scrape.call_count == 0
+
+
+def test_no_configured_source_means_no_refresh_and_no_retry():
     item = {"workshop_id": 1}
     miss = {"description": None, "body": "<title>Steam Community :: Error</title>"}
     with patch("src.web_worker.scrape_extended_details") as scrape:
-        _worker_with(None)._retry_if_gated(item, "u", miss)
+        _worker_with(None)._refresh_login_cookie_if_gated(item, miss)
         assert scrape.call_count == 0

@@ -410,6 +410,30 @@ def _web_scrape_priority(db_path, workshop_id=1):
         conn.close()
 
 
+def _run_one_attempt_with_mock(item, response, worker):
+    """Run one attempt, handing back the scrape mock so its calls can be counted.
+
+    ``_run_web_worker`` owns its own patch, so it cannot answer the question
+    these cases ask: how many requests one attempt made.
+    """
+    served = 0
+
+    def next_item(*args, **kwargs):
+        nonlocal served
+        served += 1
+        if served > 1:
+            worker.running = False
+            return None
+        return item
+
+    with patch("src.web_worker.get_next_web_scrape_item", side_effect=next_item), \
+         patch("src.web_worker.scrape_extended_details", return_value=response) as scrape, \
+         patch("time.sleep"), patch("src.pacing.wait"):
+        worker.start()
+        worker.join(timeout=5)
+    return scrape
+
+
 MISS = {"description": None, "tags": [], "body": "<html>no selector</html>",
         "http_status": 200, "final_url": "https://example.invalid/?id=1"}
 
@@ -682,6 +706,34 @@ def test_a_gate_does_not_grow_the_delay(db_path):
     assert worker.web_failures == 1, "a wall is not a failure for the delay rule"
     assert worker.web_delay == WEB_DELAY_DEFAULT
     assert _web_scrape_priority(db_path) == 5, "the item keeps its queue place"
+
+
+def test_a_gated_attempt_makes_exactly_one_request_and_keeps_the_item_queued(db_path):
+    """The retry is the queue's job now, under the worker's own adaptive delay.
+
+    A gated page used to earn a second request the moment the cookie refresh
+    changed anything -- the only request in the worker that paid no delay at
+    all, and one spaced by nothing but the scraper's own fixed 5 s gate. The
+    miss now takes the ordinary `GATE` path: one request, the cookie still
+    refreshed, the item left queued, and the queue retries it later.
+    """
+    from src.database import insert_or_update_item
+    from src.web_worker import WebScraperThread
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+
+    refreshed = []
+    worker = WebScraperThread(db_path, ".pauselock", {}, None,
+                              lambda: refreshed.append(1) or True)
+    gated = dict(MISS, body='<title>Steam Community :: Error</title>'
+                            '<div id="AgeCheck">age check</div>')
+
+    scrape = _run_one_attempt_with_mock(
+        {"workshop_id": 1, "steam_updated_at": 1}, gated, worker)
+
+    assert scrape.call_count == 1, "one request per attempt, never an immediate re-scrape"
+    assert refreshed == [1], "the cookie refresh still happens on a gated page"
+    assert _web_scrape_priority(db_path) == 5, "normal gate handling leaves the item queued"
 
 
 def test_the_missing_item_log_quotes_the_status_and_the_wording(db_path, caplog):
