@@ -2419,6 +2419,93 @@ def insert_or_update_item(db_path: str, item_data: dict) -> bool:
     conn.close()
     return is_new
 
+# ── Stage-handoff consumer predicates ─────────────────────────────────────────
+#
+# The five stage handoffs are enumerated in docs/data-pipeline.md. Each stage
+# hands an item on by writing the column the next stage's own query selects on,
+# and the two halves used to live only in the producer and the consumer -- so a
+# write the consumer could not see looked like success. These functions name the
+# consumer's half once. The worker poll interpolates the fragment into its SQL
+# and the handoff contract tests (tests/test_handoff_contract.py) interpolate the
+# same fragment scoped to one row, so the two cannot drift; a test that restated
+# the SQL could not notice the worker's copy changing.
+#
+# Each returns a WHERE fragment and nothing else. Ordering and the limit belong
+# to the selector, never here: those are the hot path of four stages and are
+# covered by tests/test_queue_indexes.py against the partial indexes.
+
+def api_fetch_queue_predicate() -> str:
+    """Discovery → API fetch: the fetch queue's entry condition.
+
+    Queued at a positive priority and not dead. A discovered row whose
+    ``api_priority`` was left at the column default is issue 20: in no queue at
+    all.
+    """
+    return "api_priority > 0 AND (status IS NULL OR status != -1)"
+
+
+def web_scrape_queue_predicate() -> str:
+    """API fetch → web scrape: the web scrape queue's entry condition.
+
+    The producer is ``_flag_scrape_and_image``; the worker's own success test is
+    that it stored a description, not merely that it cleared the flag, which is
+    issue 19's shape.
+    """
+    return "needs_web_scrape > 0"
+
+
+def image_queue_predicate() -> str:
+    """API fetch → image: the image queue's entry condition.
+
+    The producer is ``_flag_scrape_and_image``; ``image_extension`` records the
+    answer, so a permanent 404 or a non-image type also settles the stage.
+    """
+    return "needs_image > 0"
+
+
+def translation_queue_predicate() -> str:
+    """API fetch and web scrape → translation: the translation poll's condition.
+
+    The poll hands out every row of ``translation_queue``: a row is outstanding
+    by virtue of existing, and the producer's counterpart (the translator)
+    deletes it when the text is stored. The fragment is deliberately vacuous
+    because that is the consumer's real predicate; naming it keeps the poll and
+    its contract test asking one question.
+    """
+    return "1"
+
+
+def translation_priority_predicate() -> str:
+    """The item-level reading of the translation queue's mirror flag.
+
+    ``flag_field_for_translation`` raises ``translation_priority`` with MAX when
+    it queues a field and the translator clears it when the queue empties, so
+    the mirror is the row-level answer to "queued for translation" that the
+    handoff invariant (``queued_nowhere``/``dead_queued``) counts. The worker's
+    own question is the queue row; this is the row's.
+    """
+    return "translation_priority > 0"
+
+
+def queued_anywhere_predicate() -> str:
+    """Any stage → dead: the union a dead item has to fail.
+
+    ``_settle_api_failure`` clears all four flags when it writes ``status = -1``;
+    the web, image and translation polls have no dead-item guard of their own, so
+    this union is how "in no queue" is stated at the item level. It is built from
+    the named queue predicates so a change to one of them moves this with it.
+    """
+    return " OR ".join(
+        f"({predicate})"
+        for predicate in (
+            api_fetch_queue_predicate(),
+            web_scrape_queue_predicate(),
+            image_queue_predicate(),
+            translation_priority_predicate(),
+        )
+    )
+
+
 def get_next_items_to_scrape(db_path: str, limit: int = 10, staleness_days: int = 30) -> list[dict]:
     """
     Retrieves the next batch of workshop items to be scraped.
@@ -2428,9 +2515,9 @@ def get_next_items_to_scrape(db_path: str, limit: int = 10, staleness_days: int 
     conn = get_connection(db_path)
     cursor = conn.cursor()
 
-    sql = """
+    sql = f"""
         SELECT * FROM workshop_items
-        WHERE api_priority > 0 AND (status IS NULL OR status != -1)
+        WHERE {api_fetch_queue_predicate()}
         ORDER BY api_priority DESC, api_fetched_at ASC
         LIMIT ?
     """
@@ -2462,7 +2549,7 @@ def count_fetchable_items(db_path: str) -> int:
     conn = get_connection(db_path)
     cursor = conn.execute(
         "SELECT COUNT(workshop_id) as count FROM workshop_items "
-        "WHERE api_priority > 0 AND (status IS NULL OR status != -1)"
+        f"WHERE {api_fetch_queue_predicate()}"
     )
     row = cursor.fetchone()
     conn.close()
@@ -2906,9 +2993,9 @@ def get_app_tracking(db_path: str, appid: int) -> dict | None:
 def get_next_web_scrape_item(db_path: str) -> dict | None:
     """Returns the highest-priority item needing web scraping, or None."""
     conn = get_connection(db_path)
-    cursor = conn.execute("""
+    cursor = conn.execute(f"""
         SELECT * FROM workshop_items
-        WHERE needs_web_scrape > 0
+        WHERE {web_scrape_queue_predicate()}
         ORDER BY needs_web_scrape DESC, api_fetched_at ASC
         LIMIT 1
     """)
@@ -2955,9 +3042,9 @@ def bump_web_priority_for_detail(db_path: str, workshop_id: int):
 def get_next_image_item(db_path: str) -> dict | None:
     """Returns the highest-priority item needing image download, or None."""
     conn = get_connection(db_path)
-    cursor = conn.execute("""
+    cursor = conn.execute(f"""
         SELECT * FROM workshop_items
-        WHERE needs_image > 0
+        WHERE {image_queue_predicate()}
         ORDER BY needs_image DESC, api_fetched_at ASC
         LIMIT 1
     """)
@@ -3129,6 +3216,7 @@ def get_next_batch_for_translation(db_path: str, limit: int = 20) -> list[dict]:
     conn = get_connection(db_path)
     cursor = conn.execute(
         "SELECT * FROM translation_queue "
+        f"WHERE {translation_queue_predicate()} "
         "ORDER BY priority DESC, queued_at IS NOT NULL, queued_at ASC LIMIT ?",
         (limit,)
     )

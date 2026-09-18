@@ -499,13 +499,25 @@ Each stage hands an item to the next by writing the column the next stage's own 
 contract is enumerated here because it is otherwise written down only in the two functions that happen
 to implement it — the producer that writes the column and the consumer that reads it:
 
-| Handoff | Producer writes | Consumer selects on |
-|---|---|---|
-| Discovery → API fetch | `api_priority = 3` for a cursor-discovered item, `5` for a page-discovered new or changed one, with `status` and `api_fetched_at` left NULL (`seed_database`, `_run_page_discovery`) | `get_next_items_to_scrape`: `api_priority > 0 AND (status IS NULL OR status != -1)` |
-| API fetch → web scrape | `status = 200`, `api_fetched_at = now`, then `flag_for_web_scrape(max(3, requested))` — or `max(1, requested)` for an item the enrichment filters exclude (`_flag_scrape_and_image`) | `get_next_web_scrape_item`: `needs_web_scrape > 0`. The worker's own success test is that it stored a description, not merely that the flag is clear |
-| API fetch → image | `flag_for_image(max(3, requested))`, or `max(1, requested)` when the filters exclude, whenever `preview_url` is present (`_flag_scrape_and_image`) | `get_next_image_item`: `needs_image > 0`; `image_extension` records the answer, so a permanent `404` or a non-image type also settles the stage |
-| API fetch and web scrape → translation | `flag_field_for_translation` raises the item's `translation_priority` with `MAX` and inserts a `translation_queue` row for each non-ASCII `title`/`short_description` (`_flag_translations`) or `extended_description` (`WebScraperThread`) | `get_next_batch_for_translation`: any `translation_queue` row; the translator clears the mirror to `0` when the item has no queue entries left |
-| any stage → dead | `_settle_api_failure` on a permanent `404`: `status = -1` and `api_priority`, `needs_web_scrape`, `needs_image` and `translation_priority` all cleared | every queue predicate. The web, image and translation polls have **no** dead-item guard, so that clear is what keeps a dead item out; the fetch queue also tests `status != -1` on its own |
+| Handoff | Producer writes | Consumer selects on | Predicate function (`src/database.py`) |
+|---|---|---|---|
+| Discovery → API fetch | `api_priority = 3` for a cursor-discovered item, `5` for a page-discovered new or changed one, with `status` and `api_fetched_at` left NULL (`seed_database`, `_run_page_discovery`) | `get_next_items_to_scrape`: `api_priority > 0 AND (status IS NULL OR status != -1)` | `api_fetch_queue_predicate()` |
+| API fetch → web scrape | `status = 200`, `api_fetched_at = now`, then `flag_for_web_scrape(max(3, requested))` — or `max(1, requested)` for an item the enrichment filters exclude (`_flag_scrape_and_image`) | `get_next_web_scrape_item`: `needs_web_scrape > 0`. The worker's own success test is that it stored a description, not merely that the flag is clear | `web_scrape_queue_predicate()` |
+| API fetch → image | `flag_for_image(max(3, requested))`, or `max(1, requested)` when the filters exclude, whenever `preview_url` is present (`_flag_scrape_and_image`) | `get_next_image_item`: `needs_image > 0`; `image_extension` records the answer, so a permanent `404` or a non-image type also settles the stage | `image_queue_predicate()` |
+| API fetch and web scrape → translation | `flag_field_for_translation` raises the item's `translation_priority` with `MAX` and inserts a `translation_queue` row for each non-ASCII `title`/`short_description` (`_flag_translations`) or `extended_description` (`WebScraperThread`) | `get_next_batch_for_translation`: any `translation_queue` row; the translator clears the mirror to `0` when the item has no queue entries left | `translation_queue_predicate()` (the poll's; `translation_priority_predicate()` is the item-level mirror the invariant reads) |
+| any stage → dead | `_settle_api_failure` on a permanent `404`: `status = -1` and `api_priority`, `needs_web_scrape`, `needs_image` and `translation_priority` all cleared | every queue predicate. The web, image and translation polls have **no** dead-item guard, so that clear is what keeps a dead item out; the fetch queue also tests `status != -1` on its own | `queued_anywhere_predicate()` (built from the four above) |
+
+Each predicate is a named function, not a copy of its SQL: the worker poll
+interpolates the fragment into its statement and the tests in
+`tests/test_handoff_contract.py` interpolate the same fragment scoped to one row,
+so the two cannot drift. A test that restated the SQL would prove only its own
+copy. The functions return the `WHERE` fragment and nothing else — ordering and
+the limit stay in the selector, because they are the hot path of four stages and
+`tests/test_queue_indexes.py` pins their query plans. The contract tests drive
+the real producers (`seed_database`, `_process_item`, `_settle_api_failure`) and
+assert, for each handoff, either that the consumer selects the item because the
+work is outstanding or that it does not select it and the stage's output is
+stored; not selected and nothing stored is the bug the counters exist to notice.
 
 The API refresh is the change detector: it is the cheapest call and the only stage that goes stale on
 a timer, so a dependent stage is re-queued because its source changed or its output is missing, never
@@ -523,9 +535,11 @@ Two statistics watch the invariant, each meant to read zero:
 which flag was left set, so a non-zero reading points at the queue to look in. Neither replaces the
 other — the scalar is the invariant, the breakdown is the diagnosis.
 
-Both count; neither repairs. The consumer's predicate and the producer's write remain separate
-statements, so the table above is the contract and these two counters are how a divergence between
-them is noticed.
+Both count; neither repairs. The consumer's predicates are named functions shared
+with the handoff contract tests, so a divergence between a predicate and the
+producer's write is now caught at the handoff rather than inferred from these two
+numbers; the counters remain how the same divergence is noticed in the field,
+where no test is running.
 
 ---
 
