@@ -33,12 +33,18 @@ USER_COLUMNS = frozenset({
 
 def get_connection(db_path: str):
     """
-    Returns a SQLite connection with WAL mode enabled and Row factory.
-    WAL allows simultaneous readers and writers.
+    Returns a SQLite connection with a Row factory.
+
+    The journal mode is deliberately *not* set here. It is a persistent property
+    of the database file, established once by ``initialize_database``; running
+    ``PRAGMA journal_mode=WAL`` on every connection makes a read-only caller
+    reach for a mode change, and that statement is not covered by the
+    connection's busy timeout, so a lock held by another process turns into
+    ``sqlite3.OperationalError`` on a plain read. After that change, WAL allows
+    simultaneous readers and writers as before.
     """
     conn = sqlite3.connect(db_path, timeout=15.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
     return conn
 
 def normalize_tags(raw_tags) -> str:
@@ -612,9 +618,18 @@ def _demote_filtered_out_queue_priorities(conn) -> tuple[int, int]:
 def initialize_database(db_path: str):
     """
     Initializes the SQLite database and creates the workshop_items table and indexes.
+
+    This is also the one place the journal mode is set. WAL is a persistent
+    property of the file rather than of a connection, so establishing it here
+    covers every later ``get_connection`` -- the daemon, the TUI and the web
+    runner all call this before they read or write. Setting it here rather than
+    per connection matters: a journal-mode transition needs a moment where
+    nothing else holds a lock, which the connection's busy timeout does not
+    wait out, and a reader that only wants a row must not risk it.
     """
     conn = get_connection(db_path)
     cursor = conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL;")
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS workshop_items (

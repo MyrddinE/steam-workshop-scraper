@@ -119,7 +119,13 @@ The database is designed for high-concurrency and complex querying. See
 [data-model.md](data-model.md) for the full column reference.
 
 * **Concurrency model**: Uses SQLite WAL (Write-Ahead Logging) mode, so the daemon can write while
-  the TUI performs heavy read operations without locking.
+  the TUI performs heavy read operations without locking. The mode is a persistent property of the
+  database file and is established **once**, by `initialize_database`, which every entry point calls
+  before it reads or writes. `get_connection` deliberately runs no `PRAGMA journal_mode`: a
+  journal-mode statement is not covered by the connection's busy timeout, so a reader that ran it on
+  every connection could be refused while another process held a lock — which is how a two-second
+  TUI poll took the session down (issue 43). The unattended TUI polls additionally skip a tick they
+  could not read rather than ending the session; see [tui.md](tui.md).
 * **Schema**:
   * **`workshop_items`**: Item metadata. Key columns include `workshop_id` (PK), `status`
     (HTTP-like status code), `title`, `creator`, `extended_description`, the three timestamp

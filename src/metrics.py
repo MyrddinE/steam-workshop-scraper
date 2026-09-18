@@ -25,15 +25,20 @@ Two rules keep this honest:
 
 from __future__ import annotations
 
-import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator
 
+from src import db_poll
 from src.database import get_connection
 
 #: Used when a caller wants every metric and has no measurements of its own.
 DEFAULT_STALENESS_DAYS = 30
+
+#: One reporter for all metrics, keyed by metric name. The stats screen retries
+#: a failed metric on its next scheduler tick; this keeps a persistent failure
+#: from writing a warning every tick, while still reporting the first one.
+_metric_failures = db_poll.RepeatFailureLog()
 
 
 @dataclass(frozen=True)
@@ -97,9 +102,15 @@ def _run_one(conn, name: str, params: dict) -> dict:
         value = spec.run(conn, params)
     except Exception as exc:
         # One broken metric must not take the whole screen down with it; the
-        # front ends render each chunk independently.
-        logging.warning("[metrics] %s failed: %s", name, exc)
+        # front ends render each chunk independently. The report is throttled:
+        # the stats screen re-runs a failed metric on its next scheduler tick,
+        # so a persistent failure -- a database lock, most of all -- must not
+        # write a line per tick forever. The first failure of a run warns and
+        # repeats are debug until that metric succeeds again.
+        _metric_failures.failed(name, "[metrics] %s failed: %s", name, exc)
         value = None
+    else:
+        _metric_failures.succeeded(name)
     return {
         "value": value,
         "ms": round((time.monotonic() - started) * 1000, 1),

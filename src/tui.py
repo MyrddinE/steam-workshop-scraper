@@ -16,6 +16,7 @@ from textual.worker import Worker, WorkerState
 from src.database import search_items, get_all_authors, initialize_database, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, get_connection, FILTER_SCHEMA, ALL_FILTER_FIELDS, bump_api_priority_for_list, bump_api_priority_for_detail, get_subscription_states
 from src.analysis import view_window_analysis
 from src import metrics
+from src import db_poll
 from src import images
 from src import pending
 from src import subscription
@@ -1145,8 +1146,15 @@ class DetailsPane(VerticalScroll):
         """Setup background refresh to catch translation updates."""
         self.set_interval(2.0, self.refresh_data)
 
+    @db_poll.guard_db_poll("detail pane poll")
     async def refresh_data(self) -> None:
-        """Fetches fresh data from DB for the current workshop_id."""
+        """Fetches fresh data from DB for the current workshop_id.
+
+        A transient lock skips this tick instead of ending the session: the poll
+        fires every two seconds, so the next one is the retry. ``item_data`` is
+        left exactly as it was, because the read that would have replaced it did
+        not happen.
+        """
         if self.workshop_id:
             # We access db_path via self.app (ScraperApp instance)
             fresh_data = get_item_details(self.app.db_path, self.workshop_id)
@@ -1973,6 +1981,7 @@ class ScraperApp(App):
         # The web poll's adaptive delay: faster while more rows are outstanding.
         self._start_subscription_poll(max(1.0, math.log2(remaining)))
 
+    @db_poll.guard_db_poll("subscription marker poll")
     async def refresh_subscription_rows(self, workshop_ids) -> None:
         """Re-read the given rendered rows and redraw the ones that moved.
 
@@ -1981,6 +1990,12 @@ class ScraperApp(App):
         reconcile -- is picked up; no writer is hooked and no callback is
         required. Only the subscription columns are replaced, so the rest of the
         row's data is left as it was.
+
+        A transient lock skips this read without raising. That matters twice
+        over: the one-shot poll re-arms itself from the rendered state, so the
+        next tick retries, and the subscribe result's fast path reaches this
+        method from a callback of its own, where an exception would take the
+        session down just as the timer did.
         """
         try:
             list_view = self.query_one("#results-list", ListView)
