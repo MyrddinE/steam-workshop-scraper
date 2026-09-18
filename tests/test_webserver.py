@@ -280,6 +280,24 @@ def test_metrics_catalogue_lists_every_metric_in_seed_order(web_client):
     assert "tiers" not in data, "the response must not group metrics into tiers"
 
 
+def test_metrics_catalogue_carries_the_handoff_counters(web_client):
+    """The panel draws every catalogue entry, so registration is the web seam.
+
+    The client builds one section per metric from `/api/metrics` and falls back
+    to a JSON dump for a value it has no renderer for, so registering the metric
+    is all the web front end needs -- unlike the TUI, which also needs a chunk.
+    """
+    client, _ = web_client
+    data = client.get('/api/metrics').get_json()
+    names = [m["name"] for m in data["metrics"]]
+    assert "queued_nowhere" in names
+    assert "dead_queued" in names
+    for name in ("queued_nowhere", "dead_queued"):
+        entry = client.get(f'/api/metrics/{name}').get_json()
+        assert entry["value"] == 0, f"{name} did not read zero on an empty database"
+        assert entry["note"]
+
+
 def test_metric_endpoint_returns_value_and_measured_cost(web_client):
     client, db_path = web_client
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "x", "status": 200})

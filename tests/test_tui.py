@@ -491,6 +491,8 @@ _FAKE_METRIC_VALUES = {
     "app_tracking": [{"appid": 294100, "last_page_scanned": 7, "last_cursor": "abc"}],
     "status_counts": [{"status": 200, "count": 2}, {"status": -1, "count": 1}],
     "stuck_work": {"web": 1, "image": 0, "translation": 0, "api": 0},
+    "dead_queued": 1,
+    "queued_nowhere": 2,
     "fetch_recency": {"fresh": 1, "stale": 0, "blank": 1},
     "coverage": {
         "total": 2, "api_fetched": 2, "described": 1,
@@ -594,6 +596,43 @@ async def test_stats_screen_keeps_tags_in_their_own_right_hand_column(mock_confi
                 if name == StatsScreen.TAG_METRIC:
                     continue
                 assert screen.query(f"#chunk-{name}"), f"{name} lost its section"
+
+
+@pytest.mark.asyncio
+async def test_stats_screen_renders_the_handoff_counters(mock_config):
+    """The handoff detectors are registered metrics, so the TUI must draw them.
+
+    This is the seam that catches a metric added to ``src/metrics.py`` without a
+    matching ``CONTENT_IDS``/render branch: composing the screen would raise.
+    """
+    with patch('src.tui.load_config', return_value=mock_config), \
+         patch('src.tui.metrics.iter_metrics', side_effect=_fake_iter_metrics([])):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+            app.push_screen(StatsScreen(app.db_path))
+            await pilot.pause(ASYNC_PAUSE)
+            screen = app.screen
+            # The worker applies metrics as they finish; wait for both counters.
+            for _ in range(200):
+                await pilot.pause(0.02)
+                if {"queued_nowhere", "dead_queued"} <= set(screen._measured_ms):
+                    break
+
+            assert screen.query("#chunk-queued_nowhere"), "queued_nowhere has no section"
+            assert screen.query("#chunk-dead_queued"), "dead_queued has no section"
+            queued = str(screen.query_one("#queued-nowhere-content", Static).render())
+            assert "2" in queued and "not complete" in queued
+            dead = str(screen.query_one("#dead-queued-content", Static).render())
+            assert "1" in dead and "dead item" in dead
+
+
+def test_handoff_counters_show_an_all_clear_at_zero():
+    """A metric meant to read zero should say so, not print a bare 0."""
+    zero = StatsScreen._format_handoff_metric(0, "nothing stranded", "item(s) stranded")
+    assert "green" in zero and "0" not in zero
+    bad = StatsScreen._format_handoff_metric(3, "nothing stranded", "item(s) stranded")
+    assert "red" in bad and "3" in bad and "item(s) stranded" in bad
 
 
 def test_stats_request_order_learns_from_the_measured_costs():

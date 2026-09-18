@@ -474,6 +474,47 @@ The `summary_only` SELECT returns: `workshop_id, title, title_en, creator, consu
 
 ---
 
+## Stage Handoffs
+
+Every item is, at all times, in exactly one state:
+
+* queued for the API fetch (`api_priority > 0`), or
+* queued for a web scrape (`needs_web_scrape > 0`), or
+* queued for an image (`needs_image > 0`), or
+* queued for translation (`translation_priority > 0`), or
+* complete for the stage that owns it, or
+* deliberately dead (`status = -1`) and therefore in **no** queue.
+
+Each stage hands an item to the next by writing the column the next stage's own query selects on. The
+contract is enumerated here because it is otherwise written down only in the two functions that happen
+to implement it — the producer that writes the column and the consumer that reads it:
+
+| Handoff | Producer writes | Consumer selects on |
+|---|---|---|
+| Discovery → API fetch | `api_priority = 3` for a cursor-discovered item, `5` for a page-discovered new or changed one, with `status` and `api_fetched_at` left NULL (`seed_database`, `_run_page_discovery`) | `get_next_items_to_scrape`: `api_priority > 0 AND (status IS NULL OR status != -1)` |
+| API fetch → web scrape | `status = 200`, `api_fetched_at = now`, then `flag_for_web_scrape(max(3, requested))` — or `max(1, requested)` for an item the enrichment filters exclude (`_flag_scrape_and_image`) | `get_next_web_scrape_item`: `needs_web_scrape > 0`. The worker's own success test is that it stored a description, not merely that the flag is clear |
+| API fetch → image | `flag_for_image(max(3, requested))`, or `max(1, requested)` when the filters exclude, whenever `preview_url` is present (`_flag_scrape_and_image`) | `get_next_image_item`: `needs_image > 0`; `image_extension` records the answer, so a permanent `404` or a non-image type also settles the stage |
+| API fetch and web scrape → translation | `flag_field_for_translation` raises the item's `translation_priority` with `MAX` and inserts a `translation_queue` row for each non-ASCII `title`/`short_description` (`_flag_translations`) or `extended_description` (`WebScraperThread`) | `get_next_batch_for_translation`: any `translation_queue` row; the translator clears the mirror to `0` when the item has no queue entries left |
+| any stage → dead | `_settle_api_failure` on a permanent `404`: `status = -1` and `api_priority`, `needs_web_scrape`, `needs_image` and `translation_priority` all cleared | every queue predicate. The web, image and translation polls have **no** dead-item guard, so that clear is what keeps a dead item out; the fetch queue also tests `status != -1` on its own |
+
+The API refresh is the change detector: it is the cheapest call and the only stage that goes stale on
+a timer, so a dependent stage is re-queued because its source changed or its output is missing, never
+because time passed (see [Change detection across stages](#change-detection-across-stages)).
+
+Two statistics watch the invariant, each meant to read zero:
+
+* `queued_nowhere` — live items in no queue that the pipeline never completed. It is the shape of
+  issue 19 (dequeued as scraped with no description stored) and issue 20 (discovered with no fetch
+  priority).
+* `dead_queued` — dead items still holding a queue flag, the shape of issue 17. `stuck_work` reports
+  the same population broken down per queue.
+
+Both count; neither repairs. The consumer's predicate and the producer's write remain separate
+statements, so the table above is the contract and these two counters are how a divergence between
+them is noticed.
+
+---
+
 ## Item Lifecycle State Machine
 
 ```

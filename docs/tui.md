@@ -204,7 +204,7 @@ The stats screen's own read runs on a worker (`exit_on_error=False`), so it was 
 
 Opened by Ctrl+R. The screen asks `src.metrics` for named metrics and draws each into its own
 labelled section — one widget per metric — so a chunk appears the moment its own query
-finishes without touching any other. Nothing is grouped or classified by cost. The ten
+finishes without touching any other. Nothing is grouped or classified by cost. The twelve
 metrics and what each section renders:
 
 | Metric | Rendered as |
@@ -213,7 +213,9 @@ metrics and what each section renders:
 | `totals` | live/dead item counts with the overall total |
 | `app_tracking` | the per-AppID tracking table |
 | `status_counts` | the status distribution |
+| `dead_queued` | the dead-items-still-queued counter, with an all-clear at zero |
 | `stuck_work` | the stuck-work callout |
+| `queued_nowhere` | the items-in-no-queue counter, with an all-clear at zero |
 | `fetch_recency` | fresh / stale / never-attempted counts |
 | `coverage` | coverage bars over live items |
 | `translation_status` | the translation classification |
@@ -230,7 +232,10 @@ Coverage (`_format_coverage`, `src/tui.py:396`) is drawn as a labelled progress 
 stage — API data, description, image, translation, creator — against the number of live
 items, with dead items excluded because they can never be covered. `stuck_work`
 (`_format_stuck`, `src/tui.py:418`) names any dead items still flagged in a queue and says
-the queues will not drain until they are cleared; a zero value shows an all-clear. The
+the queues will not drain until they are cleared; a zero value shows an all-clear. The two
+handoff counters share `_format_handoff_metric`: `dead_queued` names any dead items still
+holding a flag, and `queued_nowhere` any live items in no queue the pipeline never completed,
+each drawn as a green sentence when it reads the healthy zero. The
 priority section (`_format_priority`, `src/tui.py:439`) reads as queue state — "Translation
 queue: N waiting" followed by the priority mix — rather than a raw column dump. `high_water`
 is the one metric whose `None` is a real answer ("never"), not a failure.
