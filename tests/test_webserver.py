@@ -2282,9 +2282,9 @@ def test_toggle_queue_reflects_the_databases_state_and_updates_the_marker(web_cl
 
 # ── the daemon log pane decodes the colour escapes ────────────────────────────
 #
-# The daemon writes SGR escapes into its log file (the "ignored" marker on a
-# rejected discovery is red). A text node renders the escape as a replacement
-# glyph and the code itself as literal "[31m" text, so the pane showed neither
+# The daemon writes SGR escapes into its log file (the "enriching" marker on a
+# selected discovery is green). A text node renders the escape as a replacement
+# glyph and the code itself as literal "[32m" text, so the pane showed neither
 # the colour nor a readable line.
 
 ANSI_LOG_DRIVER = """
@@ -2294,7 +2294,7 @@ const _ansiToHtml = (__ANSI__);
 const E = '\\u001b';
 console.log(JSON.stringify({
   plain: _ansiToHtml('no codes here'),
-  red: _ansiToHtml('x ' + E + '[31mignored' + E + '[0m'),
+  enriching: _ansiToHtml('x ' + E + '[32menriching' + E + '[0m'),
   unterminated: _ansiToHtml('x ' + E + '[31mred to the end'),
   html: _ansiToHtml('<b>&</b> ' + E + '[32mok' + E + '[0m'),
   bold: _ansiToHtml(E + '[1mheading' + E + '[0m'),
@@ -2313,12 +2313,13 @@ def test_daemon_log_decodes_colour_instead_of_showing_the_escape(web_client, tmp
     out = _run_node(driver, tmp_path)
 
     assert out["plain"] == "no codes here", "a line without codes is passed through"
-    assert "[31m" not in out["red"], "the escape code must not survive as visible text"
-    assert "\u001b" not in out["red"], "the raw escape must not reach the page"
-    assert "ignored" in out["red"]
-    assert "color:#e06c75" in out["red"], "the red it was given must be applied"
-    assert out["red"].count("<span") == 1, "one run of colour, one span"
-    assert out["red"].endswith("</span>"), "the span must be closed"
+    assert "[32m" not in out["enriching"], "the escape code must not survive as visible text"
+    assert "\u001b" not in out["enriching"], "the raw escape must not reach the page"
+    assert "enriching" in out["enriching"]
+    assert "color:#98c379" in out["enriching"], \
+        "the green the daemon's enriching marker uses must be applied"
+    assert out["enriching"].count("<span") == 1, "one run of colour, one span"
+    assert out["enriching"].endswith("</span>"), "the span must be closed"
 
     # An unterminated run must still close, or every later line inherits the
     # colour and the pane goes monochrome.

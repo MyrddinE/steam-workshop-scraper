@@ -835,7 +835,14 @@ class Daemon:
 
         self._flag_translations(merged_data, item_id, enriched, inherited_prio)
 
-        logging.info(f"[A:{item_id}] \"{display_title}\"{' — \033[31mignored\033[0m' if not enriched else ''}")
+        # Mark the useful event, not the common one: `enriching` says the item
+        # met its AppID's enrichment filter and is queued for a page and preview
+        # fetch. The old form marked the *rejected* item instead, which was
+        # 99.0% of discovery lines (measured live 2026-09-17 over the last 6 MB
+        # of scraper.log: 53,523 of 54,057), so the one line in a hundred worth
+        # reading was the unmarked one. Nothing is lost: an unmarked line is the
+        # item that failed the filter and is only scraped as backlog work.
+        logging.info(f"[A:{item_id}] \"{display_title}\"{' — \033[32menriching\033[0m' if enriched else ''}")
         # Step 3: propose the creator for the batch-level persona refresh. The
         # per-item method no longer makes an HTTP call here; nothing about the
         # delay is touched, because the request already succeeded.

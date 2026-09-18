@@ -330,15 +330,22 @@ meant to be zero, and one query finds them.
 
 ## Discovery logging: mark what is being enriched, not what is not
 
-**Status: Under discussion.** Agreed in principle, deliberately not started.
+**Status: Landed.** The marker is inverted in `src/daemon.py`; the three places
+that carried the old wording moved with it, and the behaviour and its colour are
+pinned by `tests/test_discovery_marker.py`. The measured evidence that motivated
+the change is kept below.
 
 A discovery line carries a red `ignored` marker when the item failed its enrichment filters, and
-nothing at all when it did not (`src/daemon.py:815`):
+nothing at all when it did not (`src/daemon.py:845`):
 
 ```
 [A:2063560223] "gwiezdny papiesz" — ignored
 [A:2063564494] "NSX"
 ```
+
+*(Landed: the two shapes are now swapped — the rejected item is the bare
+`[A:...] "title"` line, and the selected one is
+`[A:...] "title" — enriching` with `enriching` in green.)*
 
 The marker is therefore on almost every line, and says the least interesting thing about it.
 *Measured live* on 2026-09-17 over the last 6 MB of `scraper.log`: **53,523 of 54,057** discovery
@@ -351,16 +358,28 @@ Invert it: drop the `ignored` marker, and append `enriching` in green (`\033[32m
 details", since that return value is what gates the web-scrape and image queues. One line changes,
 and the web log viewer needs nothing: its SGR table already renders 32 as `#98c379`
 (`templates/index.html:1519`). The TUI's pane needs nothing either, but for a different reason —
-`_poll_tail` writes the raw line into a `RichLog` (`src/tui.py:678`) and nothing in the TUI decodes
+`_poll_tail` writes the raw line into a `RichLog` (`src/tui.py:690`) and nothing in the TUI decodes
 ANSI, so no marker colour has ever reached that pane.
+
+*(Landed. `src/daemon.py` appends `\033[32menriching\033[0m` when `enriched` is true, which is
+`_flag_scrape_and_image`'s own return value, and adds no marker otherwise. Both "needs nothing"
+claims were verified rather than assumed: the viewer's `ANSI_SGR` table maps `32: '#98c379'`
+(`templates/index.html:1549`), and the TUI's `_poll_tail` writes each raw line into a `RichLog`
+(`src/tui.py:690`) with no ANSI decoding. Three tests in `tests/test_discovery_marker.py` drive the
+real `_process_item`: an enriched item is marked with `\033[32menriching\033[0m`, a rejected one
+carries no escape at all, and the emitted code is asserted against the viewer's own table. All
+three fail against the old marker.)*
 
 The old wording is also load-bearing in three places that would move with it:
 
 * `src/daemon_runner.py:39` explains the em-dash encoding trap by naming the "ignored" marker, and
-  the example line it describes would no longer exist.
-* `tests/test_daemon_runner.py:146` and `tests/test_webserver.py:1985` use an `ignored` line as a
+  the example line it describes would no longer exist. *(Landed: the comment now names the
+  "enriching" marker.)*
+* `tests/test_daemon_runner.py:146` and `tests/test_webserver.py:2285` use an `ignored` line as a
   *sample* — one for the reader's encoding, one for SGR decoding. Neither depends on which word is
   used, but both comments read as if they did, which is how a stale example outlives its subject.
+  *(Landed: the encoding sample is now the daemon's own `[A:...] "..." — enriching` line, and the
+  SGR driver decodes the green `enriching` marker and asserts the viewer's `#98c379`.)*
 
 ---
 

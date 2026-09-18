@@ -110,7 +110,7 @@ def test_main_logging_no_daemon_with_file():
 #
 # The handler used the platform default, which on Windows is cp1252. That
 # corrupted every non-ASCII character once the file was read back as UTF-8 -- the
-# em dash in the "ignored" marker became a single 0x97 byte, which the reader
+# em dash in the "enriching" marker became a single 0x97 byte, which the reader
 # turns into the replacement character -- and silently dropped any record cp1252
 # cannot represent at all, which is every log line naming a Japanese or Chinese
 # item. Both failures are invisible from inside the process, so they are pinned
@@ -143,7 +143,9 @@ def test_a_cjk_record_survives_the_log_file(tmp_path):
     previous = logging.raiseExceptions
     logging.raiseExceptions = False
     try:
-        logger.info('Scraped "鸣潮-爱弥丝" — ignored')
+        # The marker is the sample the reader must survive: this is the daemon's
+        # own discovery line, with its em dash and its green SGR escape.
+        logger.info('[A:2063560223] "鸣潮-爱弥丝" — \033[32menriching\033[0m')
     finally:
         logging.raiseExceptions = previous
         logger.removeHandler(handler)
