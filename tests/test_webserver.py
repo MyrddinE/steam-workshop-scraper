@@ -586,11 +586,12 @@ def subscribe_env(tmp_path, monkeypatch):
     """A database with item 1, plus the route's two seams replaced.
 
     `_get_session` is the request seam now that the route shares the scraper's
-    session, so the recorder lives on it. `requests.post` is replaced with a
-    tripwire rather than a recorder: a return to a bare call fails loudly
-    instead of silently passing. The cookie source is replaced with a set the
-    test dictates -- the route must read that entry point, so a route taking
-    the token from anywhere else is caught here.
+    session, so the recorder lives on it. The cookie source is replaced with a
+    set the test dictates -- the route must read that entry point, so a route
+    taking the token from anywhere else is caught here. There is no runtime
+    tripwire on a bare `requests.post` because the module no longer imports
+    `requests`; that shape is pinned at the source instead, in
+    `test_the_subscribe_route_has_no_bare_requests_call`.
     """
     db_path = str(tmp_path / "subscribe.db")
     initialize_database(db_path)
@@ -611,15 +612,13 @@ def subscribe_env(tmp_path, monkeypatch):
             state["calls"].append({"url": url, **kwargs})
             resp = MagicMock()
             resp.status_code = 200
+            resp.url = url
+            resp.headers = dict(state.get("response_headers") or {})
+            resp.text = state.get("body") or json.dumps(state["payload"])
             resp.json.return_value = state["payload"]
             return resp
 
     monkeypatch.setattr(webserver.web_scraper, "_get_session", lambda: _Session())
-
-    def _bare_post(*args, **kwargs):
-        raise AssertionError("the route used a bare requests.post, not the shared session")
-
-    monkeypatch.setattr(webserver.requests, "post", _bare_post)
     return db_path, state
 
 
@@ -804,6 +803,59 @@ def test_subscribe_request_shape_matches_the_scrape_path(subscribe_env):
     # The fetch metadata of a same-origin XHR, not of a navigation.
     assert call["headers"]["Sec-Fetch-Site"] == "same-origin"
     assert call["headers"]["Sec-Fetch-Mode"] != "navigate"
+
+
+def test_the_subscribe_route_has_no_bare_requests_call():
+    """The shared session is the only request path; the import is gone.
+
+    `requests` is no longer imported in `src/webserver.py` -- commit d66adc3
+    moved the call to `web_scraper._get_session()` -- so a runtime tripwire
+    cannot be installed. The shape is pinned at the source instead, as the
+    capture tests pin their own.
+    """
+    body = __import__("pathlib").Path("src/webserver.py").read_text(encoding="utf-8")
+    assert "requests.post(" not in body
+
+
+def test_the_subscribe_pull_is_captured(subscribe_env, tmp_path):
+    """Switch on: one subscribe record, Steam's answer on disk, no credential."""
+    from src import capture
+
+    db_path, state = subscribe_env
+    secret = _login_cookie(_FUTURE_EXPIRY)
+    sid = "SUBSCRIBE-SESSIONID-SECRET-01"
+    state["cookies"] = {"sessionid": sid, "steamLoginSecure": secret,
+                        "browserid": "BROWSER-ID-0123456789"}
+    state["response_headers"] = {"Content-Type": "application/json"}
+    # Steam's answer echoes the credential, so the record being clean is not
+    # enough: the body file has to be scrubbed too.
+    state["body"] = json.dumps({"success": 1, "echo": secret})
+    state["payload"] = {"success": 1, "echo": secret}
+    outbox = tmp_path / "outbox"
+    capture.configure(str(outbox), web_download_capture=True)
+    try:
+        resp = _post_subscribe(app.test_client())
+    finally:
+        capture.configure(None)
+
+    assert resp.status_code == 200
+    records = [json.loads(path.read_text(encoding="utf-8"))
+               for path in (outbox / "web_downloads").glob("*.json")]
+    assert len(records) == 1
+    record = records[0]
+    assert record["kind"] == "subscribe"
+    assert record["workshop_id"] == 1
+    assert record["request"]["method"] == "POST"
+    assert record["request"]["data"]["sessionid"] == "***"
+    assert record["request"]["data"]["id"] == "1"
+    assert record["request"]["cookies"]["steamLoginSecure"] == "***"
+    assert record["body_file"] is not None
+    assert (outbox / record["body_file"]).exists(), "Steam's answer is on disk"
+    for path in outbox.rglob("*"):
+        if path.is_file():
+            text = path.read_text(encoding="utf-8", errors="replace")
+            assert secret not in text
+            assert sid not in text
 
 
 def test_waitress_queue_monkeypatch_tiered_logging():

@@ -5,10 +5,10 @@ import os
 import time
 import re
 import logging
-import requests
 from flask import Flask, request, jsonify, render_template, send_from_directory
 from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, mark_own_subscribed, get_queued_items, FILTER_SCHEMA, bump_api_priority_for_detail, clear_pending_items
 from src.analysis import view_window_analysis
+from src import capture
 from src import images
 from src import metrics
 from src import session_health
@@ -77,6 +77,15 @@ def init_webserver(db_path: str, config: dict, config_path: str = "config.yaml",
     # A controller passed by the TUI is shared with its daemon manager; used
     # standalone, this module builds its own from the config path.
     _daemon_controller = daemon_controller or DaemonController(config_path, config=config)
+    # The server-side subscribe is a Steam community pull, and this process is
+    # not the daemon's, so the debug switch has to be read here too or a
+    # subscribe could never be captured. `web_download_switch` is the same
+    # lookup the daemon uses, so the deprecated key is honoured in both.
+    daemon_config = config.get("daemon", {}) or {}
+    capture.configure(
+        daemon_config.get("outbox_dir") or daemon_config.get("backup_dir"),
+        capture.web_download_switch(daemon_config),
+    )
 
 
 def _get_daemon_controller() -> DaemonController:
@@ -681,18 +690,36 @@ def api_subscribe(workshop_id):
         # the way a browser reuses them; a fresh handshake per call is itself a
         # non-browser signal (`src/web_scraper.py`).
         session = web_scraper._get_session()
+        subscribe_url = "https://steamcommunity.com/sharedfiles/subscribe"
+        form = {
+            "id": str(workshop_id),
+            "appid": str(appid),
+            "include_dependencies": "false",
+            "sessionid": sid,
+        }
         resp = session.post(
-            "https://steamcommunity.com/sharedfiles/subscribe",
-            data={
-                "id": str(workshop_id),
-                "appid": str(appid),
-                "include_dependencies": "false",
-                "sessionid": sid,
-            },
+            subscribe_url,
+            data=form,
             cookies=cookies,
             headers=headers,
             timeout=15,
         )
+        # Recorded before the body is parsed, so a non-JSON answer is captured
+        # too. The values are the ones just sent -- the form, the jar and the
+        # headers are the same objects the session received -- rather than a
+        # reconstruction of them.
+        if capture.web_download_capture_active():
+            capture.record_web_download(
+                capture.SUBSCRIBE_KIND, workshop_id, subscribe_url,
+                {
+                    "request": {"method": "POST", "url": subscribe_url,
+                                "headers": headers, "cookies": cookies, "data": form},
+                    "http_status": getattr(resp, "status_code", None),
+                    "final_url": getattr(resp, "url", "") or subscribe_url,
+                    "response_headers": getattr(resp, "headers", None),
+                    "body": getattr(resp, "text", None),
+                },
+            )
         data = resp.json()
         logging.info(f"[Subscribe] Steam response: status={resp.status_code}, body={data}")
         success = data.get("success")

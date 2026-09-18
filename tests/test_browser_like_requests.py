@@ -150,6 +150,44 @@ def test_the_request_carries_the_whole_profile_cookie_set(monkeypatch):
         assert name in sent, f"{name} was not sent"
 
 
+def test_the_scrape_reports_the_request_it_actually_sent(monkeypatch):
+    """The capture records the values handed to the session, not a guess at them.
+
+    A debug capture that re-derived the request would describe what the code
+    *meant* to send; the instrument is only useful if it describes what was sent.
+    """
+    cookies = {"steamLoginSecure": "SENT-LOGIN", "sessionid": "SENT-SID"}
+    monkeypatch.setattr(web_scraper, "_workshop_cookies_or_empty", lambda: dict(cookies))
+    sent = {}
+
+    response = MagicMock()
+    response.status_code = 200
+    response.url = ITEM_URL
+    response.text = ITEM_HTML
+    response.html.find.return_value = []
+
+    class _Session:
+        def get(self, url, **kwargs):
+            sent["url"] = url
+            sent.update(kwargs)
+            return response
+
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: _Session())
+
+    details = web_scraper.scrape_extended_details(ITEM_URL)
+
+    assert details["request"] == {
+        "method": "GET",
+        "url": ITEM_URL,
+        "headers": BROWSER_HEADERS,
+        "cookies": cookies,
+        "data": None,
+    }
+    assert sent["cookies"] is details["request"]["cookies"], \
+        "the recorded jar must be the object the session received"
+    assert sent["headers"] is BROWSER_HEADERS
+
+
 # --- one session, reused ----------------------------------------------------
 
 def test_one_session_is_reused_across_calls():

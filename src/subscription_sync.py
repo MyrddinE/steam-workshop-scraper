@@ -48,7 +48,7 @@ import math
 import re
 import time
 
-from src import session_cookie, session_health, web_scraper
+from src import capture, session_cookie, session_health, web_scraper
 from src.database import apply_own_subscriptions
 
 # The page's own URL shape. `/my/` is used rather than `/profiles/<steamid>/`
@@ -142,15 +142,36 @@ def _fetch_page(appid: int, page: int, config: dict) -> str:
     transport error or a non-2xx status: a page that did not arrive is not
     evidence about the owner's subscriptions, and the caller converts the raise
     into a failed sync rather than a cleared flag.
+
+    The whole exchange is captured under the web-download debug switch, before
+    the sign-in check: a sign-in page is exactly what the capture is for, and
+    ``appid`` and ``page`` are what tell one capture from another. The request
+    recorded is the one built here and handed to the session, so it is what was
+    actually sent rather than a second guess at it.
     """
     url = SUBSCRIPTIONS_URL.format(appid=appid, page=page)
     session = web_scraper._get_session()
+    cookies = web_scraper._build_workshop_cookies(config)
+    headers = web_scraper.BROWSER_HEADERS
     response = session.get(
         url,
-        cookies=web_scraper._build_workshop_cookies(config),
-        headers=web_scraper.BROWSER_HEADERS,
+        cookies=cookies,
+        headers=headers,
         timeout=15,
     )
+    if capture.web_download_capture_active():
+        capture.record_web_download(
+            capture.SUBSCRIPTIONS_PAGE_KIND, None, url,
+            {
+                "request": {"method": "GET", "url": url, "headers": headers,
+                            "cookies": cookies, "data": None},
+                "http_status": getattr(response, "status_code", None),
+                "final_url": getattr(response, "url", "") or "",
+                "response_headers": getattr(response, "headers", None),
+                "body": response.text,
+            },
+            appid=appid, page=page,
+        )
     response.raise_for_status()
     final_url = getattr(response, "url", "") or ""
     if SIGN_IN_PATH in final_url:

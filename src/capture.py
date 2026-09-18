@@ -40,6 +40,14 @@ that carries a body — a parameter that does not exist cannot be passed by
 accident. Its records are metadata and headers only, and they live in
 ``<outbox>/image_downloads/`` (successes, debug switch only) and the failure tree
 above (failures, whenever capture is enabled).
+
+Ordinary Steam community pulls reuse the same manifest under a second debug
+switch: ``daemon.capture_web_downloads`` saves every item page, subscriptions
+page and server-side subscribe through :func:`record_web_download` into
+``<outbox>/web_downloads/`` -- request and response both, the body kept whole.
+Those records are not failures; they are the instrument for seeing what a
+*working* exchange looks like, and nothing in them may carry a credential. See
+:func:`elide_secrets`.
 """
 
 import hashlib
@@ -72,25 +80,64 @@ _outbox_dir = None
 _groups = {}
 _app_version_cache = None
 
-# Ordinary web scrapes saved while `capture_web_scrapes` is set. Not failures:
-# this is evidence about what a working page looks like, to identify the
-# signed-in markup that tells us the session is still good.
+# Every Steam community web pull saved while `capture_web_downloads` is set --
+# the item page, the subscriptions page and the server-side subscribe. Not
+# failures: this is evidence about what a *working* exchange looks like, both
+# the request that went out and the answer that came back.
 #
 # Unbounded, and the body is kept whole. This is a debugging switch that is on
 # for a session or two, so the cost is accepted in exchange for not having to
 # collect the evidence twice because a sample was thinned before anyone looked
 # at it. The failure capture above is the opposite case: it runs for weeks, so
 # its caps and its size limits stay.
-_scrape_capture = False
+_web_download_capture = False
 
 # Every image download saved while `capture_image_downloads` is set, one
-# metadata-only record each. Separate from `capture_web_scrapes` because that
-# switch keeps whole page bodies unbounded; an owner reviewing images should not
-# have to collect pages to do it.
+# metadata-only record each. Separate from `capture_web_downloads` because that
+# switch keeps whole bodies unbounded; an owner reviewing images should not have
+# to collect pages to do it.
 _image_capture = False
 
-SCRAPES_DIR_NAME = "scrapes"
+WEB_DOWNLOADS_DIR_NAME = "web_downloads"
 IMAGE_DOWNLOADS_DIR_NAME = "image_downloads"
+
+# The pulls the one switch covers, named so a reviewer can filter the captures
+# by which request produced them.
+ITEM_PAGE_KIND = "item_page"
+SUBSCRIPTIONS_PAGE_KIND = "subscriptions_page"
+SUBSCRIBE_KIND = "subscribe"
+WEB_DOWNLOAD_STAGE = "web_download"
+# Manifest kind shared by a web-download record and its body file.
+WEB_DOWNLOAD_KIND = "web_download"
+
+# ── credentials ──────────────────────────────────────────────────────────────
+#
+# The captures are an instrument for a signed-in session, so they necessarily
+# describe credentialed requests. What must never reach the outbox is the
+# credential *value*: the capture is for seeing which cookie names and which
+# form fields went out, and a token on disk is a live credential for as long as
+# it lasts.
+
+REDACTED = "***"
+
+# Header names whose whole value is a credential: a cookie jar travels as
+# `Cookie`, Steam's answer can carry `Set-Cookie`, and a bearer or basic
+# credential travels as `Authorization`.
+_SECRET_HEADERS = frozenset({"cookie", "set-cookie", "authorization"})
+
+# Form fields whose value is a credential. `sessionid` is the CSRF token the
+# subscribe form carries; the login cookie is a cookie, not a form field.
+_SECRET_FORM_FIELDS = frozenset({"sessionid"})
+
+# The `name=value` pairs inside a request's `Cookie` header.
+_COOKIE_PAIR_RE = re.compile(r"([^=;\s]+)\s*=\s*([^;]*)")
+
+# Values shorter than this are still elided where they are recognised as
+# credentials, but are not used for the whole-record scrub below. That scrub is
+# a plain substring replacement over everything written, and a short value would
+# shred the capture: a real cookie jar carries `timezoneOffset=0`, and replacing
+# every `0` leaves a page that describes nothing. Real tokens are far longer.
+MIN_SCRUB_LENGTH = 8
 
 # Kind and stage for the two image record shapes. The stage is shared because
 # both are the image-download step of the pipeline.
@@ -135,30 +182,34 @@ def _strip_noise(raw: bytes) -> bytes:
 
 # ── configuration ────────────────────────────────────────────────────────────
 
-def configure(outbox_dir, web_scrape_capture=False, image_capture=False):
+def configure(outbox_dir, web_download_capture=False, image_capture=False):
     """Enable capture under ``<outbox_dir>/failures``. ``None`` disables it.
 
-    ``web_scrape_capture`` additionally saves *every* ordinary web scrape, into
-    ``<outbox_dir>/scrapes``, success or failure, with the response body kept
-    whole. That answers a question the failure capture cannot: what a page looks
-    like when a scrape works, which is what identifies the signed-in markup.
+    ``web_download_capture`` additionally saves *every* Steam community web pull
+    -- the item page, the subscriptions page and the server-side subscribe --
+    into ``<outbox_dir>/web_downloads``, request and response both, with the
+    body kept whole. That answers a question the failure capture cannot: what a
+    *working* exchange looks like, which is what identifies the signed-in markup
+    and what the subscribe path actually sends.
 
     ``image_capture`` additionally saves *every* image download, into
     ``<outbox_dir>/image_downloads``, as metadata and headers only — never the
     image bytes, which already live in the images bucket.
     """
-    global _outbox_dir, _scrape_capture, _image_capture
+    global _outbox_dir, _web_download_capture, _image_capture
     with _lock:
         _outbox_dir = outbox_dir or None
-        _scrape_capture = bool(web_scrape_capture) and bool(_outbox_dir)
+        _web_download_capture = bool(web_download_capture) and bool(_outbox_dir)
         _image_capture = bool(image_capture) and bool(_outbox_dir)
         _groups.clear()
         if _outbox_dir:
             logging.info("Failure capture enabled: %s", failures_dir(_outbox_dir))
-            if _scrape_capture:
+            if _web_download_capture:
                 logging.info(
-                    "Web-scrape capture enabled: saving every scrape, whole body, to %s. "
-                    "This is a debugging switch — turn it off when done.", scrapes_dir(_outbox_dir),
+                    "Web-download capture enabled: saving every Steam community pull "
+                    "(item page, subscriptions page, subscribe), request and response, "
+                    "whole body, to %s. This is a debugging switch — turn it off when done.",
+                    web_downloads_dir(_outbox_dir),
                 )
             if _image_capture:
                 logging.info(
@@ -169,6 +220,26 @@ def configure(outbox_dir, web_scrape_capture=False, image_capture=False):
                 )
 
 
+def web_download_switch(daemon_config) -> bool:
+    """The ``capture_web_downloads`` debug switch from a parsed config.
+
+    Two processes read this switch -- the daemon and the web server, which owns
+    the server-side subscribe -- so the lookup lives here rather than being
+    copied into both, and the deprecated name is honoured in both with the same
+    warning. A config that still uses ``capture_web_scrapes`` keeps working and
+    is told to rename it; the current key wins when both are present.
+    """
+    daemon_config = daemon_config or {}
+    current = daemon_config.get("capture_web_downloads")
+    legacy = daemon_config.get("capture_web_scrapes")
+    if current is None and legacy is not None:
+        logging.warning(
+            "Config key 'capture_web_scrapes' is deprecated and still honoured; "
+            "rename it to 'capture_web_downloads'."
+        )
+    return bool(current if current is not None else (legacy or False))
+
+
 def is_enabled() -> bool:
     return _outbox_dir is not None
 
@@ -177,22 +248,22 @@ def failures_dir(outbox_dir) -> str:
     return os.path.join(outbox_dir, "failures")
 
 
-def scrapes_dir(outbox_dir) -> str:
-    return os.path.join(outbox_dir, SCRAPES_DIR_NAME)
+def web_downloads_dir(outbox_dir) -> str:
+    return os.path.join(outbox_dir, WEB_DOWNLOADS_DIR_NAME)
 
 
 def image_downloads_dir(outbox_dir) -> str:
     return os.path.join(outbox_dir, IMAGE_DOWNLOADS_DIR_NAME)
 
 
-def web_scrape_capture_active() -> bool:
-    """Whether ordinary scrapes are being saved. Read before each scrape.
+def web_download_capture_active() -> bool:
+    """Whether every community web pull is being saved. Read before each pull.
 
-    Also decides whether the scrape asks for its body: a successful scrape
+    Also decides whether the item page asks for its body: a successful scrape
     discards it by default, and there is nothing to capture without it.
     """
     with _lock:
-        return bool(_outbox_dir) and _scrape_capture
+        return bool(_outbox_dir) and _web_download_capture
 
 
 def image_capture_active() -> bool:
@@ -201,55 +272,235 @@ def image_capture_active() -> bool:
         return bool(_outbox_dir) and _image_capture
 
 
-def record_web_scrape(workshop_id, url, scrape_data) -> bool:
-    """Save one web scrape, success or failure. Unbounded, on purpose.
+def elide_secrets(cookies=None, data=None, headers=None):
+    """Replace the credential values in one request with ``***``.
 
-    Deliberately not deduplicated: the question is what a *working* page looks
-    like, and one sample of that is worth more than several of the same failure.
-    Both states are needed to tell the two apart, which is why the successes are
-    saved too — the failure capture by definition only ever holds misses. By the
-    same argument nothing is thinned or dropped: a sample trimmed before anyone
-    has looked at it just means collecting the evidence twice.
+    Returns ``(cookies, data, headers, secrets)``. The three structures come
+    back with every credential value removed and its **name** kept: knowing that
+    ``steamLoginSecure`` and ``browserid`` were sent is the diagnostic point,
+    while their values authenticate the session and must never reach the outbox.
+    The ``sessionid`` form field is redacted, and the ``Cookie``, ``Set-Cookie``
+    and ``Authorization`` header values are redacted whole.
 
-    That makes this a *session* switch rather than a resident one. There is no
-    budget here and no retention anywhere in the outbox, so the directory grows
-    for as long as the switch is left on — measured live at about 73 KB per
-    scrape, roughly a gigabyte a day at the web worker's current pace. The
-    failure capture is the opposite case: it runs for weeks, so its caps stay.
+    ``secrets`` is every literal value that was removed, longest first, so the
+    recorder can scrub it from everything else it writes -- a token echoed into
+    a response body or a URL is then removed too. That is defence in depth
+    rather than the only barrier.
+
+    Never raises: capture is diagnostic, and an elider that can break the
+    request it is describing is worse than no elider. If even the fallback
+    cannot describe the values, ``secrets`` is ``None`` and the caller must not
+    write anything rather than write a value it could not recognise.
     """
-    global _scrape_capture
-    if not scrape_data:
+    try:
+        return _elide_secrets(cookies, data, headers)
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logging.warning("Secret elision failed; falling back to wholesale redaction: %s", exc)
+    try:
+        return (_redact_all(cookies), _redact_all(data), _redact_all(headers),
+                _ordered_secrets(_fallback_secret_values(cookies, data, headers)))
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logging.warning("Secret elision fallback failed (%s); refusing to record", exc)
+        return None, None, None, None
+
+
+def _elide_secrets(cookies, data, headers):
+    elided_headers, header_secrets = _elide_headers(headers)
+    secrets = []
+    for value in dict(cookies or {}).values():
+        if value not in (None, ""):
+            secrets.append(str(value))
+    for name, value in dict(data or {}).items():
+        if str(name).lower() in _SECRET_FORM_FIELDS and value not in (None, ""):
+            secrets.append(str(value))
+    secrets.extend(header_secrets)
+    return (_redact_all(cookies), _elide_form_data(data), elided_headers,
+            _ordered_secrets(secrets))
+
+
+def _redact_all(values) -> dict:
+    """Every value redacted and every name kept."""
+    return {name: REDACTED for name in dict(values or {})}
+
+
+def _elide_form_data(data) -> dict:
+    return {
+        name: REDACTED if str(name).lower() in _SECRET_FORM_FIELDS else value
+        for name, value in dict(data or {}).items()
+    }
+
+
+def _elide_headers(headers):
+    """``(elided_headers, secrets)`` for one header mapping."""
+    elided = {}
+    secrets = []
+    for name, value in dict(headers or {}).items():
+        if str(name).lower() in _SECRET_HEADERS:
+            elided[name] = REDACTED
+            secrets.extend(_header_secret_values(name, value))
+        else:
+            elided[name] = value
+    return elided, secrets
+
+
+def _header_secret_values(name, value):
+    """The literal credential values inside one credential-bearing header."""
+    text = "" if value is None else str(value)
+    if not text:
+        return []
+    values = [text]
+    lowered = str(name).lower()
+    if lowered == "cookie":
+        values.extend(match.group(2).strip() for match in _COOKIE_PAIR_RE.finditer(text))
+    elif lowered == "set-cookie":
+        # Only the first pair is the cookie; the rest are attributes such as
+        # `Path=/`, whose values are not credentials and must not be scrubbed.
+        first = text.split(";", 1)[0]
+        if "=" in first:
+            values.append(first.split("=", 1)[1].strip())
+    elif lowered == "authorization":
+        # `Bearer <token>` / `Basic <base64>`: the credential is the last word,
+        # and a body or URL can echo it without the scheme.
+        parts = text.split()
+        if len(parts) > 1:
+            values.append(parts[-1])
+    return [part for part in values if part]
+
+
+def _fallback_secret_values(cookies, data, headers):
+    """Best-effort secrets when the structured elision could not run."""
+    values = [str(value) for value in dict(cookies or {}).values()
+              if value not in (None, "")]
+    values.extend(str(value) for name, value in dict(data or {}).items()
+                  if str(name).lower() in _SECRET_FORM_FIELDS and value not in (None, ""))
+    _, header_secrets = _elide_headers(headers)
+    values.extend(header_secrets)
+    return values
+
+
+def _ordered_secrets(secrets) -> list:
+    """Unique, longest first, so a value is replaced before any value it contains."""
+    unique = []
+    for value in secrets:
+        if value and value not in unique:
+            unique.append(value)
+    return sorted(unique, key=len, reverse=True)
+
+
+def _scrub_text(text, secrets):
+    if not text or not secrets:
+        return text
+    for secret in secrets:
+        if len(secret) >= MIN_SCRUB_LENGTH:
+            text = text.replace(secret, REDACTED)
+    return text
+
+
+def _scrub_bytes(raw: bytes, secrets) -> bytes:
+    if not raw or not secrets:
+        return raw
+    marker = REDACTED.encode("utf-8")
+    for secret in secrets:
+        if len(secret) >= MIN_SCRUB_LENGTH:
+            raw = raw.replace(secret.encode("utf-8", "replace"), marker)
+    return raw
+
+
+def record_web_download(kind, workshop_id, url, data, *, appid=None, page=None,
+                        ok=None) -> bool:
+    """Save one Steam community web pull, request and answer both. Unbounded.
+
+    ``kind`` names which pull it was -- :data:`ITEM_PAGE_KIND`,
+    :data:`SUBSCRIPTIONS_PAGE_KIND` or :data:`SUBSCRIBE_KIND` -- because one
+    switch now covers all three and a reviewer has to be able to tell them
+    apart. ``data`` is the caller's record of what actually went on the wire:
+
+    * ``request`` -- the ``method``, ``url``, ``headers``, ``cookies`` and form
+      ``data`` passed to the session, not re-derived guesses. A caller that
+      cannot observe one of them is a gap in the capture, so the callers carry
+      the values they built rather than reconstructing them.
+    * ``http_status``, ``final_url``, ``response_headers`` and ``body`` -- what
+      came back, with the body kept whole in a sibling file.
+
+    Credentials are elided from everything written; see :func:`elide_secrets`.
+
+    Deliberately not deduplicated, thinned or capped. The question is what a
+    *working* exchange looks like, and one sample of that is worth more than
+    several of the same failure: a sample trimmed before anyone has looked at it
+    just means collecting the evidence twice. That makes this a *session* switch
+    rather than a resident one. There is no budget here and no retention
+    anywhere in the outbox, so the directory grows for as long as the switch is
+    left on. The failure capture is the opposite case: it runs for weeks, so its
+    caps stay.
+
+    Never raises: capture is diagnostic, and a diagnostic that can break the
+    request it is describing is worse than no diagnostic.
+    """
+    if not data:
         return False
     with _lock:
-        if not _outbox_dir or not _scrape_capture:
+        if not _outbox_dir or not _web_download_capture:
             return False
         outbox = _outbox_dir
 
-    body = scrape_data.get("body")
-    hit = scrape_data.get("description") is not None
-    stamp = _utc_now_iso().replace(":", "-")
-    stem = f"{stamp}-{workshop_id}"
-    directory = scrapes_dir(outbox)
-    os.makedirs(directory, exist_ok=True)
-    body_path = os.path.join(directory, stem + ".body")
-    record_path = os.path.join(directory, stem + ".json")
+    try:
+        return _write_web_download(outbox, kind, workshop_id, url, data,
+                                   appid, page, ok)
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logging.warning("Web-download capture failed (request unaffected): %s", exc)
+        return False
 
+
+def _write_web_download(outbox, kind, workshop_id, url, data, appid, page, ok) -> bool:
+    request = dict(data.get("request") or {})
+    cookies, form, headers, secrets = elide_secrets(
+        cookies=request.get("cookies"), data=request.get("data"),
+        headers=request.get("headers"))
+    if secrets is None:
+        # The elider could not name the values to remove, so there is no safe
+        # subset to write. Refusing is the only outcome that cannot leak.
+        raise RuntimeError("credential values could not be identified")
+    response_headers, response_secrets = _elide_headers(data.get("response_headers"))
+    secrets = _ordered_secrets(secrets + response_secrets)
+
+    body = data.get("body")
     raw = b""
     if body is not None:
         raw = body.encode("utf-8", "replace") if isinstance(body, str) else bytes(body)
         # Whole and unstripped, deliberately: a debugging capture that drops the
         # <script> blocks also drops g_steamID, which is the most direct answer
-        # to "is this page signed in?".
+        # to "is this page signed in?". Scrubbed, because a token echoed into
+        # the page must not survive the elision of the structured fields.
+        raw = _scrub_bytes(raw, secrets)
+
+    stamp = _utc_now_iso().replace(":", "-")
+    identifier = workshop_id if workshop_id is not None else f"{appid}-p{page}"
+    stem = f"{stamp}-{kind}-{identifier}"
+    directory = web_downloads_dir(outbox)
+    os.makedirs(directory, exist_ok=True)
+    body_path = os.path.join(directory, stem + ".body")
+    record_path = os.path.join(directory, stem + ".json")
+
+    if raw:
         _write_atomic(body_path, raw)
 
     record = {
-        "kind": "web_scrape",
-        "stage": "web_scrape",
+        "kind": kind,
+        "stage": WEB_DOWNLOAD_STAGE,
         "workshop_id": workshop_id,
-        "url": url,
-        "scraped_ok": hit,
-        "http_status": scrape_data.get("http_status"),
-        "final_url": scrape_data.get("final_url"),
+        "appid": appid,
+        "page": page,
+        "request": {
+            "method": request.get("method") or "GET",
+            "url": request.get("url") or url,
+            "headers": headers,
+            "cookies": cookies,
+            "data": form,
+        },
+        "ok": ok,
+        "http_status": data.get("http_status"),
+        "final_url": data.get("final_url"),
+        "response_headers": response_headers,
         "body_file": _relative(outbox, body_path) if raw else None,
         "body_bytes": len(raw),
         "body_complete": True,
@@ -259,19 +510,18 @@ def record_web_scrape(workshop_id, url, scrape_data) -> bool:
         "captured_at": _utc_now_iso(),
         "app_version": app_version(),
     }
-    _write_atomic(record_path, json.dumps(record, indent=2).encode("utf-8"))
+    payload = _scrub_text(json.dumps(record, indent=2), secrets).encode("utf-8")
+    _write_atomic(record_path, payload)
     update_manifest(outbox, {
-        "path": _relative(outbox, record_path), "kind": "scrape",
-        "bytes": len(json.dumps(record)), "role": "record",
-        "scraped_ok": hit, "workshop_id": workshop_id,
+        "path": _relative(outbox, record_path), "kind": WEB_DOWNLOAD_KIND,
+        "bytes": len(payload), "role": "record", "workshop_id": workshop_id,
     })
     if raw:
         # The body has to be registered too, or the puller never sees it — the
         # record used to arrive without the page it describes.
         update_manifest(outbox, {
-            "path": _relative(outbox, body_path), "kind": "scrape",
-            "bytes": len(raw), "role": "body",
-            "scraped_ok": hit, "workshop_id": workshop_id,
+            "path": _relative(outbox, body_path), "kind": WEB_DOWNLOAD_KIND,
+            "bytes": len(raw), "role": "body", "workshop_id": workshop_id,
         })
     return True
 

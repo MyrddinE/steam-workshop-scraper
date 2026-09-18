@@ -48,8 +48,8 @@ web capture in one place, because the artefact already exists:
 * **Successes are captured only under the `daemon.capture_image_downloads` debug
   switch** — the same metadata, plus the number of bytes written and the path of
   the saved file, so a good result can be correlated with the image on disk. It
-  is a separate switch from `daemon.capture_web_scrapes`: that one keeps whole
-  page bodies unbounded, and an owner reviewing images should not have to collect
+  is a separate switch from `daemon.capture_web_downloads`: that one keeps whole
+  bodies unbounded, and an owner reviewing images should not have to collect
   pages to do it.
 * **The bytes are never captured.** A successful download already wrote the image
   into its `images/` bucket and that file is the artefact; copying it into the
@@ -63,6 +63,61 @@ content type and the exception *class*, never the exception message — so a 404
 loop costs a bounded number of files while a genuinely different failure (a 404
 and a transport error, say) still produces its own evidence. The group counters
 carry the scale.
+
+## Web downloads
+
+Every Steam community web pull is saved, whole, while the
+`daemon.capture_web_downloads` debug switch is set. Unlike the failure capture
+this is not about what broke: it is about what a *working* exchange looks like,
+for the three requests whose shape matters and which a failure-only capture can
+never show.
+
+| `kind` | Request | Caller |
+|---|---|---|
+| `item_page` | `GET` the item's `filedetails` page | `web_worker.py` |
+| `subscriptions_page` | `GET` one page of the owner's subscriptions | `subscription_sync.py` |
+| `subscribe` | `POST` `/sharedfiles/subscribe`, and Steam's answer | `webserver.py` |
+
+Each record holds **both sides of the exchange**. The request is the method, URL,
+headers, cookie jar and form data *as they were sent* — the callers carry the
+values they built (the item scrape returns them from `scrape_extended_details`)
+rather than re-deriving them — and the response is the status, the final URL, the
+headers and the body. The body is kept whole in a sibling `.body` file, with the
+same `_relative` registration and the same `auth_markers` / `g_steamID`
+diagnostics the failure capture's HTML bodies carry. A subscriptions-page record
+also names its `appid` and `page`; every record names its `workshop_id` where
+there is one.
+
+**No credential value is ever written.** `capture.elide_secrets` replaces the
+value of every cookie — the *names* stay, because knowing that
+`steamLoginSecure` and `browserid` were sent is the diagnostic point — the
+`sessionid` form field, and the `Cookie`, `Set-Cookie` and `Authorization`
+header values with `***`. Those literal values are then scrubbed from everything
+the recorder writes, the JSON record and the whole-body file both, so a token
+echoed into a response body or a URL cannot leak either. Values shorter than
+`MIN_SCRUB_LENGTH` are still elided where they are recognised, but are not used
+for that whole-file scrub: a real cookie jar carries `timezoneOffset=0`, and
+replacing every `0` would leave a capture that describes nothing. The elider
+never raises: capture is diagnostic, and a diagnostic that can break the request
+it describes is worse than no diagnostic.
+
+It is deliberately unbounded — no cap, no dedup, no thinning — for the same
+reason the item-page capture always was: a sample trimmed before anyone has
+looked at it just means collecting the evidence twice. The directory therefore
+grows for as long as the switch is left on; there is no retention anywhere in
+the outbox.
+
+Two surfaces are **not** covered by this switch:
+
+* the Steam Web API calls in `src/steam_api.py` — a different surface, which has
+  its own failure capture;
+* image downloads, which have the separate `daemon.capture_image_downloads`
+  switch.
+
+The web server is a separate process from the daemon, so it reads the switch
+from the same config itself (`init_webserver`); both processes write into the one
+`<outbox>/web_downloads/`, and the multi-process caveat under *Concurrency*
+below applies to that directory as much as to the manifest.
 
 ## What a capture holds
 
@@ -121,6 +176,8 @@ is the file count, not the write count.
 <outbox_dir>/failures/<group>/_group.json     counters, and per-shape state
 <outbox_dir>/failures/<group>/<digest8>-<n>.json   the capture record
 <outbox_dir>/failures/<group>/<digest8>-<n>.body   the raw bytes
+<outbox_dir>/web_downloads/<stamp>-<kind>-<id>.json  a web pull's record
+<outbox_dir>/web_downloads/<stamp>-<kind>-<id>.body  its response body
 <outbox_dir>/image_downloads/<stamp>-<id>.json     a successful image download (metadata only)
 ```
 
@@ -134,8 +191,10 @@ Image failures live in the same `failures/` tree under the
 `image-download-failed--image-download` group and follow the same roles, except
 that they have no `body` entry: there is no body to transfer. Successful image
 downloads live in `<outbox_dir>/image_downloads/`, a sibling of the web capture's
-`<outbox_dir>/scrapes/`, and are registered with `kind: "image_download"` and
-`role: "record"`.
+`<outbox_dir>/web_downloads/`, and are registered with `kind: "image_download"`
+and `role: "record"`. Web-download records and their bodies are registered with
+`kind: "web_download"` and a `role` of `record` or `body` — a kind of their own,
+so a puller can collect them without also pulling the failure tree.
 
 ## Selector misses change the queue
 

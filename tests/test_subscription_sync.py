@@ -552,3 +552,45 @@ def test_mark_own_subscribed_on_an_unknown_item_is_a_no_op(tmp_path):
     db_path = str(tmp_path / "absent.db")
     initialize_database(db_path)
     assert mark_own_subscribed(db_path, 999, seen_at=1000) is False
+
+
+# --- the debug capture -------------------------------------------------------
+#
+# The one web-download switch covers the subscriptions page as well as the item
+# page. Each page fetched is one request/response pair, identified by the appid
+# and the page number, and no credential value may reach the outbox.
+
+def test_the_subscriptions_page_pull_is_captured(sync_env, tmp_path):
+    import json
+
+    from src import capture
+
+    db_path, configure = sync_env
+    _items(db_path, 1)
+    secret = "SUBS-LOGIN-SECRET-0123456789"
+    # The page echoes the credential, so the record alone being clean is not
+    # enough: the body file has to be scrubbed too.
+    page = _page([1], 1).replace("</body>", f"<span>{secret}</span></body>")
+    configure({1: page}, login=secret)
+    outbox = tmp_path / "outbox"
+    capture.configure(str(outbox), web_download_capture=True)
+    try:
+        subscription_sync.reconcile_own_subscriptions(db_path, 294100, {})
+    finally:
+        capture.configure(None)
+
+    records = [json.loads(path.read_text(encoding="utf-8"))
+               for path in (outbox / "web_downloads").glob("*.json")]
+    assert len(records) == 1
+    record = records[0]
+    assert record["kind"] == "subscriptions_page"
+    assert record["appid"] == 294100
+    assert record["page"] == 1
+    assert record["request"]["method"] == "GET"
+    assert record["request"]["cookies"] == {"steamLoginSecure": "***"}
+    assert record["body_file"] is not None
+    assert (outbox / record["body_file"]).exists(), "the page body is on disk"
+    for path in outbox.rglob("*"):
+        if path.is_file():
+            assert secret not in path.read_text(encoding="utf-8", errors="replace")
+

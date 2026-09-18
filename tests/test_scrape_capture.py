@@ -1,10 +1,16 @@
-"""The debug scrape capture keeps everything while it is on.
+"""The debug web-download capture keeps everything while it is on.
 
-It exists to answer what a *working* page looks like, so the signed-in markup can
-be identified. It is deliberately unbounded and keeps the body whole: it is a
-switch that is on for a session or two, and thinning a sample before anyone has
-looked at it just means collecting the evidence twice. The failure capture is the
-opposite case — it runs for weeks, so its caps stay.
+It exists to answer what a *working* exchange looks like -- for the item page,
+the subscriptions page and the server-side subscribe -- so the signed-in markup
+and the subscribe path can be judged from real captures. It is deliberately
+unbounded and keeps the body whole: it is a switch that is on for a session or
+two, and thinning a sample before anyone has looked at it just means collecting
+the evidence twice. The failure capture is the opposite case -- it runs for
+weeks, so its caps stay.
+
+It is also an instrument for a signed-in session, so nothing in it may carry a
+credential value; ``elide_secrets`` is the barrier, and the leak test at the
+bottom is what holds it.
 """
 
 import json
@@ -14,6 +20,12 @@ from unittest.mock import patch
 import pytest
 
 from src import capture
+
+# Distinctive enough that a substring match cannot be a coincidence, and long
+# enough to clear the whole-record scrub floor.
+SECRET = "KNOWN-SECRET-VALUE-0123456789"
+SESSION_SECRET = "SESSION-SECRET-VALUE-0123456789"
+AUTH_SECRET = "AUTH-SECRET-VALUE-0123456789"
 
 
 @pytest.fixture
@@ -45,33 +57,50 @@ def _scrape(ok=True, body=None):
         "body": body if body is not None else "<html><body>plain</body></html>",
         "http_status": 200,
         "final_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=1",
+        "request": {
+            "method": "GET",
+            "url": "https://steamcommunity.com/sharedfiles/filedetails/?id=1",
+            "headers": {"User-Agent": "UA"},
+            "cookies": {"steamLoginSecure": SECRET,
+                        "browserid": "BROWSER-ID-0123456789"},
+            "data": None,
+        },
     }
 
 
+def _record_item_page(workshop_id=1, ok=True, body=None):
+    """Record one item-page pull through the generic entry point."""
+    data = _scrape(ok=ok, body=body)
+    return capture.record_web_download(
+        capture.ITEM_PAGE_KIND, workshop_id, data["request"]["url"], data, ok=ok)
+
+
 def _records(outbox):
-    directory = os.path.join(outbox, "scrapes")
+    directory = os.path.join(outbox, "web_downloads")
     return [json.load(open(os.path.join(directory, f)))
             for f in sorted(os.listdir(directory)) if f.endswith(".json")]
 
 
 def test_off_unless_configured(outbox):
-    assert capture.web_scrape_capture_active() is False
-    assert capture.record_web_scrape(1, "u", _scrape()) is False
-    assert not os.path.isdir(os.path.join(outbox, "scrapes"))
+    assert capture.web_download_capture_active() is False
+    data = _scrape()
+    assert capture.record_web_download(
+        capture.ITEM_PAGE_KIND, 1, data["request"]["url"], data) is False
+    assert not os.path.isdir(os.path.join(outbox, "web_downloads"))
 
 
 def test_on_without_an_outbox_is_still_off():
-    capture.configure(None, web_scrape_capture=True)
-    assert capture.web_scrape_capture_active() is False
+    capture.configure(None, web_download_capture=True)
+    assert capture.web_download_capture_active() is False
 
 
-def test_every_scrape_is_saved(tmp_path):
+def test_every_pull_is_saved(tmp_path):
     """No cap: a debugging switch that stops early is worse than none."""
-    capture.configure(str(tmp_path), web_scrape_capture=True)
+    capture.configure(str(tmp_path), web_download_capture=True)
     try:
-        assert capture.web_scrape_capture_active() is True
+        assert capture.web_download_capture_active() is True
         for i in range(25):
-            assert capture.record_web_scrape(i, "u", _scrape(ok=bool(i % 2))) is True
+            assert _record_item_page(i, ok=bool(i % 2)) is True
         assert len(_records(str(tmp_path))) == 25
     finally:
         capture.configure(None)
@@ -79,11 +108,11 @@ def test_every_scrape_is_saved(tmp_path):
 
 def test_successes_are_recorded_as_well_as_misses(tmp_path):
     """The failure capture only ever holds misses, which is the whole gap."""
-    capture.configure(str(tmp_path), web_scrape_capture=True)
+    capture.configure(str(tmp_path), web_download_capture=True)
     try:
-        capture.record_web_scrape(1, "u", _scrape(ok=True))
-        capture.record_web_scrape(2, "u", _scrape(ok=False))
-        flags = sorted(r["scraped_ok"] for r in _records(str(tmp_path)))
+        _record_item_page(1, ok=True)
+        _record_item_page(2, ok=False)
+        flags = sorted(r["ok"] for r in _records(str(tmp_path)))
         assert flags == [False, True]
     finally:
         capture.configure(None)
@@ -91,17 +120,40 @@ def test_successes_are_recorded_as_well_as_misses(tmp_path):
 
 def test_the_body_is_kept_whole(tmp_path):
     """Scripts carry g_steamID; stripping them would drop the decisive signal."""
-    capture.configure(str(tmp_path), web_scrape_capture=True)
+    capture.configure(str(tmp_path), web_download_capture=True)
     try:
         body = '<html><script>var g_steamID = "76561198000000000";</script>' \
                '<div class="account_pulldown">me</div></html>'
-        capture.record_web_scrape(1, "u", _scrape(body=body))
+        _record_item_page(1, body=body)
         record = _records(str(tmp_path))[0]
         assert record["body_complete"] is True
-        saved = open(os.path.join(str(tmp_path), "scrapes",
+        saved = open(os.path.join(str(tmp_path), "web_downloads",
                                   os.path.basename(record["body_file"]))).read()
         assert "g_steamID" in saved
         assert "account_pulldown" in saved
+    finally:
+        capture.configure(None)
+
+
+def test_a_record_carries_both_sides_of_the_exchange(tmp_path):
+    """The request and the answer, not just the page that came back."""
+    capture.configure(str(tmp_path), web_download_capture=True)
+    try:
+        data = _scrape()
+        data["response_headers"] = {"Content-Type": "text/html"}
+        capture.record_web_download(capture.ITEM_PAGE_KIND, 7, data["request"]["url"],
+                                    data, ok=True)
+        record = _records(str(tmp_path))[0]
+        assert record["kind"] == "item_page"
+        assert record["request"]["method"] == "GET"
+        assert record["request"]["url"] == data["request"]["url"]
+        assert record["request"]["headers"] == {"User-Agent": "UA"}
+        assert record["request"]["cookies"] == {
+            "steamLoginSecure": "***", "browserid": "***"}
+        assert record["http_status"] == 200
+        assert record["final_url"] == data["final_url"]
+        assert record["response_headers"] == {"Content-Type": "text/html"}
+        assert record["body_file"] and record["body_bytes"] > 0
     finally:
         capture.configure(None)
 
@@ -116,15 +168,100 @@ def test_the_steam_id_is_extracted(value, expected):
 
 
 def test_markers_are_recorded_not_interpreted(tmp_path):
-    capture.configure(str(tmp_path), web_scrape_capture=True)
+    capture.configure(str(tmp_path), web_download_capture=True)
     try:
-        capture.record_web_scrape(1, "u", _scrape(
-            body='<div class="account_pulldown">me</div>'))
+        _record_item_page(1, body='<div class="account_pulldown">me</div>')
         markers = _records(str(tmp_path))[0]["auth_markers"]
         assert markers["account_pulldown"] is True
         assert markers["Sign In"] is False
     finally:
         capture.configure(None)
+
+
+# --- the elider --------------------------------------------------------------
+#
+# The capture is the instrument for finishing a fix on the subscribe path, so it
+# has to describe a credentialed request in enough detail to be useful -- which
+# cookie names were sent, which form fields -- without ever writing the values.
+
+def test_elide_secrets_keeps_names_and_removes_values():
+    elided_cookies, elided_data, elided_headers, secrets = capture.elide_secrets(
+        cookies={"steamLoginSecure": SECRET, "browserid": "BROWSER-ID-0123456789"},
+        data={"id": "1", "sessionid": SESSION_SECRET},
+        headers={"Cookie": f"steamLoginSecure={SECRET}",
+                 "Authorization": f"Bearer {AUTH_SECRET}",
+                 "Accept": "*/*"})
+
+    assert elided_cookies == {"steamLoginSecure": "***", "browserid": "***"}
+    assert elided_data == {"id": "1", "sessionid": "***"}
+    assert elided_headers["Cookie"] == "***"
+    assert elided_headers["Authorization"] == "***"
+    assert elided_headers["Accept"] == "*/*", "an ordinary header is left alone"
+    for value in (SECRET, SESSION_SECRET, AUTH_SECRET):
+        assert value in secrets, "the value must be available for the whole-record scrub"
+
+
+def test_elide_secrets_never_raises():
+    """A diagnostic that can break the request it describes is not a diagnostic."""
+    _cookies, _data, _headers, _secrets = capture.elide_secrets(
+        cookies=object(), data=object(), headers=object())
+    # The point is that the call returned instead of raising; whatever it could
+    # describe safely, it did.
+    assert True
+
+
+def test_no_credential_value_reaches_the_outbox(tmp_path):
+    """Put the secret in the jar, the form, a header and the response body.
+
+    Then assert the value is in no file the recorder wrote -- record, body or
+    manifest -- while the *name* survives, because which cookie was sent is the
+    diagnostic point.
+    """
+    outbox = tmp_path / "outbox"
+    capture.configure(str(outbox), web_download_capture=True)
+    try:
+        capture.record_web_download(
+            capture.SUBSCRIBE_KIND, 1, "https://steamcommunity.com/subscribe",
+            {
+                "request": {
+                    "method": "POST",
+                    "url": "https://steamcommunity.com/subscribe?token=" + SECRET,
+                    "headers": {"Cookie": f"steamLoginSecure={SECRET}",
+                                "Authorization": f"Bearer {AUTH_SECRET}"},
+                    "cookies": {"steamLoginSecure": SECRET,
+                                "browserid": "BROWSER-ID-0123456789"},
+                    "data": {"id": "1", "sessionid": SESSION_SECRET},
+                },
+                "http_status": 200,
+                "final_url": "https://steamcommunity.com/done?sessionid=" + SESSION_SECRET,
+                "response_headers": {
+                    "Set-Cookie": f"steamLoginSecure={SECRET}; Path=/; HttpOnly"},
+                "body": f"<html>echo {SECRET} {SESSION_SECRET} {AUTH_SECRET}</html>",
+            })
+    finally:
+        capture.configure(None)
+
+    written = [path for path in outbox.rglob("*") if path.is_file()]
+    assert written, "the switch was on, so the capture must have been written"
+    for path in written:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for value in (SECRET, SESSION_SECRET, AUTH_SECRET):
+            assert value not in text, f"{value!r} leaked into {path.name}"
+
+    records = _records(str(outbox))
+    assert len(records) == 1
+    record = records[0]
+    assert record["kind"] == "subscribe"
+    assert record["request"]["cookies"] == {
+        "steamLoginSecure": "***", "browserid": "***"}
+    assert set(record["request"]["cookies"]) == {"steamLoginSecure", "browserid"}
+    assert record["request"]["data"]["sessionid"] == "***"
+    assert record["request"]["data"]["id"] == "1"
+    assert record["request"]["headers"]["Cookie"] == "***"
+    assert record["request"]["headers"]["Authorization"] == "***"
+    assert record["response_headers"]["Set-Cookie"] == "***"
+    body = (outbox / record["body_file"]).read_text(encoding="utf-8")
+    assert "echo" in body, "the body must still be the body"
 
 
 # --- the throttle page ------------------------------------------------------

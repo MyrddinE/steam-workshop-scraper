@@ -182,7 +182,10 @@ class WebScraperThread(threading.Thread):
             return scrape_data
         logging.info("[W:%s] Scrape looked gated; retrying with the refreshed login cookie",
                      item.get("workshop_id"))
-        retried = scrape_extended_details(url)
+        # Keep the body when the debug switch is on, exactly as the first
+        # attempt does: a capture of the retry would otherwise be the one record
+        # with nothing to look at.
+        retried = scrape_extended_details(url, keep_body=capture.web_download_capture_active())
         self._note_session_from((retried or {}).get("body") or body)
         return retried or scrape_data
 
@@ -388,17 +391,20 @@ class WebScraperThread(threading.Thread):
 
             workshop_id = item["workshop_id"]
             url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}"
-            # When scrape capture is on, ask for the body even on success: the
-            # whole point is to see what a working, signed-in page looks like.
-            # One interval per attempt, advanced whether or not it succeeds; a
-            # failure must not leave it running, or the next success would read
-            # the whole outage as elapsed time and collapse the delay at once.
+            # When web-download capture is on, ask for the body even on
+            # success: the whole point is to see what a working, signed-in page
+            # looks like. One interval per attempt, advanced whether or not it
+            # succeeds; a failure must not leave it running, or the next success
+            # would read the whole outage as elapsed time and collapse the delay
+            # at once.
             elapsed = self._clock.since()
-            keeping = capture.web_scrape_capture_active()
+            keeping = capture.web_download_capture_active()
             scrape_data = scrape_extended_details(url, keep_body=keeping)
             scrape_data = self._retry_if_gated(item, url, scrape_data)
-            if keeping:
-                capture.record_web_scrape(workshop_id, url, scrape_data)
+            if keeping and scrape_data:
+                capture.record_web_download(
+                    capture.ITEM_PAGE_KIND, workshop_id, url, scrape_data,
+                    ok=scrape_data.get("description") is not None)
 
             outcome = classify_scrape(scrape_data)
             if outcome is ScrapeOutcome.SUCCESS:

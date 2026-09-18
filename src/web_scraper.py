@@ -444,11 +444,24 @@ def scrape_extended_details(item_url: str, keep_body: bool = False) -> dict | No
     description selector did not match, returns a dict whose "description" is
     None - the caller must treat that as a miss, not as a completed scrape, and
     "body" carries the response so it can be captured as evidence.
+
+    "request" carries the values actually sent -- method, URL, headers, the
+    cookie jar and no form data for a GET -- so a capture records what went on
+    the wire rather than a re-derived guess at it. The jar is the same object
+    handed to the session, so the two cannot drift apart.
     """
     session = _get_session()
     _rate_limit()
+    cookies = _workshop_cookies_or_empty()
+    request = {
+        "method": "GET",
+        "url": item_url,
+        "headers": BROWSER_HEADERS,
+        "cookies": cookies,
+        "data": None,
+    }
     try:
-        response = session.get(item_url, timeout=10, cookies=_workshop_cookies_or_empty(),
+        response = session.get(item_url, timeout=10, cookies=cookies,
                                headers=BROWSER_HEADERS)
         response.raise_for_status()
 
@@ -463,11 +476,12 @@ def scrape_extended_details(item_url: str, keep_body: bool = False) -> dict | No
             "tags": tags,
             # Retained only on a miss: the caller captures it, and there is no
             # reason to carry a few hundred KB of HTML around on the happy path.
-            # Kept on a miss, and on demand: the scrape capture needs the page
-            # even when it worked, to see the signed-in markup in the header.
+            # Kept on a miss, and on demand: the web-download capture needs the
+            # page even when it worked, to see the signed-in markup in the header.
             "body": response.text if (description is None or keep_body) else None,
             "http_status": response.status_code,
             "final_url": str(getattr(response, "url", item_url)),
+            "request": request,
         }
     except requests.exceptions.HTTPError as exc:
         # raise_for_status() raises HTTPError, which carries the response. Keep
@@ -487,6 +501,7 @@ def scrape_extended_details(item_url: str, keep_body: bool = False) -> dict | No
             "body": body,
             "http_status": getattr(error_response, "status_code", None),
             "final_url": str(getattr(error_response, "url", item_url)),
+            "request": request,
         }
     except requests.exceptions.RequestException as exc:
         # A genuine transport failure has no response and no status, so None

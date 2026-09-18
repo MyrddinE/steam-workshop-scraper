@@ -847,3 +847,55 @@ def test_a_downloaded_image_does_not_rewrite_the_scrape_version(db_path, tmp_pat
     assert row["scrape_version"] == 999, \
         "an image download must leave the page's scrape revision alone"
 
+
+# ── Web worker: the debug capture ---------------------------------------------
+# The one web-download switch covers every Steam community pull. The item page is
+# the caller in this module; the subscriptions page and the subscribe route have
+# their own tests beside their callers.
+
+def test_the_item_page_pull_is_captured_as_a_full_exchange(db_path, tmp_path):
+    """The switch produces one item_page record, body on disk, no credential."""
+    import json
+
+    from src import capture
+    from src.database import insert_or_update_item
+
+    secret = "ITEM-PAGE-LOGIN-SECRET-0123456789"
+    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    page = {
+        "description": "scraped text",
+        "tags": [],
+        "body": f'<html><div class="account_pulldown">{secret}</div></html>',
+        "http_status": 200,
+        "final_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=1",
+        "request": {
+            "method": "GET",
+            "url": "https://steamcommunity.com/sharedfiles/filedetails/?id=1",
+            "headers": {"User-Agent": "UA"},
+            "cookies": {"steamLoginSecure": secret,
+                        "browserid": "BROWSER-ID-0123456789"},
+            "data": None,
+        },
+    }
+    outbox = tmp_path / "outbox"
+    capture.configure(str(outbox), web_download_capture=True)
+    try:
+        _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1}, page)
+    finally:
+        capture.configure(None)
+
+    records = [json.loads(path.read_text(encoding="utf-8"))
+               for path in (outbox / "web_downloads").glob("*.json")]
+    assert len(records) == 1
+    record = records[0]
+    assert record["kind"] == "item_page"
+    assert record["workshop_id"] == 1
+    assert record["request"]["cookies"] == {
+        "steamLoginSecure": "***", "browserid": "***"}
+    assert record["body_file"] is not None
+    assert (outbox / record["body_file"]).exists(), "the response body is on disk"
+    for path in outbox.rglob("*"):
+        if path.is_file():
+            assert secret not in path.read_text(encoding="utf-8", errors="replace")
+
+
