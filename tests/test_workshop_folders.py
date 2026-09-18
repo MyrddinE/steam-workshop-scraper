@@ -305,7 +305,14 @@ def test_scan_off_windows_is_a_silent_noop(tmp_path, caplog):
         assert svc.scan() == {"checked": 0, "stamped": 0}
 
     assert _row(db, 5)["downloaded_at"] is None
-    assert caplog.records == [], "nothing logs per check"
+    # `caplog` captures what reaches the root logger from *any* thread, so
+    # `caplog.records == []` would be asserting that no background thread left
+    # by another test happened to log during this window -- an order-dependent
+    # flake, not a property of the scan. The claim is narrower and is the one
+    # that matters: the scan's own change line, identified by the prefix the
+    # changing path logs (asserted positively in the test below), is absent.
+    scan_lines = [r for r in caplog.records if "Downloaded-item scan" in r.getMessage()]
+    assert scan_lines == [], "the disabled scan must not log per check"
 
 
 def test_scan_logs_once_when_it_changed_something(tmp_path, caplog):
