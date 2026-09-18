@@ -827,14 +827,17 @@ class SubscriptionQueueScreen(ModalScreen):
     same lock (``subscribe_engine.run_subscription_pass``), which is what covers
     a caller that runs the engine outside this screen.
 
-    Each item costs the engine **two gated page reads** -- the pre-read that
-    guards the POST and the confirmation read -- so the per-item step in the
-    estimate is twice the shared configured web delay (the POST is an XHR and
-    pays no interval). The estimate is read fresh on every tick, so a throttle
-    that doubles the delay mid-pass moves it; it is an estimate, not a promise,
-    because the pass can also be refused, throttled or cancelled after it is
-    drawn. See ``docs/tui.md`` and, for why this differs from the web overlay's
-    countdown, ``docs/web-ui.md``.
+    The estimate *starts* from the configured web delay: each item costs the
+    engine **two gated page reads** -- the pre-read that guards the POST and the
+    confirmation read -- so the initial per-item guess is twice the shared
+    configured delay (the POST is an XHR and pays no interval). From then on it
+    is nudged by what the pass has actually done: the wall-clock cost of each
+    finished item is timed between the per-item results the pass already
+    delivers, and the rows still waiting are priced from the running mean of
+    those durations, seeded with the configured guess so the first item moves it
+    most. It is an estimate, not a promise, because the pass can also be refused,
+    throttled or cancelled after it is drawn. See ``docs/tui.md`` and, for why
+    this differs from the web overlay's countdown, ``docs/web-ui.md``.
     """
 
     # Four ticks a second, the web overlay's cadence.
@@ -855,6 +858,10 @@ class SubscriptionQueueScreen(ModalScreen):
         # workshop_id -> SubscribeOutcome, in the order the pass reports them.
         self._outcomes: dict[int, subscribe_engine.SubscribeOutcome] = {}
         self._pass_started_at: float | None = None
+        # Wall-clock cost of each item the pass has finished, in the order it
+        # reported them. The running mean is seeded with the configured guess.
+        self._observed_seconds: list[float] = []
+        self._last_result_at: float | None = None
         self._estimate_timer = None
         # Set on unmount so a pass that is mid-wait stops waiting for the
         # screen it can no longer draw to.
@@ -905,25 +912,50 @@ class SubscriptionQueueScreen(ModalScreen):
         return line
 
     def _step_seconds(self) -> float:
-        """One queued item's wall-clock cost: two gated page reads.
+        """The initial per-item guess: two gated page reads.
 
         The engine reads the item page before the POST and again to confirm, and
-        both reads wait the shared adaptive web interval, so the step is twice
-        the configured delay. The delay is read fresh from the same owner every
+        both reads wait the shared adaptive web interval, so the starting guess
+        is twice the configured delay; :meth:`_estimated_item_seconds` seeds its
+        running mean with it. The delay is read fresh from the same owner every
         time (``src.web_worker.configured_web_delay``) rather than snapshotted,
         because the engine's ``WebInterval`` writes a throttle's doubling back
         through this screen's own config dict while the pass runs.
         """
         return 2.0 * configured_web_delay(self.config)
 
+    def _estimated_item_seconds(self) -> float:
+        """The mean cost of a finished item, seeded with the configured guess.
+
+        One running mean over every item the pass has reported, as
+        ``(seed + sum(observed)) / (1 + count)``: the seed is one virtual
+        observation, so the first real item moves the estimate a lot and later
+        ones less, and the configured delay still pulls on it. A rolling window,
+        a rate learned from past passes or anything else persisted is
+        deliberately not used -- the pane is transient, and the items of the pass
+        in front of it are the only evidence worth pricing the rest of it with.
+        """
+        seed = self._step_seconds()
+        observed = self._observed_seconds
+        if not observed:
+            return seed
+        return (seed + sum(observed)) / (len(observed) + 1)
+
     def _estimate_remaining(self, index: int, elapsed: float) -> int:
         """Whole seconds until item ``index`` is reached, never negative.
 
-        The same shape as the web overlay's ``(openAt - elapsed)`` countdown,
-        with this engine's per-item step. Rounded up so an estimate is never
-        drawn as "0s" while the item has not started.
+        ``index`` is the row's position in the queue and ``elapsed`` is the
+        wall-clock time since the pass started. The time already spent on the
+        item now being processed is what is left of ``elapsed`` once the
+        finished items' observed costs come out of it; every item still ahead of
+        the row costs the running mean. Rounded up so an estimate is never drawn
+        as "0s" while the item has not started.
         """
-        return max(0, math.ceil(index * self._step_seconds() - elapsed))
+        spent_on_finished = sum(self._observed_seconds)
+        waiting_before = max(0, index - len(self._outcomes))
+        spent_on_current = max(0.0, elapsed - spent_on_finished)
+        remaining = waiting_before * self._estimated_item_seconds() - spent_on_current
+        return max(0, math.ceil(remaining))
 
     def _row_state(self, index: int, elapsed: float):
         """``(countdown, status, colour)`` for the row at ``index``.
@@ -1013,6 +1045,8 @@ class SubscriptionQueueScreen(ModalScreen):
             return
         self._pass_running = True
         self._outcomes = {}
+        self._observed_seconds = []
+        self._last_result_at = None
         self._pass_started_at = time.monotonic()
         self.query_one("#btn-subscribe-queue", Button).disabled = True
         self.query_one("#sub-queue-status", Static).update(
@@ -1034,26 +1068,53 @@ class SubscriptionQueueScreen(ModalScreen):
         self.run_worker(work, name="subscribe-queue", group="subscribe-queue",
                         thread=True, exit_on_error=False)
 
+    def _item_seconds_since_last_result(self, now: float) -> float:
+        """The wall-clock cost of the item that just finished, from its own clock.
+
+        The pass calls its per-item callback synchronously right after each
+        item's engine run returns (``run_subscription_pass``), so the gap
+        between two callbacks is that item's whole cost -- both gated reads and
+        the POST -- which is what the configured delay alone does not price. The
+        first item is measured from the pass's start. Clamped at zero so a clock
+        that steps back cannot feed a negative weight to the mean.
+        """
+        started = self._last_result_at
+        if started is None:
+            started = self._pass_started_at
+        self._last_result_at = now
+        if started is None:
+            return 0.0
+        return max(0.0, now - started)
+
     def _deliver_result(self, outcome) -> None:
-        """Hand one outcome to the UI thread from the worker."""
+        """Hand one outcome to the UI thread from the worker.
+
+        The item's duration is measured here, on the worker thread, at the
+        moment the pass reports it -- not on the UI thread, whose queueing delay
+        would be counted into the item.
+        """
+        observed = self._item_seconds_since_last_result(time.monotonic())
         try:
-            self.app.call_from_thread(self._apply_result, outcome)
+            self.app.call_from_thread(self._apply_result, outcome, observed)
         except RuntimeError:
             # The screen closed while the pass was in flight; there is nothing
             # left to draw, and the pass releases the pause on its own.
             logging.debug("[subscribe] dropped a result; the screen is gone")
 
-    def _apply_result(self, outcome) -> None:
+    def _apply_result(self, outcome, observed_seconds: float) -> None:
         """Record one outcome, read the item's state back and redraw its row.
 
-        The engine writes a confirmed subscription into the shared table before
-        it returns the outcome (``mark_own_subscribed`` also clears the queue
-        flag), so reading the item back is what tells this row whether its marker
-        moved -- the row renders from the same ``src/subscription.py`` table the
-        list, the detail pane and the web do. A read that fails leaves the row
-        drawing its stored, still-queued state, which is the honest answer when
-        the state cannot be read.
+        ``observed_seconds`` is the item's measured cost, which the estimate's
+        running mean is built from. The engine writes a confirmed subscription
+        into the shared table before it returns the outcome
+        (``mark_own_subscribed`` also clears the queue flag), so reading the item
+        back is what tells this row whether its marker moved -- the row renders
+        from the same ``src/subscription.py`` table the list, the detail pane and
+        the web do. A read that fails leaves the row drawing its stored,
+        still-queued state, which is the honest answer when the state cannot be
+        read.
         """
+        self._observed_seconds.append(observed_seconds)
         self._outcomes[outcome.workshop_id] = outcome
         states = get_subscription_states(self.db_path, [outcome.workshop_id])
         fresh = states.get(outcome.workshop_id)

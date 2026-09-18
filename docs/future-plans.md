@@ -462,29 +462,32 @@ writes `own_subscribed`. The price is latency — up to a day to notice that a s
 
 ## Estimating a subscription pass from measurement
 
-**Status: Planned, low priority.** Parked deliberately: the estimate is cosmetic, and doing this properly
-costs more than the inaccuracy does today.
+**Status: Landed** (issue 41). The owner decided the approach: this is a progress bar's output, not a
+long-running graph — the pane is up for a minute or two at most.
 
-The TUI's queue estimate prices every item at two intervals of the configured delay. *Measured live* on
-2026-09-18 that is about a third low, and for a mundane reason: a gated page read costs the interval
+The TUI's queue estimate priced every item at two intervals of the configured delay. *Measured live* on
+2026-09-18 that was about a third low, and for a mundane reason: a gated page read costs the interval
 **plus the request** — 6.8 s against a 6.0 s delay in the scraper's own loop, 7.7–8.6 s inside the
 subscribe pass — and the POST, exempt from the interval, still spends 1.1–1.8 s on the clock. One item
 therefore ran about 18 s against an estimate of 12 s.
 
-Two improvements, in the order they are worth doing:
+The decided fix keeps that starting number and adds **a live correction for the rest of the queue**.
+`run_subscription_pass` calls its per-item callback synchronously after each item, so the screen times
+each finished item between two callbacks and prices the rows still waiting from a running mean of those
+observed durations, seeded with the configured guess. The seed is one virtual observation, which is why
+the first item moves the estimate a lot and later ones less; the row being processed is already drawn
+distinctly ("subscribing...") with no countdown, which is where the timing starts. Nothing is persisted
+and no rolling window or rate from past passes is used. See
+[tui.md](tui.md#subscription-queue-sl-keys). The web overlay's countdown keeps its own flow's cost and
+is deliberately not part of this ([web-ui.md](web-ui.md#subscribe-feature)).
 
-1. **A better starting number, from what has already been recorded.** The subscribe path's requests are
-   already timestamped twice over — every web download is captured with the moment it was made, and the
-   daemon log carries the web worker's own pace over weeks. A per-item cost derived from that history,
-   together with the delay it was measured at, beats a constant multiple of the configured delay, and it
-   can be recomputed when the delay moves.
-2. **A live correction for the rest of the queue.** Once a pass is running, the items it has finished are
-   the best evidence about the items it has not: a rolling mean of the last few item durations, applied
-   to the rows still waiting, converges within two or three items and absorbs whatever the history got
-   wrong. The row being processed is already drawn distinctly ("subscribing...") with no countdown, which
-   is the natural place to start timing each item from.
-
-Not worth doing before the Web UI moves onto the engine: that changes what a pass costs on the web side,
-and the two estimates should be re-derived together rather than twice — [tui.md](tui.md),
-[web-ui.md](web-ui.md), [code-issues.md](code-issues.md) records the inaccuracy as issue 41.
+**Rejected: derive the starting number from recorded history.** The subscribe path's requests are
+already timestamped twice over — every web download is captured with the moment it was made, and the
+daemon log carries the web worker's own pace over weeks — so a per-item cost, with the delay it was
+measured at, could have been derived from that history and recomputed when the delay moves. It was
+rejected with the live correction above: a transient pane does not need persisted history to be useful,
+and keeping it would have cost a store, a re-derivation rule and a staleness question for a number that
+is on screen for a minute or two. A rolling mean of the last few item durations was considered and
+rejected for the same reason: the running mean over the pass already converges within two or three
+items, and seeding it with the configured guess is enough.
 

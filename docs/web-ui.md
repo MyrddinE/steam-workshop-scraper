@@ -409,13 +409,23 @@ this side.
 
 The TUI queue screen draws the same shape of estimate, but the flow underneath it is the engine
 (`src/subscribe_engine.py`), not a tab: each item costs **two** gated page reads — the pre-read that
-guards the POST and the confirmation read — while the POST is exempt as an XHR. Its per-item step is
+guards the POST and the confirmation read — while the POST is exempt as an XHR. Its starting guess is
 therefore **twice** the shared configured delay, read fresh each tick through
-`src.web_worker.configured_web_delay` so a throttle's doubling mid-pass moves it; the row being read
-now is shown distinctly (`subscribing...`) from those still waiting. Both figures are estimates, not
-promises: a pass can be refused, throttled or cancelled. **The difference is deliberate and is not a
-missing parity fix**: each estimate is measured against its own flow's cost, and the Web UI adopting
-the engine — which would collapse the two into one — is the separate workstream recorded in
+`src.web_worker.configured_web_delay` so a throttle's doubling mid-pass moves it; from the first result
+on it is corrected by the durations the pass actually reports (see
+[tui.md](tui.md#subscription-queue-sl-keys)). The row being read now is shown distinctly
+(`subscribing...`) from those still waiting. Both figures are estimates, not promises: a pass can be
+refused, throttled or cancelled.
+
+**The overlay's countdown does not get that correction, and that is not a missing parity fix.** Its
+number is not a projection from item costs at all: it is the fixed schedule on which the overlay opens
+its tabs (`openAt = i * ceil(stepDelay / 1000)`), and the loop opens tab *i* at exactly that moment.
+Timing items against the schedule would change when tabs open — the pacing that keeps Steam from
+throttling — rather than correct a wrong number; the overlay also has no synchronous per-item result to
+time, because the browser tab loads the page on its own and the userscript reports back asynchronously
+through the queue poll. The two estimates therefore answer different questions and are measured against
+their own flow's cost. The Web UI adopting the engine — which would collapse the two into one — is the
+separate workstream recorded in
 [future-plans.md](future-plans.md#removing-the-browser-bridge-from-the-subscribe-path). The TUI
 screen's own description is in [tui.md](tui.md#subscription-queue-sl-keys).
 
