@@ -497,6 +497,12 @@ _FAKE_METRIC_VALUES = {
     "coverage": {
         "total": 2, "api_fetched": 2, "described": 1,
         "imaged": 1, "translated": 0, "attributed": 1,
+        "filtered": {
+            "total": 1, "api_fetched": 1, "described": 0,
+            "imaged": 1, "translated": 0, "attributed": 1,
+            "appids": [294100], "with_filters": [294100], "restricting": [294100],
+            "unreadable": [],
+        },
     },
     "translation_status": {"Translated": 1, "Queued": 1},
     "tag_counts": {"Alpha": 2, "Beta": 1},

@@ -255,7 +255,7 @@ metrics and what each section renders:
 | `stuck_work` | the stuck-work callout |
 | `queued_nowhere` | the items-in-no-queue counter, with an all-clear at zero |
 | `fetch_recency` | fresh / stale / never-attempted counts |
-| `coverage` | coverage bars over live items |
+| `coverage` | coverage bars over live items, at two scopes: the whole library, and the target AppIDs' enrichment filters |
 | `translation_status` | the translation classification |
 | `tag_counts` | the tag table |
 | `priority_breakdowns` | per-queue waiting counts by priority |
@@ -268,8 +268,22 @@ the same column pushed every section below it off the screen. Where a chunk is d
 do with when it is requested: the ordering below is unaffected.
 
 Coverage (`_format_coverage`, `src/tui.py:396`) is drawn as a labelled progress bar per
-stage — API data, description, image, translation, creator — against the number of live
-items, with dead items excluded because they can never be covered. `stuck_work`
+stage — API data, description, image, translation, creator — **at two scopes**. The first
+block is every live item, with dead items excluded because they can never be covered. The
+second block is the same bars over *what the owner cares about*: the live items the target
+AppIDs' stored `enrichment_filters` select, which is the population the daemon calls
+enriched. The two are separately headed, and a scope note under the second says which
+AppIDs were used and why the two figures may coincide: an AppID with no readable filter set
+(including a malformed one) excludes nothing, so its items are all counted
+(`enrichment_filters_for`'s contract: `None` and `[]` both mean no exclusion). The second
+figure is the **search builder's SQL translation** of the filters, not a re-derivation of
+the daemon's per-item check: the builder also searches each text field's `_en` counterpart
+while `_evaluate_filters` does not, so the two can disagree on an item whose stored
+translation matches and whose original text does not. Where they disagree, the search
+builder's answer is the one shown. With more than one target AppID the population is the
+**union** of what any target's filters select. The metric's own docstring
+(`src/metrics.py`, `_coverage`) is the reference for the translation's edges.
+`stuck_work`
 (`_format_stuck`, `src/tui.py:418`) names any dead items still flagged in a queue and says
 the queues will not drain until they are cleared; a zero value shows an all-clear. The two
 handoff counters share `_format_handoff_metric`: `dead_queued` names any dead items still

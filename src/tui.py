@@ -234,9 +234,13 @@ class StatsScreen(Screen):
         "translation_throughput": "translation-throughput-content",
     }
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, target_appids: list | None = None):
         super().__init__()
         self.db_path = db_path
+        #: The configured target AppIDs, when the caller has them. The coverage
+        #: metric restricts its second figure to these apps' enrichment filters;
+        #: when this is None the metric falls back to every `app_tracking` row.
+        self.target_appids = target_appids
         #: Last measured duration per metric, and when it finished, both kept for
         #: the session so the request order and the intervals adapt to the data.
         self._measured_ms: dict[str, float] = {}
@@ -363,7 +367,8 @@ class StatsScreen(Screen):
         """
         from src.database import compact_tag_ids
 
-        for name, entry in metrics.iter_metrics(self.db_path, names):
+        for name, entry in metrics.iter_metrics(
+                self.db_path, names, {"target_appids": self.target_appids}):
             if name == "tag_counts":
                 # The tag-frequency write stays off the UI thread, exactly as the
                 # old slow-tier worker did, and runs once per tag metric arrival.
@@ -513,27 +518,76 @@ class StatsScreen(Screen):
                 f"  Completed last day: {value.get('day', 0):,}\n"
                 f"  Last success: {last}")
 
+    #: The five stages the coverage figure counts, in display order.
+    COVERAGE_STAGES = (
+        ("api_fetched", "API data"),
+        ("described", "Description"),
+        ("imaged", "Image"),
+        ("translated", "Translation"),
+        ("attributed", "Creator"),
+    )
+
     @staticmethod
     def _format_coverage(cov: dict) -> str:
-        """Coverage as progress over live items, not a dump of raw counts."""
+        """Coverage over live items, at two scopes kept visibly separate.
+
+        The first block is every live item. The second is the items the target
+        AppIDs' enrichment filters select -- "what I care about" -- produced by
+        the search builder's SQL translation of those filters, not by the
+        daemon's per-item check. The note under the second block says which
+        scope it is and, when the two coincide, why: an AppID with no filters,
+        or one whose stored filters cannot be read, excludes nothing.
+        """
         total = cov.get("total", 0) or 0
         if not total:
             return "[dim]No live items to cover.[/dim]"
-        stages = (
-            ("api_fetched", "API data"),
-            ("described", "Description"),
-            ("imaged", "Image"),
-            ("translated", "Translation"),
-            ("attributed", "Creator"),
-        )
-        lines = [f"[b]Live items:[/b] {total:,}", ""]
-        for key, label in stages:
-            done = cov.get(key, 0) or 0
-            pct = done / total * 100
+
+        def bar(done: int, denominator: int) -> str:
+            pct = done / denominator * 100
             filled = int(round(pct / 100 * 20))
-            bar = f"[green]{'█' * filled}[/green][dim]{'░' * (20 - filled)}[/dim]"
-            lines.append(f"{label:<12} {pct:5.1f}%  {bar}  {done:,} / {total:,}")
+            return (f"{pct:5.1f}%  [green]{'█' * filled}[/green]"
+                    f"[dim]{'░' * (20 - filled)}[/dim]  {done:,} / {denominator:,}")
+
+        def block(counts: dict, denominator: int) -> list[str]:
+            return [
+                f"{label:<12} {bar(counts.get(key, 0) or 0, denominator)}"
+                for key, label in StatsScreen.COVERAGE_STAGES
+            ]
+
+        lines = [f"[b]Live items:[/b] {total:,}", "", "[b]All live items[/b]"]
+        lines += block(cov, total)
+
+        filtered = cov.get("filtered")
+        if isinstance(filtered, dict):
+            f_total = filtered.get("total", 0) or 0
+            lines += ["", "[b]Target AppIDs' enrichment filters — what I care about[/b]"]
+            if f_total:
+                lines += block(filtered, f_total)
+            else:
+                lines.append("  [dim]No live items match the filters.[/dim]")
+            lines.append(f"  [dim]{StatsScreen._coverage_scope_note(filtered)}[/dim]")
         return "\n".join(lines)
+
+    @staticmethod
+    def _coverage_scope_note(filtered: dict) -> str:
+        """Why the two coverage figures are what they are, in one sentence."""
+        appids = filtered.get("appids") or []
+        unreadable = filtered.get("unreadable") or []
+        restricting = filtered.get("restricting") or []
+        names = ", ".join(str(a) for a in appids) or "none configured"
+        if unreadable:
+            return (f"Target AppIDs: {names}. The stored filter set for "
+                    f"{', '.join(str(a) for a in unreadable)} could not be read, "
+                    "so those items are all counted (no exclusion).")
+        if not filtered.get("with_filters"):
+            return (f"Target AppIDs: {names}. No enrichment filters are set for "
+                    "them, so both figures are the same.")
+        if not restricting:
+            return (f"Target AppIDs: {names}. Their filters exclude nothing "
+                    "(a percentile has no fixed predicate), so both figures are "
+                    "the same.")
+        return (f"Target AppIDs: {names}. SQL translation of their filters; it may "
+                "differ from the daemon's per-item check on translated (_en) fields.")
 
     @staticmethod
     def _format_stuck(stuck: dict) -> str:
@@ -2862,7 +2916,10 @@ class ScraperApp(App):
 
     def action_show_stats(self) -> None:
         """Shows the database statistics screen."""
-        self.push_screen(StatsScreen(self.db_path))
+        self.push_screen(StatsScreen(
+            self.db_path,
+            (self.config.get("daemon", {}) or {}).get("target_appids"),
+        ))
         
     async def action_update_visible(self) -> None:
         """Queues all visible list items for API re-fetch (priority 10)."""

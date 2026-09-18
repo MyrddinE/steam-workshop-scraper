@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterator
 
 from src import db_poll
-from src.database import get_connection
+from src.database import build_filter_clause_sql, enrichment_filters_for, get_connection
 
 #: Used when a caller wants every metric and has no measurements of its own.
 DEFAULT_STALENESS_DAYS = 30
@@ -382,14 +382,140 @@ def _fetch_recency(conn, params) -> dict:
     return counts
 
 
-@metric("coverage", 80, "How much of the live library each stage has reached.")
-def _coverage(conn, params) -> dict:
-    """Processing coverage over live items.
+# --------------------------------------------------------------------------
+# coverage, at two scopes
+# --------------------------------------------------------------------------
 
-    This is the progress view: outstanding depth says how much is queued, but
-    only coverage says how far along the library actually is. Dead items are
-    excluded because they will never be covered, and counting them would make
-    coverage fall as the library is cleaned up.
+#: The five stages the coverage figure counts, in display order.
+COVERAGE_STAGES = ("api_fetched", "described", "imaged", "translated", "attributed")
+
+#: Live items only: dead items can never be covered.
+_LIVE_ITEMS = "(w.status IS NULL OR w.status <> -1)"
+
+
+def _coverage_counts(conn, where_sql: str, params: list) -> dict:
+    """The six coverage counts over whatever population ``where_sql`` selects."""
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(CASE WHEN w.api_fetched_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS api_fetched,
+               COALESCE(SUM(CASE WHEN COALESCE(w.extended_description, '') <> '' THEN 1 ELSE 0 END), 0) AS described,
+               COALESCE(SUM(CASE WHEN COALESCE(w.image_extension, '') <> '' THEN 1 ELSE 0 END), 0) AS imaged,
+               COALESCE(SUM(CASE WHEN w.translate_version IS NOT NULL THEN 1 ELSE 0 END), 0) AS translated,
+               COALESCE(SUM(CASE WHEN COALESCE(w.creator, '') <> '' THEN 1 ELSE 0 END), 0) AS attributed
+        FROM workshop_items w
+        WHERE {where_sql}
+        """,
+        params,
+    ).fetchone()
+    return {key: row[key] or 0 for key in ("total",) + COVERAGE_STAGES}
+
+
+def _care_about_population(conn, target_appids) -> tuple[str, list, dict]:
+    """The SQL predicate for "what I care about": the target AppIDs' filters.
+
+    Each target AppID contributes ``consumer_appid = ? AND <its filters>`` and
+    the AppIDs are joined with OR, so the figure is the **union** of whatever any
+    target's filters select. An AppID with no stored filters, or one whose stored
+    set could not be read, contributes its AppID alone and therefore everything
+    it owns -- the same contract as :func:`enrichment_filters_for` (``None`` and
+    ``[]`` both mean "no exclusion").
+
+    Returns ``(predicate, params, detail)``. ``predicate`` is empty when there is
+    no target AppID at all, and the caller then counts the whole live library for
+    both figures: with nothing to restrict to, "what I care about" is everything,
+    exactly as an empty filter set is.
+
+    ``detail`` names the AppIDs used, the ones with a readable non-empty filter
+    set (``with_filters``), the subset of those whose filters actually produce a
+    predicate (``restricting``) and the ones whose stored set was unreadable
+    (``unreadable``), so a front end can explain why the two figures coincide
+    rather than leaving it looking like a bug.
+    """
+    if target_appids is None:
+        target_appids = [
+            row["appid"]
+            for row in conn.execute("SELECT appid FROM app_tracking ORDER BY appid")
+            if row["appid"] is not None
+        ]
+    appids: list[int] = []
+    for value in target_appids:
+        try:
+            appids.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    if not appids:
+        return "", [], {"appids": [], "with_filters": [], "restricting": [],
+                        "unreadable": []}
+
+    clauses: list[str] = []
+    params: list = []
+    with_filters: list[int] = []
+    restricting: list[int] = []
+    unreadable: list[int] = []
+    for appid in appids:
+        row = conn.execute(
+            "SELECT * FROM app_tracking WHERE appid = ?", (appid,)
+        ).fetchone()
+        tracking = dict(row) if row is not None else None
+        filters = enrichment_filters_for(tracking) if tracking else []
+        if tracking is not None and filters is None:
+            unreadable.append(appid)
+        parts = ["w.consumer_appid = ?"]
+        app_params: list = [appid]
+        if filters:
+            with_filters.append(appid)
+            group, group_params = build_filter_clause_sql(filters)
+            if group:
+                restricting.append(appid)
+                parts.append(f"({group})")
+                app_params.extend(group_params)
+        clauses.append("(" + " AND ".join(parts) + ")")
+        params.extend(app_params)
+    predicate = "(" + " OR ".join(clauses) + ")"
+    return predicate, params, {
+        "appids": appids,
+        "with_filters": with_filters,
+        "restricting": restricting,
+        "unreadable": unreadable,
+    }
+
+
+@metric("coverage", 80, "How much of the live library each stage has reached, at both scopes.")
+def _coverage(conn, params) -> dict:
+    """Processing coverage over live items, at two scopes side by side.
+
+    The first figure is the whole live library: this is the progress view, and
+    outstanding depth says how much is queued while only coverage says how far
+    along the library actually is. Dead items are excluded because they will
+    never be covered, and counting them would make coverage fall as the library
+    is cleaned up.
+
+    The second figure, under ``filtered``, is the same coverage restricted to
+    *what the owner cares about*: the items the target AppIDs'
+    ``enrichment_filters`` select. Its population is the one the daemon calls
+    *enriched*. Each AppID contributes ``consumer_appid = ? AND <its filters>``
+    and the AppIDs are ORed together, so with more than one target the figure is
+    the **union** of what any target's filters select. The AppIDs come from the
+    ``target_appids`` parameter when a front end can supply the configured list,
+    and otherwise from every row in ``app_tracking``.
+
+    **This figure is a translation, not a re-derivation of the daemon's per-item
+    decision.** It is built by :func:`src.database.build_filter_clause_sql`, the
+    same SQL builder a search uses, while the daemon's in-memory
+    :func:`src.database._evaluate_filters` reads the original columns alone. The
+    builder also searches each text field's ``_en`` counterpart, so the two can
+    disagree on an item whose original text does not match but whose stored
+    translation does. Where they disagree, this is the search builder's answer; the
+    demotion walk deliberately keeps using the Python one. A ``percentile``
+    filter has no fixed predicate and is skipped by both, since it is relative to
+    the result set it is computed over.
+
+    An unreadable or empty filter set means *everything* for that AppID
+    (:func:`enrichment_filters_for`'s contract: ``None`` and ``[]`` both mean no
+    exclusion), so the two figures then coincide. ``filtered.with_filters`` and
+    ``filtered.unreadable`` say which AppIDs actually restricted anything, so the
+    coincidence reads as the contract it is.
 
     The image stage counts a *recorded answer*, not only a stored file.
     ``image_extension`` holds the server's reply as well as a file type, so an
@@ -398,26 +524,14 @@ def _coverage(conn, params) -> dict:
     the bar permanently short of the truth. What is still outstanding is an item
     with no answer at all.
     """
-    row = conn.execute(
-        """
-        SELECT COUNT(*) AS total,
-               COALESCE(SUM(CASE WHEN api_fetched_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS api_fetched,
-               COALESCE(SUM(CASE WHEN COALESCE(extended_description, '') <> '' THEN 1 ELSE 0 END), 0) AS described,
-               COALESCE(SUM(CASE WHEN COALESCE(image_extension, '') <> '' THEN 1 ELSE 0 END), 0) AS imaged,
-               COALESCE(SUM(CASE WHEN translate_version IS NOT NULL THEN 1 ELSE 0 END), 0) AS translated,
-               COALESCE(SUM(CASE WHEN COALESCE(creator, '') <> '' THEN 1 ELSE 0 END), 0) AS attributed
-        FROM workshop_items
-        WHERE status IS NULL OR status <> -1
-        """
-    ).fetchone()
-    return {
-        "total": row["total"] or 0,
-        "api_fetched": row["api_fetched"],
-        "described": row["described"],
-        "imaged": row["imaged"],
-        "translated": row["translated"],
-        "attributed": row["attributed"],
-    }
+    overall = _coverage_counts(conn, _LIVE_ITEMS, [])
+    predicate, predicate_params, detail = _care_about_population(
+        conn, params.get("target_appids"))
+    if predicate:
+        filtered = _coverage_counts(conn, f"{_LIVE_ITEMS} AND {predicate}", predicate_params)
+    else:
+        filtered = dict(overall)
+    return {**overall, "filtered": {**filtered, **detail}}
 
 
 # --------------------------------------------------------------------------

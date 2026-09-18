@@ -563,7 +563,11 @@ def api_metric(name):
     """
     if name not in metrics.REGISTRY:
         return jsonify({"error": f"unknown metric {name!r}"}), 404
-    entry = metrics.compute(_db_path, [name])[name]
+    # The configured target AppIDs travel with the request so the coverage
+    # metric can restrict its second figure to what the owner cares about; a
+    # config with none lets the metric fall back to every `app_tracking` row.
+    params = {"target_appids": (_config.get("daemon", {}) or {}).get("target_appids")}
+    entry = metrics.compute(_db_path, [name], params)[name]
     return jsonify({
         "name": name,
         "value": entry["value"],

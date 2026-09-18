@@ -379,6 +379,88 @@ def _build_json_tag_clause(db_col: str, op: str, val) -> tuple[str, list]:
     return ("", [])
 
 
+def build_filter_clause_sql(filters: list[dict]) -> tuple[str, list]:
+    """Translate a filter list into one SQL predicate, exactly as search does.
+
+    This is the one filter-to-SQL builder. ``search_items`` calls it for its
+    filter group, and the metrics layer calls it to express an AppID's stored
+    enrichment filters as SQL, so the coverage figure and the search are the
+    same translation rather than two copies that drift.
+
+    Returns ``(clause, params)`` where ``clause`` is the filters joined by each
+    one's own ``logic`` (AND/OR) and ``params`` are its bound values. The caller
+    supplies the enclosing parentheses. Returns ``("", [])`` when nothing in the
+    list produces a predicate, so a caller can AND it in only when it is not
+    empty.
+
+    The translation is **not** identical to the daemon's in-memory
+    :func:`_evaluate_filters`, and deliberately so: a text operator searches
+    each field's ``_en`` counterpart as well (:data:`_EN_FIELDS`), while the
+    in-memory evaluator reads the original column alone. They can therefore
+    disagree on an item whose original text does not match but whose translation
+    does. Where they disagree, this is the search builder's answer.
+
+    A ``percentile`` filter is skipped: a percentile is relative to the result
+    set it is computed over and has no fixed predicate, and the in-memory
+    evaluator likewise treats it as matching everything. ``full_text`` filters
+    are translated through the FTS index, the same as in a search.
+    """
+    clauses = []
+    params = []
+    for f in filters:
+        if not isinstance(f, dict) or f.get("op") == "percentile":
+            continue
+        logic = f.get("logic", "AND").upper()
+        field = f.get("field")
+        op = f.get("op")
+        val = f.get("value")
+        if not field or not op:
+            continue
+        db_col = FIELD_NAME_MAP.get(field, field)
+        if db_col not in FIELD_NAME_MAP.values() and db_col not in ("tags", "full_text"):
+            continue
+        if db_col == "tags":
+            if op in ("is", "is_not"):
+                continue
+            clause, clause_params = _build_json_tag_clause(db_col, op, val)
+        elif db_col == "full_text":
+            if op in ("is_empty", "is_not_empty"):
+                clause = f"w.rowid {'IN' if op == 'is_not_empty' else 'NOT IN'} (SELECT rowid FROM workshop_fts)"
+                clause_params = []
+            else:
+                fts_clause, fts_params = _build_fts_clause(op, val)
+                if fts_clause:
+                    negate = op in ("does_not_contain", "is_not")
+                    clause = f"w.rowid {'NOT IN' if negate else 'IN'} (SELECT rowid FROM workshop_fts WHERE {fts_clause})"
+                    clause_params = fts_params
+                else:
+                    clause, clause_params = "", []
+        elif db_col in _EN_FIELDS and op in _TEXT_OPS:
+            en_col = _EN_FIELDS[db_col]
+            c1, p1 = _build_filter_clause(db_col, op, val)
+            c2, p2 = _build_filter_clause(en_col, op, val)
+            joiner = " AND " if op in _TEXT_NEG_OPS else " OR "
+            if c1 and c2:
+                clause = f"({c1}{joiner}{c2})"
+                clause_params = p1 + p2
+            elif c1:
+                clause, clause_params = c1, p1
+            else:
+                clause, clause_params = c2, p2
+        else:
+            clause, clause_params = _build_filter_clause(db_col, op, val)
+        if clause:
+            params.extend(clause_params)
+            clauses.append((logic, clause))
+    if not clauses:
+        return "", []
+    sql = ""
+    for idx, (logic, clause) in enumerate(clauses):
+        sql += f" {logic} " if idx > 0 else ""
+        sql += clause
+    return sql, params
+
+
 def _ensure_tag_ids(db_path: str, tag_names: list[str]) -> list[int]:
     """Given a list of unique tag name strings, returns their tag_ids.
     Inserts any new tags into the tags table.  This is the single canonical
@@ -2740,64 +2822,15 @@ def search_items(db_path: str, query: str = "", appid: int = None,
                 sql, params = _apply_numeric_filter(sql, params, col, f_str)
 
     if filters:
-        pct_filters = []
-        regular_filters = []
-        for f in filters:
-            if f.get("op") == "percentile":
-                pct_filters.append(f)
-            else:
-                regular_filters.append(f)
+        pct_filters = [f for f in filters if f.get("op") == "percentile"]
+        regular_filters = [f for f in filters if f.get("op") != "percentile"]
 
-        filter_clauses = []
-        for f in regular_filters:
-            logic = f.get("logic", "AND").upper()
-            field = f.get("field")
-            op = f.get("op")
-            val = f.get("value")
-            if not field or not op:
-                continue
-            db_col = FIELD_NAME_MAP.get(field, field)
-            if db_col not in FIELD_NAME_MAP.values() and db_col not in ("tags", "full_text"):
-                continue
-            if db_col == "tags":
-                if op in ("is", "is_not"):
-                    continue
-                clause, clause_params = _build_json_tag_clause(db_col, op, val)
-            elif db_col == "full_text":
-                if op in ("is_empty", "is_not_empty"):
-                    clause = f"w.rowid {'IN' if op == 'is_not_empty' else 'NOT IN'} (SELECT rowid FROM workshop_fts)"
-                    clause_params = []
-                else:
-                    fts_clause, fts_params = _build_fts_clause(op, val)
-                    if fts_clause:
-                        negate = op in ("does_not_contain", "is_not")
-                        clause = f"w.rowid {'NOT IN' if negate else 'IN'} (SELECT rowid FROM workshop_fts WHERE {fts_clause})"
-                        clause_params = fts_params
-                    else:
-                        clause, clause_params = "", []
-            elif db_col in _EN_FIELDS and op in _TEXT_OPS:
-                en_col = _EN_FIELDS[db_col]
-                c1, p1 = _build_filter_clause(db_col, op, val)
-                c2, p2 = _build_filter_clause(en_col, op, val)
-                joiner = " AND " if op in _TEXT_NEG_OPS else " OR "
-                if c1 and c2:
-                    clause = f"({c1}{joiner}{c2})"
-                    clause_params = p1 + p2
-                elif c1:
-                    clause, clause_params = c1, p1
-                else:
-                    clause, clause_params = c2, p2
-            else:
-                clause, clause_params = _build_filter_clause(db_col, op, val)
-            if clause:
-                params.extend(clause_params)
-                filter_clauses.append((logic, clause))
-        if filter_clauses:
-            sql += " AND ("
-            for idx, (logic, clause) in enumerate(filter_clauses):
-                sql += f" {logic} " if idx > 0 else ""
-                sql += clause
-            sql += ")"
+        # One shared translation (see `build_filter_clause_sql`), so the SQL the
+        # search runs and the SQL the coverage metric runs cannot drift apart.
+        group_sql, group_params = build_filter_clause_sql(regular_filters)
+        if group_sql:
+            sql += f" AND ({group_sql})"
+            params.extend(group_params)
 
         for f in pct_filters:
             field = f.get("field")

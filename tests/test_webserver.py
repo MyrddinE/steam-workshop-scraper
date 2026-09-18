@@ -306,13 +306,22 @@ def test_every_registered_metric_reaches_the_web_catalogue(web_client):
 
 def test_metric_endpoint_returns_value_and_measured_cost(web_client):
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "x", "status": 200})
+    # The fixture config targets AppID 294100, so the route must pass that
+    # through: the item belongs to the target and both scopes count it.
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "x", "status": 200,
+                                    "consumer_appid": 294100})
 
     resp = client.get('/api/metrics/coverage')
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["name"] == "coverage"
     assert data["value"]["total"] == 1
+    # Both scopes reach the client: the whole live library and the target
+    # AppIDs' filters. The target has no filters stored, so nothing is
+    # excluded and the second coincides; the scope detail says so.
+    assert data["value"]["filtered"]["total"] == 1
+    assert data["value"]["filtered"]["appids"] == [294100]
+    assert data["value"]["filtered"]["with_filters"] == []
     assert data["ms"] >= 0.0
     assert data["note"] == metrics.REGISTRY["coverage"].note
     assert data["seed_ms"] == metrics.REGISTRY["coverage"].seed_ms

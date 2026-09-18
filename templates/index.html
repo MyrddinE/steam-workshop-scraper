@@ -2105,26 +2105,71 @@ function _fmtTimestamp(ts) {
   return ts ? new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ') : 'never';
 }
 
-function _renderCoverage(cov) {
-  const total = cov.total || 0;
-  if (!total) return '<p class="stat-label">No live items to cover.</p>';
-  const stages = [
-    ['api_fetched', 'API data'],
-    ['described', 'Description'],
-    ['imaged', 'Image'],
-    ['translated', 'Translation'],
-    ['attributed', 'Creator'],
-  ];
-  const rows = stages.map(function(stage) {
-    const done = cov[stage[0]] || 0;
+const COVERAGE_STAGES = [
+  ['api_fetched', 'API data'],
+  ['described', 'Description'],
+  ['imaged', 'Image'],
+  ['translated', 'Translation'],
+  ['attributed', 'Creator'],
+];
+
+function _coverageRows(counts, total) {
+  return COVERAGE_STAGES.map(function(stage) {
+    const done = counts[stage[0]] || 0;
     const pct = done / total * 100;
     return '<tr><td>' + stage[1] + '</td>'
       + '<td style="white-space:nowrap">' + fmtCount(done) + ' / ' + fmtCount(total) + '</td>'
       + '<td style="width:45%"><progress value="' + pct.toFixed(1) + '" max="100"></progress></td>'
       + '<td>' + pct.toFixed(1) + '%</td></tr>';
   }).join('');
-  return '<p class="stat-label">Progress over ' + fmtCount(total) + ' live items (dead items excluded).</p>'
-    + '<table class="stats-table"><tbody>' + rows + '</tbody></table>';
+}
+
+function _coverageScopeNote(filtered) {
+  // Why the two coverage figures are what they are. The second is the search
+  // builder's SQL translation of the target AppIDs' enrichment filters, so it
+  // is not a re-derivation of the daemon's per-item check; an AppID with no
+  // filters, or one whose stored filters cannot be read, excludes nothing.
+  const appids = (filtered.appids || []).join(', ') || 'none configured';
+  const unreadable = (filtered.unreadable || []).join(', ');
+  const withFilters = filtered.with_filters || [];
+  const restricting = filtered.restricting || [];
+  if (unreadable) {
+    return 'Target AppIDs: ' + appids + '. The stored filter set for ' + unreadable
+      + ' could not be read, so those items are all counted (no exclusion).';
+  }
+  if (!withFilters.length) {
+    return 'Target AppIDs: ' + appids
+      + '. No enrichment filters are set for them, so both figures are the same.';
+  }
+  if (!restricting.length) {
+    return 'Target AppIDs: ' + appids + '. Their filters exclude nothing'
+      + ' (a percentile has no fixed predicate), so both figures are the same.';
+  }
+  return 'Target AppIDs: ' + appids
+    + ". SQL translation of their filters; it may differ from the daemon's per-item"
+    + ' check on translated (_en) fields.';
+}
+
+function _renderCoverage(cov) {
+  const total = cov.total || 0;
+  if (!total) return '<p class="stat-label">No live items to cover.</p>';
+  let html = '<p class="stat-label">All live items: ' + fmtCount(total)
+    + ' (dead items excluded).</p>'
+    + '<table class="stats-table"><tbody>' + _coverageRows(cov, total) + '</tbody></table>';
+  const filtered = cov.filtered;
+  if (filtered && typeof filtered === 'object') {
+    const fTotal = filtered.total || 0;
+    html += '<p class="stat-label" style="margin-top:8px">Target AppIDs&rsquo; enrichment'
+      + ' filters &mdash; what I care about: ' + fmtCount(fTotal) + '</p>';
+    if (fTotal) {
+      html += '<table class="stats-table"><tbody>' + _coverageRows(filtered, fTotal)
+        + '</tbody></table>';
+    } else {
+      html += '<p class="stat-label">No live items match the filters.</p>';
+    }
+    html += '<p class="stat-label">' + _escapeHtml(_coverageScopeNote(filtered)) + '</p>';
+  }
+  return html;
 }
 
 function _renderStuck(stuck) {
