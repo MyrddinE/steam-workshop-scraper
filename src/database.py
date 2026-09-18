@@ -72,6 +72,79 @@ def normalize_tags(raw_tags) -> str:
             normalized = [raw_tags]
     return json.dumps(sorted(set(normalized)), ensure_ascii=False)
 
+# --- the Subscribed filter field -----------------------------------------------
+#
+# Every other field filters one column with free text. `Subscribed` is the first
+# whose value is chosen from a list, and whose predicate reads four columns at
+# once, so it gets its own type ("enum") and its own value table. That table is
+# the single source both evaluators read -- the SQL builder and the in-memory
+# mirror -- because six cases written twice is exactly how the two would drift.
+SUBSCRIBED_FIELD = "Subscribed"
+# A virtual column name: no workshop_items column is called this. It exists so
+# the schema entry can carry one db_col like every other field while its
+# predicate spans the four real columns in SUBSCRIBED_FILTER_COLUMNS.
+SUBSCRIBED_DB_COL = "subscribed_state"
+SUBSCRIBED_VALUES = ["any", "never", "currently", "previously", "queued", "downloaded"]
+SUBSCRIBED_FILTER_COLUMNS = (
+    "own_subscribed", "own_first_subscribed_at",
+    "is_queued_for_subscription", "downloaded_at",
+)
+
+
+def _flag_column(item: dict, column: str) -> int:
+    """A boolean/queue column read as 0 or 1, with NULL and a missing key both 0.
+
+    The SQL side wraps the same columns in COALESCE, so a stored NULL and a row
+    dict that never carried the key evaluate the same way in both evaluators.
+    """
+    try:
+        return 1 if int(item.get(column) or 0) else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+# value -> its predicate, in both spellings, in one place. `sql` is the fragment
+# the SELECT path uses; `matches` is the same predicate over an in-memory row.
+# `columns` names the real columns the value reads, so a caller that has to load
+# a partial row (the demotion walk) can load all of them.
+SUBSCRIBED_FILTERS = {
+    "any": {
+        "sql": "1 = 1",
+        "columns": (),
+        "matches": lambda item: True,
+    },
+    "never": {
+        "sql": "own_first_subscribed_at IS NULL",
+        "columns": ("own_first_subscribed_at",),
+        "matches": lambda item: item.get("own_first_subscribed_at") is None,
+    },
+    "currently": {
+        "sql": "COALESCE(own_subscribed, 0) = 1",
+        "columns": ("own_subscribed",),
+        "matches": lambda item: _flag_column(item, "own_subscribed") == 1,
+    },
+    # `previously` is the complement of `never OR currently`, so its negation is
+    # exactly `never OR currently` -- see _build_subscribed_clause.
+    "previously": {
+        "sql": "(own_first_subscribed_at IS NOT NULL AND COALESCE(own_subscribed, 0) = 0)",
+        "columns": ("own_subscribed", "own_first_subscribed_at"),
+        "matches": lambda item: (
+            item.get("own_first_subscribed_at") is not None
+            and _flag_column(item, "own_subscribed") == 0
+        ),
+    },
+    "queued": {
+        "sql": "COALESCE(is_queued_for_subscription, 0) = 1",
+        "columns": ("is_queued_for_subscription",),
+        "matches": lambda item: _flag_column(item, "is_queued_for_subscription") == 1,
+    },
+    "downloaded": {
+        "sql": "downloaded_at IS NOT NULL",
+        "columns": ("downloaded_at",),
+        "matches": lambda item: item.get("downloaded_at") is not None,
+    },
+}
+
 FILTER_SCHEMA = [
     {"field": "Full Text",        "db_col": "full_text",                 "type": "string", "ops": ["contains", "does_not_contain"]},
     {"field": "Title",            "db_col": "title",                     "type": "string", "ops": ["contains", "does_not_contain", "is", "is_not"]},
@@ -86,6 +159,7 @@ FILTER_SCHEMA = [
     {"field": "Favs",             "db_col": "favorited",                 "type": "number", "ops": ["gt", "lt", "gte", "lte", "percentile"]},
     {"field": "Views",            "db_col": "views",                     "type": "number", "ops": ["gt", "lt", "gte", "lte", "percentile"]},
     {"field": "File Size",        "db_col": "file_size",                  "type": "number", "ops": ["gt", "lt", "gte", "lte"]},
+    {"field": SUBSCRIBED_FIELD,   "db_col": SUBSCRIBED_DB_COL,           "type": "enum",   "values": SUBSCRIBED_VALUES, "ops": ["is", "is_not"]},
 ]
 
 # Build FIELD_NAME_MAP and ALL_FILTER_FIELDS from the schema
@@ -120,6 +194,10 @@ VALID_SORT_COLS = {
     "title", "file_size", "subscriptions", "favorited", "views",
     "workshop_id", "steam_created_at", "steam_updated_at", "api_fetched_at",
     "wilson_favorite_score", "wilson_subscription_score",
+    # The sticky first-seen-subscribed stamp: the only subscription timestamp
+    # there is. NULL means never subscribed; SQLite orders NULL below every
+    # value, so descending puts the never-subscribed rows last.
+    "own_first_subscribed_at",
 }
 
 # The lowest priority a *user request* carries, on the shared queue vocabulary
@@ -149,8 +227,48 @@ def _build_text_search_clauses(sql: str, params: list, q_str: str, cols: list[st
             params.append(f"%{token}%")
     return sql, params
 
+def _build_subscribed_clause(op: str, val) -> tuple[str, list]:
+    """SQL for the Subscribed field, read from the shared value table.
+
+    ``is_not`` is exactly the complement of ``is``. That includes ``is_not any``,
+    which the front ends do not offer -- a NOT over "everything" matches nothing
+    -- but a saved filter or an API call can still carry. An unknown value is
+    treated the same way (``is`` matches nothing, ``is_not`` matches everything),
+    so the pair stays complementary rather than one side silently matching the
+    whole table.
+    """
+    if op not in ("is", "is_not"):
+        return ("", [])
+    spec = SUBSCRIBED_FILTERS.get(str(val))
+    if spec is None:
+        return ("0 = 1", []) if op == "is" else ("1 = 1", [])
+    clause = spec["sql"]
+    if op == "is_not":
+        clause = f"NOT ({clause})"
+    return (clause, [])
+
+
+def subscribed_overlay_clause(value) -> tuple[str, list]:
+    """The single predicate a Subscribed overlay control ANDs onto a search.
+
+    ``any`` (and no value at all) is the control's off switch: no constraint. An
+    unknown value constrains nothing either -- the overlay is view state a client
+    sends back, and a value this build does not know must not silently hide the
+    whole library. The overlay is always a positive selection, which is why it
+    has no operator: the field's own builder rows carry ``is``/``is_not``.
+    """
+    if value is None or value == "any":
+        return ("", [])
+    spec = SUBSCRIBED_FILTERS.get(str(value))
+    if spec is None:
+        return ("", [])
+    return (spec["sql"], [])
+
+
 def _build_filter_clause(db_col: str, op: str, val) -> tuple[str, list]:
     """Converts an operator and value into a SQL clause string and param list."""
+    if db_col == SUBSCRIBED_DB_COL:
+        return _build_subscribed_clause(op, val)
     op_map = {
         "contains": (f"{db_col} LIKE ?", [f"%{val}%"]),
         "does_not_contain": (f"({db_col} IS NULL OR {db_col} NOT LIKE ?)", [f"%{val}%"]),
@@ -331,8 +449,24 @@ def compact_tag_ids(db_path: str, tag_counts: dict = None):
     if swaps:
         logging.info(f"compact_tags: {swaps} tag IDs reordered for space efficiency")
 
+def _evaluate_subscribed_filter(item: dict, op: str, val) -> bool:
+    """The in-memory half of the Subscribed field, from the same value table.
+
+    Negation is applied here rather than spelled out per value, so
+    ``_build_subscribed_clause``'s SQL and this predicate cannot disagree about
+    what the complement of a value is.
+    """
+    if op not in ("is", "is_not"):
+        return True
+    spec = SUBSCRIBED_FILTERS.get(str(val))
+    matched = spec["matches"](item) if spec is not None else False
+    return not matched if op == "is_not" else matched
+
+
 def _evaluate_single_filter(item: dict, db_col: str, op: str, val) -> bool:
     """Checks whether an in-memory item dict matches a single filter criterion."""
+    if db_col == SUBSCRIBED_DB_COL:
+        return _evaluate_subscribed_filter(item, op, val)
     is_tags = db_col == "tags"
     if is_tags:
         return _evaluate_tag_filter(item, op, val)
@@ -562,6 +696,13 @@ def _demote_filtered_out_queue_priorities(conn) -> tuple[int, int]:
         referenced = {FIELD_NAME_MAP.get(f.get("field"), f.get("field"))
                       for f in filters if isinstance(f, dict) and f.get("field")}
         referenced.discard("tags")
+        # The Subscribed field's virtual column spans four real ones. The row
+        # must carry every one the chosen value reads, or _evaluate_single_filter
+        # would read missing keys and answer from their NULLs -- `never`, a false
+        # `queued`, a false `downloaded` -- instead of the stored state.
+        if SUBSCRIBED_DB_COL in referenced:
+            referenced.discard(SUBSCRIBED_DB_COL)
+            referenced.update(SUBSCRIBED_FILTER_COLUMNS)
         selected = sorted(c for c in referenced
                           if c and c.isidentifier() and c in columns)
         fields = ", ".join(["workshop_id", "needs_web_scrape", "needs_image"] + selected)
@@ -2387,11 +2528,18 @@ def search_items(db_path: str, query: str = "", appid: int = None,
                  required_tags: list[str] = None, excluded_tags: list[str] = None,
                  summary_only: bool = False, 
                  sort_by: str = None, sort_order: str = "ASC",
-                 limit: int = None, offset: int = None) -> list[dict]:
+                 limit: int = None, offset: int = None,
+                 subscribed_overlay: str = None) -> list[dict]:
     """
     Searches the database for items matching the criteria.
     Joins with users table to provide names.
     If summary_only is True, returns only essential columns for list view display.
+
+    ``subscribed_overlay`` is the view control's value, ANDed onto the builder's
+    rows as one extra clause. It is a separate argument rather than an appended
+    filter on purpose: it must sit outside the builder's parenthesised group, so
+    an OR row cannot absorb it, and it must never be mistaken for a row the
+    "Save Filter for Scraper" action writes.
     """
     conn = get_connection(db_path)
     
@@ -2515,6 +2663,13 @@ def search_items(db_path: str, query: str = "", appid: int = None,
             if threshold is not None:
                 sql += f" AND w.{db_col} >= {threshold}"
 
+    # The overlay is ANDed after the builder's group, and outside it, so a row
+    # whose logic is OR cannot pull a row back in that the overlay excluded.
+    overlay_clause, overlay_params = subscribed_overlay_clause(subscribed_overlay)
+    if overlay_clause:
+        sql += f" AND ({overlay_clause})"
+        params.extend(overlay_params)
+
     sort_sql = _build_sort_clause(sort_by, sort_order) if sort_by else ""
     sql += sort_sql
     limit_sql, limit_params = _build_limit_offset(limit, offset) if limit is not None else ("", [])
@@ -2580,10 +2735,16 @@ def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
     return {key: result[metric_name]["value"] for key, metric_name in _STAT_METRICS}
 
 
-def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None) -> dict:
+def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None,
+                           subscribed_overlay: str = None) -> dict:
     """Returns percentile cutoff scores for Wilson metrics across items matching filters.
     Uses NTILE(100) — returns p99, p90, p50 thresholds for both scores.
-    Returns empty dict if fewer than 10 items in the filtered set."""
+    Returns empty dict if fewer than 10 items in the filtered set.
+
+    ``subscribed_overlay`` follows :func:`search_items`: the overlay constrains
+    the same population the grid shows, so the percentiles must be computed over
+    it too or the colours would describe a different set of rows.
+    """
     conn = get_connection(db_path)
     sql = "SELECT w.workshop_id, w.wilson_favorite_score, w.wilson_subscription_score FROM workshop_items w"
     params = []
@@ -2614,6 +2775,11 @@ def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None) -> dict:
             for idx, (logic, clause) in enumerate(filter_clauses):
                 sql += f" {logic} " if idx > 0 else ""
                 sql += clause
+
+    overlay_clause, overlay_params = subscribed_overlay_clause(subscribed_overlay)
+    if overlay_clause:
+        sql += (" AND " if " WHERE " in sql else " WHERE ") + f"({overlay_clause})"
+        params.extend(overlay_params)
 
     cutoff_sql = f"""
         WITH base AS (

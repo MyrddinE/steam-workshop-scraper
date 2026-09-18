@@ -75,6 +75,10 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .filter-row select.field-select { flex: 2; }
 .filter-row select.op-select { flex: 2; }
 .filter-row input.value-input { flex: 3; }
+/* An enum field (Subscribed) uses a <select> for its value instead of the free
+   text input; it takes the same slot and the same width so the row does not
+   reflow when the field changes. */
+.filter-row select.value-input { flex: 3; }
 .filter-row button { padding: 0 6px; min-width: 2rem; }
 #detail-pane { flex: 1; overflow-y: auto; min-height: 0; }
 #detail-buttons { flex-shrink: 0; border-top: 1px solid var(--pico-muted-border-color); padding: .35rem 0 0 0; display: flex; gap: .25rem; }
@@ -140,7 +144,16 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
         <button id="btn-and" style="flex:1">AND</button>
         <button id="btn-or" style="flex:1">OR</button>
       </div>
-      <div style="display:flex;gap:.25rem;margin-top:.25rem">
+      <div style="display:flex;gap:.25rem;margin-top:.25rem;align-items:center">
+        <label for="subscribed-overlay" style="margin:0;white-space:nowrap">Subscribed:</label>
+        <select id="subscribed-overlay" style="flex:1">
+          <option value="any">any</option>
+          <option value="never">never</option>
+          <option value="currently">currently</option>
+          <option value="previously">previously</option>
+          <option value="queued">queued</option>
+          <option value="downloaded">downloaded</option>
+        </select>
         <select id="sort-by" style="flex:2">
           <option value="title">Title</option>
           <option value="file_size">File Size</option>
@@ -153,6 +166,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
           <option value="api_fetched_at">Fetched Time</option>
           <option value="wilson_subscription_score">Subscriber Score</option>
           <option value="wilson_favorite_score">Favorite Score</option>
+          <option value="own_first_subscribed_at">Subscribed at</option>
         </select>
         <select id="sort-order" style="flex:1">
           <option value="ASC">ASC</option>
@@ -272,6 +286,13 @@ FILTER_SCHEMA.forEach(f => {
 const ID_FIELDS = FILTER_SCHEMA.filter(f => f.type === 'id').map(f => f.field);
 const NUMERIC_FIELDS = FILTER_SCHEMA.filter(f => f.type === 'number').map(f => f.field);
 const TEXT_FIELDS = FILTER_SCHEMA.filter(f => f.type === 'string').map(f => f.field);
+// The one enum field and its choices. The overlay control below offers the same
+// list, and the value control of a builder row is a <select> for these fields
+// where every other field gets a free-text input.
+const SUBSCRIBED_FIELD = 'Subscribed';
+const SUBSCRIBED_VALUES = (FILTER_SCHEMA.find(f => f.field === SUBSCRIBED_FIELD) || {}).values || [];
+const ENUM_FIELDS = {};
+FILTER_SCHEMA.forEach(f => { if (f.type === 'enum') ENUM_FIELDS[f.field] = f.values || []; });
 
 let currentOffset = 0, hasMore = true, loading = false, cutoffs = {};
 let _cutoffsCache = null, _cutoffsFilterKey = '';
@@ -289,6 +310,94 @@ function showServerPort() {
 }
 showServerPort();
 
+function _isEnumField(field) {
+  return Object.prototype.hasOwnProperty.call(ENUM_FIELDS, field);
+}
+
+// `any` is not offered for `is_not`: a NOT over "everything" matches nothing,
+// so the choice would produce an empty result with no visible reason. A value
+// that arrives from a saved filter is preserved by updateValueControl instead.
+function _enumValueOptions(field, op) {
+  const values = (ENUM_FIELDS[field] || []).slice();
+  return op === 'is_not' ? values.filter(v => v !== 'any') : values;
+}
+
+// The value control follows the field's type: free text for every field, a
+// <select> of the schema's values for an enum one. Swapping the element (rather
+// than re-rendering the row) is what lets the value keep the same class and
+// slot in the flex row. `desired` is the value to restore; when it is undefined
+// the control keeps what it holds, which is what an operator change wants.
+function updateValueControl(row, desired) {
+  const field = row.querySelector('.field-select').value;
+  const op = row.querySelector('.op-select').value;
+  const isEnum = _isEnumField(field);
+  let ctl = row.querySelector('.value-input');
+  if (desired === undefined) desired = ctl.value;
+  const wantTag = isEnum ? 'SELECT' : 'INPUT';
+  if (ctl.tagName !== wantTag) {
+    const next = document.createElement(wantTag.toLowerCase());
+    next.className = 'value-input';
+    if (wantTag === 'INPUT') { next.type = 'text'; next.placeholder = 'value'; }
+    ctl.parentNode.replaceChild(next, ctl);
+    ctl = next;
+  }
+  if (!isEnum) {
+    if (desired != null) ctl.value = desired;
+    return ctl;
+  }
+  const opts = _enumValueOptions(field, op);
+  if (desired != null && opts.indexOf(desired) === -1) opts.push(desired);
+  ctl.innerHTML = opts.map(v => `<option value="${v}">${v}</option>`).join('');
+  ctl.value = (desired != null && opts.indexOf(desired) !== -1) ? desired : (opts[0] || '');
+  return ctl;
+}
+
+// ── the Subscribed overlay ────────────────────────────────────────────────
+// A labelled control beside the sort menus. It ANDs one predicate onto every
+// search in addition to the builder's rows; `any` is its off switch, so it has
+// no separate checkbox. It is deliberately not a builder row: changing the
+// builder does not clear it, it never appears there, and "Save for scraper"
+// does not write it.
+function _subscribedOverlayEl() {
+  return document.getElementById('subscribed-overlay');
+}
+
+function _builderHasSubscribedRow() {
+  const rows = document.querySelectorAll('#filter-rows .filter-row');
+  for (let i = 0; i < rows.length; i++) {
+    const fs = rows[i].querySelector('.field-select');
+    if (fs && fs.value === SUBSCRIBED_FIELD) return true;
+  }
+  return false;
+}
+
+// Greyed out while the builder already constrains the same field: a second
+// constraint on one field is redundant or contradictory, and silently ANDing
+// two of them can empty the result with no visible reason.
+function _syncSubscribedOverlay() {
+  const el = _subscribedOverlayEl();
+  if (!el) return;
+  const blocked = _builderHasSubscribedRow();
+  el.disabled = blocked;
+  el.title = blocked
+    ? 'Disabled because the filter builder already has a Subscribed row. Two constraints on the same field are redundant or contradictory.'
+    : '';
+}
+
+// What the next search ANDs on. A greyed-out overlay contributes nothing: the
+// builder row is the constraint the user can see.
+function _overlayValue() {
+  const el = _subscribedOverlayEl();
+  if (!el || el.disabled || _builderHasSubscribedRow()) return 'any';
+  return SUBSCRIBED_VALUES.indexOf(el.value) === -1 ? 'any' : el.value;
+}
+
+function _applySubscribedOverlay(value) {
+  const el = _subscribedOverlayEl();
+  if (!el) return;
+  el.value = SUBSCRIBED_VALUES.indexOf(value) === -1 ? 'any' : value;
+}
+
 function updateOps(row) {
   const field = row.querySelector('.field-select').value;
   const opSelect = row.querySelector('.op-select');
@@ -296,6 +405,10 @@ function updateOps(row) {
   const ops = FIELD_OPS[field] || ['contains','does_not_contain'];
   opSelect.innerHTML = ops.map(o => `<option value="${o}">${o.replace(/_/g,' ')}</option>`).join('');
   if (ops.includes(cur)) opSelect.value = cur;
+  // A field change resets the value control: a value that made sense for the
+  // old field (or free text for an enum field) does not carry over.
+  updateValueControl(row, null);
+  _syncSubscribedOverlay();
 }
 
 // `initial` lets a caller (the author jump) build a row that already carries a
@@ -309,7 +422,7 @@ function addRow(logic, initial) {
   if (logic) div.dataset.logic = logic;
   div.innerHTML = `
     <select class="field-select" onchange="updateOps(this.parentElement)">${ALL_FIELDS.map(f => `<option value="${f}">${f}</option>`).join('')}</select>
-    <select class="op-select"></select>
+    <select class="op-select" onchange="updateValueControl(this.parentElement)"></select>
     <input class="value-input" type="text" placeholder="value">
     <button onclick="removeRow(this.parentElement)">&#x2715;</button>
   `;
@@ -318,11 +431,14 @@ function addRow(logic, initial) {
   updateOps(div);
   if (initial) {
     if (initial.op) div.querySelector('.op-select').value = initial.op;
-    if (initial.value != null) div.querySelector('.value-input').value = initial.value;
+    updateValueControl(div, initial.value != null ? String(initial.value) : null);
   }
 }
 
-function removeRow(row) { row.remove(); }
+function removeRow(row) {
+  row.remove();
+  _syncSubscribedOverlay();
+}
 
 function getFilters() {
   const rows = document.querySelectorAll('#filter-rows .filter-row');
@@ -345,12 +461,15 @@ function getFilters() {
 
 async function loadCutoffs() {
   const filters = getFilters();
-  const key = JSON.stringify(filters);
+  const overlay = _overlayValue();
+  // The overlay changes the population the percentiles describe, so it is part
+  // of the cache key as well as the request.
+  const key = JSON.stringify([filters, overlay]);
   // A cache hit has to restore `cutoffs` too: a search now clears it before the
   // rows are drawn, so returning early without assigning would leave the grid
   // colourless on a repeat of the same filter set.
   if (key === _cutoffsFilterKey && _cutoffsCache !== null) { cutoffs = _cutoffsCache; return; }
-  const resp = await fetch('/api/cutoffs', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filters})});
+  const resp = await fetch('/api/cutoffs', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filters, subscribed: overlay})});
   cutoffs = await resp.json();
   if (cutoffs && typeof cutoffs === 'object' && Object.keys(cutoffs).length) {
     _cutoffsCache = cutoffs;
@@ -461,7 +580,7 @@ async function doSearch(reset = true) {
   const filters = getFilters();
   const resp = await fetch('/api/search', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({filters, sort_by: document.getElementById('sort-by').value, sort_order: document.getElementById('sort-order').value, offset: currentOffset, limit: 50})
+    body: JSON.stringify({filters, subscribed: _overlayValue(), sort_by: document.getElementById('sort-by').value, sort_order: document.getElementById('sort-order').value, offset: currentOffset, limit: 50})
   });
   const items = await resp.json();
 
@@ -832,6 +951,12 @@ function renderDetail(item) {
   const favs = item.favorited||0, lfavs = item.lifetime_favorited||0;
   const created = item.steam_created_at ? new Date(item.steam_created_at*1000).toISOString().slice(0,10) : 'N/A';
   const updated = item.steam_updated_at && item.steam_updated_at !== item.steam_created_at ? new Date(item.steam_updated_at*1000).toISOString().slice(0,10) : null;
+  // The sticky first-seen-subscribed stamp, paired with the marker above it and
+  // formatted the way the other detail timestamps are. null (never seen
+  // subscribed) renders no line at all rather than a dated claim.
+  const subscribedAt = item.own_first_subscribed_at
+    ? new Date(item.own_first_subscribed_at*1000).toISOString().slice(0,10)
+    : null;
   const tags = (()=>{
     const raw = item.tags || '';
     if (!raw) return 'None';
@@ -895,6 +1020,7 @@ function renderDetail(item) {
   pane.innerHTML = `
     <h2>${subMarker}<a href="${url}" target="_blank" title="${tooltip}">${title}</a></h2>
     <p>by ${creatorHtml} &mdash; <small>Workshop ID: ${item.workshop_id}</small></p>
+    ${subscribedAt ? `<div class="stat-row"><span class="stat-label">Subscribed at:</span> ${subscribedAt}</div>` : ''}
     <p class="stat-wilson"><span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}" data-wilson="wilson_subscription" data-score="${item.wilson_subscription_score ?? ''}" title="${_subTitleText}">Subscriber Score: ${wss!=null?wss+'%':'N/A'}</span> &nbsp; <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}" data-wilson="wilson_favorite" data-score="${item.wilson_favorite_score ?? ''}" title="${_favTitleText}">Favorite Score: ${wfs!=null?wfs+'%':'N/A'}</span></p>
     <div class="stat-row"><span class="stat-label">Created:</span> ${created}</div>
     <div class="stat-row"><span class="stat-label">Size:</span> <span class="${sc}">${size || 'N/A'}</span></div>
@@ -1144,6 +1270,9 @@ function _loadViewState() {
       filters: filters,
       sort_by: typeof parsed.sort_by === 'string' ? parsed.sort_by : '',
       sort_order: typeof parsed.sort_order === 'string' ? parsed.sort_order : '',
+      // The overlay is view state, so it lives here beside the sort. An unknown
+      // value reads back as `any` (no constraint) rather than hiding rows.
+      subscribed: SUBSCRIBED_VALUES.indexOf(parsed.subscribed) === -1 ? 'any' : parsed.subscribed,
       selected: (typeof parsed.selected === 'number' && isFinite(parsed.selected)) ? parsed.selected : null,
       scroll: (typeof parsed.scroll === 'number' && isFinite(parsed.scroll) && parsed.scroll > 0) ? parsed.scroll : 0,
     };
@@ -1163,6 +1292,7 @@ function _saveViewState() {
       filters: getFilters(),
       sort_by: document.getElementById('sort-by').value,
       sort_order: document.getElementById('sort-order').value,
+      subscribed: (_subscribedOverlayEl() || {}).value || 'any',
       selected: _selectedWid,
       scroll: grid ? grid.scrollTop : 0,
     }));
@@ -1187,6 +1317,7 @@ function _applyFilters(filters) {
     container.appendChild(div);
     updateOps(div);
     if (f.op) div.querySelector('.op-select').value = f.op;
+    updateValueControl(div, f.value != null ? String(f.value) : null);
   });
 }
 
@@ -1231,15 +1362,22 @@ async function loadState() {
       _applyFilters(local.filters);
       if (local.sort_by) document.getElementById('sort-by').value = local.sort_by;
       if (local.sort_order) document.getElementById('sort-order').value = local.sort_order;
+      _applySubscribedOverlay(local.subscribed);
     } else {
       const resp = await fetch('/api/state');
       const state = await resp.json();
       if (state.filters && state.filters.length) _applyFilters(state.filters);
       if (state.sort_by) document.getElementById('sort-by').value = state.sort_by;
       if (state.sort_order) document.getElementById('sort-order').value = state.sort_order;
+      // The overlay is view state the TUI persists in the same file, so a first
+      // visit seeds it from there too, exactly as it seeds sort and filters.
+      _applySubscribedOverlay(state.subscribed_overlay);
     }
   } catch(e) { console.warn('loadState fetch failed', e); }
   if (!document.getElementById('filter-rows').children.length) addRow();
+  // The builder's rows decide whether the overlay is usable; sync after both
+  // branches have drawn them.
+  _syncSubscribedOverlay();
   _restoringView = true;
   try {
     await doSearch(true);
@@ -1262,6 +1400,9 @@ window.addEventListener('pagehide', _saveViewState);
 
 document.getElementById('sort-by').onchange = () => doSearch(true);
 document.getElementById('sort-order').onchange = () => doSearch(true);
+// The overlay is a view control: changing it re-runs the search, which saves
+// the view state at the end of a reset.
+document.getElementById('subscribed-overlay').onchange = () => doSearch(true);
 document.getElementById('btn-search').onclick = () => doSearch(true);
 document.getElementById('btn-and').onclick = () => addRow('AND');
 document.getElementById('btn-or').onclick = () => addRow('OR');

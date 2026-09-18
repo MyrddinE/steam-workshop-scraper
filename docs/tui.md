@@ -77,13 +77,42 @@ Holds multiple `SearchRow` widgets. Provides:
 
 Each row contains:
 - A `Select` for the field (from `SearchBuilder.fields`)
-- A `Select` for the operator (dynamically populated based on field type: text, numeric, or id)
-- An `Input` for the value
+- A `Select` for the operator (dynamically populated based on field type: text, numeric, id, or enum)
+- A value control: an `Input` for every free-text field, or a `Select` for an enum field (`Subscribed`) — both are mounted and `_sync_value_control` shows the one the field's type calls for
 - AND/OR buttons, and a Remove button (only on non-first rows)
 
-**Operator categories** mirror the web UI: text operators for Title/Description/Filename/Full Text, numeric operators (including `percentile`) for File Size/Subs/Favs/Views/Subscriber Score/Favorite Score, and id operators for Author ID/Workshop ID/AppID.
+**Operator categories** mirror the web UI: text operators for Title/Description/Filename/Full Text, numeric operators (including `percentile`) for File Size/Subs/Favs/Views/Subscriber Score/Favorite Score, id operators for Author ID/Workshop ID/AppID, and `is`/`is_not` for the `Subscribed` enum.
 
-**Field type determination** in `compose()` and `on_select_changed()` uses explicit field name checks rather than category lists, ensuring Subscriber Score and Favorite Score are consistently classified as numeric.
+**Field type determination** in `compose()` and `on_select_changed()` reads the type from the central `FILTER_SCHEMA` (`_FIELD_TYPES`), so a field added there gets the right control without a second field list here.
+
+**The enum value control** offers the schema's `values`, with `any` dropped while
+the operator is `is_not` (a NOT over "everything" matches nothing, so it is not a
+choice). A value restored from a saved filter that the list does not offer — a
+legacy or API-written value — is kept as an extra option so the row displays and
+round-trips it rather than being silently rewritten.
+
+### The `Subscribed:` overlay
+
+A labelled `Select` (`#subscribed-overlay`) beside the sort controls, offering the
+six values and defaulting to `any` (no constraint). It ANDs one predicate onto
+every search in addition to the builder's rows and is deliberately not a row:
+changing the builder does not clear it, it never appears in the builder, and
+"Save Filter for Scraper" writes only `builder.get_filters()`. It is **greyed out**
+(with a tooltip) while any builder row names `Subscribed`, because a second
+constraint on the same field is redundant or contradictory; while greyed out,
+`_effective_subscribed_overlay` returns `any` so it contributes nothing.
+
+Its value is view state: `save_state` writes `subscribed_overlay` beside
+`sort_by`/`sort_order`, `on_mount` restores it, and the author jump leaves it
+alone (only its enabled state can change, since the author row is not a
+`Subscribed` row). The TUI state reader in the web UI (`/api/state`) also seeds
+the browser's overlay on a first visit.
+
+### Sort
+
+The sort row offers the same columns as the web UI, including **Subscribed at**
+(`own_first_subscribed_at`). Descending leaves the never-subscribed (NULL) rows
+last.
 
 ### Percentile Clamping
 
@@ -173,6 +202,15 @@ One shared `_tick` drives the whole list and each item divides it by its stage's
 ### `DetailsPane` (widget)
 
 Displays detailed metadata for the selected item. Shows: formatted title, creator, Wilson scores with percentile-colored markup, created/updated dates (Steam timestamps formatted via `format_ts`), file size (color-coded via `format_size`), views (formatted via `format_count`), subscription/favorite counts (current/lifetime), tags (parsed via `parse_tags`), description text, and action buttons.
+
+**Subscribed at**: when `own_first_subscribed_at` is set, the pane shows it as a
+`Subscribed at: YYYY-MM-DD` line directly beneath the subscription marker, using
+the pane's shared `format_ts`. It is the same sticky first-seen stamp the
+`Subscribed at` sort uses, worded with the marker's own "subscribed" vocabulary,
+and it lives with the marker rather than in the description. The line is hidden
+entirely when the column is NULL — an item never seen subscribed must not gain a
+dated line implying an observation nobody made. `get_item_details` selects `w.*`,
+so the column is already in the payload the pane renders from.
 
 **Translation toggle**: The `translate_version` field determines whether the pane shows translated or original text. A "Show Original"/"Show Translation" button appears only when `translate_version` is set.
 

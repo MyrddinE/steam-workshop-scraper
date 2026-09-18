@@ -250,6 +250,9 @@ def api_search():
     sort_order = data.get('sort_order', 'ASC')
     offset = data.get('offset', 0)
     limit = data.get('limit', 50)
+    # The Subscribed overlay is a view control: one predicate ANDed onto the
+    # builder's rows, never part of the saved scraper filter.
+    subscribed_overlay = data.get('subscribed')
 
     try:
         results = search_items(
@@ -260,6 +263,7 @@ def api_search():
             summary_only=True,
             limit=limit,
             offset=offset,
+            subscribed_overlay=subscribed_overlay,
         )
 
         if results:
@@ -497,7 +501,10 @@ def api_clear_pending():
 def api_cutoffs():
     data = request.get_json(silent=True) or {}
     filters = data.get('filters', [])
-    cutoffs = compute_wilson_cutoffs(_db_path, filters if filters else None)
+    # The overlay constrains the same population the grid shows, so the
+    # percentiles are computed over it as well.
+    cutoffs = compute_wilson_cutoffs(_db_path, filters if filters else None,
+                                     subscribed_overlay=data.get('subscribed'))
     result = {}
     for k, v in cutoffs.items():
         result[k] = v
