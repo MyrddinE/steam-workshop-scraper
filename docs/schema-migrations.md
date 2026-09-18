@@ -623,11 +623,11 @@ Adding the index left `translation_priority` alone: it already had
 
 ### `get_connection` (database)
 
-Opens a new SQLite connection with WAL mode enabled and `row_factory = sqlite3.Row` for dict-like row access. Foreign-key enforcement is **not** enabled (`PRAGMA foreign_keys` is left at its default), which matches the schema: no foreign-key constraints are declared. Each caller is responsible for closing the connection.
+Opens a new SQLite connection with `row_factory = sqlite3.Row` for dict-like row access and a 15 s busy timeout. It issues no `PRAGMA`: the journal mode is a persistent property of the file, set once by `initialize_database`, and running `PRAGMA journal_mode` on every connection was refused outright while another process held a lock — a statement the busy timeout does not cover (issue 43). Foreign-key enforcement is **not** enabled (`PRAGMA foreign_keys` is left at its default), which matches the schema: no foreign-key constraints are declared. Each caller is responsible for closing the connection.
 
 ### `initialize_database` (database)
 
-Creates tables (using `IF NOT EXISTS`), runs all pending migrations, creates indexes. This is called on every startup by the daemon, TUI, and web runner. Idempotent and safe to call on an existing database.
+Creates tables (using `IF NOT EXISTS`), runs all pending migrations, creates indexes, and puts the database into WAL mode. This is called on every startup by the daemon, TUI, and web runner — before anything reads or writes — so the one call covers every later connection. Idempotent and safe to call on an existing database: on a database already in WAL the statement is a no-op.
 
 ### `_safe_add_columns` (database)
 

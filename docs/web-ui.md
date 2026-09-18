@@ -86,6 +86,10 @@ An adaptive-timeout poll that keeps a rendered cell's markers in step with the d
   marker (`_applySub`), and rewrites the Wilson scores
 - Delay: `max(1, log2(pending_count))` seconds → speeds up as work lands
 - Stops when no rendered row needs re-reading
+- Re-arms after *any* failed read, too: the `setTimeout` sits outside the `try`, and a non-`ok`
+  response is a skipped tick rather than a stop. A 500 from a locked database is exactly the case
+  that matters — the server answers it per request, so the next tick can succeed (see
+  [Unattended Tolerance](#unattended-tolerance)).
 
 **Reading the database rather than hooking each writer.** The poll is the one path that notices a
 subscription change, so every writer of the flag is covered by one refresh: the userscript bridge's
@@ -103,7 +107,11 @@ text, so an answer is never overwritten with "no image".
 
 ### `_startDetailPoll`
 
-A fixed 3-second poll on the currently-selected detail item. Checks `translation_priority > 0` to detect when translation completes, then re-renders the detail pane. Stops when `translation_priority` is 0.
+A fixed 3-second poll on the currently-selected detail item. Checks `translation_priority > 0` to detect when translation completes, then re-renders the detail pane. Stops when `translation_priority` is 0, or when the item itself is gone (a 404). A *failure* to answer — a 500 from a locked database, or a dropped request — leaves the interval running so the next tick retries; treating every non-200 as a stop used to freeze the pane for the rest of the session after one transient error.
+
+### Unattended Tolerance
+
+The browser's polls and the TUI's polls read the same database, and the same transient lock reaches both — but not in the same shape. The Flask route isolates one request: a lock that outlives the connection's busy timeout becomes a 500 for that response and the server keeps serving. It cannot kill a thread, let alone the daemon. What it *can* do is end a client poll that treats a failed response as final, so both browser polls above re-arm on any failure instead: one 500 is a skipped tick, and the write is picked up on a later one. On the TUI side the equivalent reads are wrapped in `src.db_poll.guard_db_poll`, because there an exception in a timer callback does end the session ([tui.md](tui.md#unattended-reads)). Neither side re-tries a failure inside the same tick; the retry is the next scheduled read.
 
 ---
 

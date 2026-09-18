@@ -659,9 +659,11 @@ function _startListPoll(filters, sortBy, sortOrder) {
 
   async function tick() {
     if (!_listPollTimer) return;  // stopped during fetch
+    let pending = [];
     try {
       const grid = document.getElementById('results-grid');
-      const pending = [];
+      // No grid is not a transient failure: there is nothing to poll.
+      if (!grid) { _stopListPoll(); return; }
       // A stage spinner needs re-reading, but so does a row whose subscription
       // marker is still `pending`: a subscribe can land behind the cell's back
       // and that row has no spinner to be found by. Deciding here from the
@@ -681,35 +683,44 @@ function _startListPoll(filters, sortBy, sortOrder) {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ids: pending})
       });
-      const items = await resp.json();
-      if (!Array.isArray(items)) return;
-
-      items.forEach(item => {
-        const el = grid.querySelector(`.grid-cell[data-wid="${item.workshop_id}"]`);
-        if (!el) return;
-        const title = item.title_en || item.title || 'Untitled';
-        const titleEl = el.querySelector('.grid-title');
-        if (titleEl) titleEl.textContent = title;
-        if (!el.querySelector('.grid-img') && !el.querySelector('.grid-img-failed')) {
-          const ph = el.querySelector('.grid-img-placeholder');
-          if (ph && _imageState(item) !== 'absent') ph.outerHTML = _imageCellHtml(item);
+      if (!resp.ok) {
+        // A 500 from a locked database is transient. Fall through to the
+        // re-arm below so the next tick retries; treating a failed response as
+        // a stop used to freeze every pending marker for the rest of the
+        // session.
+      } else {
+        const items = await resp.json();
+        if (Array.isArray(items)) {
+          items.forEach(item => {
+            const el = grid.querySelector(`.grid-cell[data-wid="${item.workshop_id}"]`);
+            if (!el) return;
+            const title = item.title_en || item.title || 'Untitled';
+            const titleEl = el.querySelector('.grid-title');
+            if (titleEl) titleEl.textContent = title;
+            if (!el.querySelector('.grid-img') && !el.querySelector('.grid-img-failed')) {
+              const ph = el.querySelector('.grid-img-placeholder');
+              if (ph && _imageState(item) !== 'absent') ph.outerHTML = _imageCellHtml(item);
+            }
+            _applyPending(el, item);
+            // The poll also carries the subscription columns, and /api/subscribed
+            // may have stamped them behind this cell's back, so the marker is
+            // refreshed from the same payload.
+            _applySub(el.querySelector('.grid-sub'), item);
+            const wfs = item.wilson_favorite_score != null ? (item.wilson_favorite_score*100).toFixed(1) : null;
+            const wss = item.wilson_subscription_score != null ? (item.wilson_subscription_score*100).toFixed(1) : null;
+            const scores = el.querySelector('.grid-scores');
+            if (scores) scores.innerHTML = `
+              <span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}" data-wilson="wilson_subscription" data-score="${item.wilson_subscription_score ?? ''}">S ${wss!=null?wss+'%':'—'}</span>
+              <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}" data-wilson="wilson_favorite" data-score="${item.wilson_favorite_score ?? ''}">F ${wfs!=null?wfs+'%':'—'}</span>`;
+          });
         }
-        _applyPending(el, item);
-        // The poll also carries the subscription columns, and /api/subscribed
-        // may have stamped them behind this cell's back, so the marker is
-        // refreshed from the same payload.
-        _applySub(el.querySelector('.grid-sub'), item);
-        const wfs = item.wilson_favorite_score != null ? (item.wilson_favorite_score*100).toFixed(1) : null;
-        const wss = item.wilson_subscription_score != null ? (item.wilson_subscription_score*100).toFixed(1) : null;
-        const scores = el.querySelector('.grid-scores');
-        if (scores) scores.innerHTML = `
-          <span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}" data-wilson="wilson_subscription" data-score="${item.wilson_subscription_score ?? ''}">S ${wss!=null?wss+'%':'—'}</span>
-          <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}" data-wilson="wilson_favorite" data-score="${item.wilson_favorite_score ?? ''}">F ${wfs!=null?wfs+'%':'—'}</span>`;
-      });
-
-      const delay = Math.max(1, Math.log2(pending.length)) * 1000;
-      _listPollTimer = setTimeout(tick, delay);
+      }
     } catch(e) { console.debug('List poll error', e); /* keep trying */ }
+    // Re-arm whatever the tick met, so one failed read is a skipped tick rather
+    // than the end of the poll; `_stopListPoll` (checked above) is the only exit.
+    if (!_listPollTimer) return;
+    const delay = Math.max(1, Math.log2(pending.length)) * 1000;
+    _listPollTimer = setTimeout(tick, delay);
   }
 
   _listPollTimer = setTimeout(tick, 0);
@@ -915,7 +926,14 @@ function _startDetailPoll(wid, item) {
     try {
       // Read-only: this polls every 3s, so it must never re-arm the fetch queue.
       const resp = await fetch('/api/item/' + wid);
-      if (!resp.ok || wid !== _detailPollWid) { _stopDetailPoll(); return; }
+      if (wid !== _detailPollWid) { _stopDetailPoll(); return; }
+      // A 404 is the item itself: there is nothing left to follow. Any other
+      // failure -- a 500 from a locked database, most of all -- is transient,
+      // so return without stopping and let the interval retry next tick.
+      // Stopping here used to leave the pane frozen for the rest of the session
+      // after one lock held by the daemon.
+      if (resp.status === 404) { _stopDetailPoll(); return; }
+      if (!resp.ok) { return; }
       const updated = await resp.json();
       if (updated.error) { _stopDetailPoll(); return; }
       if (!_detailNeedsPoll(updated)) {
