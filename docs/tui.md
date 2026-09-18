@@ -425,10 +425,20 @@ overlay's cadence) and gives every row still waiting an estimated whole number o
 engine reaches it, shown as `~24s`; the row the engine is reading now carries `subscribing...` in place
 of a countdown, and a reported outcome drops the countdown and keeps its status word. The estimate is
 deliberately an estimate, not a promise: the pass can be refused, throttled or cancelled after it is
-drawn, and the screen's own status line says so. It is built from the configured web delay — the same
-`daemon.web_delay_seconds` the engine reads through `src.web_worker.configured_web_delay` — times
-**two**, because each item costs two gated page reads (the pre-read and the confirmation read) while
-the subscribe POST is an XHR and pays no interval. The delay is read fresh on every tick, so a throttle
-that doubles the engine's `WebInterval` mid-pass moves the estimate with it. This differs from the web
-overlay's countdown on purpose; see
+drawn, and the screen's own status line says so.
+
+It **starts** from the configured web delay — the same `daemon.web_delay_seconds` the engine reads
+through `src.web_worker.configured_web_delay` — times **two**, because each item costs two gated page
+reads (the pre-read and the confirmation read) while the subscribe POST is an XHR and pays no interval.
+*Measured live* (issue 41) that starting figure is about a third low: a gated read costs the interval
+**plus** the request, and the POST spends time on the clock even though it pays no interval. So from
+the first result on the screen nudges it: `run_subscription_pass` calls its per-item callback
+synchronously after each item returns, so the screen times each finished item between two callbacks
+(on the worker thread, where the report arrives — not on the UI thread, whose queueing delay would be
+counted in) and prices the rows still waiting from the running mean of those observed durations,
+seeded with the configured guess. The seed is one virtual observation, which is why the first item
+moves the mean a lot and later ones less; the mean is not persisted, no history is consulted, and
+there is no rolling window — the pass in front of the screen is the only evidence used. The delay is
+still read fresh on every tick, so a throttle that doubles the engine's `WebInterval` mid-pass moves
+the seed the mean is built on. This differs from the web overlay's countdown on purpose; see
 [web-ui.md](web-ui.md#subscribe-feature) for why the two cover different flows.
