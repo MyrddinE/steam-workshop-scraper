@@ -341,3 +341,15 @@ The old wording is also load-bearing in three places that would move with it:
 * `tests/test_daemon_runner.py:146` and `tests/test_webserver.py:1985` use an `ignored` line as a
   *sample* — one for the reader's encoding, one for SGR decoding. Neither depends on which word is
   used, but both comments read as if they did, which is how a stale example outlives its subject.
+
+---
+
+## Removing the browser bridge from the subscribe path
+
+**Status: Deferred** — waiting on captured evidence from a real subscribe.
+
+The Web UI cannot subscribe on its own today, and that is the only reason the Tampermonkey bridge exists: the server could not build a working Steam session request, so a browser tab did the subscribing and reported the outcome back. Everything the bridge compensates for is now addressed on the server side — the credential comes from one read (`web_scraper._build_workshop_cookies`, which is also where the CSRF token now comes from), the request presents the same identity as every scrape, and `/api/subscribe/<id>` records the confirmation instead of discarding it. That is the same route the TUI has always called.
+
+Once captures of real traffic confirm that path, the bridge becomes removable along with everything that exists to serve it: the userscript, the `autosubscribe=true` tab flow, the `/api/sessionid` token push, the verification poll against `/api/queued` and `/api/sub_failures`, and the throttle-reporting endpoints. The subscribe action in the Web UI then becomes one request to the route the TUI uses, and the grid's marker updates from the same response.
+
+One thing this must not quietly drop: the tab flow spread many subscribes across a browser session and reported throttle pages separately, and the replacement needs equivalent pacing rather than a burst of server-side POSTs. The project already has the machinery — the shared AIMD delay and the per-account budget — so this is a matter of routing subscribe through it, not of inventing something.
