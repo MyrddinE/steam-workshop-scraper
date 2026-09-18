@@ -128,7 +128,7 @@ USER_PRIORITY_FLOOR = 5
 # than local to `initialize_database` because the migration tests assert that
 # the chain reaches it, and a magic number repeated in nine test files is a
 # number that will be wrong after the next migration.
-EXPECTED_VERSION = 24
+EXPECTED_VERSION = 25
 
 def _build_text_search_clauses(sql: str, params: list, q_str: str, cols: list[str]) -> tuple[str, list]:
     """Applies positive/negative text search tokens to SQL via LIKE clauses."""
@@ -1770,6 +1770,53 @@ def initialize_database(db_path: str):
         cursor.execute("PRAGMA user_version = 24")
         conn.commit()
         logging.info("Migration 23->24 complete.")
+
+    if db_version < 25:
+        logging.info("Running migration 24->25: indexing the three work queues...")
+
+        # The web, image and API workers each find the head of their own queue
+        # with a full scan plus a sort on **every poll** -- not only when the
+        # statistics screen is open -- and the statistics breakdowns pay for the
+        # same missing indexes. Each query asks for exactly
+        # `WHERE <queue_column> > 0 ORDER BY <queue_column> DESC,
+        # api_fetched_at ASC`, so a partial composite index in that shape lets
+        # the poll read one index entry and stop and lets the breakdown walk the
+        # index instead of sorting the table.
+        #
+        # Measured on a copy of the production snapshot (see docs/future-plans.md,
+        # "Queue indexes"): the web and image polls drop from 258 ms and 252 ms to
+        # ~0 ms, the web and image breakdowns from 470/401 ms to 70/59 ms, and the
+        # API queue from 219 ms to 0.4 ms. The three indexes total 52.4 MB (2.8%
+        # of the database) and took 2.3 s to build; index maintenance is 1.0 us
+        # per completion update. The one-time build is deliberately not treated
+        # as a cost to optimise.
+        #
+        # The web queue's `> 0` predicate covers about 89% of rows, so its
+        # partial index is nearly full-size -- the shape of that queue, not a
+        # defect. `IF NOT EXISTS` (and the separate commit for the version bump)
+        # keeps a partial run resumable and re-runnable.
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_web_scrape_queue "
+            "ON workshop_items (needs_web_scrape DESC, api_fetched_at ASC) "
+            "WHERE needs_web_scrape > 0"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_image_queue "
+            "ON workshop_items (needs_image DESC, api_fetched_at ASC) "
+            "WHERE needs_image > 0"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_api_queue "
+            "ON workshop_items (api_priority DESC, api_fetched_at ASC) "
+            "WHERE api_priority > 0"
+        )
+
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 25")
+        conn.commit()
+        logging.info(
+            "Migration 24->25 complete. Indexed the web, image and API fetch queues."
+        )
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")

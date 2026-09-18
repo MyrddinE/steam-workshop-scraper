@@ -4,7 +4,7 @@ The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_
 
 ---
 
-## Current Schema (v24)
+## Current Schema (v25)
 
 The application-level reference for every table and column is
 [data-model.md](data-model.md); the timestamp conventions are in
@@ -129,6 +129,9 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 | idx_wilson_subscription_score | wilson_subscription_score | "Subscriber Score" sort |
 | idx_wilson_favorite_score | wilson_favorite_score | "Favorite Score" sort |
 | idx_translation_priority | translation_priority | Translation queue scanning |
+| idx_web_scrape_queue | (needs_web_scrape DESC, api_fetched_at ASC) WHERE needs_web_scrape > 0 | Web scrape worker poll and web queue breakdown (v25) |
+| idx_image_queue | (needs_image DESC, api_fetched_at ASC) WHERE needs_image > 0 | Image worker poll and image queue breakdown (v25) |
+| idx_api_queue | (api_priority DESC, api_fetched_at ASC) WHERE api_priority > 0 | API fetch worker poll and fetchable count (v25) |
 | idx_is_queued | is_queued_for_subscription | Subscription queue scan |
 | idx_workshop_tags_tag_id | workshop_tags.tag_id | Reverse tag lookup |
 
@@ -539,6 +542,80 @@ API merge allow-list either, and the `Language ID` filter alias is gone
 (`FIELD_NAME_MAP`). A saved filter that named it now falls through as an unknown
 field and is ignored rather than erroring, which is what it effectively did
 already: no row ever matched.
+
+---
+
+### v24 → v25: Partial composite indexes for the three work queues
+
+Purely additive — no table or column changes. The web, image and API workers
+find the head of their own queue by scanning `workshop_items` and sorting it on
+**every poll**, and the web/image statistics breakdowns pay for the same missing
+indexes. Each query asks for one of these shapes:
+
+```sql
+-- get_next_web_scrape_item / get_next_image_item
+SELECT * FROM workshop_items
+WHERE needs_web_scrape > 0
+ORDER BY needs_web_scrape DESC, api_fetched_at ASC LIMIT 1
+
+-- get_next_items_to_scrape (plus `AND (status IS NULL OR status != -1)`)
+SELECT * FROM workshop_items
+WHERE api_priority > 0
+ORDER BY api_priority DESC, api_fetched_at ASC LIMIT ?
+
+-- _priority_breakdowns (web and image)
+SELECT needs_web_scrape AS prio, COUNT(*) AS cnt FROM workshop_items
+WHERE needs_web_scrape > 0 AND (status IS NULL OR status <> -1)
+GROUP BY needs_web_scrape ORDER BY prio DESC
+```
+
+So the migration creates one partial composite index per queue, in exactly the
+order the poll's `ORDER BY` names, with a predicate the query's `WHERE` contains
+as a subexpression:
+
+```sql
+CREATE INDEX idx_web_scrape_queue ON workshop_items
+  (needs_web_scrape DESC, api_fetched_at ASC) WHERE needs_web_scrape > 0;
+CREATE INDEX idx_image_queue ON workshop_items
+  (needs_image DESC, api_fetched_at ASC) WHERE needs_image > 0;
+CREATE INDEX idx_api_queue ON workshop_items
+  (api_priority DESC, api_fetched_at ASC) WHERE api_priority > 0;
+```
+
+`EXPLAIN QUERY PLAN` confirms all six consumers plan through the index —
+`SEARCH workshop_items USING INDEX idx_... (...>?)` and, for the polls, no
+`USE TEMP B-TREE FOR ORDER BY`. `TEMP B-TREE` is the proof that the `ORDER BY`
+matches the index's column order rather than being sorted afterwards. A
+`GROUP BY` over a queue still costs time proportional to the queued rows, so
+the breakdowns improve rather than becoming free. This is pinned by
+`tests/test_queue_indexes.py`.
+
+*Measured on a copy of the production snapshot* (1,725,544 items; the plan's
+"Queue indexes" section carries the full table):
+
+| Query | Before | After | Index size |
+|---|---|---|---|
+| Next web scrape item (worker poll) | 258 ms | ~0 ms | 28.4 MB |
+| Next image item (worker poll) | 252 ms | ~0 ms | 23.8 MB |
+| Web queue breakdown | 470 ms | 70 ms | *(same index)* |
+| Image queue breakdown | 401 ms | 59 ms | *(same index)* |
+| API fetch queue | 219 ms | 0.4 ms | 0.19 MB |
+
+Build time 2.3 s; total 52.4 MB, or 2.8% of the database. Index maintenance is
+1.0 µs per completion update — 0.13% duty at the crawler's pace. The web queue's
+`> 0` predicate covers about 89% of rows, so its partial index is nearly
+full-size; that is the queue's shape, not a defect. The one-time build is
+deliberately not benchmarked or optimised here.
+
+The API queue's breakdown shape above has no shipped caller: the statistics
+`priority_breakdowns` metric covers `translation_priority`, `needs_image` and
+`needs_web_scrape` only. The API queue is read by the fetch poll and by
+`count_fetchable_items` (the daemon's "is there work?" count), both of which the
+new index serves; the 219 ms → 0.4 ms row is the queue's own `GROUP BY` as
+measured for the plan.
+
+Adding the index left `translation_priority` alone: it already had
+`idx_translation_priority`, and the translation breakdown continues to use it.
 
 ---
 

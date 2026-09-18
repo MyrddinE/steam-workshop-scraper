@@ -37,8 +37,8 @@ def _log_file_handler(log_file: str) -> logging.FileHandler:
 
     Without this the file is written in the locale encoding, which on Windows is
     cp1252. That corrupts every non-ASCII character the moment the file is read
-    back as UTF-8 -- the em dash in the "ignored" marker became a lone 0x97 byte,
-    read back as the replacement character -- and, worse, a log record the
+    back as UTF-8 -- the em dash in the "enriching" marker became a lone 0x97
+    byte, read back as the replacement character -- and, worse, a log record the
     encoding cannot represent at all is *dropped*: cp1252 has no CJK, and
     `logging.raiseExceptions = False` below means `handleError` discards the
     record in silence, so every line naming a Japanese or Chinese item was never
