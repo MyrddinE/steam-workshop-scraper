@@ -613,24 +613,29 @@ def api_subscribe(workshop_id):
     and is what the TUI (and the web UI next) drives; this route builds its POST
     from the same helpers rather than keeping a second copy.
 
-    The cookies and the CSRF token come from one read of the cookie source, so
-    the credential and the token cannot belong to different sessions; a Steam
-    ``sessionid`` from one login beside the credential of another is rejected in
-    a way that looks like an ordinary failure (``web_scraper._session_id``). The
-    pushed ``_sessionid`` global and the configured id are only a fallback for a
-    cookie set that carries no ``sessionid``, which is what keeps the
-    userscript-driven flow working exactly as before.
+    The CSRF token now comes from the item page this route reads, exactly as the
+    engine's does. ``sessionid`` is a session cookie Firefox keeps in memory and
+    never writes to ``cookies.sqlite``, so the profile read can never carry the
+    current one; the page's own ``g_sessionID`` is the token that belongs to the
+    credential that authenticated that read. The pushed ``_sessionid`` global and
+    ``session.id`` are only a fallback for a page that carries no token, which is
+    what keeps the userscript-driven flow working for an anonymous page. The read
+    is gated on the shared web interval -- ``daemon.web_delay_seconds`` through
+    ``configured_web_delay`` and ``pacing.wait`` -- so it honours the same rate
+    the daemon's worker and the engine keep. **Nothing else this route decides
+    changed**: the same refusal branches, the same status codes, the same
+    response bodies. (What a refusal *records* did change; see the block below.)
     """
-    cookies, sid, login = subscribe_engine.resolve_subscribe_credentials(_config, _sessionid)
+    cookies, fallback_sid, login = subscribe_engine.resolve_subscribe_credentials(
+        _config, _sessionid)
     logging.info(
         f"[Subscribe] request for workshop_id={workshop_id}, "
-        f"sessionid={'set' if sid else 'missing'}, login={'set' if login else 'missing'}")
-    # Refuse before spending a request: without either half of the pair Steam
-    # answers anonymously, which can never subscribe. The message names the
-    # remedy, because the person reading it is holding a browser.
-    if not sid:
-        logging.warning(f"[Subscribe] No sessionid available — refusing before the request")
-        return jsonify({"success": -1, "message": _SUBSCRIBE_NO_SESSION_MESSAGE}), 400
+        f"sessionid_fallback={'set' if fallback_sid else 'missing'}, "
+        f"login={'set' if login else 'missing'}")
+    # Refuse before spending a request: without a login cookie the page read
+    # would be anonymous and Steam answers anonymously, which can never
+    # subscribe. The message names the remedy, because the person reading it is
+    # holding a browser.
     if not login:
         logging.warning(f"[Subscribe] No steamLoginSecure available — refusing before the request")
         return jsonify({"success": -1, "message": _SUBSCRIBE_NO_LOGIN_MESSAGE}), 400
@@ -650,7 +655,23 @@ def api_subscribe(workshop_id):
         logging.warning(f"[Subscribe] Item {workshop_id} has no AppID — cannot subscribe")
         return jsonify({"success": -1, "message": "Item has no AppID."}), 400
 
-    logging.info(f"[Subscribe] POSTing to Steam: id={workshop_id}, appid={appid}, sessionid={sid[:6]}..., login={'set' if login else 'missing'}")
+    # The token source: read the item page this request is about to act on, on
+    # the shared interval. The same attempt's read also decides what a Steam
+    # refusal means below -- an authenticated page proves the login is good.
+    interval = subscribe_engine.WebInterval(_config, config_path=_config_path)
+    page = subscribe_engine.fetch_item_page(workshop_id, interval=interval)
+    page_html = subscribe_engine.page_body(page)
+    page_authenticated = subscribe_engine.page_read_authenticated(page_html)
+    sid, page_sid = subscribe_engine.resolve_subscribe_token(
+        page_html, cookies, fallback_sid)
+    if not sid:
+        logging.warning(f"[Subscribe] No sessionid available — refusing before the request")
+        return jsonify({"success": -1, "message": _SUBSCRIBE_NO_SESSION_MESSAGE}), 400
+
+    logging.info(
+        f"[Subscribe] POSTing to Steam: id={workshop_id}, appid={appid}, "
+        f"{subscribe_engine.token_log_note(sid, page_sid, fallback_sid)}, "
+        f"login={'set' if login else 'missing'}")
     try:
         # The shared request shape and the shared session, so the TCP connection
         # and TLS handshake are reused the way a browser reuses them; a fresh
@@ -659,11 +680,20 @@ def api_subscribe(workshop_id):
         data = resp.json()
         logging.info(f"[Subscribe] Steam response: status={resp.status_code}, body={data}")
         success = data.get("success")
-        # Steam's "the session is gone / not permitted" answers are the same ones
-        # the TUI maps to a session warning; recording them here is what makes
-        # the web UI's banner say it too, without a scrape having to notice.
-        if success in (2, 15):
-            session_health.record_rejected(_db_path, _SUBSCRIBE_SESSION_REJECTED_DETAIL)
+        # Steam's refusal answers. Whether that is a session problem depends on
+        # the page this attempt itself read: an authenticated page proves the
+        # credential works, so the refusal is about the CSRF token and recording
+        # a session problem would send the operator to sign in again for nothing.
+        if getattr(resp, "status_code", None) == 401 or success in (2, 15):
+            if page_authenticated:
+                logging.warning(
+                    f"[Subscribe] Steam refused the CSRF token for "
+                    f"workshop_id={workshop_id}, but this attempt's page read was "
+                    f"authenticated; the login is good, so no session problem "
+                    f"was recorded.")
+            else:
+                session_health.record_rejected(
+                    _db_path, _SUBSCRIBE_SESSION_REJECTED_DETAIL)
         elif success == 1:
             # The confirmation is the same fact `/api/subscribed/<id>` stamps for
             # the browser bridge: mark it subscribed and clear the queue flag.

@@ -10,9 +10,11 @@ from unittest.mock import MagicMock
 import lxml.html
 from src import session_health
 from src import webserver
+from src import subscribe_engine
 from src.webserver import app, init_webserver
 from src.database import initialize_database, insert_or_update_item, normalize_tags, get_image_subdirs, get_connection
 from src import metrics
+from src import pacing
 from src import web_scraper
 
 
@@ -581,17 +583,37 @@ def _login_cookie(expires_at, steamid="76561198000000000"):
     return f"{steamid}%7C%7CeyJhbGciOiJub25lIn0.{payload}.c2ln"
 
 
+def _synthetic_page(session_id=None, *, authenticated=True, toggled=False):
+    """A hand-built item page for the route tests -- never a captured one.
+
+    The local mirror's captures carry real `g_sessionID` values and real login
+    cookies, so no capture is ever committed as a fixture. This page carries the
+    account marker when `authenticated` and a **fake** `g_sessionID` only when
+    one is asked for.
+    """
+    classes = 'class="btn toggled"' if toggled else 'class="btn"'
+    account = '<div id="account_pulldown">signed in</div>' if authenticated else ""
+    token = f'<script>var g_sessionID = "{session_id}";</script>' if session_id else ""
+    return (f'<html><body>{account}'
+            f'<a id="SubscribeItemBtn" {classes}>Subscribe</a>{token}</body></html>')
+
+
 @pytest.fixture
 def subscribe_env(tmp_path, monkeypatch):
     """A database with item 1, plus the route's two seams replaced.
 
-    `_get_session` is the request seam now that the route shares the scraper's
-    session, so the recorder lives on it. The cookie source is replaced with a
-    set the test dictates -- the route must read that entry point, so a route
-    taking the token from anywhere else is caught here. There is no runtime
-    tripwire on a bare `requests.post` because the module no longer imports
-    `requests`; that shape is pinned at the source instead, in
+    `_get_session` is the POST seam, and `scrape_extended_details` is the page
+    read the route now makes to source its CSRF token. The cookie source is
+    replaced with a set the test dictates -- the route must read that entry
+    point, so a route taking the token from anywhere else is caught here. There
+    is no runtime tripwire on a bare `requests.post` because the module no
+    longer imports `requests`; that shape is pinned at the source instead, in
     `test_the_subscribe_route_has_no_bare_requests_call`.
+
+    The default page is authenticated (so a Steam refusal is a token refusal,
+    not a session problem) and carries no `g_sessionID` (so the pushed/configured
+    fallback is exercised); a test that wants the page's own token sets
+    `state["page"]`.
     """
     db_path = str(tmp_path / "subscribe.db")
     initialize_database(db_path)
@@ -601,17 +623,28 @@ def subscribe_env(tmp_path, monkeypatch):
               "session": {}}
     init_webserver(db_path, config)
     monkeypatch.setattr(webserver, "_sessionid", "")
+    # The route's page read waits the shared interval; tests must not sleep.
+    monkeypatch.setattr(pacing, "wait", lambda seconds, keep_running=None: True)
 
-    state = {"cookies": {}, "payload": {"success": 1}, "calls": []}
+    state = {"cookies": {}, "payload": {"success": 1}, "calls": [], "pages": [],
+             "page": _synthetic_page(), "status_code": 200}
 
     monkeypatch.setattr(webserver.web_scraper, "_build_workshop_cookies",
                         lambda config: dict(state["cookies"]))
+
+    def _read_page(url, keep_body=False):
+        state["pages"].append(url)
+        return {"description": "d", "tags": [], "body": state["page"],
+                "http_status": 200, "final_url": url,
+                "request": {"method": "GET", "url": url}}
+
+    monkeypatch.setattr(webserver.web_scraper, "scrape_extended_details", _read_page)
 
     class _Session:
         def post(self, url, **kwargs):
             state["calls"].append({"url": url, **kwargs})
             resp = MagicMock()
-            resp.status_code = 200
+            resp.status_code = state.get("status_code", 200)
             resp.url = url
             resp.headers = dict(state.get("response_headers") or {})
             resp.text = state.get("body") or json.dumps(state["payload"])
@@ -634,7 +667,7 @@ def _item_row(db_path, wid=1):
 
 
 def test_subscribe_token_comes_from_the_built_cookie_set(subscribe_env, monkeypatch):
-    """(a) The form token is the built set's, even when a global is pushed."""
+    """(a) With no token on the page, the built set's token is used."""
     _, state = subscribe_env
     state["cookies"] = {"sessionid": "FROM_COOKIES",
                         "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
@@ -720,26 +753,108 @@ def test_subscribe_success_marks_the_item_and_clears_the_session_problem(subscri
     assert session_health.read(db_path) is None
 
 
-@pytest.mark.parametrize("success", [2, 15])
-def test_subscribe_session_error_answers_are_recorded(subscribe_env, success):
-    """(f) Steam's session-expired answers record a session problem."""
+@pytest.mark.parametrize("payload,status", [({"success": 2}, 200),
+                                            ({"success": 15}, 200),
+                                            ({"success": 2}, 401)])
+def test_a_refused_token_with_an_authenticated_page_read_is_not_a_session_problem(
+        subscribe_env, payload, status):
+    """(f) A refusal beside an authenticated read is about the token, not the login.
+
+    The page this attempt read was served to the signed-in account, so the
+    credential is proven good. Recording a session problem here is what told the
+    owner to sign in again while the login was working.
+    """
     db_path, state = subscribe_env
-    state["cookies"] = {"sessionid": "TOK",
-                        "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
-    state["payload"] = {"success": success}
+    state["cookies"] = {"steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
+    state["page"] = _synthetic_page("PAGE_SESSION_TOKEN", authenticated=True)
+    state["payload"] = payload
+    state["status_code"] = status
+
+    resp = _post_subscribe(app.test_client())
+
+    assert session_health.read(db_path) is None, "the login was proven good"
+    # The response body is still Steam's own, untouched.
+    assert resp.get_json() == payload
+
+
+def test_a_refused_token_with_an_anonymous_page_read_is_still_a_session_problem(
+        subscribe_env, monkeypatch):
+    """(g) A refusal beside an anonymous read records the session problem."""
+    db_path, state = subscribe_env
+    state["cookies"] = {"steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
+    state["page"] = _synthetic_page(authenticated=False)
+    state["payload"] = {"success": 2}
+    monkeypatch.setattr(webserver, "_sessionid", "PUSHED_TOKEN")
 
     resp = _post_subscribe(app.test_client())
 
     recorded = session_health.read(db_path)
-    assert recorded, "a session error must leave a problem for the banner"
+    assert recorded, "an anonymous page read leaves the session problem"
     assert "sign in to steam" in recorded["detail"].lower()
-    # The response itself is untouched: the TUI still reads Steam's own body.
     assert resp.status_code == 200
-    assert resp.get_json() == {"success": success}
+    assert resp.get_json() == {"success": 2}
+
+
+def test_subscribe_token_comes_from_the_page_when_it_carries_one(subscribe_env, monkeypatch):
+    """(h) The regression for issue 38: g_sessionID beats the configured token.
+
+    `sessionid` is a session cookie Firefox never persists, so the profile read
+    cannot supply the current one; the page the attempt reads is the honest
+    source. The pushed global and the cookie set are only fallbacks, and the
+    form token and the cookie must end up as the page's value together.
+    """
+    _, state = subscribe_env
+    state["cookies"] = {"sessionid": "COOKIE_TOKEN",
+                        "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
+    state["page"] = _synthetic_page("PAGE_SESSION_TOKEN")
+    monkeypatch.setattr(webserver, "_sessionid", "PUSHED_TOKEN")
+
+    resp = _post_subscribe(app.test_client())
+
+    assert resp.status_code == 200
+    call = state["calls"][0]
+    assert call["data"]["sessionid"] == "PAGE_SESSION_TOKEN"
+    assert call["cookies"]["sessionid"] == "PAGE_SESSION_TOKEN"
+
+
+def test_the_route_gates_its_page_read_on_the_shared_interval(subscribe_env, monkeypatch):
+    """(i) Sourcing the token must not read pages off the shared rate.
+
+    The read goes through the same `WebInterval`, the same
+    `daemon.web_delay_seconds` and the same `pacing.wait` as the engine.
+    """
+    _, state = subscribe_env
+    webserver._config.setdefault("daemon", {})["web_delay_seconds"] = 11.0
+    waits = []
+    monkeypatch.setattr(
+        pacing, "wait",
+        lambda seconds, keep_running=None: waits.append(seconds) or True)
+    state["cookies"] = {"steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
+
+    _post_subscribe(app.test_client())
+
+    assert state["pages"], "the route must read the page to source its token"
+    assert waits == [11.0], "the read waits the shared interval exactly once"
+
+
+def test_the_route_log_carries_a_fingerprint_and_never_the_token(subscribe_env, caplog):
+    """(j) The log compares tokens by hash, and never writes one down."""
+    _, state = subscribe_env
+    token = "PAGE_SESSION_TOKEN"
+    state["cookies"] = {"steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
+    state["page"] = _synthetic_page(token)
+
+    with caplog.at_level(logging.INFO):
+        _post_subscribe(app.test_client())
+
+    text = caplog.text
+    assert "POSTing to Steam" in text
+    assert token not in text, "the token must never be logged"
+    assert subscribe_engine.token_fingerprint(token) in text
 
 
 def test_subscribe_item_error_branches_are_unchanged(subscribe_env):
-    """(g) The 404 no-item and 400 no-AppID branches still answer, send nothing."""
+    """(k) The 404 no-item and 400 no-AppID branches still answer, send nothing."""
     db_path, state = subscribe_env
     state["cookies"] = {"sessionid": "TOK",
                         "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
@@ -818,7 +933,7 @@ def test_the_subscribe_route_has_no_bare_requests_call():
 
 
 def test_the_subscribe_pull_is_captured(subscribe_env, tmp_path):
-    """Switch on: one subscribe record, Steam's answer on disk, no credential."""
+    """Switch on: the page read and the subscribe are captured, no credential."""
     from src import capture
 
     db_path, state = subscribe_env
@@ -841,9 +956,10 @@ def test_the_subscribe_pull_is_captured(subscribe_env, tmp_path):
     assert resp.status_code == 200
     records = [json.loads(path.read_text(encoding="utf-8"))
                for path in (outbox / "web_downloads").glob("*.json")]
-    assert len(records) == 1
-    record = records[0]
-    assert record["kind"] == "subscribe"
+    # The route now reads the item page to source its CSRF token, so that read
+    # is captured under `item_page` beside the POST.
+    assert sorted(record["kind"] for record in records) == ["item_page", "subscribe"]
+    record = next(r for r in records if r["kind"] == "subscribe")
     assert record["workshop_id"] == 1
     assert record["request"]["method"] == "POST"
     assert record["request"]["data"]["sessionid"] == "***"

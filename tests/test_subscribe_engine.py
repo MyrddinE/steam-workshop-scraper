@@ -16,6 +16,7 @@ still runs where the captures were never synced.
 
 import base64
 import json
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -75,6 +76,21 @@ TOGGLED = (
 )
 
 
+def _synthetic_page(session_id=None, *, authenticated=True, toggled=False):
+    """A hand-built item page -- never a captured one.
+
+    The local mirror's captures carry real `g_sessionID` values and real login
+    cookies, so no capture is ever committed as a test fixture. This page carries
+    the account marker when `authenticated` and a **fake** `g_sessionID` only
+    when one is asked for.
+    """
+    classes = 'class="btn toggled"' if toggled else 'class="btn"'
+    account = '<div id="account_pulldown">signed in</div>' if authenticated else ""
+    token = f'<script>var g_sessionID = "{session_id}";</script>' if session_id else ""
+    return (f'<html><body>{account}'
+            f'<a id="SubscribeItemBtn" {classes}>Subscribe</a>{token}</body></html>')
+
+
 def test_the_parser_reads_the_two_rendered_states():
     assert engine.parse_button_state(NOT_TOGGLED) == engine.BUTTON_NOT_SUBSCRIBED
     assert engine.parse_button_state(TOGGLED) == engine.BUTTON_SUBSCRIBED
@@ -97,6 +113,37 @@ def test_the_parser_says_unknown_when_the_button_is_absent():
     assert engine.parse_button_state("<html><body>error</body></html>") == engine.BUTTON_UNKNOWN
     assert engine.parse_button_state("") == engine.BUTTON_UNKNOWN
     assert engine.parse_button_state(None) == engine.BUTTON_UNKNOWN
+
+
+def test_the_session_id_parser_reads_a_quoted_g_session_id():
+    """The parser for issue 38, against synthetic pages only."""
+    assert engine.parse_session_id(
+        "<script>var g_sessionID = 'PAGE_TOKEN';</script>") == "PAGE_TOKEN"
+    assert engine.parse_session_id(
+        '<script>var g_sessionID="X";</script>') == "X"
+    assert engine.parse_session_id(
+        '<script>g_sessionID = "SPACED";</script>') == "SPACED"
+
+
+def test_the_session_id_parser_says_empty_when_the_page_has_no_g_session_id():
+    """An error, throttle or anonymous page carries no token; never guess one."""
+    for page in ("<html><body>Steam error page</body></html>",
+                 "<html>You have made too many requests</html>",
+                 "<script>var g_sessionID = '';</script>",
+                 "", None):
+        assert engine.parse_session_id(page) == ""
+
+
+def test_the_token_fingerprint_is_stable_and_different_for_another_token():
+    """The diagnostic property: equal tokens compare equal, others do not."""
+    token = "A-FAKE-SESSION-TOKEN"
+    fingerprint = engine.token_fingerprint(token)
+    assert fingerprint
+    assert fingerprint != token
+    assert len(fingerprint) == 12
+    assert all(c in "0123456789abcdef" for c in fingerprint)
+    assert engine.token_fingerprint(token) == fingerprint, "stable for one token"
+    assert engine.token_fingerprint(token + "x") != fingerprint, "different for another"
 
 
 def test_the_parser_reads_both_states_from_the_local_signed_in_captures():
@@ -137,16 +184,17 @@ class _Fetcher:
 class _Session:
     """A shared-session stand-in recording the subscribe POST."""
 
-    def __init__(self, payload=None, text=None, json_ok=True):
+    def __init__(self, payload=None, text=None, json_ok=True, status_code=200):
         self.payload = payload
         self.text = text
         self.json_ok = json_ok
+        self.status_code = status_code
         self.calls = []
 
     def post(self, url, **kwargs):
         self.calls.append({"url": url, **kwargs})
         resp = MagicMock()
-        resp.status_code = 200
+        resp.status_code = self.status_code
         resp.url = url
         resp.headers = {}
         resp.text = self.text if self.text is not None else json.dumps(self.payload)
@@ -295,6 +343,129 @@ def test_the_confirmation_step_can_be_retired_without_touching_the_click(engine_
     assert _queued(db_path, 7) is False
 
 
+# --- the POST's CSRF token (issue 38) ---------------------------------------
+
+def test_the_post_uses_the_pages_token_when_the_configured_one_differs(engine_env,
+                                                                      monkeypatch):
+    """The regression for issue 38: the page's own `g_sessionID` is posted.
+
+    The configured/pushed token belongs to whatever session pushed it, and a
+    `sessionid` off the Firefox profile is impossible -- it is a session cookie.
+    The page the attempt just read carries the token that authenticates *it*,
+    and the form field and the cookie must both carry that value.
+    """
+    db_path, config = engine_env
+    page = _synthetic_page("PAGE_SESSION_TOKEN", authenticated=True)
+    after = _synthetic_page("PAGE_SESSION_TOKEN", authenticated=True, toggled=True)
+    monkeypatch.setattr(web_scraper, "scrape_extended_details", _Fetcher([page, after]))
+    session = _Session(payload={"success": 1})
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: session)
+
+    outcome = engine.subscribe_item(7, config=config, db_path=db_path)
+
+    assert outcome.status == engine.SUBSCRIBED
+    call = session.calls[0]
+    assert call["data"]["sessionid"] == "PAGE_SESSION_TOKEN"
+    assert call["data"]["sessionid"] != "TOK", "the configured token lost"
+    assert call["cookies"]["sessionid"] == "PAGE_SESSION_TOKEN", \
+        "the form field and the cookie must agree"
+
+
+def test_the_configured_token_is_the_fallback_when_the_page_has_none(engine_env,
+                                                                    monkeypatch):
+    """A page with no `g_sessionID` still posts the cookie set's token."""
+    db_path, config = engine_env
+    page = _synthetic_page(None, authenticated=True)
+    after = _synthetic_page(None, authenticated=True, toggled=True)
+    monkeypatch.setattr(web_scraper, "scrape_extended_details", _Fetcher([page, after]))
+    session = _Session(payload={"success": 1})
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: session)
+
+    engine.subscribe_item(7, config=config, db_path=db_path)
+
+    assert session.calls[0]["data"]["sessionid"] == "TOK"
+
+
+@pytest.mark.parametrize("payload,status", [({"success": 2}, 200),
+                                            ({"success": 15}, 200),
+                                            ({"success": 2}, 401)])
+def test_a_refused_token_with_an_authenticated_page_is_not_a_session_problem(
+        engine_env, monkeypatch, payload, status):
+    """The refusal is about the token when this attempt's page read was signed in.
+
+    The credential just authenticated a page, so recording a session problem
+    would tell the operator to sign in again for nothing -- the misleading half
+    of issue 38. A 401 and Steam's `success: 2`/`15` are the same refusal.
+    """
+    db_path, config = engine_env
+    page = _synthetic_page("PAGE_SESSION_TOKEN", authenticated=True)
+    monkeypatch.setattr(web_scraper, "scrape_extended_details", _Fetcher([page]))
+    session = _Session(payload=payload, status_code=status)
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: session)
+
+    outcome = engine.subscribe_item(7, config=config, db_path=db_path)
+
+    assert outcome.status == engine.TOKEN_REFUSED
+    assert outcome.queued is True
+    assert outcome.steam_success == payload["success"]
+    assert session_health.read(db_path) is None, "the login was proven good"
+    assert _queued(db_path, 7) is True
+
+
+def test_an_http_401_with_an_unreadable_body_is_still_a_token_refusal(engine_env,
+                                                                     monkeypatch):
+    """A 401 whose body is not JSON is refused, not reported as a failure."""
+    db_path, config = engine_env
+    page = _synthetic_page("PAGE_SESSION_TOKEN", authenticated=True)
+    monkeypatch.setattr(web_scraper, "scrape_extended_details", _Fetcher([page]))
+    session = _Session(text="<html>unauthorized</html>", json_ok=False, status_code=401)
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: session)
+
+    outcome = engine.subscribe_item(7, config=config, db_path=db_path)
+
+    assert outcome.status == engine.TOKEN_REFUSED
+    assert session_health.read(db_path) is None
+
+
+def test_a_refused_token_with_an_anonymous_page_still_records_a_session_problem(
+        engine_env, monkeypatch):
+    """Nothing authenticated, so the refusal is the session's problem as before."""
+    db_path, config = engine_env
+    # No account marker and no page token: the cookie set's token is posted and
+    # the refusal has nothing authenticated to contradict it.
+    page = _synthetic_page(None, authenticated=False)
+    monkeypatch.setattr(web_scraper, "scrape_extended_details", _Fetcher([page]))
+    session = _Session(payload={"success": 2})
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: session)
+
+    outcome = engine.subscribe_item(7, config=config, db_path=db_path)
+
+    assert outcome.status == engine.SESSION_PROBLEM
+    recorded = session_health.read(db_path)
+    assert recorded and recorded["detail"] == engine.SUBSCRIBE_SESSION_REJECTED_DETAIL
+
+
+def test_the_post_log_carries_a_fingerprint_and_never_the_token(engine_env,
+                                                                monkeypatch, caplog):
+    """One line tells the next occurrence apart without ever printing a token."""
+    db_path, config = engine_env
+    token = "PAGE_SESSION_TOKEN"
+    page = _synthetic_page(token, authenticated=True)
+    after = _synthetic_page(token, authenticated=True, toggled=True)
+    monkeypatch.setattr(web_scraper, "scrape_extended_details", _Fetcher([page, after]))
+    session = _Session(payload={"success": 1})
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: session)
+
+    with caplog.at_level(logging.INFO):
+        engine.subscribe_item(7, config=config, db_path=db_path)
+
+    line = [r.getMessage() for r in caplog.records if "POSTing to Steam" in r.getMessage()]
+    assert line, "the POST must be logged"
+    assert token not in caplog.text, "the token itself must never be logged"
+    assert engine.token_fingerprint(token) in line[0]
+    assert "sessionid_fp=" in line[0]
+
+
 # --- the refusals ------------------------------------------------------------
 
 def test_a_missing_button_refuses(engine_env, monkeypatch):
@@ -345,6 +516,11 @@ def test_a_throttle_answer_to_the_post_leaves_the_item_queued(engine_env, monkey
 
 @pytest.mark.parametrize("success", [2, 15])
 def test_an_expiry_answer_records_a_session_problem(engine_env, monkeypatch, success):
+    """`NOT_TOGGLED` carries no account marker, so the page read was anonymous.
+
+    The refusal is therefore the session's problem, exactly as before the token
+    fix; the authenticated branch is covered separately above.
+    """
     db_path, config = engine_env
     monkeypatch.setattr(web_scraper, "scrape_extended_details",
                         _Fetcher([NOT_TOGGLED]))

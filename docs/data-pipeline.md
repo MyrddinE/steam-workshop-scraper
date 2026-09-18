@@ -250,6 +250,11 @@ to say:
   accepted; it never says whether anything changed.
 * A missing `#SubscribeItemBtn` is "cannot tell", never "not subscribed". An error page, a signed-out
   page and a throttle page all omit it.
+* `sessionid` is a **session cookie**: Firefox keeps it in memory and never writes it to
+  `cookies.sqlite`, so a profile read can never supply the current one. The page carries
+  `g_sessionID` instead, which belongs to the session that served that page, and it is the token the
+  POST uses. The cookie set's `sessionid`, the pushed `_sessionid` global and `session.id` are only
+  fallbacks for a page that carries no token.
 
 So one run is:
 
@@ -260,8 +265,13 @@ So one run is:
    is sent**. This is both the guard against the endpoint ever turning out to be a toggle and the
    reason re-running a queue is cheap.
 3. **Click** (only when the page says not subscribed): `post_subscribe_request` sends the POST, built
-   from the same helpers `/api/subscribe/<id>` uses. Steam's `success: 2`/`15` answers are recorded as
-   a session problem with the route's own sentence.
+   from the same helpers `/api/subscribe/<id>` uses. `resolve_subscribe_token` takes the form token
+   from the page just read -- `g_sessionID` first, then the cookie set, then the pushed/configured
+   fallback -- and puts it back into the cookie jar so the form field and the cookie agree. Steam
+   answers `success: 2`/`15` (or HTTP 401) when it refuses the request: beside an **authenticated**
+   page read that is a refused CSRF token and is reported as `token_refused` with **no session
+   problem recorded**, because the credential just fetched the page; beside an **anonymous** page read
+   the refusal is recorded as a session problem with the route's own sentence, as before.
 4. **Confirm** (`confirm_subscription`): read the page again and decide from the button. `toggled`
    present means subscribed — `record_confirmed_subscription` calls `mark_own_subscribed` (which also
    clears `is_queued_for_subscription`) and clears the recorded session problem. `toggled` absent with
