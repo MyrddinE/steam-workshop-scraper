@@ -101,6 +101,18 @@ The TUI is an interface for exploring the scraped data, built with the `Textual`
 * **Command palette**: A searchable menu for actions such as clearing the database or managing
   filters.
 
+### Front-end parity (TUI and Web UI)
+
+Both front ends read the same database and the same shared tables — `src/pending.py` for a stage
+marker and `src/subscription.py` for the subscription marker — so a change on one side is reviewed
+against the other in the same change. **Layout may differ**: a terminal and a browser have different
+constraints, so the same control can sit in a different place, in a different order, and be drawn
+differently. **Function may not**: the same data is surfaced and the same actions are available on
+both sides. When one front end gains a metric, a marker state, a control or an estimate, the other
+gains it too, or the difference is recorded with the reason it cannot be shared. A gap noticed while
+working on one side is fixed at once when the change is small and obvious, and raised as a question
+when the two sides genuinely need different behaviour — [tui.md](tui.md), [web-ui.md](web-ui.md).
+
 ### The Data Layer (SQLite)
 
 The database is designed for high-concurrency and complex querying. See
