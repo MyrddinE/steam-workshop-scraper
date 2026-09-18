@@ -227,6 +227,75 @@ def _stuck_work(conn, params) -> dict:
     return {k: row[k] for k in ("web", "image", "translation", "api")}
 
 
+@metric("dead_queued", 58, "Dead items still holding a queue flag.")
+def _dead_queued(conn, params) -> int:
+    """Dead items a work queue would still select -- the shape of issue 17.
+
+    The handoff invariant is that every item is in exactly one state: queued for
+    the API fetch (``api_priority > 0``), a web scrape (``needs_web_scrape > 0``),
+    an image (``needs_image > 0``) or a translation (``translation_priority > 0``);
+    complete for the stage that owns it; or deliberately dead (``status = -1``)
+    and therefore in **no** queue.
+
+    A dead item holding a queue flag is the second kind of violation: the stage
+    that marked it dead wrote ``status = -1`` but left a flag set, so the web,
+    image or translation poll -- each of which selects on its flag alone, with no
+    dead-item guard -- keeps handing out a row that can never complete.
+
+    Zero is the healthy reading. A non-zero value is the number of dead items
+    still encumbered by a queue, each item counted once however many flags it
+    holds; `stuck_work` reports the same population broken down per queue.
+    """
+    return conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM workshop_items
+        WHERE status = -1
+          AND (api_priority > 0 OR needs_web_scrape > 0
+               OR needs_image > 0 OR translation_priority > 0)
+        """
+    ).fetchone()["n"]
+
+
+@metric("queued_nowhere", 63, "Live items no queue is carrying and the pipeline has not finished.")
+def _queued_nowhere(conn, params) -> int:
+    """Items in no queue that the pipeline never completed -- issues 19 and 20.
+
+    The handoff invariant is that every item is in exactly one state: queued for
+    the API fetch (``api_priority > 0``), a web scrape (``needs_web_scrape > 0``),
+    an image (``needs_image > 0``) or a translation (``translation_priority > 0``);
+    complete for the stage that owns it; or deliberately dead (``status = -1``) in
+    no queue. This counts the first kind of violation -- an item that fell out of
+    the pipeline without being finished:
+
+    * discovered but never fetched (``status IS NULL``) with no fetch priority,
+      which is issue 20; or
+    * fetched (``status = 200``) with no stored description and no scrape queued,
+      which is issue 19.
+
+    Zero is the healthy reading: every live item is queued somewhere or has been
+    carried through to a stored description. A non-zero value is the number of
+    live items no stage is carrying. Some of those can be item pages that were
+    served without an extended description, which the web stage deliberately
+    settles and which look identical in the database to issue 19's stranded rows,
+    so the number is a population to inspect rather than proof of a live defect.
+    Statuses the pipeline settles otherwise -- dead (``-1``) and the legacy
+    ``404`` rows of issue 36 -- are outside the population.
+    """
+    return conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM workshop_items
+        WHERE (status IS NULL
+               OR (status = 200 AND COALESCE(extended_description, '') = ''))
+          AND api_priority <= 0
+          AND needs_web_scrape <= 0
+          AND needs_image <= 0
+          AND translation_priority <= 0
+        """
+    ).fetchone()["n"]
+
+
 @metric("fetch_recency", 79, "Our fetch recency, by last_fetch_attempted_at.")
 def _fetch_recency(conn, params) -> dict:
     staleness_days = int(params.get("staleness_days", DEFAULT_STALENESS_DAYS))

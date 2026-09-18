@@ -395,6 +395,96 @@ def test_stuck_work_surfaces_dead_items_still_queued(db_path):
     assert stuck == {"web": 1, "image": 1, "translation": 1, "api": 0}
 
 
+def test_queued_nowhere_finds_a_discovered_item_with_no_queue(db_path):
+    """Issue 20: a discovered row whose api_priority was left at 0.
+
+    The fetch queue selects ``api_priority > 0``, so a bare row at the column
+    default of a migrated database is carried by no stage at all.
+    """
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "discovered", "api_priority": 0})
+
+    assert metrics.values(metrics.compute(db_path, ["queued_nowhere"]))["queued_nowhere"] == 1
+
+
+def test_queued_nowhere_finds_a_fetched_item_with_no_description(db_path):
+    """Issue 19: dequeued as scraped while the description was never stored."""
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "title": "fetched", "status": 200,
+        "api_fetched_at": 1000, "api_priority": 0, "needs_web_scrape": 0,
+    })
+
+    assert metrics.values(metrics.compute(db_path, ["queued_nowhere"]))["queued_nowhere"] == 1
+
+
+def test_dead_queued_counts_a_dead_item_holding_a_flag(db_path):
+    """Issue 17: dead, yet a queue flag was left set.
+
+    The item is counted once however many flags it holds, and it is already out
+    of the ``queued_nowhere`` population because it is deliberately dead.
+    """
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "title": "gone", "status": -1, "api_priority": 0,
+        "needs_web_scrape": 1, "needs_image": 1, "translation_priority": 1,
+    })
+
+    values = metrics.values(metrics.compute(db_path, ["dead_queued", "queued_nowhere"]))
+    assert values["dead_queued"] == 1
+    assert values["queued_nowhere"] == 0
+
+
+def test_handoff_counters_read_zero_on_a_healthy_database(db_path):
+    """Every legal state must read zero: queued, complete, or deliberately dead.
+
+    An item being queued somewhere is one of the invariant's legal states, so a
+    queue flag must never make either counter fire.
+    """
+    # Complete: fetched, description stored, image answered, nothing queued.
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "title": "complete", "status": 200, "api_fetched_at": 1000,
+        "extended_description": "the full page text", "image_extension": "jpg",
+        "api_priority": 0,
+    })
+    # Queued for each stage in turn: legal, not stranded.
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": "fetch", "api_priority": 3})
+    insert_or_update_item(db_path, {
+        "workshop_id": 3, "title": "scrape", "status": 200, "api_fetched_at": 1000,
+        "api_priority": 0, "needs_web_scrape": 3,
+    })
+    insert_or_update_item(db_path, {
+        "workshop_id": 4, "title": "image", "status": 200, "api_fetched_at": 1000,
+        "api_priority": 0, "needs_image": 3,
+    })
+    insert_or_update_item(db_path, {
+        "workshop_id": 5, "title": "translate", "status": 200, "api_fetched_at": 1000,
+        "api_priority": 0, "translation_priority": 3,
+    })
+    # Deliberately dead, in no queue.
+    insert_or_update_item(db_path, {"workshop_id": 6, "title": "gone", "status": -1, "api_priority": 0})
+
+    values = metrics.values(metrics.compute(db_path, ["queued_nowhere", "dead_queued"]))
+    assert values == {"queued_nowhere": 0, "dead_queued": 0}
+
+
+def test_handoff_counters_count_without_changing_the_rows(db_path):
+    """The detectors report; they do not repair. No write may follow a read."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "discovered", "api_priority": 0})
+    insert_or_update_item(db_path, {
+        "workshop_id": 2, "title": "gone", "status": -1, "api_priority": 0,
+        "needs_web_scrape": 1,
+    })
+
+    conn = get_connection(db_path)
+    before = [dict(r) for r in conn.execute("SELECT * FROM workshop_items ORDER BY workshop_id")]
+    conn.close()
+
+    metrics.compute(db_path, ["queued_nowhere", "dead_queued"])
+
+    conn = get_connection(db_path)
+    after = [dict(r) for r in conn.execute("SELECT * FROM workshop_items ORDER BY workshop_id")]
+    conn.close()
+    assert after == before
+
+
 def test_tag_counts_reads_the_junction_table(db_path):
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "x", "status": 200,

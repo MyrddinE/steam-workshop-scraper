@@ -1723,6 +1723,8 @@ const STATS_LABELS = {
   status_counts: 'Status counts',
   coverage: 'Coverage',
   stuck_work: 'Stuck work',
+  dead_queued: 'Dead but queued',
+  queued_nowhere: 'Queued nowhere',
   fetch_recency: 'Fetch recency',
   translation_status: 'Translation status',
   priority_breakdowns: 'Queue priorities',
@@ -1791,6 +1793,13 @@ function _renderTotals(t) {
     + ' &nbsp; <span class="stat-label">Total: ' + fmtCount(t.total || 0) + '</span></p>';
 }
 
+function _renderHandoffCount(value, zeroText, badText) {
+  // Both handoff counters are meant to read zero, so a zero is an all-clear
+  // worth saying in words rather than printing a bare digit.
+  if (!value) return '<p style="color:#44aa44">' + zeroText + '</p>';
+  return '<p class="stats-stuck">&#x26A0; ' + fmtCount(value) + ' ' + badText + '</p>';
+}
+
 function _renderPriority(b) {
   const queues = [['translation_priority', 'Translation'], ['needs_image', 'Image'], ['needs_web_scrape', 'Web scrape']];
   return queues.map(function(q) {
@@ -1852,6 +1861,11 @@ function _renderMetricBody(name, value) {
   if (name === 'high_water') return '<p>' + _fmtTimestamp(value) + '</p>';
   if (name === 'coverage') return _renderCoverage(value);
   if (name === 'stuck_work') return _renderStuck(value);
+  if (name === 'dead_queued') return _renderHandoffCount(
+    value, 'No dead item is holding a queue flag.', 'dead item(s) still hold a queue flag.');
+  if (name === 'queued_nowhere') return _renderHandoffCount(
+    value, 'No item is stranded: every live item is queued or complete.',
+    'item(s) are in no queue and not complete.');
   if (name === 'status_counts') return _renderStatusCounts(value);
   if (name === 'fetch_recency') return _renderRecency(value);
   if (name === 'translation_status') return _renderTranslation(value);

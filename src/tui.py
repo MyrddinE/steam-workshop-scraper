@@ -178,6 +178,8 @@ class StatsScreen(Screen):
         "app_tracking": "App tracking",
         "status_counts": "Status counts",
         "stuck_work": "Stuck work",
+        "dead_queued": "Dead but queued",
+        "queued_nowhere": "Queued nowhere",
         "fetch_recency": "Fetch recency",
         "coverage": "Coverage",
         "translation_status": "Translation status",
@@ -192,6 +194,8 @@ class StatsScreen(Screen):
         "totals": "totals-content",
         "status_counts": "status-content",
         "stuck_work": "stuck-content",
+        "dead_queued": "dead-queued-content",
+        "queued_nowhere": "queued-nowhere-content",
         "fetch_recency": "recency-content",
         "coverage": "coverage-content",
         "translation_status": "translation-stats-content",
@@ -419,6 +423,18 @@ class StatsScreen(Screen):
             )
         elif name == "stuck_work":
             self._set_text(name, self._format_stuck(value))
+        elif name == "dead_queued":
+            self._set_text(name, self._format_handoff_metric(
+                value,
+                "No dead item is holding a queue flag.",
+                "dead item(s) still hold a queue flag",
+            ))
+        elif name == "queued_nowhere":
+            self._set_text(name, self._format_handoff_metric(
+                value,
+                "No item is stranded: every live item is queued or complete.",
+                "item(s) are in no queue and not complete",
+            ))
         elif name == "fetch_recency":
             self._set_text(
                 name,
@@ -486,6 +502,18 @@ class StatsScreen(Screen):
             lines.append(f"  {label}: {stuck.get(key, 0) or 0:,}")
         lines.append("\n[dim]These rows can never complete; the queues will not drain.[/dim]")
         return "\n".join(lines)
+
+    @staticmethod
+    def _format_handoff_metric(value, zero_text: str, bad_text: str) -> str:
+        """A handoff counter, drawn as an all-clear when it reads zero.
+
+        Both counters are meant to be zero, so a green sentence is more useful
+        than the digit 0: it says the invariant held, not merely that a query
+        returned nothing.
+        """
+        if not value:
+            return f"[green]{zero_text}[/green]"
+        return f"[bold red]{value:,} {bad_text}[/bold red]"
 
     @staticmethod
     def _format_priority(breakdowns: dict) -> str:
