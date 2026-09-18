@@ -145,6 +145,13 @@ class ImageScraperThread(threading.Thread):
                     "workshop_id": wid,
                     "image_extension": ext,
                     "needs_image": 0,
+                    # Our clock, taken now that the bytes are on disk. Not a
+                    # Steam value: the API supplies no image time, and the
+                    # completion timestamp is what a throughput is measured
+                    # from. Only this success path writes it -- a 404, an
+                    # unclassifiable content type and a transport failure all
+                    # leave it alone.
+                    "image_fetched_at": int(time.time()),
                     # Deliberately not scrape_version. The column records the
                     # revision the *page* was scraped at, and this worker used to
                     # write the same value into it on every download -- so an item

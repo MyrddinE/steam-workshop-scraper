@@ -436,6 +436,11 @@ class WebScraperThread(threading.Thread):
                     "extended_description": scrape_data.get("description"),
                     "needs_web_scrape": 0,
                     "scrape_version": item.get("steam_updated_at", 0),
+                    # Our clock, taken now that the page is in hand -- not the
+                    # Steam revision scrape_version records. Only this success
+                    # branch writes it; a miss, a wall or a transport failure
+                    # leaves the previous completion time, or NULL, alone.
+                    "web_scraped_at": int(time.time()),
                 }
                 insert_or_update_item(self.db_path, update)
 

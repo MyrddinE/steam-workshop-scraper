@@ -1,6 +1,6 @@
 # Data Model
 
-The database is a single SQLite file in WAL mode. Its current schema version is 26
+The database is a single SQLite file in WAL mode. Its current schema version is 27
 (`EXPECTED_VERSION` in `src/database.py`). All application state lives in three tables —
 `workshop_items`, `users`, and `translation_queue` — plus two tables that hold tags,
 `tags` and `workshop_tags`.
@@ -84,6 +84,9 @@ Tags are not a column on `workshop_items`. They live in `tags(tag_id, tag_name)`
 | `last_fetch_attempted_at` | STATE (ours) | Set on every API attempt, success or failure. |
 | `scrape_version` | STATE (Steam value) | `steam_updated_at` at the moment the web scraper ran. |
 | `translate_version` | STATE (Steam value) | `steam_updated_at` at the moment the translator ran. |
+| `web_scraped_at` | STATE (ours) | Our clock: when the web worker last scraped this item's page successfully. NULL means no success has been recorded since the column arrived in v27; unlike `scrape_version` it is not a Steam revision. |
+| `image_fetched_at` | STATE (ours) | Our clock: when the image worker last fetched this item's preview successfully. NULL means no success has been recorded since the column arrived in v27. |
+| `translated_at` | STATE (ours) | Our clock: when the translator finished the **last** queued field for this item. One stamp per item, moved on each later completion; NULL means no completion has been recorded since the column arrived in v27. The `users` table has a column of the same name meaning "when this profile's text was translated"; the item column is the completion time of the item as a whole, because a per-field stamp is what `translate_version` already carries. |
 | `image_extension` | STATE | The preview's **outcome**, not only its file type. A real extension (`jpg`, `png`, …) means the file exists at `images/<bucket>/<id>.<ext>` and a URL may be built from it. A **wholly numeric** value is an HTTP status the server answered with: `404`/`410` mean the preview is permanently missing and will not be retried, any other code is recorded but still retryable. Any other token (`html`, `svg+xml`) is a content type that was not a picture this downloader can store. NULL means nothing has been recorded yet. One rule follows from this: **a URL is only ever built from a known image extension**, which `src/images.py` owns so the writer and every reader agree. |
 | `is_queued_for_subscription` | QUEUE | Subscription queue flag. Set by the TUI (`s`) and by `POST /api/toggle_sub/<id>`; cleared whenever the owner's subscription is observed, so nothing is left pending for an item that is now subscribed: by `mark_own_subscribed` — which the subscribe engine calls on a confirmed subscribe and on its already-`toggled` short-circuit — by `POST /api/subscribed/<id>` and `POST /api/subscribe_failed/<id>` when the userscript reports an outcome, and by a subscription reconcile for any item it finds already subscribed. Transient working state — it reads `0` whenever nothing is queued, which is the normal resting state, not evidence of disuse. |
 | `own_subscribed` | STATE (ours) | Whether **the owner** — the account whose API key and cookies are configured — is subscribed to this item right now. Reconciled from the signed-in Workshop subscriptions page (`src/subscription_sync.py`), stamped immediately by `POST /api/subscribed/<id>` when the userscript confirms a subscribe, and stamped by `src/subscribe_engine.py` both when its confirmation read shows the item subscribed and when its pre-read already shows `toggled` (no request is sent in that case). Not to be confused with `subscriptions` / `lifetime_subscriptions`, which are item-wide counts that cannot be attributed to an account. |
@@ -193,3 +196,10 @@ that is not there.
   transient, an all-zero snapshot only means nothing was queued at that moment.
 * **`status = 206` has never occurred.** The schema and one migration query allow a partial-data
   status, but the production database contains zero rows with it.
+* **The completion clocks start empty and are never backfilled.** `web_scraped_at`,
+  `image_fetched_at` and `translated_at` arrived in v27, so every item that completed its stage
+  earlier keeps NULL and no rate can be reconstructed for it. The per-queue throughput metrics
+  report "no history yet" for a queue with no stamps rather than a zero or an estimate
+  ([timestamps.md](timestamps.md)). **Burn-down and ETA are deliberately absent** while the owner
+  decides how to present a rate that has no stable history behind it; the timestamps a later ETA
+  would need are recorded from now on.

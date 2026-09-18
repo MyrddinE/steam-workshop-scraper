@@ -51,21 +51,21 @@ The main loop is the only thread that writes metadata fields (title, description
 
 ### Web Scraper Thread (`WebScraperThread`)
 
-Independent daemon thread. Picks up items with highest `needs_web_scrape` priority (10 = detail view, 5 = list view, 3 = new item, 1 = backlog). Downloads the Steam Community page, extracts extended_description and tags. Writes `extended_description`, `needs_web_scrape`, `scrape_version`. Flags non-ASCII extended_description for translation.
+Independent daemon thread. Picks up items with highest `needs_web_scrape` priority (10 = detail view, 5 = list view, 3 = new item, 1 = backlog). Downloads the Steam Community page, extracts extended_description and tags. Writes `extended_description`, `needs_web_scrape`, `scrape_version` (the Steam revision) and `web_scraped_at` (our completion time). Flags non-ASCII extended_description for translation.
 
-**Shared state**: Reads `workshop_items` (preview_url, extended_description, etc.), writes `extended_description`, `needs_web_scrape`, `scrape_version` (via `insert_or_update_item`). Writes `translation_queue` via `flag_field_for_translation`. On failure it raises `api_priority` to 2.
+**Shared state**: Reads `workshop_items` (preview_url, extended_description, etc.), writes `extended_description`, `needs_web_scrape`, `scrape_version` and `web_scraped_at` (via `insert_or_update_item`). Writes `translation_queue` via `flag_field_for_translation`. On failure it raises `api_priority` to 2. `web_scraped_at` is written only on the success branch; a miss, a wall, a throttle and a transport failure all leave it alone.
 
 ### Image Download Thread (`ImageScraperThread`)
 
-Independent daemon thread. Picks up items with highest `needs_image` priority. Downloads the preview image, detects MIME/extension, saves to the bucketed `images/` directory. Writes `image_extension`, `needs_image`, `scrape_version`.
+Independent daemon thread. Picks up items with highest `needs_image` priority. Downloads the preview image, detects MIME/extension, saves to the bucketed `images/` directory. Writes `image_extension`, `needs_image` and `image_fetched_at`.
 
-**Shared state**: Reads `workshop_items` (preview_url, image_extension, needs_image). Writes `image_extension`, `needs_image`, `scrape_version`. On failure it decrements `needs_image` and raises `api_priority` to 2.
+**Shared state**: Reads `workshop_items` (preview_url, image_extension, needs_image). Writes `image_extension`, `needs_image`, `image_fetched_at`. On failure it decrements `needs_image` and raises `api_priority` to 2. It deliberately does **not** write `scrape_version`: that column records the revision the page was scraped at, and the image worker used to overwrite it on every download (issue 7; pinned by `test_a_downloaded_image_does_not_rewrite_the_scrape_version`). `image_fetched_at` is written only when the bytes are on disk — a 404, an unclassifiable content type and a transport failure all leave it alone.
 
 ### Translation Thread (`TranslatorThread`)
 
 Independent daemon thread. Batch-fetches fields from `translation_queue` (up to 20), sends to OpenAI API, writes translated fields to `_en` columns. Handles both `workshop_items` (title_en, short_description_en, extended_description_en) and `users` (personaname_en).
 
-**Shared state**: Reads `translation_queue`. Writes `_en` columns on `workshop_items` and `users`, stamps `translate_version` on items and `translated_at` on users, deletes from `translation_queue`, resets `translation_priority` to 0 when the queue is empty for an item.
+**Shared state**: Reads `translation_queue`. Writes `_en` columns on `workshop_items` and `users`, stamps `translate_version` on items and `translated_at` on users, deletes from `translation_queue`, resets `translation_priority` to 0 when the queue is empty for an item. In that same last-field statement it stamps the item's `translated_at` with our clock — the completion time of the item as a whole. A per-field write while another field is still queued does not stamp it.
 
 **Pacing and failure**: Every API-calling thread is expected to pace itself and to back off when a
 request fails, the way the daemon's dynamic `api_delay` does — see [data-pipeline.md](data-pipeline.md).
@@ -130,9 +130,9 @@ A `PRAGMA journal_mode` per connection used to be the exception to that concurre
 No formal locking protocol exists, but columns have clear ownership:
 - **Main loop**: title, short_description, extended_description (via insert_or_update_item), subscriptions, favorited, views, tags, `steam_*`, `first_seen_at`, `api_fetched_at`, `last_fetch_attempted_at`, `wilson_*`, `translation_priority`
 - **Discovery thread**: nothing beyond the bare row it creates — `workshop_id` and `api_priority` — so every other column on a discovered item is the main loop's
-- **Web scraper**: extended_description, needs_web_scrape
-- **Image thread**: image_extension, needs_image
-- **Translator**: title_en, short_description_en, extended_description_en, personaname_en, translate_version (translated_at on users)
+- **Web scraper**: extended_description, needs_web_scrape, `web_scraped_at` (our completion time, success only)
+- **Image thread**: image_extension, needs_image, `image_fetched_at` (our completion time, success only)
+- **Translator**: title_en, short_description_en, extended_description_en, personaname_en, translate_version, `translated_at` on both tables (on an item it is written when the last queued field completes)
 - **Web scraper**: scrape_version, the revision the *page* was scraped at. The image thread used to write it too, which made an unscraped item claim a scrape; it no longer touches the column
 
 ### Priority Bumping

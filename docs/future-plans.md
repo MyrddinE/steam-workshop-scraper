@@ -105,7 +105,11 @@ leaves a gap: several completion paths record Steam's version value instead of w
 
 So **three of the four queues cannot report a rate or an ETA from the data alone**; only the API queue
 can. This is the single largest gap between the current stats screen and the intended one, and it is a
-schema question rather than a presentation one.
+schema question rather than a presentation one. *(Landed: migration 26→27 added
+`web_scraped_at`, `image_fetched_at` and `translated_at`, and the per-queue throughput and
+last-success metrics read them. A rate is now available for all four queues; burn-down and ETA are
+still deliberately not computed, because the owner is deciding how to present a rate that has no
+history behind it yet.)*
 
 **Decision taken:** add a per-queue completion timestamp for the three queues that lack one, rather
 than inferring rates from sampled queue-depth deltas. Sampled deltas would avoid a migration but
@@ -243,8 +247,9 @@ flight. *(Done: migration 24→25.)*
 The schema changes this plan needs are additive and independent of the migration currently in flight
 for the full-text index. They should therefore take the next migration number rather than sharing
 one, so each can be deployed and reverted on its own. *(The queue indexes took their own number,
-24→25, following this rule. The per-queue completion timestamps this plan also needs are still
-unlanded.)*
+24→25, following this rule. The per-queue completion timestamps took 26→27: `web_scraped_at`,
+`image_fetched_at` and `translated_at`, with the per-queue throughput and last-success metrics that
+read them. Burn-down and ETA are still open — see below.)*
 
 ### Open decisions
 

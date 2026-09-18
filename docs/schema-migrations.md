@@ -4,7 +4,7 @@ The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_
 
 ---
 
-## Current Schema (v26)
+## Current Schema (v27)
 
 The application-level reference for every table and column is
 [data-model.md](data-model.md); the timestamp conventions are in
@@ -26,6 +26,7 @@ Primary key: `workshop_id INTEGER PRIMARY KEY` (aliased from rowid). Columns:
 | extended_description, extended_description_en | TEXT | Full description (populated by web scraper) and translation |
 | steam_created_at, steam_updated_at | INTEGER | Steam's clock, Unix epoch seconds |
 | first_seen_at, api_fetched_at, last_fetch_attempted_at, scrape_version, translate_version | INTEGER | Our clocks and the two stored Steam version keys |
+| web_scraped_at, image_fetched_at, translated_at | INTEGER | Our completion clocks for the web scrape, image download and translation stages (v27). NULL on every row that predates v27 and on any stage that has not succeeded since |
 | subscriptions, lifetime_subscriptions | INTEGER | Current and lifetime subscriber counts |
 | favorited, lifetime_favorited, views | INTEGER | Engagement metrics |
 | visibility, banned, ban_reason, app_name, file_type | Various | Steam metadata |
@@ -135,6 +136,9 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 | idx_web_scrape_queue | (needs_web_scrape DESC, api_fetched_at ASC) WHERE needs_web_scrape > 0 | Web scrape worker poll and web queue breakdown (v25) |
 | idx_image_queue | (needs_image DESC, api_fetched_at ASC) WHERE needs_image > 0 | Image worker poll and image queue breakdown (v25) |
 | idx_api_queue | (api_priority DESC, api_fetched_at ASC) WHERE api_priority > 0 | API fetch worker poll and fetchable count (v25) |
+| idx_web_scraped_at | web_scraped_at WHERE web_scraped_at IS NOT NULL | Web scrape throughput and last-success metric (v27) |
+| idx_image_fetched_at | image_fetched_at WHERE image_fetched_at IS NOT NULL | Image throughput and last-success metric (v27) |
+| idx_translated_at | translated_at WHERE translated_at IS NOT NULL | Translation throughput and last-success metric (v27) |
 | idx_is_queued | is_queued_for_subscription | Subscription queue scan |
 | idx_workshop_tags_tag_id | workshop_tags.tag_id | Reverse tag lookup |
 
@@ -656,6 +660,56 @@ never set the marker. No index is added; the scan's predicate is
 `own_subscribed = 1 AND downloaded_at IS NULL` over the owner's subscriptions,
 which is a small set, and the columns are read with the row by the grid and
 detail payloads.
+
+---
+
+### v26 → v27: Per-queue completion clocks
+
+Adds our completion time to the three work queues that had none:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `web_scraped_at` | INTEGER DEFAULT NULL | Our clock: when the web worker last scraped this item's page successfully. |
+| `image_fetched_at` | INTEGER DEFAULT NULL | Our clock: when the image worker last fetched this item's preview successfully. |
+| `translated_at` | INTEGER DEFAULT NULL | Our clock: when the translator finished the item's last queued field. One stamp per item, not per field. |
+
+All three are added by `_safe_add_columns(cursor, "workshop_items", [...])`: a
+fresh database gets them from `CREATE TABLE`, an existing one from `ALTER TABLE`,
+and every pre-existing row is left NULL.
+
+**They are our clock, not Steam's.** The web and translation stages already
+stored `scrape_version` / `translate_version`, which are `steam_updated_at`
+values — the revision the work was done at, not when we did it — and the image
+stage recorded no time at all. Throughput, burn-down and ETA need the wall clock,
+so these are named `*_at` under the convention in [timestamps.md](timestamps.md)
+and are never written from a Steam field. They are therefore also **excluded from
+the API merge allow-list** (`daemon.MERGE_EXCLUDED_KEYS`), so a stray API key
+under one of those names can never set them.
+
+**No data is written by the migration.** No stage recorded its completion time
+before this version, so none can be reconstructed and every existing row keeps
+NULL. The metrics that read the columns treat an all-NULL column as **no history
+yet** rather than as zero throughput; see [timestamps.md](timestamps.md). No
+backfill exists, by design.
+
+**One partial index per column**, shaped for the only reader that is not a
+worker — the per-queue throughput metric:
+
+```sql
+CREATE INDEX ... ON workshop_items(<column>) WHERE <column> IS NOT NULL
+```
+
+The metric asks for the rows inside the last-hour and last-day windows and for
+the newest stamp. Each part is served by the index: the range counts read only
+the window, and `MAX` reads the newest entry. The `IS NOT NULL` predicate keeps
+the index empty on the run that creates it (every row is NULL then) and makes it
+proportional to recorded completions afterwards, which a plain index over the
+2.6M-row table would not be. Measured on a 2.6M-row copy with a third of the
+column stamped, the full scan each statement would otherwise run costs 73–85 ms;
+the partial index serves the whole three-part metric in 0.2 ms (`MAX` needs an
+explicit `WHERE <column> IS NOT NULL` to use a partial index at all). The
+one-time build is not benchmarked: the index is empty when it is built. The
+metric's `EXPLAIN QUERY PLAN` is pinned by `tests/test_queue_completion_times.py`.
 
 ---
 

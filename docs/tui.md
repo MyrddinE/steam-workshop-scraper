@@ -204,7 +204,7 @@ The stats screen's own read runs on a worker (`exit_on_error=False`), so it was 
 
 Opened by Ctrl+R. The screen asks `src.metrics` for named metrics and draws each into its own
 labelled section — one widget per metric — so a chunk appears the moment its own query
-finishes without touching any other. Nothing is grouped or classified by cost. The ten
+finishes without touching any other. Nothing is grouped or classified by cost. The thirteen
 metrics and what each section renders:
 
 | Metric | Rendered as |
@@ -219,6 +219,7 @@ metrics and what each section renders:
 | `translation_status` | the translation classification |
 | `tag_counts` | the tag table |
 | `priority_breakdowns` | per-queue waiting counts by priority |
+| `web_throughput`, `image_throughput`, `translation_throughput` | completions in the last hour and day, then the last success; "no history yet" when the queue's completion column holds no stamp |
 
 **Layout.** The screen is two columns. The metrics scroll down the left; `tag_counts` is the
 exception and gets the right-hand column to itself, filling the screen height and scrolling within

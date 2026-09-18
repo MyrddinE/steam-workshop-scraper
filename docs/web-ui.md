@@ -285,6 +285,7 @@ The 📊 button (`#btn-stats`, `templates/index.html:99`) opens `#stats-overlay`
 * **stuck_work** — flagged in red when non-zero: the number of dead items still sitting in a queue, broken down per queue. A zero value renders as an all-clear.
 * **priority_breakdowns** — one "queue: N waiting" block per queue with the priority mix.
 * **translation_status**, **status_counts**, **fetch_recency** — labelled count lists.
+* **web_throughput**, **image_throughput**, **translation_throughput** — completions in the last hour and the last day, then the last success as a formatted timestamp. When the queue's completion column holds no stamp at all the chunk reads "no history yet" rather than showing `0`: a stage that finished before the column existed has no recorded time, and a fabricated zero would read as an idle queue. Same wording as the TUI, so the two front ends make the same claim about the same data.
 * **tag_counts** — a two-column table (Tag, Count) over every tag, sorted by count descending and scrolling inside a bounded box so a long list cannot push the chunks below it off the panel. Counts print in full (`fmtExact`) rather than through `fmtCount`: a tag count is read and compared, not merely scanned, and `fmtCount` reports 5,000 as "5.00K".
 * **high_water**, **app_tracking** — a formatted timestamp and a per-AppID table.
 
