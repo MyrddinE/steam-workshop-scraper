@@ -213,6 +213,11 @@ def _stuck_work(conn, params) -> dict:
     clears the flags when it marks an item dead, and migration 16->17 cleared the
     rows already stranded. A non-zero reading means that cause has come back,
     which is more useful than a button that would hide the symptom.
+
+    This is the diagnostic form of the question `dead_queued` answers: that
+    metric is the scalar that must read zero, and this one breaks the same
+    population down so the reading says *which* queue still holds dead rows.
+    They are one question at two resolutions, not two findings.
     """
     row = conn.execute(
         """
@@ -244,7 +249,11 @@ def _dead_queued(conn, params) -> int:
 
     Zero is the healthy reading. A non-zero value is the number of dead items
     still encumbered by a queue, each item counted once however many flags it
-    holds; `stuck_work` reports the same population broken down per queue.
+    holds. `stuck_work` answers the same question at the other resolution: this
+    is the scalar that must read zero, and that metric is the per-queue breakdown
+    that says where the flag was left set. Both are wanted -- the scalar is the
+    invariant, the breakdown is the diagnosis -- so one is not a replacement for
+    the other.
     """
     return conn.execute(
         """

@@ -506,8 +506,12 @@ Two statistics watch the invariant, each meant to read zero:
 * `queued_nowhere` — live items in no queue that the pipeline never completed. It is the shape of
   issue 19 (dequeued as scraped with no description stored) and issue 20 (discovered with no fetch
   priority).
-* `dead_queued` — dead items still holding a queue flag, the shape of issue 17. `stuck_work` reports
-  the same population broken down per queue.
+* `dead_queued` — dead items still holding a queue flag, the shape of issue 17.
+
+`dead_queued` and `stuck_work` are one question at two resolutions, and both are wanted:
+`dead_queued` is the scalar that must read zero, and `stuck_work` is the per-queue breakdown that says
+which flag was left set, so a non-zero reading points at the queue to look in. Neither replaces the
+other — the scalar is the invariant, the breakdown is the diagnosis.
 
 Both count; neither repairs. The consumer's predicate and the producer's write remain separate
 statements, so the table above is the contract and these two counters are how a divergence between

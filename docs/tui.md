@@ -235,7 +235,10 @@ items, with dead items excluded because they can never be covered. `stuck_work`
 the queues will not drain until they are cleared; a zero value shows an all-clear. The two
 handoff counters share `_format_handoff_metric`: `dead_queued` names any dead items still
 holding a flag, and `queued_nowhere` any live items in no queue the pipeline never completed,
-each drawn as a green sentence when it reads the healthy zero. The
+each drawn as a green sentence when it reads the healthy zero. `stuck_work` and `dead_queued`
+are not duplicates: the scalar `dead_queued` is the invariant that must read zero, and the
+`stuck_work` breakdown says which queue still holds the dead rows, so a non-zero scalar sends
+the reader to the breakdown for the diagnosis. The
 priority section (`_format_priority`, `src/tui.py:439`) reads as queue state — "Translation
 queue: N waiting" followed by the priority mix — rather than a raw column dump. `high_water`
 is the one metric whose `None` is a real answer ("never"), not a failure.
