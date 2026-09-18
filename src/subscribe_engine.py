@@ -18,8 +18,16 @@ from an answer body:
   any of them as "not subscribed" would queue a request against an item whose
   state is unknown.
 * Steam answers ``2`` (session no longer accepted) and ``15`` (not permitted)
-  when the login is no longer usable. Those are recorded as a session problem,
-  exactly as ``/api/subscribe/<id>`` does, so the banner can say so.
+  when it will not take the request. **That is not on its own a session
+  problem.** Every attempt reads the item page before it posts, and that page
+  carries ``g_sessionID`` -- the CSRF token belonging to the session that served
+  it, which a Firefox profile read can never supply because ``sessionid`` is a
+  session cookie Firefox keeps in memory and never writes to ``cookies.sqlite``.
+  A refusal beside an *authenticated* page read therefore means the credential
+  works and the token was stale: it is reported as a token refusal and no
+  session problem is recorded. Only a refusal beside an anonymous page read is
+  recorded as a session problem, exactly as ``/api/subscribe/<id>`` does, so the
+  banner can say so.
 
 This module holds the engine those facts dictate. It is deliberately shared:
 the TUI's subscription queue drives it now, and the web UI adopts it next (the
@@ -80,6 +88,7 @@ unsubscribe: an already-subscribed item returns before any request is made.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -118,6 +127,7 @@ SUBSCRIBED = "subscribed"
 DISAGREEMENT = "disagreement"
 THROTTLED = "throttled"
 SESSION_PROBLEM = "session_problem"
+TOKEN_REFUSED = "token_refused"
 REFUSED = "refused"
 FAILED = "failed"
 
@@ -133,6 +143,16 @@ NO_LOGIN_MESSAGE = "No Steam login cookie is available. " + SUBSCRIBE_REMEDY
 SUBSCRIBE_SESSION_REJECTED_DETAIL = (
     "Steam refused the subscribe request, so the saved login cookie is no "
     "longer accepted. " + SUBSCRIBE_REMEDY
+)
+# The refusal that is *not* about the login. The item page the attempt read was
+# authenticated, so the credential is proven good; Steam turned down the CSRF
+# token. Recording a session problem here is what told the owner to sign in
+# again while the login was fine, so this sentence deliberately does not.
+TOKEN_REFUSED_DETAIL = (
+    "Steam refused the subscribe request, but the item page read in the same "
+    "attempt was served to your signed-in account, so the login cookie is "
+    "working: the CSRF token was refused. The item stays queued and is retried "
+    "with the token from its own page; no session problem was recorded."
 )
 
 _NO_BUTTON_MESSAGE = (
@@ -214,6 +234,7 @@ _STATUS_LABELS = {
     DISAGREEMENT: "unverified (sources disagree)",
     THROTTLED: "left queued (throttled)",
     SESSION_PROBLEM: "session problem",
+    TOKEN_REFUSED: "refused (stale CSRF token)",
     REFUSED: "cannot tell",
     FAILED: "failed",
 }
@@ -260,34 +281,127 @@ def parse_button_state(html: str | bytes | None) -> str:
     return BUTTON_SUBSCRIBED if _TOGGLED_CLASS in classes else BUTTON_NOT_SUBSCRIBED
 
 
+# The CSRF token Steam injects into every page it serves, always quoted. It is
+# the value Steam's own JavaScript posts back, so it belongs to the session that
+# served *this* page -- unlike a `sessionid` off the cookie store, which can only
+# ever be the profile's stale copy (Firefox keeps the real one in memory).
+_SESSION_ID_RE = re.compile(r"""g_sessionID\s*=\s*["']([^"']*)["']""", re.IGNORECASE)
+
+
+def parse_session_id(html: str | bytes | None) -> str:
+    """The CSRF token Steam injected into a page, or ``""`` when it has none.
+
+    Read from the page the attempt actually fetched, because ``sessionid`` is a
+    session cookie: Firefox holds it in memory and never writes it to
+    ``cookies.sqlite``, so a profile read can never supply the token belonging
+    to the credential that authenticated the page. An error or throttle page
+    carries no usable token, and an empty answer is left to the caller's
+    fallback rather than guessed at.
+    """
+    if not html:
+        return ""
+    if isinstance(html, bytes):
+        html = html.decode("utf-8", "replace")
+    match = _SESSION_ID_RE.search(html)
+    return match.group(1).strip() if match else ""
+
+
+# How much of the digest is kept. Long enough that two tokens collide only by
+# accident, short enough to read in a log line.
+_FINGERPRINT_LENGTH = 12
+
+
+def token_fingerprint(token: str | None) -> str:
+    """A short, stable, non-reversible fingerprint for a secret token.
+
+    The log has to be able to say "the same token as last time" without the
+    token reaching disk. A SHA-256 prefix compares equal for one token and
+    different for another, and cannot be turned back into a credential.
+    """
+    if not token:
+        return ""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:_FINGERPRINT_LENGTH]
+
+
+def token_log_note(sid: str, page_sid: str, fallback_sid: str) -> str:
+    """The one-line fingerprint note both call sites log for a subscribe POST.
+
+    Never the token itself. When the page's ``g_sessionID`` differs from the
+    pushed/configured token it replaced, both fingerprints are named: that
+    difference is exactly what a stale CSRF token looks like from the log alone,
+    and it is what took an afternoon to find the first time.
+    """
+    note = f"sessionid_fp={token_fingerprint(sid) or 'none'}"
+    if page_sid and page_sid != fallback_sid:
+        note += (
+            f", page_fp={token_fingerprint(page_sid)}, "
+            f"fallback_fp={token_fingerprint(fallback_sid) or 'none'}"
+        )
+    return note
+
+
+def page_read_authenticated(page_html: str | bytes | None) -> bool:
+    """Whether a page read was served to a signed-in account.
+
+    This is the evidence that separates a refused token from a genuinely
+    expired session: account markers on the page mean the login cookie just
+    authenticated a request, so a refusal that follows is about the CSRF token.
+    A missing body or an anonymous page is not evidence of anything good.
+    """
+    if not page_html:
+        return False
+    if isinstance(page_html, bytes):
+        page_html = page_html.decode("utf-8", "replace")
+    return not web_scraper.looks_signed_out(page_html)
+
+
 # --- the shared request shape ------------------------------------------------
 
 
 def resolve_subscribe_credentials(config: dict, sessionid_fallback: str = ""):
-    """The cookie set, the CSRF token and the login cookie for one POST.
+    """The cookie set, the pushed/configured token fallback, and the login cookie.
 
-    The cookies and the token come from one read of the cookie source, so the
-    credential and the token cannot belong to different sessions; a Steam
-    ``sessionid`` from one login beside the credential of another is rejected in
-    a way that looks like an ordinary failure (``web_scraper._session_id``). The
-    pushed/configured id is only a fallback for a cookie set that carries no
-    ``sessionid``, and when it is used it is put back into the jar so the form
-    field and the cookie agree.
+    The cookies and the login come from one read of the cookie source, so the
+    credential and the cookie set cannot belong to different sessions. The CSRF
+    token is deliberately *not* taken from that read: ``sessionid`` is a session
+    cookie Firefox never persists, so the profile read cannot supply the current
+    one. :func:`resolve_subscribe_token` prefers the page's own ``g_sessionID``;
+    the value returned here is only the pushed ``sessionid_fallback`` or the
+    configured ``session.id``, for a page that carries no token.
 
-    Returns ``(cookies, sid, login)``; ``sid`` and ``login`` may be empty, and
+    Returns ``(cookies, fallback_sid, login)``; the fallbacks may be empty, and
     the caller decides whether that is a refusal.
     """
     cookies = web_scraper._build_workshop_cookies(config)
     sid = (
-        cookies.get("sessionid")
-        or sessionid_fallback
+        sessionid_fallback
         or config.get("session", {}).get("id", "")
         or ""
     )
-    if sid and not cookies.get("sessionid"):
-        cookies["sessionid"] = sid
     login = cookies.get("steamLoginSecure", "")
     return cookies, sid, login
+
+
+def resolve_subscribe_token(page_html: str | bytes | None, cookies: dict,
+                            fallback_sid: str = "") -> tuple[str, str]:
+    """Pick the CSRF token for one POST, from the page the attempt fetched first.
+
+    The precedence is the whole fix for a refused subscribe: the token Steam
+    injected into the page this attempt already read (``g_sessionID``), then a
+    ``sessionid`` already in the cookie set, then the pushed/configured
+    fallback. Whichever wins is put back into the cookie jar, so the form field
+    and the cookie agree -- Steam answers a mismatch between them exactly as it
+    answers a stale one.
+
+    ``page_html`` is the fetched page's body. Returns ``(sid, page_sid)``;
+    ``page_sid`` is exposed so the caller can log both fingerprints when the
+    page's token differs from the fallback it replaced.
+    """
+    page_sid = parse_session_id(page_html)
+    sid = page_sid or cookies.get("sessionid") or fallback_sid or ""
+    if sid:
+        cookies["sessionid"] = sid
+    return sid, page_sid
 
 
 def subscribe_headers(workshop_id: int) -> dict:
@@ -392,10 +506,36 @@ def record_expired_session(db_path: str) -> None:
     session_health.record_rejected(db_path, SUBSCRIBE_SESSION_REJECTED_DETAIL)
 
 
+def refused_token_outcome(workshop_id: int, *, page_authenticated: bool, db_path: str,
+                          button_before: str | None = None,
+                          steam_success: int | None = None) -> SubscribeOutcome:
+    """What a refused subscribe means, given what the attempt's own read saw.
+
+    A refusal beside an authenticated page read is about the CSRF token: the
+    credential just fetched a signed-in page, so recording a session problem
+    would tell the operator to sign in again while the login is fine -- the
+    misleading half of this defect. A refusal beside an anonymous (or absent)
+    page read still records the session problem, because nothing authenticated.
+    """
+    if page_authenticated:
+        logging.warning(
+            "[Subscribe] Steam refused the CSRF token for %s, but the page read "
+            "in the same attempt was authenticated; the login is good, so no "
+            "session problem was recorded.", workshop_id)
+        return SubscribeOutcome(
+            workshop_id, TOKEN_REFUSED, TOKEN_REFUSED_DETAIL,
+            button_before=button_before, steam_success=steam_success)
+    record_expired_session(db_path)
+    return SubscribeOutcome(
+        workshop_id, SESSION_PROBLEM, SUBSCRIBE_SESSION_REJECTED_DETAIL,
+        button_before=button_before, steam_success=steam_success)
+
+
 # --- the engine --------------------------------------------------------------
 
 
-def _body_of(page) -> str:
+def page_body(page) -> str:
+    """The decoded body of a fetched page, or ``""`` when there is none."""
     if not page:
         return ""
     body = page.get("body")
@@ -498,7 +638,7 @@ def fetch_item_page(workshop_id: int, *, interval: WebInterval,
     url = item_page_url(workshop_id)
     interval.before_read()
     data = web_scraper.scrape_extended_details(url, keep_body=keep_body)
-    body = _body_of(data)
+    body = page_body(data)
     state = parse_button_state(body)
     interval.after_read(state, body)
     if capture.web_download_capture_active() and data:
@@ -530,7 +670,11 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
         interval = WebInterval(config, config_path=config_path,
                                keep_running=keep_running)
     page = fetch_item_page(workshop_id, interval=interval)
-    before = parse_button_state(_body_of(page))
+    page_html = page_body(page)
+    before = parse_button_state(page_html)
+    # The evidence a later refusal is judged against: this attempt's own page
+    # read, authenticated or not, observed before the POST is sent.
+    page_authenticated = page_read_authenticated(page_html)
 
     if before == BUTTON_SUBSCRIBED:
         # The browser plugin never clicked an item it could see was already
@@ -542,7 +686,7 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
         )
 
     if before == BUTTON_UNKNOWN:
-        if web_scraper.looks_rate_limited(_body_of(page)):
+        if web_scraper.looks_rate_limited(page_html):
             logging.warning(
                 "[Subscribe] Throttled while reading item %s; left queued.", workshop_id)
             return SubscribeOutcome(
@@ -552,7 +696,11 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
         return SubscribeOutcome(
             workshop_id, REFUSED, _NO_BUTTON_MESSAGE, button_before=before)
 
-    cookies, sid, login = resolve_subscribe_credentials(config, sessionid_fallback)
+    cookies, fallback_sid, login = resolve_subscribe_credentials(
+        config, sessionid_fallback)
+    # The page's own `g_sessionID` first: it belongs to the session that served
+    # the page above, and `sessionid` off the cookie store cannot be current.
+    sid, page_sid = resolve_subscribe_token(page_html, cookies, fallback_sid)
     if not sid:
         return SubscribeOutcome(
             workshop_id, REFUSED, NO_SESSION_MESSAGE, button_before=before)
@@ -575,15 +723,21 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
             workshop_id, REFUSED, "Item has no AppID.", button_before=before)
 
     logging.info(
-        "[Subscribe] POSTing to Steam: id=%s, appid=%s, sessionid=%s..., login=%s",
-        workshop_id, appid, (sid or "")[:6], "set" if login else "missing")
+        "[Subscribe] POSTing to Steam: id=%s, appid=%s, %s, login=%s",
+        workshop_id, appid, token_log_note(sid, page_sid, fallback_sid),
+        "set" if login else "missing")
+    resp = None
     try:
         resp = post_subscribe_request(cookies, sid, appid, workshop_id)
         data = resp.json()
     except Exception as exc:  # noqa: BLE001 - the engine reports, never raises
         # A body that is not JSON can be Steam's throttle shell, which is not a
         # failure of the item: the userscript learned to tell them apart, and so
-        # does this.
+        # does this. A 401 with an unreadable body is still a refusal.
+        if getattr(resp, "status_code", None) == 401:
+            return refused_token_outcome(
+                workshop_id, page_authenticated=page_authenticated,
+                db_path=db_path, button_before=before)
         if web_scraper.looks_rate_limited(getattr(resp, "text", "") or ""):
             logging.warning(
                 "[Subscribe] Throttled on the subscribe POST for %s; left queued.",
@@ -597,12 +751,11 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
             button_before=before)
 
     success = data.get("success") if isinstance(data, dict) else None
-    if success in (2, 15):
-        # Steam's "the session is gone / not permitted" answers, recorded with
-        # the route's own sentence.
-        record_expired_session(db_path)
-        return SubscribeOutcome(
-            workshop_id, SESSION_PROBLEM, SUBSCRIBE_SESSION_REJECTED_DETAIL,
+    if getattr(resp, "status_code", None) == 401 or success in (2, 15):
+        # Steam's "the session is gone / not permitted" answers. Whether that is
+        # a session problem at all depends on the page this attempt read.
+        return refused_token_outcome(
+            workshop_id, page_authenticated=page_authenticated, db_path=db_path,
             button_before=before, steam_success=success)
 
     if not VERIFY_AFTER_SUBSCRIBE:
@@ -640,7 +793,7 @@ def confirm_subscription(workshop_id: int, success, *, db_path: str,
     The page is the authority; ``success`` from Steam's JSON only corroborates.
     """
     after_page = fetch_item_page(workshop_id, interval=interval)
-    after = parse_button_state(_body_of(after_page))
+    after = parse_button_state(page_body(after_page))
     logging.info(
         "[Subscribe] Confirmation for %s: before=%s after=%s steam_success=%r",
         workshop_id, button_before, after, success)
@@ -670,7 +823,7 @@ def confirm_subscription(workshop_id: int, success, *, db_path: str,
 
     # No button on the confirmation read: cannot tell. A throttle page stays
     # queued.
-    if web_scraper.looks_rate_limited(_body_of(after_page)):
+    if web_scraper.looks_rate_limited(page_body(after_page)):
         logging.warning(
             "[Subscribe] Throttled on the confirmation read for %s; left queued.",
             workshop_id)
