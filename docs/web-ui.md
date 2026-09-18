@@ -318,6 +318,28 @@ The "Subscribe" button's install link points to `/userscript/steam_subscribe.use
 5. Server POSTs to `steamcommunity.com/sharedfiles/subscribe` with browser-like headers (User-Agent, Origin, Referer with workshop URL) and cookies
 6. Steam's answer is mapped to user-facing messages: a refusal (`success: 2`/`15`, or HTTP 401) is a stale CSRF token when the same attempt's page read was authenticated — the login is not reported as expired — and a session problem only when that read was anonymous
 
+### The queued-row countdowns, and why the TUI's is not the same
+
+The autosubscribe overlay gives each queued row a live countdown to when it will be reached:
+`openAt = i * ceil(stepDelay / 1000)`, rendered as `(openAt - elapsed) + 's'`, cleared once the item is
+opened, ticking four times a second (`templates/index.html`, the `_subScheduleIv` loop). `stepDelay` is
+`WEB_DELAY`, injected from `daemon.web_delay_seconds` (`src/webserver.py`). Each row's cost there is
+**one interval**, because the flow opens **one browser tab per item** and the tab spends a single
+page load before the userscript reports back; the tab's own click is browser-side and pays nothing on
+this side.
+
+The TUI queue screen draws the same shape of estimate, but the flow underneath it is the engine
+(`src/subscribe_engine.py`), not a tab: each item costs **two** gated page reads — the pre-read that
+guards the POST and the confirmation read — while the POST is exempt as an XHR. Its per-item step is
+therefore **twice** the shared configured delay, read fresh each tick through
+`src.web_worker.configured_web_delay` so a throttle's doubling mid-pass moves it; the row being read
+now is shown distinctly (`subscribing...`) from those still waiting. Both figures are estimates, not
+promises: a pass can be refused, throttled or cancelled. **The difference is deliberate and is not a
+missing parity fix**: each estimate is measured against its own flow's cost, and the Web UI adopting
+the engine — which would collapse the two into one — is the separate workstream recorded in
+[future-plans.md](future-plans.md#removing-the-browser-bridge-from-the-subscribe-path). The TUI
+screen's own description is in [tui.md](tui.md#subscription-queue-sl-keys).
+
 ---
 
 ## Server Endpoints

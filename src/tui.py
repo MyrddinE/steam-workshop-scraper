@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import time
 from functools import partial
 from textual.app import App, ComposeResult, SystemCommand
@@ -12,7 +13,7 @@ from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, L
 from textual.containers import Horizontal, Vertical, VerticalScroll, Center, Grid
 from textual.reactive import reactive
 from textual.worker import Worker, WorkerState
-from src.database import search_items, get_all_authors, initialize_database, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, get_connection, FILTER_SCHEMA, ALL_FILTER_FIELDS, bump_api_priority_for_list, bump_api_priority_for_detail
+from src.database import search_items, get_all_authors, initialize_database, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, get_connection, FILTER_SCHEMA, ALL_FILTER_FIELDS, bump_api_priority_for_list, bump_api_priority_for_detail, get_subscription_states
 from src.analysis import view_window_analysis
 from src import metrics
 from src import images
@@ -20,6 +21,7 @@ from src import pending
 from src import subscription
 from src import subscribe_engine
 from src import crash
+from src.web_worker import configured_web_delay
 from src.config import ConfigError, load_config, save_config
 from src.daemon_control import DaemonController
 import os
@@ -741,7 +743,22 @@ class SubscriptionQueueScreen(ModalScreen):
     stays quiet while the queue is open; the pass itself takes and releases the
     same lock (``subscribe_engine.run_subscription_pass``), which is what covers
     a caller that runs the engine outside this screen.
+
+    Each item costs the engine **two gated page reads** -- the pre-read that
+    guards the POST and the confirmation read -- so the per-item step in the
+    estimate is twice the shared configured web delay (the POST is an XHR and
+    pays no interval). The estimate is read fresh on every tick, so a throttle
+    that doubles the delay mid-pass moves it; it is an estimate, not a promise,
+    because the pass can also be refused, throttled or cancelled after it is
+    drawn. See ``docs/tui.md`` and, for why this differs from the web overlay's
+    countdown, ``docs/web-ui.md``.
     """
+
+    # Four ticks a second, the web overlay's cadence.
+    _ESTIMATE_TICK_SECONDS = 0.25
+    # The word a row carries while the engine is reading it, in place of a
+    # countdown: the item being processed is visibly not one still waiting.
+    _CURRENT_LABEL = "subscribing..."
 
     def __init__(self, db_path: str, pause_lock_file: str, config: dict | None = None,
                  config_path: str | None = None):
@@ -752,6 +769,10 @@ class SubscriptionQueueScreen(ModalScreen):
         self.config_path = config_path
         self._items: list[dict] = []
         self._pass_running = False
+        # workshop_id -> SubscribeOutcome, in the order the pass reports them.
+        self._outcomes: dict[int, subscribe_engine.SubscribeOutcome] = {}
+        self._pass_started_at: float | None = None
+        self._estimate_timer = None
         # Set on unmount so a pass that is mid-wait stops waiting for the
         # screen it can no longer draw to.
         self._closing = False
@@ -767,6 +788,7 @@ class SubscriptionQueueScreen(ModalScreen):
     def on_unmount(self) -> None:
         """Remove the pause lock file when the screen is unmounted."""
         self._closing = True
+        self._stop_estimate_timer()
         try:
             if os.path.exists(self.pause_lock_file):
                 os.remove(self.pause_lock_file)
@@ -774,18 +796,110 @@ class SubscriptionQueueScreen(ModalScreen):
             logging.error(f"Failed to remove pause lock file: {e}")
 
     @staticmethod
-    def _row_text(item: dict, status: str | None = None, colour: str | None = None):
-        """One item's line, built as Rich text so a Steam title stays literal."""
+    def _row_text(item: dict, status: str | None = None, colour: str | None = None,
+                  countdown: str | None = None):
+        """One item's line, built as Rich text so a Steam title stays literal.
+
+        The marker is the item's real state from ``src/subscription.py`` -- the
+        same table the list row, the detail pane and the web render from -- so a
+        completed subscribe moves this row's glyph too, rather than every row
+        drawing the green ``pending`` outline whatever happened. ``countdown`` is
+        the estimated seconds until the engine reaches the item, absent for the
+        item it is reading now and for outcomes already reported.
+        """
         from rich.text import Text as RichText
-        state = subscription.PENDING
+        state = subscription.subscription_state(item)
         line = RichText()
         line.append(f"{subscription.glyph(state)} ", style=subscription.colour(state))
         line.append(f"#{item['workshop_id']}  ")
         line.append(str(item.get("title") or "(untitled)"))
+        if countdown:
+            line.append("  ")
+            line.append(countdown, style="dim")
         if status:
             line.append("  ")
             line.append(status, style=colour or "white")
         return line
+
+    def _step_seconds(self) -> float:
+        """One queued item's wall-clock cost: two gated page reads.
+
+        The engine reads the item page before the POST and again to confirm, and
+        both reads wait the shared adaptive web interval, so the step is twice
+        the configured delay. The delay is read fresh from the same owner every
+        time (``src.web_worker.configured_web_delay``) rather than snapshotted,
+        because the engine's ``WebInterval`` writes a throttle's doubling back
+        through this screen's own config dict while the pass runs.
+        """
+        return 2.0 * configured_web_delay(self.config)
+
+    def _estimate_remaining(self, index: int, elapsed: float) -> int:
+        """Whole seconds until item ``index`` is reached, never negative.
+
+        The same shape as the web overlay's ``(openAt - elapsed)`` countdown,
+        with this engine's per-item step. Rounded up so an estimate is never
+        drawn as "0s" while the item has not started.
+        """
+        return max(0, math.ceil(index * self._step_seconds() - elapsed))
+
+    def _row_state(self, index: int, elapsed: float):
+        """``(countdown, status, colour)`` for the row at ``index``.
+
+        The engine takes the queue in order, so the item it is reading now is
+        the one after the outcomes already reported. That row carries the
+        ``subscribing...`` word instead of a countdown, which is what makes it
+        distinct from the rows still waiting; a reported outcome keeps its
+        status word and drops the countdown.
+        """
+        item = self._items[index]
+        outcome = self._outcomes.get(item["workshop_id"])
+        if outcome is not None:
+            colour = "green" if outcome.ok else "yellow"
+            return None, subscribe_engine.status_label(outcome.status), colour
+        if not self._pass_running:
+            return None, None, None
+        if index == len(self._outcomes):
+            return None, self._CURRENT_LABEL, "cyan"
+        return f"~{self._estimate_remaining(index, elapsed)}s", None, None
+
+    def _render_rows(self) -> None:
+        """Redraw every row from the current outcomes and the estimate.
+
+        Estimate times are not promises, so this only ever runs while the pass
+        is live (moved by ``_tick_estimates``) or when an outcome lands; a
+        finished screen has no countdown left on it.
+        """
+        if not self.is_mounted:
+            return
+        elapsed = 0.0
+        if self._pass_started_at is not None:
+            elapsed = max(0.0, time.monotonic() - self._pass_started_at)
+        for index, item in enumerate(self._items):
+            countdown, status, colour = self._row_state(index, elapsed)
+            try:
+                row = self.query_one(f"#sub-item-{item['workshop_id']}", Static)
+            except Exception:
+                continue
+            row.update(self._row_text(item, status=status, colour=colour,
+                                      countdown=countdown))
+
+    def _start_estimate_timer(self) -> None:
+        if self._estimate_timer is None:
+            self._estimate_timer = self.set_interval(
+                self._ESTIMATE_TICK_SECONDS, self._tick_estimates)
+
+    def _stop_estimate_timer(self) -> None:
+        if self._estimate_timer is not None:
+            self._estimate_timer.stop()
+            self._estimate_timer = None
+
+    def _tick_estimates(self) -> None:
+        """Move every waiting row's estimate; stop once the pass is over."""
+        if not self._pass_running:
+            self._stop_estimate_timer()
+            self._render_rows()
+            return
+        self._render_rows()
 
     def compose(self) -> ComposeResult:
         self._items = get_queued_items(self.db_path)
@@ -795,7 +909,8 @@ class SubscriptionQueueScreen(ModalScreen):
                 yield Label("Queue is empty. Press 's' on an item to add it.")
             else:
                 yield Static(
-                    "Press Subscribe to run the queue through the engine.",
+                    "Press Subscribe to run the queue through the engine. "
+                    "Row times are estimates.",
                     id="sub-queue-status",
                 )
                 for item in self._items:
@@ -814,8 +929,13 @@ class SubscriptionQueueScreen(ModalScreen):
         if self._pass_running or not self._items:
             return
         self._pass_running = True
+        self._outcomes = {}
+        self._pass_started_at = time.monotonic()
         self.query_one("#btn-subscribe-queue", Button).disabled = True
-        self.query_one("#sub-queue-status", Static).update("Subscribing...")
+        self.query_one("#sub-queue-status", Static).update(
+            "Subscribing... (start times are estimates)")
+        self._start_estimate_timer()
+        self._render_rows()
 
         def work():
             return subscribe_engine.run_subscription_pass(
@@ -841,23 +961,34 @@ class SubscriptionQueueScreen(ModalScreen):
             logging.debug("[subscribe] dropped a result; the screen is gone")
 
     def _apply_result(self, outcome) -> None:
-        try:
-            row = self.query_one(f"#sub-item-{outcome.workshop_id}", Static)
-        except Exception:
-            return
-        colour = "green" if outcome.ok else "yellow"
-        row.update(self._row_text(
-            {"workshop_id": outcome.workshop_id, "title": self._title_for(outcome.workshop_id)},
-            status=subscribe_engine.status_label(outcome.status), colour=colour,
-        ))
+        """Record one outcome, read the item's state back and redraw its row.
+
+        The engine writes a confirmed subscription into the shared table before
+        it returns the outcome (``mark_own_subscribed`` also clears the queue
+        flag), so reading the item back is what tells this row whether its marker
+        moved -- the row renders from the same ``src/subscription.py`` table the
+        list, the detail pane and the web do. A read that fails leaves the row
+        drawing its stored, still-queued state, which is the honest answer when
+        the state cannot be read.
+        """
+        self._outcomes[outcome.workshop_id] = outcome
+        states = get_subscription_states(self.db_path, [outcome.workshop_id])
+        fresh = states.get(outcome.workshop_id)
+        if fresh is not None:
+            for item in self._items:
+                if item["workshop_id"] == outcome.workshop_id:
+                    for column in ("own_subscribed", "is_queued_for_subscription",
+                                   "own_first_subscribed_at"):
+                        item[column] = fresh.get(column)
+                    break
+        self._render_rows()
+        # A row on the results list moves now rather than at the poll's next
+        # tick; the poll is still what catches every other writer.
+        refresh = getattr(self.app, "refresh_subscription_rows", None)
+        if refresh is not None:
+            self.app.call_after_refresh(refresh, [outcome.workshop_id])
         if not outcome.ok and outcome.message:
             logging.info("[subscribe] %s: %s", outcome.workshop_id, outcome.message)
-
-    def _title_for(self, workshop_id: int) -> str:
-        for item in self._items:
-            if item["workshop_id"] == workshop_id:
-                return item.get("title") or ""
-        return ""
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """Finish the pass: re-enable the button and report the tally."""
@@ -865,6 +996,10 @@ class SubscriptionQueueScreen(ModalScreen):
             return
         if event.state in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
             self._pass_running = False
+            # The estimate is only for a live pass; drop it with the pass so a
+            # finished screen shows outcomes rather than a stale "~3s".
+            self._stop_estimate_timer()
+            self._render_rows()
             if not self.is_mounted:
                 return
             button = self.query_one("#btn-subscribe-queue", Button)
@@ -1659,6 +1794,10 @@ class ScraperApp(App):
         self._start_webserver()
         self.current_item_creator = None
         self.pause_lock_file = ".pauselock"
+        # One-shot timer that re-reads rendered rows whose subscription marker
+        # is still pending. Armed only while such a row exists, and disarmed by
+        # its own tick when none does; see `_start_subscription_poll`.
+        self._sub_poll_timer = None
         
         # Pagination state
         self.current_offset = 0
@@ -1773,6 +1912,99 @@ class ScraperApp(App):
         except Exception:
             pass
 
+    # --- the subscription-marker poll ---------------------------------------
+
+    def _pending_subscription_ids(self) -> list[int]:
+        """Ids of rendered rows whose subscription marker is still ``pending``.
+
+        The selection is made from what is *rendered* -- the item data the row
+        was built from, resolved through the shared table -- rather than from a
+        separately read queue flag, so every row still drawing the green outline
+        is re-read and every settled row is left alone.
+        """
+        try:
+            list_view = self.query_one("#results-list", ListView)
+        except Exception:
+            return []
+        ids: list[int] = []
+        for child in list_view.children:
+            data = getattr(child, "item_data", None)
+            if not data:
+                continue
+            if subscription.subscription_state(data) != subscription.PENDING:
+                continue
+            workshop_id = data.get("workshop_id")
+            if workshop_id is not None:
+                ids.append(workshop_id)
+        return ids
+
+    def _start_subscription_poll(self, delay: float = 0.05) -> None:
+        """Arm a one-shot re-read of the rendered rows that are still pending.
+
+        The web grid's ``_startListPoll`` is the model: a new search, a row
+        moving into ``pending``, or a pass result all arm the next tick, and the
+        tick re-arms itself only while a rendered row is still pending. A
+        settled list therefore costs no reads, and there is no fixed interval.
+        The default is a hair above zero rather than Textual's ``set_timer(0)``,
+        whose zero interval divides by zero when a busy loop skips it.
+        """
+        self._stop_subscription_poll()
+        self._sub_poll_timer = self.set_timer(delay, self._poll_pending_subscriptions)
+
+    def _stop_subscription_poll(self) -> None:
+        if self._sub_poll_timer is not None:
+            self._sub_poll_timer.stop()
+            self._sub_poll_timer = None
+
+    async def _poll_pending_subscriptions(self) -> None:
+        """Re-read the rendered pending rows once; re-arm only if some remain."""
+        self._sub_poll_timer = None
+        if not self.is_mounted:
+            return
+        ids = self._pending_subscription_ids()
+        if not ids:
+            self._stop_subscription_poll()
+            return
+        await self.refresh_subscription_rows(ids)
+        remaining = len(self._pending_subscription_ids())
+        if not remaining:
+            self._stop_subscription_poll()
+            return
+        # The web poll's adaptive delay: faster while more rows are outstanding.
+        self._start_subscription_poll(max(1.0, math.log2(remaining)))
+
+    async def refresh_subscription_rows(self, workshop_ids) -> None:
+        """Re-read the given rendered rows and redraw the ones that moved.
+
+        The reader is the shared database, so a write by *any* process -- this
+        TUI's own subscribe pass, the web UI's routes, or the daemon's daily
+        reconcile -- is picked up; no writer is hooked and no callback is
+        required. Only the subscription columns are replaced, so the rest of the
+        row's data is left as it was.
+        """
+        try:
+            list_view = self.query_one("#results-list", ListView)
+        except Exception:
+            return
+        wanted = set(workshop_ids)
+        states = get_subscription_states(self.db_path, wanted)
+        for child in list(list_view.children):
+            data = getattr(child, "item_data", None)
+            if not data or data.get("workshop_id") not in wanted:
+                continue
+            fresh = states.get(data["workshop_id"])
+            if not fresh:
+                continue
+            moved = False
+            for column in ("own_subscribed", "is_queued_for_subscription",
+                           "own_first_subscribed_at"):
+                value = fresh.get(column)
+                if data.get(column) != value:
+                    data[column] = value
+                    moved = True
+            if moved:
+                await child.refresh_item()
+
     def compose(self) -> ComposeResult:
         yield Header()
         
@@ -1862,6 +2094,8 @@ class ScraperApp(App):
             logging.debug("Results list not accessible during search execution")
             return
         await list_view.clear()
+        # A fresh result set has no rendered rows to watch until they mount.
+        self._stop_subscription_poll()
         self._compute_percentiles()
         await self.load_more_items()
 
@@ -1906,6 +2140,10 @@ class ScraperApp(App):
         
         items = [WorkshopItem(item) for item in results]
         await list_view.mount(*items)
+
+        # Watch the rows that arrived already queued for subscription; the poll
+        # disarms itself at once when none of them is pending.
+        self._start_subscription_poll()
 
         for item in results:
             if item.get("needs_web_scrape", 0) > 0:
@@ -2110,6 +2348,11 @@ class ScraperApp(App):
 
         # Refresh the ListItem to show the change
         await item.refresh_item()
+
+        # A row queued from the keyboard is watched too: the web grid starts its
+        # poll on the transition into `pending` for the same reason.
+        if subscription.subscription_state(item.item_data) == subscription.PENDING:
+            self._start_subscription_poll()
 
         # Update details pane if it's showing the same item
         detail_pane = self.query_one("#item-details", DetailsPane)
