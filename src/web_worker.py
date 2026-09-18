@@ -88,7 +88,8 @@ class ScrapeOutcome(enum.Enum):
     # so clear the queue flag; neutral for pacing.
     ITEM_PAGE_WITHOUT_DESCRIPTION = "item_page_without_description"
     # An age check, a sign-in wall, or Steam's error shell: a session or wall
-    # problem that ``_retry_if_gated`` already addresses. Not a pacing problem.
+    # problem that ``_refresh_login_cookie_if_gated`` already re-reads the login
+    # cookie for. Not a pacing problem.
     GATE = "gate"
     # An outcome we cannot attribute: a transport failure or a page that is
     # neither the item's nor a recognised condition. The only served outcome
@@ -146,8 +147,8 @@ class WebScraperThread(threading.Thread):
         self.db_path = db_path
         self.pause_lock_file = pause_lock_file
         self._save_cb = save_callback
-        # Returns True when the login cookie changed, meaning a gated scrape
-        # is worth retrying. None when no browser source is configured.
+        # Re-reads the browser login cookie and reports whether it changed. None
+        # when no browser source is configured.
         self._session_refresh = session_refresh
         self.running = True
         self.web_delay = float((daemon_config or {}).get("web_delay_seconds") or WEB_DELAY_DEFAULT)
@@ -159,26 +160,34 @@ class WebScraperThread(threading.Thread):
         self._clock = pacing.Clock()
         self._persisted_web_delay = self.web_delay
 
-    def _retry_if_gated(self, item: dict, url: str, scrape_data: dict | None) -> dict | None:
-        """Retry once when a failed scrape looks like Steam withholding the page.
+    def _refresh_login_cookie_if_gated(self, item: dict, scrape_data: dict | None) -> None:
+        """Refresh the login cookie when a failed scrape looks gated.
 
         A gated page and a changed layout are indistinguishable from the selector
         alone, but only one of them can be fixed by a fresher login cookie. The
         cookie is valid for days, so it is not polled on a clock; this is the
-        evidence that it has gone stale. Nothing is retried unless the cookie
-        actually changed, so a merely broken page cannot double the request rate.
-        A definitive HTTP 404/410 is exempt: the item is gone and no credential
-        changes that.
+        evidence that it has gone stale. The refresh is a local file read through
+        the injected ``session_refresh`` and spends no request, so it happens
+        even for a throttle page and the next request that does go out carries
+        the freshest credential.
+
+        It deliberately does **not** re-scrape. The miss goes through
+        ``classify_scrape`` and takes the ordinary outcome path -- ``_handle_gate``
+        leaves the item queued in its place, and a rate limit or unknown outcome
+        applies its usual back-off -- so the queue retries the item under the
+        worker's own adaptive delay, which is the only spacing a request pays. A
+        definitive HTTP 404/410 is exempt from the refresh: the item is gone and
+        no credential changes that.
         """
         if not scrape_data or scrape_data.get("description") is not None:
-            return scrape_data
+            return
         # A definitive HTTP 404/410 is not a gate and no cookie refresh can
-        # materialise the item, so it is not worth a request. The HTTP 200
+        # materialise the item, so it is not worth the file read. The HTTP 200
         # item-error page is not caught here: its status proves nothing, so a
-        # stale session is still worth ruling out with the retry below before
-        # the outcome is read as "the item is gone".
+        # stale session is still worth ruling out before the outcome is read as
+        # "the item is gone".
         if scrape_data.get("http_status") in ITEM_MISSING_HTTP_STATUSES:
-            return scrape_data
+            return
         body = scrape_data.get("body") or ""
 
         # Both conditions are evaluated, and neither shadows the other. They
@@ -186,37 +195,18 @@ class WebScraperThread(threading.Thread):
         # lacks the signed-in markers too -- and reading that overlap as "signed
         # out" would be a mistake in one direction and skipping the refresh a
         # mistake in the other.
-        #
-        # The throttle suppresses only the network retry. Refreshing the cookie
-        # is a local file read that spends none of the exhausted budget, and
-        # doing it here means the next request that does go out carries the
-        # freshest credential.
-        throttled = looks_rate_limited(body)
-        signed_out = self._session_refresh and (looks_signed_out(body) or looks_gated(body))
-
-        changed = False
-        if signed_out:
+        if self._session_refresh and (looks_signed_out(body) or looks_gated(body)):
             try:
-                changed = self._session_refresh()
+                self._session_refresh()
             except Exception as exc:
                 logging.warning("[W:%s] Login cookie refresh failed: %s", item.get("workshop_id"), exc)
 
-        if throttled:
-            # Never retry into a budget that is already spent.
-            return scrape_data
-        if not changed:
-            # Nothing in the browser is newer than the cookie that just failed,
-            # so the operator is the only one who can fix this.
+        # A throttle page is anonymous because the budget is spent, not because
+        # the login is bad, so it makes no claim about the session in either
+        # direction. Every other miss does: this records the problem, or clears
+        # one the fresh page disproves.
+        if not looks_rate_limited(body):
             self._note_session_from(body)
-            return scrape_data
-        logging.info("[W:%s] Scrape looked gated; retrying with the refreshed login cookie",
-                     item.get("workshop_id"))
-        # Keep the body when the debug switch is on, exactly as the first
-        # attempt does: a capture of the retry would otherwise be the one record
-        # with nothing to look at.
-        retried = scrape_extended_details(url, keep_body=capture.web_download_capture_active())
-        self._note_session_from((retried or {}).get("body") or body)
-        return retried or scrape_data
 
     def _note_session_from(self, body: str) -> None:
         """Record or clear the login problem a failed scrape is evidence of.
@@ -275,7 +265,8 @@ class WebScraperThread(threading.Thread):
         outcome has a response that a slower pace cannot improve -- a throttle
         has its own pause, a missing item and a description-less item page are
         answers the item itself gave, and a gate is a session problem
-        ``_retry_if_gated`` already addresses -- so none of them buys a back-off.
+        ``_refresh_login_cookie_if_gated`` already re-reads the login cookie for
+        -- so none of them buys a back-off.
         """
         self.web_failures += 1
         self.web_successes = 0
@@ -367,10 +358,13 @@ class WebScraperThread(threading.Thread):
     def _handle_gate(self, item: dict, url: str, scrape_data: dict) -> None:
         """Handle a wall, an age check, or Steam's error shell.
 
-        ``_retry_if_gated`` has already re-read the login cookie and retried once
-        when the cookie actually changed. A slower request rate cannot fix a
-        session that is not working, so this leaves the delay alone. The item
-        keeps its queue place because it is not at fault.
+        ``_refresh_login_cookie_if_gated`` has already re-read the login cookie
+        when the page looked gated or signed out, so the next attempt carries a
+        fresher credential. Nothing was re-scraped immediately: the miss takes
+        this ordinary path, the item keeps its queue place because it is not at
+        fault, and the queue retries it under the worker's own delay. A slower
+        request rate cannot fix a session that is not working, so the delay is
+        left alone.
         """
         self._capture_scrape_failure(item, url, scrape_data)
         logging.warning(
@@ -429,7 +423,7 @@ class WebScraperThread(threading.Thread):
             elapsed = self._clock.since()
             keeping = capture.web_download_capture_active()
             scrape_data = scrape_extended_details(url, keep_body=keeping)
-            scrape_data = self._retry_if_gated(item, url, scrape_data)
+            self._refresh_login_cookie_if_gated(item, scrape_data)
             if keeping and scrape_data:
                 capture.record_web_download(
                     capture.ITEM_PAGE_KIND, workshop_id, url, scrape_data,

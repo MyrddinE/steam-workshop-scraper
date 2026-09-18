@@ -15,7 +15,6 @@ import sys
 import types
 from unittest.mock import MagicMock, patch
 
-import pytest
 import responses
 
 import src.web_scraper as web_scraper
@@ -46,10 +45,9 @@ PROFILE_COOKIES = {
 }
 
 
-@pytest.fixture(autouse=True)
-def _no_web_delay(monkeypatch):
-    """Keep the scraper's inter-request pacing out of the test runtime."""
-    monkeypatch.setattr(web_scraper, "_WEB_DELAY", 0.0)
+# The scraper applies no pacing of its own: the interval belongs to the caller,
+# owned by the configured `web_delay_seconds` (see tests/test_web_scraper.py,
+# `test_the_fixed_web_delay_gate_is_gone`). There is no fixed delay to stub out.
 
 
 def _assert_browser_headers(prepared):

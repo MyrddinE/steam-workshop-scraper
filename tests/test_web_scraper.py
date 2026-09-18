@@ -211,6 +211,69 @@ def test_scrape_missing_dom_returns_none():
         assert scrape_extended_details(123) is None
 
 
+# --- the web interval has one owner (issue 34) ------------------------------
+# The scraper used to enforce a fixed `_WEB_DELAY = 5.0` through `_rate_limit()`
+# on every call, and the only way to move it, `set_web_delay()`, had no callers
+# anywhere -- so the value could never be configured, and the worker's adaptive
+# `web_delay_seconds` (floor 6.0) paid it again underneath every item. The gate
+# is removed rather than left as a second, unconfigurable interval.
+
+
+def test_the_fixed_web_delay_gate_is_gone():
+    import pathlib
+    import re
+    import src.web_scraper as web_scraper
+
+    names = ("_WEB_DELAY", "_last_web_call", "set_web_delay", "_rate_limit")
+    for name in names:
+        assert not hasattr(web_scraper, name), (
+            f"{name} is a second interval owner; spacing belongs to the "
+            "configured web_delay_seconds that the caller gates on")
+
+    source = pathlib.Path("src/web_scraper.py").read_text(encoding="utf-8")
+    for name in names:
+        # A word boundary so the removed gate's `_rate_limit` is not matched
+        # inside the surviving `looks_rate_limited`, which is a body predicate.
+        assert not re.search(rf"\b{re.escape(name)}\b", source), \
+            f"{name} is still referenced in src/web_scraper.py"
+
+
+def test_nothing_in_src_references_the_removed_fixed_web_gate():
+    """`steam_api`'s `_rate_limit` is the API's own schedule, not this one."""
+    import pathlib
+    import re
+
+    removed = ("_WEB_DELAY", "_last_web_call", "set_web_delay")
+    offenders = []
+    for path in pathlib.Path("src").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        offenders += [f"{path}:{name}" for name in removed
+                      if re.search(rf"\b{re.escape(name)}\b", text)]
+    assert offenders == [], f"the removed fixed web gate is still referenced: {offenders}"
+
+
+@responses.activate
+def test_the_scraper_applies_no_delay_of_its_own():
+    """Two back-to-back calls are not spaced by the scraper.
+
+    This pins the property rather than the symbols: the removed gate slept
+    until five seconds had elapsed, so a second call straight after the first
+    was delayed. Pacing is the caller's, owned by `web_delay_seconds`.
+    """
+    import src.web_scraper as web_scraper
+
+    responses.add(responses.GET, STEAM_WORKSHOP_URL, body="<html></html>",
+                  status=200, content_type="text/html")
+    sleeps = []
+    with patch("src.web_scraper.load_config",
+               return_value={"session": {"id": "x"}}), \
+         patch("time.sleep", side_effect=lambda *a, **k: sleeps.append(a)):
+        web_scraper.scrape_extended_details(STEAM_WORKSHOP_URL + "?id=1")
+        web_scraper.scrape_extended_details(STEAM_WORKSHOP_URL + "?id=2")
+
+    assert sleeps == [], "the scraper applied a delay of its own"
+
+
 def test_image_worker_runs_without_crash(tmp_path):
     """Smoke test: ImageScraperThread initializes and exits immediately."""
     import os

@@ -285,22 +285,22 @@ def test_a_throttled_page_is_not_mistaken_for_a_stale_cookie():
     called = []
     with patch("src.web_worker.scrape_extended_details") as scrape:
         WebScraperThread("test.db", "nope.lock", {}, None,
-                         lambda: called.append(1) or True)._retry_if_gated(item, "u", throttled)
-        assert scrape.call_count == 0, "must not retry against an empty budget"
+                         lambda: called.append(1) or True)._refresh_login_cookie_if_gated(item, throttled)
+        assert scrape.call_count == 0, "the request is never repeated"
         assert called == [1], "but the cookie is still re-read: a local read costs no budget"
 
 
 def test_a_definitive_404_is_not_treated_as_a_gate():
-    """A gone item cannot be fixed by a fresher cookie, so it costs no request."""
+    """A gone item cannot be fixed by a fresher cookie, so it costs no file read."""
     from src.web_worker import WebScraperThread
     page = {"description": None, "http_status": 404,
             "body": "<title>Steam Community :: Error</title>"}
     called = []
     with patch("src.web_worker.scrape_extended_details") as scrape:
         WebScraperThread("test.db", "nope.lock", {}, None,
-                         lambda: called.append(1) or True)._retry_if_gated(
-                             {"workshop_id": 1}, "u", page)
-    assert scrape.call_count == 0, "a gone item is not worth a retry"
+                         lambda: called.append(1) or True)._refresh_login_cookie_if_gated(
+                             {"workshop_id": 1}, page)
+    assert scrape.call_count == 0, "a gone item is never worth a request"
     assert called == [], "and it is not a session problem to refresh for"
 
 
@@ -333,30 +333,32 @@ def test_a_throttled_page_does_not_shadow_the_auth_check():
     """They overlap by construction, so both must be evaluated.
 
     A throttle page is not the item page, so it lacks the signed-in markers too.
-    Reading that as "signed out" would refresh and retry; skipping the refresh
-    leaves the next request carrying an older cookie than it needs to.
+    Reading that as "signed out" would skip a refresh that costs no budget;
+    skipping the refresh leaves the next request carrying an older cookie than
+    it needs to.
     """
     from src.web_worker import WebScraperThread
     calls = []
     throttled = {"description": None, "body": "<h1>Too many requests</h1>"}
     with patch("src.web_worker.scrape_extended_details") as scrape:
         WebScraperThread("test.db", "nope.lock", {}, None,
-                         lambda: calls.append("refresh") or True)._retry_if_gated(
-                             {"workshop_id": 1}, "u", throttled)
+                         lambda: calls.append("refresh") or True)._refresh_login_cookie_if_gated(
+                             {"workshop_id": 1}, throttled)
     assert calls == ["refresh"], "the auth reaction still fires"
-    assert scrape.call_count == 0, "the network retry does not"
+    assert scrape.call_count == 0, "the request is never repeated"
 
 
-def test_a_signed_out_page_without_throttling_still_retries():
-    """The other direction: no throttle, so the retry is allowed."""
+def test_a_signed_out_page_refreshes_the_cookie_without_a_second_request():
+    """The miss is left to the outcome path; the queue retries it, not this."""
     from src.web_worker import WebScraperThread
     page = {"description": None, "body": "<html>no account dropdown here</html>"}
-    with patch("src.web_worker.scrape_extended_details",
-               return_value={"description": "found"}) as scrape:
-        out = WebScraperThread("test.db", "nope.lock", {}, None,
-                               lambda: True)._retry_if_gated({"workshop_id": 1}, "u", page)
-    assert scrape.call_count == 1
-    assert out["description"] == "found"
+    refreshed = []
+    with patch("src.web_worker.scrape_extended_details") as scrape:
+        WebScraperThread("test.db", "nope.lock", {}, None,
+                         lambda: refreshed.append(1) or True)._refresh_login_cookie_if_gated(
+                             {"workshop_id": 1}, page)
+    assert refreshed == [1]
+    assert scrape.call_count == 0
 
 
 # --- the login warning the worker raises -------------------------------------
@@ -379,23 +381,22 @@ def test_a_signed_out_scrape_records_the_problem_for_the_ui():
 
     with patch("src.web_worker.scrape_extended_details", return_value=miss):
         WebScraperThread("test.db", "nope.lock", {}, None,
-                         lambda: False)._retry_if_gated({"workshop_id": 1}, "u", miss)
+                         lambda: False)._refresh_login_cookie_if_gated({"workshop_id": 1}, miss)
 
     problem = session_health.read("test.db")
     assert problem is not None
     assert "sign-in page" in problem["detail"]
 
 
-def test_a_retry_that_works_clears_the_problem():
+def test_a_later_signed_in_scrape_clears_the_problem():
+    """There is no retry to clear it; the next ordinary scrape does."""
     from src import session_health
     from src.web_worker import WebScraperThread
     session_health.record_rejected("test.db", "the login cookie expired", now=1000)
-    miss = {"description": None, "body": "<html>no account dropdown here</html>"}
-    good = {"description": "found", "body": "<div class='account_pulldown'>me</div>"}
+    good = {"description": None, "body": "<div class='account_pulldown'>me</div>"}
 
-    with patch("src.web_worker.scrape_extended_details", return_value=good):
-        WebScraperThread("test.db", "nope.lock", {}, None,
-                         lambda: True)._retry_if_gated({"workshop_id": 1}, "u", miss)
+    WebScraperThread("test.db", "nope.lock", {}, None,
+                     lambda: True)._refresh_login_cookie_if_gated({"workshop_id": 1}, good)
 
     assert session_health.read("test.db") is None
 
@@ -407,7 +408,7 @@ def test_a_signed_in_page_leaves_a_healthy_session_alone():
 
     with patch("src.web_worker.scrape_extended_details", return_value=miss):
         WebScraperThread("test.db", "nope.lock", {}, None,
-                         lambda: True)._retry_if_gated({"workshop_id": 1}, "u", miss)
+                         lambda: True)._refresh_login_cookie_if_gated({"workshop_id": 1}, miss)
 
     assert session_health.read("test.db") is None
 
@@ -421,7 +422,7 @@ def test_a_throttled_page_makes_no_claim_about_the_cookie():
     throttled = {"description": None, "body": "<h1>Too many requests</h1>"}
 
     WebScraperThread("test.db", "nope.lock", {}, None,
-                     lambda: True)._retry_if_gated({"workshop_id": 1}, "u", throttled)
+                     lambda: True)._refresh_login_cookie_if_gated({"workshop_id": 1}, throttled)
 
     assert session_health.read("test.db") == {
         "detail": "the login cookie expired", "detected_at": 1000}
