@@ -328,12 +328,12 @@ meant to be zero, and one query finds them.
 
 ---
 
-## Discovery logging: mark what is being enriched, not what is not
+## Discovery logging: mark what was queued for the item, not what the filters matched
 
-**Status: Landed.** The marker is inverted in `src/daemon.py`; the three places
-that carried the old wording moved with it, and the behaviour and its colour are
-pinned by `tests/test_discovery_marker.py`. The measured evidence that motivated
-the change is kept below.
+**Status: Landed.** The marker is chosen in `src/daemon.py` from the
+`ScrapeImageOutcome` that `_flag_scrape_and_image` returns; the behaviour and its
+colour are pinned by `tests/test_discovery_marker.py`. The measured evidence that
+motivated the change is kept below.
 
 A discovery line carries a red `ignored` marker when the item failed its enrichment filters, and
 nothing at all when it did not (`src/daemon.py:845`):
@@ -343,9 +343,19 @@ nothing at all when it did not (`src/daemon.py:845`):
 [A:2063564494] "NSX"
 ```
 
-*(Landed: the two shapes are now swapped — the rejected item is the bare
-`[A:...] "title"` line, and the selected one is
-`[A:...] "title" — enriching` with `enriching` in green.)*
+*(Landed: the red `ignored` marker is gone, and the marker now answers "was a
+scrape or an image actually queued for this item" rather than "did the item match
+its AppID's enrichment filters". Three shapes:)*
+
+```
+[A:...] "title" — current      # nothing was queued
+[A:...] "title" — enriching    # the filters matched and work was queued
+[A:...] "title"                # work was queued only as backlog (filters did not match)
+```
+
+*(`current` is grey (SGR `\033[90m`), `enriching` is green (SGR `\033[32m`). The
+word answers "was anything queued", so an item the filters *rejected* still reads
+`current` when it has nothing to queue: the marker was never a filter verdict.)*
 
 The marker is therefore on almost every line, and says the least interesting thing about it.
 *Measured live* on 2026-09-17 over the last 6 MB of `scraper.log`: **53,523 of 54,057** discovery
@@ -353,22 +363,32 @@ lines (**99.0%**) carried it, while 534 (1.0%) did not. A red word that appears 
 decoration; the informative event is the one item in a hundred that is about to have its page and
 preview fetched, and that is the one currently unmarked.
 
-Invert it: drop the `ignored` marker, and append `enriching` in green (`\033[32m`) when
-`_flag_scrape_and_image` returns true — which is exactly "met the filter and is queued for additional
-details", since that return value is what gates the web-scrape and image queues. One line changes,
-and the web log viewer needs nothing: its SGR table already renders 32 as `#98c379`
-(`templates/index.html:1519`). The TUI's pane needs nothing either, but for a different reason —
-`_poll_tail` writes the raw line into a `RichLog` (`src/tui.py:690`) and nothing in the TUI decodes
-ANSI, so no marker colour has ever reached that pane.
+Invert it: drop the `ignored` marker, and mark the line from whether
+`_flag_scrape_and_image` actually queued work — `enriching` in green (`\033[32m`) when the item also
+matched its AppID's filters, `current` in grey (`\033[90m`) when it queued nothing, and no marker
+when the queued work is backlog because the filters did not match. One line changes, and the web log
+viewer needs nothing: its SGR table already renders 32 as `#98c379` and 90 as `#6b7280`. The TUI's
+pane needs nothing either, but for a different reason — `_poll_tail` writes the raw line into a
+`RichLog` and nothing in the TUI *decodes* ANSI, so no marker colour has ever been applied by the
+widget; the raw escape bytes do reach it, unrendered and zero-width.
 
-*(Landed. `src/daemon.py` appends `\033[32menriching\033[0m` when `enriched` is true, which is
-`_flag_scrape_and_image`'s own return value, and adds no marker otherwise. Both "needs nothing"
-claims were verified rather than assumed: the viewer's `ANSI_SGR` table maps `32: '#98c379'`
-(`templates/index.html:1549`), and the TUI's `_poll_tail` writes each raw line into a `RichLog`
-(`src/tui.py:690`) with no ANSI decoding. Three tests in `tests/test_discovery_marker.py` drive the
-real `_process_item`: an enriched item is marked with `\033[32menriching\033[0m`, a rejected one
-carries no escape at all, and the emitted code is asserted against the viewer's own table. All
-three fail against the old marker.)*
+*(Landed. `_flag_scrape_and_image` returns a `ScrapeImageOutcome(enriched, queued)` rather than a
+bare bool: `queued` is set when `flag_for_web_scrape` or `flag_for_image` is called, and `enriched`
+is the filter verdict the two other consumers still need — `_flag_translations` and
+`_creator_to_refresh` read `outcome.enriched`, because a filter match is what gates translation and
+the creator refresh. The first landed form chose the marker from `enriched` alone, so an item that
+matched its filters and queued nothing — its description at the stored revision with a renderable
+preview, or a preview the server has already answered with 404 or a non-image type — was drawn
+`enriching` for work that was never queued. Both "needs nothing" claims were verified rather than
+assumed: the viewer's `ANSI_SGR` table maps `32: '#98c379'` and `90: '#6b7280'`, and `_poll_tail`
+writes each raw line into a `RichLog` with no ANSI decoding. Seven tests in
+`tests/test_discovery_marker.py` drive the real `_process_item`: an enriched item that queues is
+marked `\033[32menriching\033[0m`; a rejected item that queues a backlog scrape carries no escape at
+all; an enriched item and a rejected item that both queue nothing are marked
+`\033[90mcurrent\033[0m`; an enriched item with only its preview queued is still `enriching`; and
+the emitted codes are asserted against the viewer's own table. The three `current` tests fail
+against the old `enriched`-only marker, and the image-only one fails against a marker keyed on the
+description alone.)*
 
 The old wording is also load-bearing in three places that would move with it:
 
