@@ -367,9 +367,19 @@ Return ONLY a JSON array matching this exact format, preserving all 'id' values:
                         (item_id,)
                     ).fetchone()
                     version_ts = ver["steam_updated_at"] if ver and ver["steam_updated_at"] else now_ts
+                    # translated_at is OUR clock, stamped when the item's last
+                    # queued field is gone -- the point at which the stage is
+                    # actually complete for this item. It is written in the same
+                    # statement (and so the same transaction) that zeroes the
+                    # queue mirror, so a mirror that reads 0 and a completion
+                    # that reads NULL can never both be observed. The per-field
+                    # write above deliberately does not stamp it: an item with
+                    # one field still queued is a partial stage, not a
+                    # completion.
                     conn.execute(
-                        "UPDATE workshop_items SET translation_priority = 0, translate_version = ? WHERE workshop_id = ?",
-                        (version_ts, item_id)
+                        "UPDATE workshop_items SET translation_priority = 0, "
+                        "translate_version = ?, translated_at = ? WHERE workshop_id = ?",
+                        (version_ts, int(time.time()), item_id)
                     )
 
             conn.commit()

@@ -205,6 +205,12 @@ class ScrapeImageOutcome(NamedTuple):
 # writes it and only the subscription walk clears it. Excluding it keeps the
 # merge from carrying it at all -- the column is simply not in the statement --
 # so a stray API key under that name can never set the green star.
+#
+# The per-queue completion clocks (web_scraped_at, image_fetched_at,
+# translated_at) are our wall time, written at each stage's success point and by
+# nothing else. Excluding them keeps a Steam payload from ever carrying a value
+# under one of those names into the merge: the whole point of the columns is
+# that they record when *we* did the work, not what Steam said.
 MERGE_EXCLUDED_KEYS = frozenset({
     "is_queued_for_subscription",
     "needs_web_scrape",
@@ -212,10 +218,14 @@ MERGE_EXCLUDED_KEYS = frozenset({
     "needs_image",
     "translation_priority",
     "downloaded_at",
+    "web_scraped_at",
+    "image_fetched_at",
+    "translated_at",
 })
 
 # Keys retained from an API merge into the item record:
-#   * every real column (WORKSHOP_ITEM_COLUMNS), minus the queue-owned ones above
+#   * every real column (WORKSHOP_ITEM_COLUMNS), minus the locally-owned ones
+#     above (the queue flags, the download latch, the completion clocks)
 #   * "tags", which is no longer a column -- it lives in the workshop_tags
 #     junction table -- but is consumed by insert_or_update_item's tag sync and
 #     so must survive the merge

@@ -185,6 +185,9 @@ class StatsScreen(Screen):
         "translation_status": "Translation status",
         "tag_counts": "Tags",
         "priority_breakdowns": "Queue priorities",
+        "web_throughput": "Web scrape throughput",
+        "image_throughput": "Image download throughput",
+        "translation_throughput": "Translation throughput",
     }
 
     #: Text metrics own a Static widget; the two table metrics are special-cased
@@ -200,6 +203,9 @@ class StatsScreen(Screen):
         "coverage": "coverage-content",
         "translation_status": "translation-stats-content",
         "priority_breakdowns": "priority-stats-content",
+        "web_throughput": "web-throughput-content",
+        "image_throughput": "image-throughput-content",
+        "translation_throughput": "translation-throughput-content",
     }
 
     def __init__(self, db_path: str):
@@ -459,6 +465,27 @@ class StatsScreen(Screen):
                 table.add_row(escape_markup(tag), f"{count:,}")
         elif name == "priority_breakdowns":
             self._set_text(name, self._format_priority(value))
+        elif name in ("web_throughput", "image_throughput", "translation_throughput"):
+            self._set_text(name, self._format_throughput(value))
+
+    @staticmethod
+    def _format_throughput(value: dict) -> str:
+        """A queue's completion rate, or an honest "no history yet".
+
+        A NULL stamp is not a zero: it means the stage finished before the
+        column that records the time existed, so no rate can be computed from
+        it. Showing 0/hour would read as an idle queue rather than an
+        unmeasurable one -- the one thing the metric must not do is invent a
+        number. Once any stamp exists a 0 is a real measurement and is shown.
+        """
+        if not value or value.get("last_success") is None:
+            return ("[dim]No history yet — completion times are only recorded "
+                    "from here on.[/dim]")
+        last = datetime.datetime.fromtimestamp(
+            value["last_success"]).strftime("%Y-%m-%d %H:%M")
+        return (f"  Completed last hour: {value.get('hour', 0):,}\n"
+                f"  Completed last day: {value.get('day', 0):,}\n"
+                f"  Last success: {last}")
 
     @staticmethod
     def _format_coverage(cov: dict) -> str:

@@ -6,7 +6,7 @@ several of them used to share one name and were read as if they all meant the sa
 | Clock | Convention | Columns |
 |---|---|---|
 | Steam's clock | `steam_*` | `steam_created_at`, `steam_updated_at` (`workshop_items`) |
-| Our clock | `*_at` | `first_seen_at`, `api_fetched_at`, `last_fetch_attempted_at` (`workshop_items`); `api_fetched_at`, `translated_at` (`users`); `queued_at` (`translation_queue`) |
+| Our clock | `*_at` | `first_seen_at`, `api_fetched_at`, `last_fetch_attempted_at`, `web_scraped_at`, `image_fetched_at`, `translated_at` (`workshop_items`); `api_fetched_at`, `translated_at` (`users`); `queued_at` (`translation_queue`) |
 | A stored Steam value used as a version key | `*_version` | `scrape_version`, `translate_version` (`workshop_items`) |
 
 All of them are Unix epoch integers (seconds), except where noted. There are no ISO 8601 strings
@@ -21,23 +21,60 @@ in the current schema.
 | `first_seen_at` | `workshop_items` | `insert_or_update_item`, new rows only | Our clock: when the row was first inserted. |
 | `api_fetched_at` | `workshop_items` | daemon, on a successful API content pull only | Our clock: the last time the API returned usable content. |
 | `last_fetch_attempted_at` | `workshop_items` | daemon, on every API attempt | Our clock: the last time a fetch was attempted, success or failure. |
-| `scrape_version` | `workshop_items` | web scraper / image worker | Steam value: `steam_updated_at` at the moment the scraper ran. |
+| `scrape_version` | `workshop_items` | web scraper | Steam value: `steam_updated_at` at the moment the scraper ran. |
 | `translate_version` | `workshop_items` | translator | Steam value: `steam_updated_at` at the moment translation ran. |
+| `web_scraped_at` | `workshop_items` | web worker, on a successful scrape only | Our clock: when this item's page was last scraped successfully. |
+| `image_fetched_at` | `workshop_items` | image worker, on a successful download only | Our clock: when this item's preview image was last fetched successfully. |
+| `translated_at` | `workshop_items` | translator, when the item's last queued field is translated | Our clock: when this item's translation last completed. One stamp per item, not per field. |
 | `api_fetched_at` | `users` | daemon | Our clock: when the creator profile was last refreshed. |
 | `translated_at` | `users` | translator | Our wall-clock time of the translation. Users have no `steam_updated_at`, so this is not a version key. |
 | `queued_at` | `translation_queue` | `flag_field_for_translation`, new rows only | Our clock: when the queue entry was created. NULL on rows that predate migration 13→14, because their queue time is unknown. |
 
 ## Write Rules
 
-| Event | `first_seen_at` | `api_fetched_at` | `last_fetch_attempted_at` | `scrape_version` | `translate_version` |
-|---|---|---|---|---|---|
-| Row first inserted | set | — | — | — | — |
-| API fetch attempted | — | — | **set** | — | — |
-| API content received | — | **set** | **set** | — | — |
-| Web scrape succeeds | — | — | — | **set** = `steam_updated_at` | — |
-| Translation succeeds | — | — | — | — | **set** = `steam_updated_at` |
+| Event | `first_seen_at` | `api_fetched_at` | `last_fetch_attempted_at` | `web_scraped_at` | `image_fetched_at` | `translated_at` | `scrape_version` | `translate_version` |
+|---|---|---|---|---|---|---|---|---|
+| Row first inserted | set | — | — | — | — | — | — | — |
+| API fetch attempted | — | — | **set** | — | — | — | — | — |
+| API content received | — | **set** | **set** | — | — | — | — | — |
+| Web scrape succeeds | — | — | — | **set** = our clock | — | — | **set** = `steam_updated_at` | — |
+| Image download succeeds | — | — | — | — | **set** = our clock | — | — | — |
+| A field is translated | — | — | — | — | — | — | — | **set** = `steam_updated_at` (or our clock when the row has no Steam payload) |
+| The item's last queued field is translated | — | — | — | — | — | **set** = our clock | — | **set** = `steam_updated_at` |
 
 Web scraping and translation do not touch `api_fetched_at`, and never have.
+
+**A failed or partial stage stamps nothing.** The completion clocks move only on
+the success paths: the web worker's success branch (not a selector miss, a wall,
+a throttle or a transport failure), the image worker's completed download (not a
+404, an unclassifiable content type or a transport failure), and the translator's
+last-field write for an item (not a per-field write while another field is still
+queued, and not a batch that returned no text). This is deliberate: a stamp on a
+partial stage would overstate the rate, and the throughput metric could not tell
+the difference between "we did the work" and "we tried".
+
+## Completion Clocks and the No-History Rule
+
+`web_scraped_at`, `image_fetched_at` and `translated_at` are the completion
+timestamps throughput, burn-down and ETA are measured from, and they exist
+because the three queues had none of our own: the web and translation stages
+recorded only Steam's version value, and the image stage recorded nothing.
+Migration 26→27 adds them; [schema-migrations.md](schema-migrations.md) has the
+storage detail.
+
+**Every row that predates the migration keeps NULL, and nothing backfills them.**
+The stages never recorded when they completed an item, so the time is not
+recoverable, and an estimate would be a fabricated rate rather than a
+measurement. The metrics say so instead of guessing:
+
+* `last_success` is **NULL** when a queue's column holds no value at all. The
+  front ends render that as "no history yet", and the throughput for that queue
+  is also NULL rather than `0`.
+* Once a single stamp exists the counts are real answers. `0` completed in the
+  last hour then means a queue that was measured and is idle, which is a
+  different statement from an unmeasurable one.
+* The counts only include rows inside their window, so a NULL-stamped row can
+  never be counted in either.
 
 ## Why `last_fetch_attempted_at` Exists
 
@@ -99,8 +136,10 @@ The comparison is per **item**, not per field: `translate_version` is one column
 `workshop_items`, so an edit to any Steam-visible field makes every non-ASCII field of that item
 stale and re-queues them together. That is the granularity of the only version stamp that exists.
 
-**Scraping.** `scrape_version` is written by two workers — the web scraper and the image worker — and
-both store the item's `steam_updated_at`, so it records Steam's revision rather than our clock, and it
-cannot distinguish which stage wrote it last. The daemon's `_flag_scrape_and_image` does not read it:
-it decides whether to re-queue the HTML scrape by comparing `steam_updated_at` against the pre-fetch
-record. The column therefore has no consumer.
+**Scraping.** `scrape_version` is written by the web scraper alone, as the item's
+`steam_updated_at`, so it records Steam's revision rather than our clock. The image worker used to
+write the same value into it on every download, which made an item whose page had never been scraped
+claim a scrape at its current revision; it no longer touches the column (issue 7). The daemon's
+`_flag_scrape_and_image` does not read it either: it decides whether to re-queue the HTML scrape by
+comparing `steam_updated_at` against the pre-fetch record. The column therefore has no consumer —
+when our own scrape time is wanted, it is `web_scraped_at`.

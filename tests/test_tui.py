@@ -505,6 +505,10 @@ _FAKE_METRIC_VALUES = {
         "needs_image": [],
         "needs_web_scrape": [{"prio": 10, "cnt": 1}],
     },
+    "web_throughput": {"hour": 2, "day": 5, "last_success": 1_700_000_000},
+    "image_throughput": {"hour": 1, "day": 3, "last_success": 1_700_000_000},
+    # The no-history shape: a queue whose completion column holds no stamp.
+    "translation_throughput": {"hour": None, "day": None, "last_success": None},
 }
 
 

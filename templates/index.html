@@ -1728,6 +1728,9 @@ const STATS_LABELS = {
   fetch_recency: 'Fetch recency',
   translation_status: 'Translation status',
   priority_breakdowns: 'Queue priorities',
+  web_throughput: 'Web scrape throughput',
+  image_throughput: 'Image download throughput',
+  translation_throughput: 'Translation throughput',
   tag_counts: 'Tags',
 };
 
@@ -1855,6 +1858,19 @@ function _renderAppTracking(apps) {
     + '<tbody>' + rows + '</tbody></table>';
 }
 
+// A NULL stamp is not a zero: the stage completed before the column that
+// records the time existed, so a rate cannot be computed from it. Reporting
+// 0/hour would read as an idle queue rather than an unmeasurable one. Once any
+// stamp exists, a 0 is a real measurement and is shown.
+function _renderThroughput(t) {
+  if (!t || t.last_success === null || t.last_success === undefined) {
+    return '<p class="stat-label">No history yet &mdash; completion times are only recorded from here on.</p>';
+  }
+  return '<ul><li>Completed last hour: ' + fmtCount(t.hour || 0) + '</li>'
+    + '<li>Completed last day: ' + fmtCount(t.day || 0) + '</li>'
+    + '<li>Last success: ' + _fmtTimestamp(t.last_success) + '</li></ul>';
+}
+
 function _renderMetricBody(name, value) {
   if (value === null || value === undefined) return '<span class="stat-label">failed</span>';
   if (name === 'totals') return _renderTotals(value);
@@ -1870,6 +1886,8 @@ function _renderMetricBody(name, value) {
   if (name === 'fetch_recency') return _renderRecency(value);
   if (name === 'translation_status') return _renderTranslation(value);
   if (name === 'priority_breakdowns') return _renderPriority(value);
+  if (name === 'web_throughput' || name === 'image_throughput'
+      || name === 'translation_throughput') return _renderThroughput(value);
   if (name === 'tag_counts') return _renderTags(value);
   if (name === 'app_tracking') return _renderAppTracking(value);
   return '<pre style="white-space:pre-wrap;margin:0">' + JSON.stringify(value) + '</pre>';

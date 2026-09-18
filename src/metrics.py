@@ -190,6 +190,59 @@ def _app_tracking(conn, params) -> list[dict]:
 
 
 # --------------------------------------------------------------------------
+# per-queue completion: the three clocks migration 26->27 added
+# --------------------------------------------------------------------------
+
+
+def _completion_window(conn, column: str) -> dict:
+    """A queue's completions in the two windows, and the newest one.
+
+    ``last_success`` is None when the column holds no value at all. That is not
+    a zero rate: those rows completed before the column existed, and a rate
+    cannot be reconstructed from a time that was never written down. A front
+    end renders that as "no history yet". Once a single stamp exists the counts
+    are real answers -- 0 in the last hour then means an idle queue that was
+    actually measured, which is a different statement.
+
+    Each part is served by the partial index migration 26->27 adds
+    (``WHERE <column> IS NOT NULL``): the range counts read only the window and
+    ``MAX`` reads the newest entry, instead of scanning 2.6M rows for each of
+    the three. ``MAX`` needs the explicit ``IS NOT NULL`` predicate to use a
+    partial index.
+    """
+    now = int(time.time())
+    row = conn.execute(
+        f"""
+        SELECT (SELECT COUNT(*) FROM workshop_items WHERE {column} >= ?) AS hour,
+               (SELECT COUNT(*) FROM workshop_items WHERE {column} >= ?) AS day,
+               (SELECT MAX({column}) FROM workshop_items
+                 WHERE {column} IS NOT NULL) AS last_success
+        """,
+        (now - 3600, now - 86400),
+    ).fetchone()
+    if row["last_success"] is None:
+        return {"hour": None, "day": None, "last_success": None}
+    return {"hour": row["hour"], "day": row["day"], "last_success": row["last_success"]}
+
+
+@metric("web_throughput", 2, "Web scrapes completed in the last hour and day, and the last success.")
+def _web_throughput(conn, params) -> dict:
+    return _completion_window(conn, "web_scraped_at")
+
+
+@metric("image_throughput", 2, "Preview images fetched in the last hour and day, and the last success.")
+def _image_throughput(conn, params) -> dict:
+    return _completion_window(conn, "image_fetched_at")
+
+
+@metric("translation_throughput", 2, "Items whose translation finished in the last hour and day, and the last success.")
+def _translation_throughput(conn, params) -> dict:
+    # One stamp per item, written when its last queued field is translated, so
+    # this counts items completed, not fields.
+    return _completion_window(conn, "translated_at")
+
+
+# --------------------------------------------------------------------------
 # one pass over workshop_items
 # --------------------------------------------------------------------------
 
