@@ -138,6 +138,15 @@ Only an **unknown** outcome — a transport failure, a 5xx, or a page that is ne
 
 The decay stops at a **6.0 s floor** (raised from 1.0 s): the same Steam budget is shared with the owner's own hand-browsing, so when scrapes start failing the worker has to back off far enough that the Workshop is still usable manually while the daemon runs. The starting default is the floor. There is **no ceiling** any more — it went with the fixed 300 s pause, which was a second pacing rule that could not converge: the same pause however often the throttle recurred, and no slower a rate afterwards. A rate that moves on every refusal needs no separate rule, and it cannot run away (see the API rule above).
 
+The delay is persisted as `daemon.web_delay_seconds`, and that persisted value is the only shared truth
+between processes: `src.web_worker.configured_web_delay` reads it fresh from the config rather than from
+a module-level snapshot, so the subscribe engine's page reads and the subscriptions walk wait the same
+interval the worker is using. A page read that does not go through the worker therefore gates itself
+with it; the subscribe POST does not, because it is a click rather than a page load — see
+[Subscribe Engine](#subscribe-engine-browser-free). The fixed `_WEB_DELAY` gate still applied inside
+`scrape_extended_details` is a separate defect, recorded as issue 34 in
+[code-issues.md](code-issues.md).
+
 **Throttling**: Steam answers many requests with **HTTP 200** and its ordinary Workshop shell
 carrying "too many requests", so the status code proves nothing and the page is otherwise
 indistinguishable from a content miss. It is detected separately and treated as a spent request
@@ -210,6 +219,69 @@ The `User-Agent` version is read from the Firefox profile's `compatibility.ini` 
 The cookies are the profile's whole `steamcommunity.com` set when `session.read_firefox_cookies` is enabled — the ten names a real navigation sends, not two hand-picked ones plus a hardcoded third — and nothing is invented for a name the profile does not have. When the setting is off, the configured `sessionid`/`login_secure` pair is sent exactly as before, and the login cookie is omitted when unset.
 
 This browser shape was prompted by the "too many requests" page described above: the suspicion is that it may be bot deterrence rather than genuine throttling. That suspicion is **not proven**, and it changes nothing about detection or the pause — the reply is still not the item, so the worker still treats it as "no content" and still leaves the item untouched.
+
+---
+
+## Subscribe Engine (browser-free)
+
+`src/subscribe_engine.py` performs the owner's subscription without a browser tab. It is the shared
+implementation both front ends will use: the TUI's subscription queue drives it today, and the Web UI
+adopts it next (the Tampermonkey bridge that does this from a browser tab is being retired — see
+[future-plans.md](future-plans.md#removing-the-browser-bridge-from-the-subscribe-path)).
+
+The behaviour is dictated by facts measured against production, not by what the response body seems
+to say:
+
+* The subscribe control is **server-rendered** as one element, `id="SubscribeItemBtn"`, whose class
+  list carries `toggled` when and only when this account is currently subscribed. No JavaScript has
+  to run to read it (both states are present in the signed-in captures under `/root/.dsh/live/scrapes`).
+* `POST https://steamcommunity.com/sharedfiles/subscribe` answers `{"success": 1}` **both** when an
+  item was newly subscribed and when it was already subscribed. The body confirms the request was
+  accepted; it never says whether anything changed.
+* A missing `#SubscribeItemBtn` is "cannot tell", never "not subscribed". An error page, a signed-out
+  page and a throttle page all omit it.
+
+So one run is:
+
+1. **Read** the item page (`fetch_item_page`, the scraper's own request shape via
+   `scrape_extended_details(..., keep_body=True)`). `parse_button_state` reads the one element's own
+   class list.
+2. **Short-circuit** when `toggled` is present: the outcome is `already_subscribed`, and **no request
+   is sent**. This is both the guard against the endpoint ever turning out to be a toggle and the
+   reason re-running a queue is cheap.
+3. **Click** (only when the page says not subscribed): `post_subscribe_request` sends the POST, built
+   from the same helpers `/api/subscribe/<id>` uses. Steam's `success: 2`/`15` answers are recorded as
+   a session problem with the route's own sentence.
+4. **Confirm** (`confirm_subscription`): read the page again and decide from the button. `toggled`
+   present means subscribed — `record_confirmed_subscription` calls `mark_own_subscribed` (which also
+   clears `is_queued_for_subscription`) and clears the recorded session problem. `toggled` absent with
+   `success: 1` is a **disagreement**: nothing is recorded and the item stays queued, because the page
+   is the authority and the JSON is corroboration only. A throttle page on the confirmation read stays
+   queued; any other button-less page reports that the result cannot be told.
+
+**The confirmation read is evidence-gathering, not the design.** It doubles each item's page reads,
+so it is isolated in `confirm_subscription` behind the module-level `VERIFY_AFTER_SUBSCRIBE` switch;
+retiring it is one call site and one flag. The production run measured why it can eventually go — the
+endpoint is safe on an already-subscribed item, and the body cannot distinguish the two cases — while
+the pre-read keeps both of its jobs until idempotency is trusted beyond a single observation. The
+retirement order, and the cheap middle ground of letting the daily reconcile be the confirmer, are
+recorded in
+[future-plans.md](future-plans.md#retiring-the-subscribe-confirmation-read).
+
+**Pacing.** Both page reads are page loads, so `WebInterval` gates them on the web scraper's shared
+adaptive interval — the persisted `daemon.web_delay_seconds`, read fresh through
+`src.web_worker.configured_web_delay` rather than snapshotted, decayed with `pacing.decay` on a read
+that carried a button and doubled with `pacing.backoff` on a throttle page, then written back through
+the config the way the daemon's `_save_config_value` writes it. A pass builds one interval and threads
+it through every item, so the items are spaced. **The subscribe POST is exempt**: it is the button
+click, a browser-initiated XHR rather than a page load, so it never waits. The subscriptions walk in
+`src/subscription_sync.py` uses the same gate, and it only waits — a reconcile is not a rate-seeking
+queue and does not move the shared delay.
+
+**Capture.** Every page read and the POST go through
+`capture.record_web_download` under the `item_page` and `subscribe` kinds, covered by the existing
+`web_downloads` switch; the switch's credential elision is what keeps the login cookie out of the
+outbox.
 
 ---
 

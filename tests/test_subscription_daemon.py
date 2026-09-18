@@ -86,7 +86,7 @@ def test_one_bad_appid_does_not_stop_the_others(daemon):
     daemon.target_appids = [1, 2, 3]
     calls = []
 
-    def reconcile(db_path, appid, config):
+    def reconcile(db_path, appid, config, **kwargs):
         calls.append(appid)
         if appid == 2:
             raise RuntimeError("boom")

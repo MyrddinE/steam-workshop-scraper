@@ -679,7 +679,8 @@ class Daemon:
         """
         for appid in self.target_appids or []:
             try:
-                reconcile_own_subscriptions(self.db_path, appid, self.config)
+                reconcile_own_subscriptions(self.db_path, appid, self.config,
+                                            keep_running=lambda: self.running)
             except Exception as exc:
                 logging.warning(
                     "Subscription reconcile for appid %s failed; housekeeping skipped "

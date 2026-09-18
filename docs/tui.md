@@ -262,7 +262,7 @@ The server shares the TUI's database connection path (set via `init_webserver`).
 
 ### Subscribe Action (Ctrl+B)
 
-Sends a POST request to the local web server's `/api/subscribe/<workshop_id>` endpoint. The server proxies the subscribe request to Steam using the stored session ID. Handles Steam response codes (success=1, expired=2, permission denied=15, limit reached=25).
+Sends a POST request to the local web server's `/api/subscribe/<workshop_id>` endpoint. The server proxies the subscribe request to Steam using the stored session ID. Handles Steam response codes (success=1, expired=2, permission denied=15, limit reached=25). The route builds its request from the shared helpers in `src/subscribe_engine.py`, so the single-item action and the queue screen present the same identity and the same form.
 
 ---
 
@@ -304,4 +304,21 @@ The `btn-return` button leaves single-creator mode: it clears the flag, shows th
 
 ### Subscription Queue (s/l keys)
 
-`s` toggles `is_queued_for_subscription` on the selected item. `l` opens a screen listing all queued items with clickable links to their Steam pages. Each row is built with Rich `Text.append` rather than `Text.from_markup`: the URL keeps its link style as deliberate markup and the title is appended as literal characters, so a Steam title never reaches a parser — see [Steam text is escaped before it is rendered](#steam-text-is-escaped-before-it-is-rendered).
+`s` toggles `is_queued_for_subscription` on the selected item. `l` opens the queue screen
+(`SubscriptionQueueScreen`), which **subscribes each queued item through `src/subscribe_engine.py`** —
+there are no clickable Steam URLs any more and no browser tabs. Each row is a `Static` built with Rich
+`Text.append`, so a Steam title never reaches a parser (see
+[Steam text is escaped before it is rendered](#steam-text-is-escaped-before-it-is-rendered)).
+
+For each item the engine reads the page's server-rendered `#SubscribeItemBtn`, sends the subscribe POST
+only when the button says the item is not subscribed, and confirms from a second page read. `Subscribe`
+runs the pass on a worker thread and draws each item's outcome in place as it lands; a verified
+subscribe records `mark_own_subscribed`, which clears `is_queued_for_subscription`. Failures and
+disagreements stay queued. Both page reads wait the shared adaptive web interval, and the pass takes
+`.pauselock` for its duration and releases it in a `finally` — so the daemon's web and image workers
+pause for the pass and resume even if the engine raises. The screen also creates the lock on mount and
+removes it on unmount, so the queue stays quiet while it is open. No live Steam call happens in tests;
+the engine's fetch and POST seams are patched. See
+[data-pipeline.md](data-pipeline.md#subscribe-engine-browser-free) for the engine's semantics and
+[future-plans.md](future-plans.md#retiring-the-subscribe-confirmation-read) for the planned retirement
+of the confirmation read.

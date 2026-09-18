@@ -92,6 +92,9 @@ def sync_env(tmp_path, monkeypatch):
     """
     db_path = str(tmp_path / "sync.db")
     initialize_database(db_path)
+    # The walk now honours the shared web interval; tests must not sleep it.
+    monkeypatch.setattr(subscription_sync.pacing, "wait",
+                        lambda seconds, keep_running=None: True)
 
     def configure(pages, login="76561198000000000||tok", sign_in=False):
         session = _FakeSession(pages, sign_in=sign_in)
@@ -161,6 +164,23 @@ def test_a_single_page_account_is_one_request(sync_env):
 
     assert len(session.urls) == 1
     assert own_subscription_ids(db_path, 294100) == set(ids)
+
+
+def test_the_subscriptions_walk_waits_the_shared_interval(sync_env, monkeypatch):
+    """Each page is a page load: it honours `daemon.web_delay_seconds`."""
+    db_path, configure = sync_env
+    ids = list(range(2000, 2005))
+    _items(db_path, *ids)
+    configure({1: _page(ids, 5)})
+    waits = []
+    monkeypatch.setattr(
+        subscription_sync.pacing, "wait",
+        lambda seconds, keep_running=None: waits.append(seconds) or True)
+
+    subscription_sync.reconcile_own_subscriptions(
+        db_path, 294100, {"daemon": {"web_delay_seconds": 9.0}})
+
+    assert waits == [9.0]
 
 
 def test_every_other_item_of_the_appid_is_cleared(sync_env):

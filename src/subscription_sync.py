@@ -39,6 +39,11 @@ subscribed.
 authenticated session (``src.web_scraper._get_session`` and
 ``_build_workshop_cookies``), which is what the tests mock; nothing in this
 module builds a session or a cookie of its own.
+
+**The walk is paced.** Each page is a page load, so it waits the web scraper's
+adaptive interval (``daemon.web_delay_seconds``, read fresh through
+``configured_web_delay``) before the request. It only waits -- it does not move
+the shared delay, because a reconcile is not a rate-seeking queue.
 """
 
 from __future__ import annotations
@@ -48,8 +53,9 @@ import math
 import re
 import time
 
-from src import capture, session_cookie, session_health, web_scraper
+from src import capture, pacing, session_cookie, session_health, web_scraper
 from src.database import apply_own_subscriptions
+from src.web_worker import configured_web_delay
 
 # The page's own URL shape. `/my/` is used rather than `/profiles/<steamid>/`
 # because it needs no steamid, and the configured saved cookie is what makes it
@@ -134,7 +140,7 @@ class SignInRequired(RuntimeError):
 SIGN_IN_PATH = "/login/"
 
 
-def _fetch_page(appid: int, page: int, config: dict) -> str:
+def _fetch_page(appid: int, page: int, config: dict, keep_running=None) -> str:
     """Fetch one subscriptions page and return its body.
 
     Raises :class:`SignInRequired` when the response is Steam's sign-in page,
@@ -142,6 +148,11 @@ def _fetch_page(appid: int, page: int, config: dict) -> str:
     transport error or a non-2xx status: a page that did not arrive is not
     evidence about the owner's subscriptions, and the caller converts the raise
     into a failed sync rather than a cleared flag.
+
+    This is a page load, so it honours the web scraper's adaptive interval
+    (``daemon.web_delay_seconds``, read fresh from ``config``) before the
+    request, exactly as an item-page read does. The walk is not a rate-seeking
+    queue, so it only waits; it does not move the shared delay.
 
     The whole exchange is captured under the web-download debug switch, before
     the sign-in check: a sign-in page is exactly what the capture is for, and
@@ -153,6 +164,8 @@ def _fetch_page(appid: int, page: int, config: dict) -> str:
     session = web_scraper._get_session()
     cookies = web_scraper._build_workshop_cookies(config)
     headers = web_scraper.BROWSER_HEADERS
+    pacing.wait(configured_web_delay(config),
+                keep_running or (lambda: True))
     response = session.get(
         url,
         cookies=cookies,
@@ -181,7 +194,8 @@ def _fetch_page(appid: int, page: int, config: dict) -> str:
     return response.text or ""
 
 
-def collect_subscribed_ids(appid: int, config: dict) -> tuple[set[int], int | None]:
+def collect_subscribed_ids(appid: int, config: dict,
+                           keep_running=None) -> tuple[set[int], int | None]:
     """Walk the subscriptions pages and return ``(ids, declared_total)``.
 
     Paging stops once the collected set reaches the declared total. A page that
@@ -197,7 +211,7 @@ def collect_subscribed_ids(appid: int, config: dict) -> tuple[set[int], int | No
     page_number = 1
     while page_number <= MAX_PAGES:
         pages_fetched += 1
-        body = _fetch_page(appid, page_number, config)
+        body = _fetch_page(appid, page_number, config, keep_running=keep_running)
         if declared_total is None and pages_fetched == 1:
             # Only the first page's total is trusted: later pages repeat it, and
             # a number read off a differently-shaped page mid-walk would be a
@@ -229,7 +243,8 @@ def collect_subscribed_ids(appid: int, config: dict) -> tuple[set[int], int | No
 
 
 def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
-                                seen_at: int | None = None) -> dict | None:
+                                seen_at: int | None = None,
+                                keep_running=None) -> dict | None:
     """Bring this app's ``own_subscribed`` flags in line with Steam.
 
     Returns the counters from ``apply_own_subscriptions``. The ``cleared`` count
@@ -298,7 +313,8 @@ def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            ids, declared_total = collect_subscribed_ids(appid, config)
+            ids, declared_total = collect_subscribed_ids(
+                appid, config, keep_running=keep_running)
         except SignInRequired as exc:
             # Retrying cannot help and would only ask Steam again, so the walk
             # ends here. Nothing is applied: a sign-in page is not a list. The

@@ -143,6 +143,15 @@ the pane alone.
 The marker sits inside the cell that opens the detail pane, so its click handler stops propagation:
 without that, toggling the queue would also drag the pane to the item.
 
+The Web UI's actual subscribe still runs through the browser bridge today, but it will adopt
+`src/subscribe_engine.py` next: the engine already performs the read → click → confirm flow without a
+browser, its page reads honour the shared adaptive web interval, and its POST is the same request the
+route builds. The TUI's subscription queue drives it now. The deprecation of the userscript and its
+bridge endpoints is recorded in
+[future-plans.md](future-plans.md#removing-the-browser-bridge-from-the-subscribe-path), and the
+engine's semantics are in
+[data-pipeline.md](data-pipeline.md#subscribe-engine-browser-free).
+
 `previously` can only ever mean "we have **seen** this account subscribed". Steam exposes no
 per-account subscription history — `lifetime_subscriptions` is an item-wide count and
 `EnumerateUserSubscribedFiles` is publisher-key-only — so on the day the marker shipped there were

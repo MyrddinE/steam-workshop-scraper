@@ -32,6 +32,35 @@ WEB_DELAY_FLOOR = 6.0
 WEB_DELAY_DEFAULT = WEB_DELAY_FLOOR
 
 
+def configured_web_delay(config: dict) -> float:
+    """The shared web interval currently configured, floored at the floor.
+
+    The delay is adaptive, and the daemon persists it; the TUI and the web
+    server run in different processes, so the persisted value is the only shared
+    truth. This reads it *fresh* from the config dict -- never from a
+    module-level snapshot -- so a value this process or the daemon just wrote is
+    what the next page read honours.
+
+    Both shapes are accepted: the daemon's own section
+    (``config["daemon"]["web_delay_seconds"]``, which is what ``config.yaml``
+    holds) and the flattened section the worker is constructed with
+    (``config["web_delay_seconds"]``). A missing or unreadable value falls back
+    to :data:`WEB_DELAY_DEFAULT`.
+    """
+    raw = None
+    if isinstance(config, dict):
+        raw = config.get("web_delay_seconds")
+        if raw is None:
+            daemon = config.get("daemon")
+            if isinstance(daemon, dict):
+                raw = daemon.get("web_delay_seconds")
+    try:
+        delay = float(raw)
+    except (TypeError, ValueError):
+        delay = WEB_DELAY_DEFAULT
+    return max(WEB_DELAY_FLOOR, delay)
+
+
 class ScrapeOutcome(enum.Enum):
     """What one web scrape attempt turned out to be, and so what it earns.
 

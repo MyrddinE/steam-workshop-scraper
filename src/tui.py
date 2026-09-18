@@ -18,6 +18,7 @@ from src import metrics
 from src import images
 from src import pending
 from src import subscription
+from src import subscribe_engine
 from src import crash
 from src.config import ConfigError, load_config, save_config
 from src.daemon_control import DaemonController
@@ -725,12 +726,35 @@ class DaemonManagerScreen(Screen):
 
 
 class SubscriptionQueueScreen(ModalScreen):
-    """A modal screen that displays the subscription queue with clickable links."""
+    """The subscription queue: the engine subscribes each queued item.
 
-    def __init__(self, db_path: str, pause_lock_file: str):
+    The screen used to draw a clickable Steam URL per item and leave the actual
+    subscribe to a human with a browser. It now runs each item through
+    ``src.subscribe_engine``, which reads the item page's own subscribe button,
+    sends the POST only when the button says the item is not subscribed, and
+    verifies from a second page read. There are no browser tabs and no URLs to
+    click; per-item progress and failures are shown in place, and a verified
+    subscribe clears ``is_queued_for_subscription`` (through
+    ``mark_own_subscribed``, which the engine calls).
+
+    The ``.pauselock`` is created on mount and removed on unmount, so the daemon
+    stays quiet while the queue is open; the pass itself takes and releases the
+    same lock (``subscribe_engine.run_subscription_pass``), which is what covers
+    a caller that runs the engine outside this screen.
+    """
+
+    def __init__(self, db_path: str, pause_lock_file: str, config: dict | None = None,
+                 config_path: str | None = None):
         super().__init__()
         self.db_path = db_path
         self.pause_lock_file = pause_lock_file
+        self.config = config or {}
+        self.config_path = config_path
+        self._items: list[dict] = []
+        self._pass_running = False
+        # Set on unmount so a pass that is mid-wait stops waiting for the
+        # screen it can no longer draw to.
+        self._closing = False
 
     def on_mount(self) -> None:
         """Create the pause lock file when the screen is mounted."""
@@ -742,39 +766,123 @@ class SubscriptionQueueScreen(ModalScreen):
 
     def on_unmount(self) -> None:
         """Remove the pause lock file when the screen is unmounted."""
+        self._closing = True
         try:
             if os.path.exists(self.pause_lock_file):
                 os.remove(self.pause_lock_file)
         except Exception as e:
             logging.error(f"Failed to remove pause lock file: {e}")
 
-    def compose(self) -> ComposeResult:
+    @staticmethod
+    def _row_text(item: dict, status: str | None = None, colour: str | None = None):
+        """One item's line, built as Rich text so a Steam title stays literal."""
         from rich.text import Text as RichText
+        state = subscription.PENDING
+        line = RichText()
+        line.append(f"{subscription.glyph(state)} ", style=subscription.colour(state))
+        line.append(f"#{item['workshop_id']}  ")
+        line.append(str(item.get("title") or "(untitled)"))
+        if status:
+            line.append("  ")
+            line.append(status, style=colour or "white")
+        return line
+
+    def compose(self) -> ComposeResult:
+        self._items = get_queued_items(self.db_path)
         with Vertical(id="sub-queue-container"):
             yield Label("Subscription Queue", id="sub-queue-title")
-            
-            items = get_queued_items(self.db_path)
-            if not items:
+            if not self._items:
                 yield Label("Queue is empty. Press 's' on an item to add it.")
             else:
-                for item in items:
-                    wid = item['workshop_id']
-                    title = item['title']
-                    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}"
-                    # Built with Text.append rather than Text.from_markup: the
-                    # URL keeps its link style as deliberate markup, and the
-                    # title is appended as literal characters so Steam's
-                    # brackets never reach the parser at all.
-                    link_text = RichText()
-                    link_text.append(url, style=f"link {url}")
-                    link_text.append(f" : {title}")
-                    yield Static(link_text)
-            
+                yield Static(
+                    "Press Subscribe to run the queue through the engine.",
+                    id="sub-queue-status",
+                )
+                for item in self._items:
+                    yield Static(
+                        self._row_text(item),
+                        id=f"sub-item-{item['workshop_id']}",
+                    )
+            yield Button(
+                "Subscribe", id="btn-subscribe-queue", variant="primary",
+                disabled=not self._items,
+            )
             yield Button("Close", id="btn-close-sub-queue")
+
+    def _start_pass(self) -> None:
+        """Run the queue through the engine on a worker thread."""
+        if self._pass_running or not self._items:
+            return
+        self._pass_running = True
+        self.query_one("#btn-subscribe-queue", Button).disabled = True
+        self.query_one("#sub-queue-status", Static).update("Subscribing...")
+
+        def work():
+            return subscribe_engine.run_subscription_pass(
+                list(self._items),
+                config=self.config,
+                db_path=self.db_path,
+                pause_lock_file=self.pause_lock_file,
+                on_result=self._deliver_result,
+                config_path=self.config_path,
+                keep_running=lambda: not self._closing,
+            )
+
+        self.run_worker(work, name="subscribe-queue", group="subscribe-queue",
+                        thread=True, exit_on_error=False)
+
+    def _deliver_result(self, outcome) -> None:
+        """Hand one outcome to the UI thread from the worker."""
+        try:
+            self.app.call_from_thread(self._apply_result, outcome)
+        except RuntimeError:
+            # The screen closed while the pass was in flight; there is nothing
+            # left to draw, and the pass releases the pause on its own.
+            logging.debug("[subscribe] dropped a result; the screen is gone")
+
+    def _apply_result(self, outcome) -> None:
+        try:
+            row = self.query_one(f"#sub-item-{outcome.workshop_id}", Static)
+        except Exception:
+            return
+        colour = "green" if outcome.ok else "yellow"
+        row.update(self._row_text(
+            {"workshop_id": outcome.workshop_id, "title": self._title_for(outcome.workshop_id)},
+            status=subscribe_engine.status_label(outcome.status), colour=colour,
+        ))
+        if not outcome.ok and outcome.message:
+            logging.info("[subscribe] %s: %s", outcome.workshop_id, outcome.message)
+
+    def _title_for(self, workshop_id: int) -> str:
+        for item in self._items:
+            if item["workshop_id"] == workshop_id:
+                return item.get("title") or ""
+        return ""
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        """Finish the pass: re-enable the button and report the tally."""
+        if event.worker.group != "subscribe-queue":
+            return
+        if event.state in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            self._pass_running = False
+            if not self.is_mounted:
+                return
+            button = self.query_one("#btn-subscribe-queue", Button)
+            button.disabled = not self._items
+            outcomes = event.worker.result if event.state == WorkerState.SUCCESS else []
+            done = sum(1 for o in outcomes if o.ok)
+            remaining = len(outcomes) - done
+            self.query_one("#sub-queue-status", Static).update(
+                f"Pass finished: {done} subscribed, {remaining} left queued."
+                if outcomes else "Pass finished with no results."
+            )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-close-sub-queue":
             self.app.pop_screen()
+        elif event.button.id == "btn-subscribe-queue":
+            self._start_pass()
+
 
 def load_tui_state(path: str) -> dict:
     """Loads the TUI state from a YAML file."""
@@ -2082,8 +2190,13 @@ class ScraperApp(App):
         self.notify(f"Queued {len(visible_ids)} items for update.")
 
     def action_show_sub_queue(self) -> None:
-        """Shows the subscription queue modal screen."""
-        self.push_screen(SubscriptionQueueScreen(self.db_path, self.pause_lock_file))
+        """Shows the subscription queue modal screen.
+
+        The engine needs the cookie source, so the app's config travels with the
+        screen; the screen itself owns the pause for as long as it is open.
+        """
+        self.push_screen(SubscriptionQueueScreen(
+            self.db_path, self.pause_lock_file, self.config, self.config_path))
 
     async def action_quit(self) -> None:
         """Quit the application."""

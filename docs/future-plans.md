@@ -346,10 +346,51 @@ The old wording is also load-bearing in three places that would move with it:
 
 ## Removing the browser bridge from the subscribe path
 
-**Status: Deferred** — waiting on captured evidence from a real subscribe.
+**Status: Partly landed.** The captured evidence arrived: two real subscribes were run against
+production, captured end to end, and the browser-free engine that replaces the bridge's job now
+exists in `src/subscribe_engine.py` and drives the TUI's subscription queue. What remains is the Web
+UI's adoption of that engine and the removal of the bridge itself.
 
 The Web UI cannot subscribe on its own today, and that is the only reason the Tampermonkey bridge exists: the server could not build a working Steam session request, so a browser tab did the subscribing and reported the outcome back. Everything the bridge compensates for is now addressed on the server side — the credential comes from one read (`web_scraper._build_workshop_cookies`, which is also where the CSRF token now comes from), the request presents the same identity as every scrape, and `/api/subscribe/<id>` records the confirmation instead of discarding it. That is the same route the TUI has always called.
 
 Once captures of real traffic confirm that path, the bridge becomes removable along with everything that exists to serve it: the userscript, the `autosubscribe=true` tab flow, the `/api/sessionid` token push, the verification poll against `/api/queued` and `/api/sub_failures`, and the throttle-reporting endpoints. The subscribe action in the Web UI then becomes one request to the route the TUI uses, and the grid's marker updates from the same response.
 
-One thing this must not quietly drop: the tab flow spread many subscribes across a browser session and reported throttle pages separately, and the replacement needs equivalent pacing rather than a burst of server-side POSTs. The project already has the machinery — the shared AIMD delay and the per-account budget — so this is a matter of routing subscribe through it, not of inventing something.
+One thing this must not quietly drop: the tab flow spread many subscribes across a browser session and reported throttle pages separately, and the replacement needs equivalent pacing rather than a burst of server-side POSTs. The project already has the machinery — the shared AIMD delay and the per-account budget — so this is a matter of routing subscribe through it, not of inventing something. The engine does exactly that: both of its page reads wait the shared `daemon.web_delay_seconds` and feed their outcome back into it, while the subscribe POST is the click and is deliberately exempt (it is an XHR, not a page load).
+
+---
+
+## Retiring the subscribe confirmation read
+
+**Status: Planned** — parked until the browser-free flow has bedded in.
+
+The engine reads the item page, sends the POST only when the page says the item is not subscribed,
+and then reads the page again to confirm. That third read is deliberate while the flow is being
+proven, but it is a cost: it **doubles each item's gated page reads** (the POST itself is exempt), so
+a queue of N items costs 2N interval-paced reads where 1N would do. It goes first, ahead of any other
+change to the engine.
+
+Why it can go: the production confirmation measured the endpoint directly. `POST /sharedfiles/subscribe`
+returned `{"success": 1}` for an item that was **already** subscribed, and the item's page was still
+`toggled` afterwards with a byte-identical length — so the call is safe to repeat, and the response
+body cannot distinguish "newly subscribed" from "already subscribed". The page read is the only
+confirmation *available*, not the only one that will always be needed. The step is isolated in
+`subscribe_engine.confirm_subscription` behind the module-level `VERIFY_AFTER_SUBSCRIBE` switch, so
+retiring it is one call site and one flag and cannot perturb the click, the recording or the capture.
+
+What must not go with it is the **pre-read**, and the order matters:
+
+1. **First, drop the confirmation read** (`VERIFY_AFTER_SUBSCRIBE = False`), which removes one read per
+   item and leaves the POST's own answer as the record.
+2. **Only then, and only once idempotency is trusted beyond a single observation, consider dropping
+   the pre-read.** It has two jobs that no other code does: it is the guard against the endpoint ever
+   turning out to be a *toggle* (an item that is already subscribed would be unsubscribed by a blind
+   POST), and it is the filter that lets a re-run of a queue skip items that are already subscribed
+   without spending a request on them. Until idempotency has more than one observation behind it, both
+   jobs are load-bearing, and the "already `toggled` → no request at all" short-circuit stays.
+
+**The cheap middle ground.** Rather than a third read or trusting the JSON, the existing daily
+subscription reconcile (`src/subscription_sync.py`, the `/my/myworkshopfiles/?browsefilter=mysubscriptions`
+walk) can be the confirmer: it costs no extra request, because it already runs once a day and already
+writes `own_subscribed`. The price is latency — up to a day to notice that a subscribe silently failed
+— and that is the trade to weigh when the confirmation read is retired.
+
