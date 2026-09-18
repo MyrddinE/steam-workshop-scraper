@@ -1935,6 +1935,14 @@ def apply_own_subscriptions(db_path: str, appid: int, subscribed_ids,
     to not-subscribed. The caller is responsible for establishing that
     completeness (see ``src.subscription_sync``).
 
+    Every id on the list is written with ``mark_own_subscribed``'s contract,
+    whether the read is complete or partial: marked subscribed, its first-seen
+    stamp set if it is still NULL, and its ``is_queued_for_subscription`` flag
+    cleared -- there is nothing pending for an item the walk saw subscribed, so
+    leaving the flag set would list it for ever and cost a page read a pass. The
+    queue clear is bounded to the ids the walk saw; an item it did not see keeps
+    its queue flag.
+
     When ``complete`` is False the list is treated as a partial observation and
     only the one-way facts are applied: items on it are marked subscribed, their
     first-seen stamp is set if it is still NULL, and their queue flag is cleared.

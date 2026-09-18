@@ -66,8 +66,11 @@ not why it must be permanent. The step therefore lives alone in
 switch and cannot perturb the click, the recording or the capture. The two reads
 that remain are kept deliberately: the pre-read both guards against the endpoint
 ever turning out to be a toggle and skips the POST for an item that is already
-subscribed, which is what makes re-running a queue cheap. The retirement order
-is in ``docs/future-plans.md``.
+subscribed, which is what makes re-running a queue cheap. That skip records the
+observation like the confirmed path does -- the pre-read's ``toggled`` is the
+same page authority -- so an item already subscribed drains from the queue
+through :func:`mark_own_subscribed` instead of being read again on every pass.
+The retirement order is in ``docs/future-plans.md``.
 
 Every page read and every POST is captured through
 :func:`src.capture.record_web_download` under ``item_page`` and ``subscribe``,
@@ -678,7 +681,14 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
 
     if before == BUTTON_SUBSCRIBED:
         # The browser plugin never clicked an item it could see was already
-        # subscribed, and neither does this: no request, no toggle question.
+        # subscribed, and neither does this: no request, no toggle question. The
+        # page is the same authority the confirmed path trusts, so the
+        # observation is recorded with the same write -- `mark_own_subscribed`
+        # sets `own_subscribed`, clears `is_queued_for_subscription` and stamps
+        # the sticky first-seen time. Recording nothing here is what left an
+        # item that was already subscribed in the queue for every later pass to
+        # read and skip again.
+        mark_own_subscribed(db_path, workshop_id)
         return SubscribeOutcome(
             workshop_id, ALREADY,
             "The item page already shows it subscribed; no request was sent.",

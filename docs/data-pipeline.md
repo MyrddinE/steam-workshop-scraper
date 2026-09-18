@@ -263,7 +263,12 @@ So one run is:
    class list.
 2. **Short-circuit** when `toggled` is present: the outcome is `already_subscribed`, and **no request
    is sent**. This is both the guard against the endpoint ever turning out to be a toggle and the
-   reason re-running a queue is cheap.
+   reason re-running a queue is cheap. The page is the same authority the confirmation step trusts,
+   so the observation is recorded with the same write the confirmed path uses
+   (`mark_own_subscribed`): `own_subscribed` is set, `own_first_subscribed_at` is stamped if it was
+   still NULL, and `is_queued_for_subscription` is cleared. Recording nothing here would leave an
+   item already known to be subscribed in the queue, so every later pass would list it and spend a
+   gated page read rediscovering that it is subscribed.
 3. **Click** (only when the page says not subscribed): `post_subscribe_request` sends the POST, built
    from the same helpers `/api/subscribe/<id>` uses. `resolve_subscribe_token` takes the form token
    from the page just read -- `g_sessionID` first, then the cookie set, then the pushed/configured

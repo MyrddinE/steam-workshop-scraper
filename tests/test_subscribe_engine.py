@@ -27,6 +27,7 @@ from src import capture, pacing, session_health, subscribe_engine as engine, web
 from src import web_worker
 from src.database import (
     get_connection,
+    get_queued_items,
     initialize_database,
     insert_or_update_item,
     toggle_subscription_queue_status,
@@ -242,7 +243,14 @@ def _queued(db_path, wid=7):
 # --- the already-subscribed no-op -------------------------------------------
 
 def test_an_already_subscribed_item_sends_no_request(engine_env, monkeypatch):
-    """`toggled` short-circuits before any POST -- the confirmed semantics."""
+    """`toggled` short-circuits before any POST -- and records what it saw.
+
+    The page is the authority that makes skipping the request safe, so the same
+    observation the confirmed path writes is recorded here: the subscription is
+    marked, the sticky first-seen time is stamped, and the queue flag is cleared.
+    The no-request property is unchanged -- an already-subscribed item still
+    costs no POST.
+    """
     db_path, config = engine_env
     body = _capture_with_state(engine.BUTTON_SUBSCRIBED)
     monkeypatch.setattr(web_scraper, "scrape_extended_details", _Fetcher([body]))
@@ -254,7 +262,33 @@ def test_an_already_subscribed_item_sends_no_request(engine_env, monkeypatch):
     assert outcome.status == engine.ALREADY
     assert outcome.subscribed is True
     assert session.calls == [], "an already-subscribed item must not be POSTed"
-    assert _row(db_path, 7)["own_subscribed"] == 0, "no request, so nothing to record"
+    row = _row(db_path, 7)
+    assert row["own_subscribed"] == 1, "the page said subscribed, so record it"
+    assert row["is_queued_for_subscription"] == 0, "nothing is pending once subscribed"
+    assert row["own_first_subscribed_at"] is not None, "the first-seen time is stamped"
+
+
+def test_the_already_subscribed_no_op_drains_the_subscription_queue(engine_env, monkeypatch):
+    """An item the page already shows subscribed leaves the queue after a pass.
+
+    ``get_queued_items`` is the one query both front ends list through, so this
+    pins the recorded symptom: the flag must be clear, not left for every later
+    pass to list and re-read.
+    """
+    db_path, config = engine_env
+    body = _capture_with_state(engine.BUTTON_SUBSCRIBED)
+    monkeypatch.setattr(web_scraper, "scrape_extended_details", _Fetcher([body]))
+    session = _Session(payload={"success": 1})
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: session)
+
+    assert [item["workshop_id"] for item in get_queued_items(db_path)] == [7]
+
+    engine.run_subscription_pass(
+        [{"workshop_id": 7}], config=config, db_path=db_path,
+        pause_lock_file=str(Path(db_path).with_suffix(".pauselock")))
+
+    assert get_queued_items(db_path) == []
+    assert session.calls == [], "draining the queue still costs no POST"
 
 
 def test_the_already_subscribed_no_op_reads_a_local_capture(engine_env, monkeypatch):
@@ -708,11 +742,15 @@ def test_the_pass_spaces_every_item(tmp_path, monkeypatch):
         pacing, "wait",
         lambda seconds, keep_running=None: waits.append(seconds) or True)
     monkeypatch.setattr(web_scraper, "scrape_extended_details", _Fetcher([TOGGLED]))
+    # The already-subscribed branch now records what the page showed, so the
+    # pass needs the schema; the items themselves are not required for spacing.
+    db_path = str(tmp_path / "x.db")
+    initialize_database(db_path)
 
     outcomes = engine.run_subscription_pass(
         [{"workshop_id": 1}, {"workshop_id": 2}],
         config={"daemon": {"web_delay_seconds": 8.0}},
-        db_path=str(tmp_path / "x.db"),
+        db_path=db_path,
         pause_lock_file=str(tmp_path / ".pauselock"))
 
     assert [o.status for o in outcomes] == [engine.ALREADY, engine.ALREADY]
