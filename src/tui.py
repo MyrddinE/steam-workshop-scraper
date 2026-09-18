@@ -1061,7 +1061,7 @@ class WorkshopItem(ListItem):
     # a single timer. The modulus keeps the sequence repeating exactly for the
     # slowest stage.
     _tick = 0
-    _TICK_MODULUS = len(BRAILLE) * max(m for _s, m, _c in pending.STAGES)
+    _TICK_MODULUS = len(BRAILLE) * max(m for _s, m, _c, _l in pending.STAGES)
 
     def __init__(self, item_data: dict):
         super().__init__()

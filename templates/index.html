@@ -571,12 +571,28 @@ function _pendingStage(item) {
   return null;
 }
 
+// What the stage's marker means, in words, for its title. The wording is kept
+// in src/pending.py beside the stage's speed and colour -- the TUI draws the
+// same state and has no hover, so a table that lived only here could describe
+// it differently. tests/test_pending.py holds this copy to that table.
+function _pendingLabel(stage) {
+  if (stage === 'image') return 'Waiting for the image';
+  if (stage === 'translation') return 'Waiting for the translation';
+  if (stage === 'web') return 'Waiting for the web scrape';
+  return '';
+}
+
 function _applyPending(el, item) {
   const stage = _pendingStage(item);
   ['image', 'translation', 'web'].forEach(function(name) {
     el.classList.toggle('pending-' + name, stage === name);
   });
   el.classList.toggle('has-spinner', stage !== null);
+  // The marker is the only part of the row that knows which stage is set, so
+  // the wording goes on it here; an empty label clears a stale tooltip when the
+  // stage is gone.
+  const spinner = el.querySelector('.grid-spinner');
+  if (spinner) spinner.title = _pendingLabel(stage);
 }
 
 // ── the owner's subscription marker ──────────────────────────────────────────

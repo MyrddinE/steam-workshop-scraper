@@ -123,11 +123,13 @@ When items appear in the list, the TUI bumps their priority for web scraping, tr
 
 Each row's marker is not a binary "pending": its speed says *which* stage the item is waiting on, and its colour fades as it slows, so a marker that will clear in seconds does not look like one that may take hours.
 
-| stage | rotation | colour |
-|---|---|---|
-| image | 1x | vivid green |
-| translation | 4x slower | mid green |
-| web scrape | 16x slower | grey |
+| stage | rotation | colour | wording (web tooltip) |
+|---|---|---|---|
+| image | 1x | vivid green | Waiting for the image |
+| translation | 4x slower | mid green | Waiting for the translation |
+| web scrape | 16x slower | grey | Waiting for the web scrape |
+
+The wording sits with the speed and colour in `src/pending.py` even though only the web marker has a hover to show it. The TUI has no hover and draws no text, but it names the same stage, so a description kept only in the template could describe that state differently from this table.
 
 Three rules, all in `src/pending.py` and mirrored by the web list:
 
