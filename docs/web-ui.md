@@ -157,15 +157,54 @@ of the item `get_item_details` reads.
 
 Stats are in a single-column vertical layout (`.stat-row`), not the previous two-column grid.
 
-### Jump to author
+### Jump to author, and author mode
 
-The creator in the heading is a button, the web equivalent of the TUI's `btn-jump-author`. It calls `jumpToAuthor(creatorId)`, which sets an ordinary `Author ID` / `is` filter row through `addRow` and re-runs the search — the same field, operator and value the TUI's jump builds. If the builder already holds an Author ID row, that row is switched to `is` instead of a second, contradictory one being added.
+The creator in the heading is a button, the web equivalent of the TUI's `btn-jump-author`. It calls
+`jumpToAuthor(creatorId)`, which enters the web's **author mode** — the counterpart of the TUI's
+single-creator mode (`is_single_creator_mode`, `action_return_from_creator`, `btn-return` in
+`src/tui.py`). The filter rows are replaced by one `Author ID` / `is` row for that creator and the
+search re-runs, so the view is everything by that author and nothing the previous filters would have
+excluded. The same field, operator and value the TUI's jump builds.
 
-There is deliberately **no single-creator mode and no Return button**. The TUI needs them because its jump replaces a fixed set of rows and cannot undo that; the web builder is always visible and its rows are individually removable, so deleting the author row and searching again restores the previous view. That also means no in-memory filter snapshot has to survive a detail re-render.
+The sort menus and the `Subscribed:` overlay are **not** part of the filter builder, so the jump
+leaves them alone — exactly as the TUI leaves its sort alone. The filter area is swapped for an
+author box (`#author-mode-bar`) naming the creator, with a `Return` button
+(`#btn-return-author`), and Save Filter is hidden: the author row is not a filter set the user
+assembled, and saving it would overwrite the scraper's stored filter with one they never chose. The
+TUI hides the same button for the same reason.
 
-`creatorId` comes from the payload's `creator_id`, which is a string. A SteamID64 is seventeen digits — beyond the range a JavaScript number represents exactly — so a numeric field would round in `JSON.parse` and the filter would name a different account (`src/webserver.py`, `_detail_payload`). An item with no creator renders the name plainly and offers no jump.
+`Return` restores the view exactly as the jump took it. Before the jump, `_viewSnapshot()` captures
+the filter rows, both sort values, the overlay value, the open item and the grid's scroll position;
+`returnFromAuthor()` puts them back and then restores the item and scroll through `_restoreView`, the
+same routine a reload of a saved view runs. The snapshot is **in memory**, like the TUI's
+`_pre_jump_filters`: `_saveViewState` is a no-op while `_authorMode` is set, so the value in
+`localStorage` stays the view Return restores even if the search or the scroll listener runs in
+between. Returning re-opens the item and puts the scroll back, which the TUI's Return does not; a
+browser can afford it and the mode's point is that a half-restore is worse than none.
 
-`/api/authors` (the full author list) is still not consumed: a single jump needs only the one ID already in the payload, and an author picker was out of scope, so no request was added for it.
+`creatorId` comes from the payload's `creator_id`, which is a string. A SteamID64 is seventeen digits
+— beyond the range a JavaScript number represents exactly — so a numeric field would round in
+`JSON.parse` and the filter would name a different account (`src/webserver.py`, `_detail_payload`). An
+item with no creator renders the name plainly and offers no jump.
+
+### The creator list
+
+`#btn-authors` in the header opens a picker (`#author-overlay`, `#author-list`), which
+`GET /api/authors` fills. Picking a creator closes the picker and enters author mode through the same
+`jumpToAuthor` the item jump uses, so there is one mode and one entry into it, not a second
+implementation.
+
+The route existed with no client before this. The item jump only reaches a creator whose item is
+already on screen; the list is the way to reach one that is not, and it needs only the IDs
+`/api/authors` already returns (`get_all_authors`, `ORDER BY creator`) — no new endpoint and no new
+query.
+
+The TUI has no equivalent list, and this is recorded rather than glossed: `src.tui` imports
+`get_all_authors` and never calls it (the only caller is `/api/authors` in `src/webserver.py`), so the
+TUI's only route to a creator is typing an `Author ID` into a filter row or jumping from one of that
+creator's items — both of which the browser has too. This is therefore not a function one side has and
+the other lacks; the picker is a third route to the same end, earned by the fact that a creator ID is
+not something a person types or remembers. The parity position is stated in [tui.md](tui.md#jump-to-author).
 
 ### The subscription marker (queue / unqueue)
 
@@ -221,14 +260,15 @@ correct whenever it is drawn, which is the same promise the TUI's marker poll ma
 The marker sits inside the cell that opens the detail pane, so its click handler stops propagation:
 without that, toggling the queue would also drag the pane to the item.
 
-The Web UI's actual subscribe still runs through the browser bridge today, but it will adopt
-`src/subscribe_engine.py` next: the engine already performs the read → click → confirm flow without a
-browser, its page reads honour the shared adaptive web interval, and its POST is the same request the
-route builds. The TUI's subscription queue drives it now. The deprecation of the userscript and its
-bridge endpoints is recorded in
-[future-plans.md](future-plans.md#removing-the-browser-bridge-from-the-subscribe-path), and the
-engine's semantics are in
-[data-pipeline.md](data-pipeline.md#subscribe-engine-browser-free).
+The Web UI's subscribe action now runs through the server, not the browser bridge. `doSubscribe` POSTs
+`/api/subscribe/<id>`, which reads the item page on the server, takes that page's own CSRF token,
+posts to Steam and records the answer — the route the TUI has always driven
+([data-pipeline.md](data-pipeline.md#subscribe-engine-browser-free)). **The bridge is not removed.**
+The userscript, `/api/sessionid`, `/api/subscribed`, the verification poll and the throttle endpoints
+all stay exactly as they were; the page has simply stopped using the tab flow as its path. The owner
+wants the new route proven in use before anything is deleted, so the bridge stays installed and the
+deprecation stays recorded in
+[future-plans.md](future-plans.md#removing-the-browser-bridge-from-the-subscribe-path).
 
 `previously` can only ever mean "we have **seen** this account subscribed". Steam exposes no
 per-account subscription history — `lifetime_subscriptions` is an item-wide count and
@@ -384,38 +424,50 @@ The budget is per account or address and refills over minutes.
 
 Checks `document.body.dataset.userscript` for presence and `userscriptVer` against the page's expected version from the meta tag. If outdated, offers to open the install URL.
 
+**Nothing calls it on the subscribe path any more**, because that path is the server route and needs no
+userscript. The function, the `userscript-version` meta and the endpoint it points at are kept as
+part of the bridge, which stays installed; the button's own install prompt is gone with its last
+caller, so the script is reachable by visiting `/userscript/steam_subscribe.user.js` directly. The
+detection contract — the meta tag and the script's own `@version` agreeing — is still asserted by
+`tests/test_userscript_contract.py`.
+
 ### Install URL
 
-The "Subscribe" button's install link points to `/userscript/steam_subscribe.user.js` — a dynamic endpoint that injects `@include` lines for the server's host IP and port, so the script works on LAN IPs as well as localhost.
+`/userscript/steam_subscribe.user.js` is a dynamic endpoint that injects `@include` lines for the server's host IP and port, so the script works on LAN IPs as well as localhost. It was the "Subscribe" button's install link; that button no longer opens tabs, so the URL is reached directly.
 
 ### Subscribe Flow
 
-1. User clicks Subscribe on the web UI → `doSubscribe` checks `_userscriptPresent()`
-2. If userscript absent: shows install instructions
-3. If present: POSTs to `/api/subscribe/<workshop_id>`
-4. Server reads `steamLoginSecure` (from config `session.login_secure`, which can be a YAML list joined with `%7C%7C`) and the item page it fetches on the shared web interval; the CSRF token is that page's own `g_sessionID`, with the pushed `_sessionid` and config `session.id` as fallbacks
-5. Server POSTs to `steamcommunity.com/sharedfiles/subscribe` with browser-like headers (User-Agent, Origin, Referer with workshop URL) and cookies
-6. Steam's answer is mapped to user-facing messages: a refusal (`success: 2`/`15`, or HTTP 401) is a stale CSRF token when the same attempt's page read was authenticated — the login is not reported as expired — and a session problem only when that read was anonymous
+1. User clicks Subscribe on the web UI → `doSubscribe` POSTs `/api/subscribe/<workshop_id>`
+2. Server reads `steamLoginSecure` (from config `session.login_secure`, which can be a YAML list joined with `%7C%7C`) and the item page it fetches on the shared web interval; the CSRF token is that page's own `g_sessionID`, with the pushed `_sessionid` and config `session.id` as fallbacks
+3. Server POSTs to `steamcommunity.com/sharedfiles/subscribe` with browser-like headers (User-Agent, Origin, Referer with workshop URL) and cookies
+4. Steam's answer is mapped to user-facing messages: a refusal (`success: 2`/`15`, or HTTP 401) is a stale CSRF token when the same attempt's page read was authenticated — the login is not reported as expired — and a session problem only when that read was anonymous
+5. On `success: 1` the route stamps `own_subscribed` and clears the queue flag; the page then re-reads `/api/item/<id>` and re-renders the pane and the matching cell's marker from that payload, the same read-back a queue toggle uses
 
-### The queued-row countdowns, and why the TUI's is not the same
+The button sends no tab and needs no userscript. `_userscriptPresent` and its install prompt remain in the page, but nothing in the subscribe action calls them any more: the bridge is kept for its own endpoints, not as this button's fallback. A refusal shows the route's own message rather than falling back to a tab.
 
-The autosubscribe overlay gives each queued row a live countdown to when it will be reached:
-`openAt = i * ceil(stepDelay / 1000)`, rendered as `(openAt - elapsed) + 's'`, cleared once the item is
-opened, ticking four times a second (`templates/index.html`, the `_subScheduleIv` loop). `stepDelay` is
-`WEB_DELAY`, injected from `daemon.web_delay_seconds` (`src/webserver.py`). Each row's cost there is
-**one interval**, because the flow opens **one browser tab per item** and the tab spends a single
-page load before the userscript reports back; the tab's own click is browser-side and pays nothing on
-this side.
+**A drain serialises; it does not schedule.** `_startAutoSubscribe` loops over `/api/queued` and
+awaits `/api/subscribe/<id>` for each item before starting the next. The route's page read is gated on
+the shared web interval and its POST is exempt, so the interval is already paid once per item inside
+the call; a second client-side delay would pay it twice, and firing the items without awaiting would
+run two gated reads concurrently against one shared interval. This is why the row timer shows elapsed
+time for the row being asked about rather than a countdown to a scheduled tab.
 
-The TUI queue screen draws the same shape of estimate, but the flow underneath it is the engine
-(`src/subscribe_engine.py`), not a tab: each item costs **two** gated page reads — the pre-read that
-guards the POST and the confirmation read — while the POST is exempt as an XHR. Its per-item step is
-therefore **twice** the shared configured delay, read fresh each tick through
-`src.web_worker.configured_web_delay` so a throttle's doubling mid-pass moves it; the row being read
-now is shown distinctly (`subscribing...`) from those still waiting. Both figures are estimates, not
-promises: a pass can be refused, throttled or cancelled. **The difference is deliberate and is not a
-missing parity fix**: each estimate is measured against its own flow's cost, and the Web UI adopting
-the engine — which would collapse the two into one — is the separate workstream recorded in
+### Queued-row timing, and why it differs from the TUI's
+
+The autosubscribe overlay keeps one timer (`_subScheduleIv`) whose only job is to tick an elapsed
+figure on the row currently being asked about; the row's outcome is written from the route's own
+answer. There is deliberately **no schedule of opens**: the drain awaits each
+`/api/subscribe/<id>` and the route's page read pays the shared interval, so the POST it sends is
+exempt and a row's cost is one gated read — the same shape the TUI's queue has for its POST, though
+the TUI additionally spends a confirmation read per item (`src/subscribe_engine.py`). Nothing in the
+page spaces the requests: the route reads the configured delay itself, fresh per call, so a throttle's
+doubling mid-pass moves the pacing without the page knowing, and a second client-side delay would pay
+the interval twice per item.
+
+`daemon.web_delay_seconds` is still injected as `WEB_DELAY`, but the page no longer uses it to space
+anything. It is left in place rather than removed: it is served from `src/webserver.py` and is the
+number a reader would expect the page's own timing to be built from, and the removal of the tab flow
+that used it is the separate workstream recorded in
 [future-plans.md](future-plans.md#removing-the-browser-bridge-from-the-subscribe-path). The TUI
 screen's own description is in [tui.md](tui.md#subscription-queue-sl-keys).
 
@@ -487,7 +539,7 @@ Re-reads `steamLoginSecure` from the browser's cookie store after the operator s
 
 ### `/api/stats`, `/api/tags`, `/api/authors`
 
-Read-only endpoints returning database statistics. `/api/stats` still returns the old flat payload; the statistics panel uses the per-metric endpoints below instead. `/api/authors` still has no client.
+Read-only endpoints returning database statistics. `/api/stats` still returns the old flat payload; the statistics panel uses the per-metric endpoints below instead. `/api/authors` returns the distinct creator IDs in `ORDER BY creator` and is consumed by the creator picker ([The creator list](#the-creator-list)).
 
 ### `/api/analysis` — GET
 

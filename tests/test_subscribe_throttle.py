@@ -77,10 +77,26 @@ def test_the_plugin_reports_throttling_rather_than_failure():
 # --- the pause must be released --------------------------------------------
 
 def _throttle_body():
+    """The source of `_checkSubThrottle`, brace-matched.
+
+    It is nested inside `_startAutoSubscribe`, so the end cannot be found by
+    indentation: an early return inside the function is also a line at the
+    function body's own indent level, and a slice to the first such line stops
+    before the release this test exists to pin.
+    """
     from pathlib import Path
     html = Path("templates/index.html").read_text(encoding="utf-8")
-    body = html[html.index("async function _checkSubThrottle()"):]
-    return body[:body.index("\n  }")]
+    start = html.index("async function _checkSubThrottle()")
+    brace = html.index("{", start)
+    depth = 0
+    for i in range(brace, len(html)):
+        if html[i] == "{":
+            depth += 1
+        elif html[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return html[start:i + 1]
+    raise AssertionError("unterminated _checkSubThrottle")
 
 
 def test_a_throttle_stop_releases_the_daemon_pause():

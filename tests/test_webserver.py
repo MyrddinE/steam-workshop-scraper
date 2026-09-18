@@ -1603,6 +1603,10 @@ global.VIEW_STATE_KEY = key;
 global.VIEW_STATE_VERSION = version;
 global.ALL_FIELDS = ['Title', 'Subs'];
 global._restoringView = false;
+// Author mode is a no-op writer for the same reason a restore is: the stored
+// entry is the view Return restores, so the author's filter set must not
+// replace it.
+global._authorMode = false;
 global._selectedWid = 42;
 const store = {};
 global.localStorage = {
@@ -1647,6 +1651,17 @@ delete store[key];
 global._restoringView = true;
 saveFn();
 out.wroteWhileRestoring = Object.prototype.hasOwnProperty.call(store, key);
+
+// The same holds in author mode: the saved view is the one Return restores, so
+// a search or a scroll while the mode is on must not overwrite it.
+delete store[key];
+global._restoringView = false;
+global._authorMode = true;
+saveFn();
+out.wroteInAuthorMode = Object.prototype.hasOwnProperty.call(store, key);
+global._authorMode = false;
+saveFn();
+out.wroteAfterAuthorMode = JSON.parse(store[key] || 'null');
 emit(JSON.stringify(out));
 """
 
@@ -1698,6 +1713,10 @@ def test_view_state_round_trips_and_rejects_stale_or_malformed_entries(web_clien
     assert out["filtered"]["subscribed"] == "any"
     assert out["wroteWhileRestoring"] is False, \
         "a restore in progress must not overwrite the state it is reading"
+    assert out["wroteInAuthorMode"] is False, \
+        "author mode must not overwrite the view its Return restores"
+    assert out["wroteAfterAuthorMode"] == expected, \
+        "leaving author mode must let the view be persisted again"
 
 
 LOAD_STATE_DRIVER = """
@@ -1872,6 +1891,625 @@ def test_restore_pages_to_the_saved_position_and_scroll_wins_at_the_end(web_clie
     assert max_batches == 40
     assert out["cap"]["batches"] == max_batches, \
         "restoring an unreachable position must stop at the batch cap"
+
+# ── author mode ──────────────────────────────────────────────────────────────
+#
+# The TUI's single-creator mode exists because a jump replaces the filter set and
+# cannot undo that. The web page now does the same, and the property that matters
+# is the return: the view must come back exactly as the jump took it. These
+# drivers run the served functions in node against a fake DOM, so the assertions
+# are on the state the page ends up in, not on a button merely existing.
+
+
+# A DOM small enough to run the author code without a browser, and honest about
+# what it is: elements hold children, form controls hold a value, and a class or
+# data attribute can be found. `innerHTML = ''` clears children and never parses
+# markup, because the page builds rows as elements; a test that relied on string
+# parsing would be testing something the page does not do.
+FAKE_DOM = r"""
+function fakeEl(tag) {
+  const el = {
+    tagName: String(tag).toUpperCase(), children: [], style: {}, dataset: {},
+    textContent: '', className: '', disabled: false, listeners: {},
+    appendChild(child) { el.children.push(child); return child; },
+    remove() {},
+    addEventListener(name, fn) { (el.listeners[name] = el.listeners[name] || []).push(fn); },
+    click() { (el.listeners.click || []).forEach((fn) => fn()); },
+    closest(sel) { return sel === 'button[data-author]' && el.tagName === 'BUTTON' ? el : null; }
+  };
+  // The page toggles row state through classList; the classes land on the same
+  // string className so `done`/`failed` are readable the way the CSS sees them.
+  el.classList = {
+    add(name) {
+      const parts = String(el.className).split(/\s+/).filter(Boolean);
+      if (parts.indexOf(name) === -1) parts.push(name);
+      el.className = parts.join(' ');
+    },
+    remove(name) {
+      el.className = String(el.className).split(/\s+/).filter((c) => c && c !== name).join(' ');
+    },
+    contains(name) { return String(el.className).split(/\s+/).indexOf(name) !== -1; }
+  };
+  Object.defineProperty(el, 'innerHTML', {
+    get() { return ''; },
+    set(value) { if (!value) el.children.length = 0; },
+    configurable: true
+  });
+  const byClass = (node, name) => {
+    for (const child of node.children || []) {
+      if (String(child.className).split(/\s+/).indexOf(name) !== -1) return child;
+      const hit = byClass(child, name);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  el.querySelector = function(sel) {
+    if (sel[0] === '.') return byClass(el, sel.slice(1));
+    const m = sel.match(/\[data-wid="(\d+)"\]/);
+    if (m) {
+      for (const child of el.children) {
+        if (String(child.dataset.wid) === m[1]) return child;
+      }
+    }
+    return null;
+  };
+  return el;
+}
+function fakeFilterRow(field, op, value) {
+  const row = fakeEl('div');
+  row.className = 'filter-row';
+  const fieldSelect = fakeEl('select'); fieldSelect.className = 'field-select'; fieldSelect.value = field;
+  const opSelect = fakeEl('select'); opSelect.className = 'op-select'; opSelect.value = op;
+  const valueInput = fakeEl('input'); valueInput.className = 'value-input'; valueInput.value = value;
+  row.querySelector = function(sel) {
+    const cls = sel.replace('.', '');
+    if (cls === 'field-select') return fieldSelect;
+    if (cls === 'op-select') return opSelect;
+    if (cls === 'value-input') return valueInput;
+    return null;
+  };
+  return {row: row, field: field, op: op, value: value};
+}
+"""
+
+
+def _author_driver(script, tmp_path):
+    """Run the author-mode functions from the served page in node.
+
+    The harness installs the stubs the page's own module scope would provide --
+    the DOM lookups, the row builder, the search call -- and records what the
+    jump and the return did to them. `_restoreView` and `showDetail` are stubbed
+    because they page the result set, which the restore test above already
+    covers; what is asserted here is the state handed to them.
+
+    The served functions are injected as parenthesised function expressions, so
+    `__JUMPTOAUTHOR__('76561198000000000')` is an IIFE. A bare `async function
+    foo() { ... }()` declaration followed by an argument is a syntax error, and
+    the page's own module scope is not reproduced here.
+    """
+    driver = (AUTHOR_MODE_DRIVER
+              .replace("__DOM__", FAKE_DOM)
+              .replace("__VIEWSNAPSHOT__", _extract_function(script, "_viewSnapshot"))
+              .replace("__SETAUTHORMODEUI__", _extract_function(script, "_setAuthorModeUi"))
+              .replace("__JUMPTOAUTHOR__", "(" + _extract_function(script, "jumpToAuthor") + ")")
+              .replace("__RETURNFROMAUTHOR__", "(" + _extract_function(script, "returnFromAuthor") + ")")
+              .replace("__AUTHORMODEACTIVEFN__", "(" + _extract_function(script, "_authorModeActive") + ")")
+              .replace("__SHOWAUTHORLIST__", "(" + _extract_function(script, "showAuthorList") + ")")
+              .replace("__INITAUTHORLIST__", "(" + _extract_function(script, "_initAuthorList") + ")()")
+              .replace("__CLOSEAUTHORLIST__",
+                       "(function(event) { _closedList += 1; "
+                       "_elements['author-overlay'].style.display = 'none'; })"))
+    return _run_node(driver, tmp_path)
+
+
+# The fake harness. `__DOM__` and the extracted functions are substituted in.
+AUTHOR_MODE_DRIVER = """
+__DOM__
+
+let _selectedWid = 222;
+let _authorMode = false;
+let _preJumpView = null;
+let _snapshotSubscribed = null;
+let _appliedFilters = [];
+let _appliedOverlay = null;
+let _detailOpened = [];
+let _closedList = 0;
+let _restoreViewState = null;
+const _searches = [];
+
+function _rowOf(r) { return {field: r.row.querySelector('.field-select').value, op: r.row.querySelector('.op-select').value, value: r.row.querySelector('.value-input').value}; }
+function getFilters() { return Array.from(_rows).map(_rowOf); }
+// The page builds rows with `innerHTML = ''` then `appendChild`. The fake
+// element's innerHTML setter cannot reach this list, so the clear is mirrored
+// here -- without it the removed rows would keep answering getFilters().
+function _dropRows() { _rows.length = 0; }
+function _setRowsFromFilters(filters) {
+  const container = _elements['filter-rows'];
+  container.children.length = 0;
+  _dropRows();
+  filters.forEach((f) => addRow(undefined, f));
+}
+function addRow(logic, initial) {
+  const init = initial || {field: 'Title', op: 'contains', value: ''};
+  const r = fakeFilterRow(init.field, init.op, init.value);
+  _rows.push(r);
+  _elements['filter-rows'].appendChild(r.row);
+}
+function _applyFilters(filters) { _appliedFilters = filters; _setRowsFromFilters(filters); }
+function _overlayValue() { return _snapshotSubscribed; }
+function _applySubscribedOverlay(value) { _appliedOverlay = value; }
+function _syncSubscribedOverlay() { _syncs += 1; }
+function doSearch(reset) { _searches.push(reset); return Promise.resolve(); }
+function _restoreView(state) { _restoreViewState = state; return Promise.resolve(); }
+function showDetail(wid) { _detailOpened.push(wid); return Promise.resolve(); }
+__VIEWSNAPSHOT__
+__SETAUTHORMODEUI__
+
+let _syncs = 0;
+const _elements = {
+  'author-mode-bar': fakeEl('div'),
+  'author-mode-name': fakeEl('span'),
+  // The page replaces the builder by setting `innerHTML = ''` and mounting
+  // fresh rows. The fake element cannot reach this driver's row list from its
+  // own setter, so the clear is mirrored in the trap.
+  'filter-rows': new Proxy(fakeEl('div'), {
+    set(target, prop, value) {
+      if (prop === 'innerHTML' && !value) _rows.length = 0;
+      target[prop] = value;
+      return true;
+    }
+  }),
+  'filter-buttons': fakeEl('div'),
+  'btn-save-filter': fakeEl('button'),
+  'sort-by': fakeEl('select'),
+  'sort-order': fakeEl('select'),
+  'subscribed-overlay': fakeEl('select'),
+  'results-grid': fakeEl('div'),
+  'author-overlay': fakeEl('div'),
+  'author-list': fakeEl('div'),
+  'author-list-status': fakeEl('span'),
+  'btn-authors': fakeEl('button'),
+  'author-close': fakeEl('button')
+};
+_elements['sort-by'].value = 'subscriptions';
+_elements['sort-order'].value = 'DESC';
+_elements['subscribed-overlay'].value = 'previously';
+_elements['results-grid'].scrollTop = 900;
+_snapshotSubscribed = 'previously';
+const _rows = [];
+_setRowsFromFilters([
+  {field: 'Subs', op: 'gte', value: '500'},
+  {field: 'Title', op: 'contains', value: 'pack'}
+]);
+
+global.document = {
+  getElementById: (id) => _elements[id] || null,
+  createElement: (tag) => fakeEl(tag),
+  querySelectorAll: () => []
+};
+global.fetch = async (url) => {
+  if (String(url) === '/api/authors') {
+    return {ok: true, status: 200, json: async () => ['111', '222']};
+  }
+  return {ok: true, status: 200, json: async () => ({})};
+};
+
+// The page's functions, under the names the page's other functions call.
+const showAuthorList = __SHOWAUTHORLIST__;
+const jumpToAuthor = __JUMPTOAUTHOR__;
+const returnFromAuthor = __RETURNFROMAUTHOR__;
+function _authorModeActive() { return (__AUTHORMODEACTIVEFN__)(); }
+// The page's real close, with the count this driver records around it.
+const _closeAuthorListFromPage = __CLOSEAUTHORLIST__;
+function _closeAuthorList() { _closedList += 1; _closeAuthorListFromPage(); }
+// The semicolon keeps this IIFE from being parsed as a call of the declaration
+// above it.
+__INITAUTHORLIST__;
+
+(async () => {
+  const sortBefore = _elements['sort-by'].value;
+
+  jumpToAuthor('76561198000000000');
+  const snapshot = _preJumpView;
+  const jump = {
+    mode: _authorMode,
+    rows: _elements['filter-rows'].children.length,
+    filters: getFilters(),
+    sortBy: _elements['sort-by'].value,
+    sortOrder: _elements['sort-order'].value,
+    barVisible: _elements['author-mode-bar'].style.display,
+    name: _elements['author-mode-name'].textContent,
+    saveVisible: _elements['btn-save-filter'].style.display,
+    rowsVisible: _elements['filter-rows'].style.display,
+    searchResets: _searches.slice()
+  };
+
+  await returnFromAuthor();
+  const restored = {
+    modeActive: _authorModeActive(),
+    filters: getFilters(),
+    sortBy: _elements['sort-by'].value,
+    sortOrder: _elements['sort-order'].value,
+    subscribed: _appliedOverlay,
+    appliedFilters: _appliedFilters,
+    restoreState: _restoreViewState,
+    detailOpened: _detailOpened.slice(),
+    barVisible: _elements['author-mode-bar'].style.display,
+    name: _elements['author-mode-name'].textContent,
+    saveVisible: _elements['btn-save-filter'].style.display,
+    buttonsVisible: _elements['filter-buttons'].style.display,
+    searchResets: _searches.slice()
+  };
+
+  await showAuthorList();
+  const list = {
+    status: _elements['author-list-status'].textContent,
+    count: _elements['author-list'].children.length,
+    authors: _elements['author-list'].children.map((b) => b.dataset.author),
+    texts: _elements['author-list'].children.map((b) => b.textContent),
+    overlayShown: _elements['author-overlay'].style.display
+  };
+  if (_elements['author-list'].children.length) {
+    _elements['author-list'].onclick({target: _elements['author-list'].children[0]});
+  }
+  const pickerAfterChoice = _elements['author-overlay'].style.display;
+
+  console.log(JSON.stringify({
+    sortBefore: sortBefore,
+    snapshot: snapshot,
+    jump: jump,
+    restored: restored,
+    list: list,
+    nameAfterListClick: _elements['author-mode-name'].textContent,
+    modeAfterListClick: _authorMode,
+    closedList: _closedList,
+    pickerAfterChoice: pickerAfterChoice,
+    syncs: _syncs
+  }));
+  process.exit(0);
+})();
+"""
+
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_entering_author_mode_from_an_item_overrides_filters_and_keeps_the_sort(web_client, tmp_path):
+    """The jump is the TUI's single-creator mode, not just another filter row.
+
+    `jumpToAuthor` used to leave the builder alone and set one more row, so the
+    previous filters stayed in force and the view was the intersection. It now
+    replaces them with one `Author ID is <id>` row, leaves the sort menus
+    untouched (they are not builder rows), swaps the filter area for the author
+    box, and hides Save Filter -- all of which the TUI does.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    out = _author_driver(script, tmp_path)
+
+    assert out["snapshot"]["filters"] == [
+        {"field": "Subs", "op": "gte", "value": "500"},
+        {"field": "Title", "op": "contains", "value": "pack"},
+    ], "the jump must snapshot the rows it is about to replace"
+
+    jump = out["jump"]
+    assert jump["mode"] is True
+    assert jump["rows"] == 1, "author mode must replace the filter rows, not add to them"
+    assert jump["filters"] == [
+        {"field": "Author ID", "op": "is", "value": "76561198000000000"}
+    ], "the one row must be the author, or the old filters would still constrain the view"
+    assert jump["sortBy"] == out["sortBefore"], "the sort is not a builder filter and must not change"
+    assert jump["sortOrder"] == "DESC"
+    assert jump["barVisible"] == "flex", "the author box must replace the filter area"
+    assert jump["name"] == "76561198000000000", "the author box must name the creator"
+    assert jump["saveVisible"] == "none", "Save Filter is hidden in single-creator mode"
+    assert jump["rowsVisible"] == "none", "the old rows are replaced, not merely overlaid"
+    assert jump["searchResets"] == [True], "the jump re-runs the search once"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_returning_from_author_mode_restores_the_previous_view_exactly(web_client, tmp_path):
+    """The point of the mode: Return puts back what the jump threw away.
+
+    The assertions are on the restored state -- the rows' field/op/value, the
+    sort pair, the Subscribed overlay, the paged restore of the item and scroll
+    position -- rather than on the presence of a Return button. A half-restore
+    (filters back but the author row still present, or the sort left where the
+    author view had it) fails here.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    out = _author_driver(script, tmp_path)
+    restored = out["restored"]
+
+    assert restored["modeActive"] is False, "Return must leave single-creator mode"
+    assert restored["filters"] == out["snapshot"]["filters"], \
+        "Return must restore the filters the jump replaced, exactly as they were"
+    assert all(f["field"] != "Author ID" for f in restored["filters"]), \
+        "the author row must be gone, not restored as part of the view"
+    assert restored["sortBy"] == "subscriptions" and restored["sortOrder"] == "DESC"
+    assert restored["subscribed"] == "previously", \
+        "the Subscribed overlay is view state the jump must restore too"
+    assert restored["appliedFilters"] == out["snapshot"]["filters"]
+    assert restored["restoreState"] == out["snapshot"], \
+        "the item and scroll snapshot must be handed to the restore routine"
+    assert restored["barVisible"] == "none" and restored["name"] == ""
+    assert restored["saveVisible"] == "", "Save Filter comes back with the filter area"
+    assert restored["buttonsVisible"] == "flex"
+    assert restored["searchResets"] == [True, True], \
+        "the jump and the return each re-run the search once"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_the_creator_list_reads_api_authors_and_enters_author_mode(web_client, tmp_path):
+    """The author list is the surface /api/authors never had a client for.
+
+    The item jump can only reach a creator whose item is already on screen. The
+    list surfaces the same rows `/api/authors` returns, in the order the route
+    answers them, and picking one enters the same single-creator mode the item
+    jump does -- one entry point, not a second implementation.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    out = _author_driver(script, tmp_path)
+    listed = out["list"]
+
+    assert listed["overlayShown"] == "block", "the picker must be shown"
+    assert listed["authors"] == ["111", "222"], "the list must be the route's own answer, in order"
+    assert listed["texts"] == ["111", "222"], "each creator must be readable, not just clickable"
+    assert listed["status"] == "2 creators"
+    assert out["modeAfterListClick"] is True, \
+        "picking a creator from the list must enter author mode"
+    assert out["nameAfterListClick"] == "111", \
+        "the mode must be entered for the creator that was picked"
+    assert out["pickerAfterChoice"] == "none", "the picker closes behind the choice"
+
+
+def test_author_mode_scaffold_is_in_the_served_page(web_client):
+    """The controls the drivers reach only exist if the page renders them."""
+    client, _ = web_client
+    doc = lxml.html.fromstring(client.get('/').data.decode())
+
+    for el_id in ("author-mode-bar", "author-mode-name", "btn-return-author",
+                  "btn-authors", "author-overlay", "author-list", "author-list-status"):
+        assert doc.xpath(f'//*[@id="{el_id}"]'), f"missing #{el_id}"
+
+    bars = doc.xpath('//*[@id="author-mode-bar"]')
+    rows = doc.xpath('//*[@id="filter-rows"]')
+    buttons = doc.xpath('//*[@id="filter-buttons"]')
+    assert bars[0] in rows[0].getparent().iterdescendants(), \
+        "the author box must live in the filter area it replaces"
+    return_btn = doc.xpath('//*[@id="btn-return-author"]')[0]
+    assert "returnFromAuthor" in (return_btn.get("onclick") or "") or \
+        doc.xpath('//*[@id="btn-return-author"]'), "the Return control must be wired"
+
+
+# ── the subscribe action's target ─────────────────────────────────────────────
+#
+# The bridge is not being retired, only bypassed by this page: the route does the
+# whole job now, so the button and the queue drain call it. What the drivers pin
+# is the target and the absence of a tab, plus the ordering the route's shared
+# interval depends on. `tests/test_userscript_contract.py`, run alongside this
+# file, is what holds the untouched bridge's own contract.
+
+
+SUBSCRIBE_ACTION_DRIVER = """
+const fn = (__FN__);
+const calls = [];
+const opened = [];
+global.window = {open: (url, name) => { opened.push({url: url, name: name}); return null; }};
+global.alert = (m) => calls.push({alert: m});
+// The pane and the grid cell are not the subject here; the read-back only has
+// to complete so its request is visible in the recorded calls.
+global.document = {getElementById: () => null, querySelector: () => null};
+global._currentDetail = null;
+global._startListPoll = () => {};
+async function refreshItemState(wid) { return __REFRESH__(wid); }
+global.fetch = async (url, opts) => {
+  calls.push({url: url, method: opts && opts.method});
+  if (String(url).indexOf('/api/subscribe/') === 0) {
+    return {ok: true, status: 200, statusText: 'OK', json: async () => ({success: 1})};
+  }
+  return {ok: true, status: 200, statusText: 'OK', json: async () => ({workshop_id: 77, subscription_state: 'subscribed', subscription_glyph: '\\u2713', subscription_clickable: false})};
+};
+(async () => {
+  await fn(77);
+  global.fetch = async (url, opts) => {
+    calls.push({url: url, method: opts && opts.method});
+    return {ok: false, status: 400, statusText: 'BAD REQUEST', json: async () => ({success: -1, message: 'No steamLoginSecure available.'})};
+  };
+  await fn(78);
+  console.log(JSON.stringify({calls: calls, opened: opened}));
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_subscribe_action_calls_the_server_route_and_opens_no_tab(web_client, tmp_path):
+    """The button asks the server to subscribe instead of opening a Steam tab.
+
+    It used to `window.open` the item page with `autosubscribe=true` and let the
+    userscript do the work. The route does that work now, so the only request is
+    a POST to `/api/subscribe/<id>`; a tab appearing is the old behaviour and
+    fails this test. The userscript scaffolding is deliberately still installed
+    (see the bridge test below) -- it is just no longer this button's path.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = (SUBSCRIBE_ACTION_DRIVER
+              .replace("__FN__", _extract_function(script, "doSubscribe"))
+              .replace("__REFRESH__", _extract_function(script, "refreshItemState")))
+    out = _run_node(driver, tmp_path)
+
+    posts = [c for c in out["calls"] if c.get("url") == "/api/subscribe/77"]
+    assert len(posts) == 1, "the Subscribe button must POST the subscribe route"
+    assert posts[0]["method"] == "POST"
+    assert [c for c in out["calls"] if c.get("url") == "/api/item/77"], \
+        "the marker must be re-read from the server after the route records it"
+    assert out["opened"] == [], "subscribing must not open a Steam tab any more"
+
+    # A refusal is the route's message, and nothing is opened for it either.
+    refused = [c for c in out["calls"] if c.get("url") == "/api/subscribe/78"]
+    assert len(refused) == 1
+    assert out["opened"] == [], "a refused subscribe must not fall back to a tab"
+    assert any("No steamLoginSecure available." in c.get("alert", "") for c in out["calls"]), \
+        "the route's reason must reach the user rather than being swallowed"
+
+
+QUEUE_DRAIN_DRIVER = """
+__DOM__
+
+let _subPollIv = null;
+let _subScheduleIv = null;
+let _subCanceled = false;
+let _subThrottleStopped = false;
+const WEB_DELAY = 1.0;
+// The row HTML escapes the tooltip; the real helper is a string replace with no
+// behaviour worth re-running here.
+function _escapeHtml(text) { return String(text); }
+
+const queueItems = [
+  {workshop_id: 11, title: 'A', subscription_colour: '#0f0', subscription_tooltip: 'a', subscription_glyph: '\\u2713'},
+  {workshop_id: 22, title: 'B', subscription_colour: '#0f0', subscription_tooltip: 'b', subscription_glyph: '\\u2713'}
+];
+const queueRows = queueItems.map((it) => {
+  const row = fakeEl('div');
+  row.className = 'sub-queue-item';
+  row.dataset.wid = String(it.workshop_id);
+  const countdown = fakeEl('span');
+  countdown.className = 'countdown';
+  row.appendChild(countdown);
+  return row;
+});
+const queueList = fakeEl('div');
+queueRows.forEach((r) => queueList.appendChild(r));
+queueList.querySelectorAll = (sel) => (sel === '.sub-queue-item' ? queueRows.slice() : []);
+
+const elements = {
+  'sub-queue-overlay': fakeEl('div'),
+  'sub-queue-list': queueList,
+  'sub-progress': fakeEl('span'),
+  'sub-cancel': fakeEl('button'),
+  'sub-clear-failed': fakeEl('button')
+};
+// The old drain built a Steam URL from the page's origin; the stub lets it run
+// far enough that the tab it opens is what fails the test, not a missing global.
+global.location = {origin: 'http://localhost:8080'};
+const opened = [];
+global.window = {open: (url, name) => { opened.push(String(url)); return null; }};
+global.document = {
+  getElementById: (id) => elements[id] || null,
+  createElement: (tag) => fakeEl(tag),
+  querySelectorAll: () => []
+};
+
+const order = [];
+const subscribeCalls = [];
+let overlap = false;
+let inFlight = 0;
+global.fetch = async (url, opts) => {
+  const u = String(url);
+  order.push(u);
+  if (u.indexOf('/api/subscribe/') === 0) {
+    const wid = u.slice('/api/subscribe/'.length);
+    subscribeCalls.push({wid: wid, startedInFlight: inFlight, order: order.length});
+    inFlight += 1;
+    if (inFlight > 1) overlap = true;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    inFlight -= 1;
+    return {ok: true, status: 200, statusText: 'OK', json: async () => ({success: 1})};
+  }
+  if (u === '/api/queued') {
+    return {ok: true, status: 200, json: async () => queueItems};
+  }
+  if (u === '/api/sub_failures') { return {ok: true, status: 200, json: async () => []}; }
+  if (u === '/api/sub_health') {
+    return {ok: true, status: 200, json: async () => ({throttled_at: 0, retry_after: 300})};
+  }
+  return {ok: true, status: 200, json: async () => ({ok: true})};
+};
+
+(async () => {
+  const fn = (__FN__);
+  await fn();
+  // Let the poll's first tick (1s) run so the pass's own bookkeeping settles.
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  console.log(JSON.stringify({
+    order: order,
+    subscribeCalls: subscribeCalls,
+    overlap: overlap,
+    done: queueRows.map((r) => r.className),
+    progress: elements['sub-progress'].textContent,
+    opened: opened
+  }));
+  process.exit(0);
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_the_queue_drain_calls_the_subscribe_route_once_per_item_in_order(web_client, tmp_path):
+    """Drain serially through the route; the route already owns the interval.
+
+    The old drain scheduled a `window.open` per item on its own `WEB_DELAY`
+    timer. The route's page read is gated on the shared web interval and its POST
+    is exempt, so the caller must do exactly two things: call
+    `/api/subscribe/<id>`, and never have two calls in flight at once. A second
+    client-side delay would pay the interval twice per item, and firing items
+    without awaiting the previous call is what this test's overlap check catches.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = (QUEUE_DRAIN_DRIVER
+              .replace("__DOM__", FAKE_DOM)
+              .replace("__FN__", _extract_function(script, "_startAutoSubscribe")))
+    out = _run_node(driver, tmp_path)
+
+    assert [c["wid"] for c in out["subscribeCalls"]] == ["11", "22"], \
+        "every queued item must be asked for through the route"
+    assert out["overlap"] is False, \
+        "the drain must wait for each call to return before starting the next"
+    assert all(c["startedInFlight"] == 0 for c in out["subscribeCalls"]), \
+        "a call started while another was in flight means the queue was fired at once"
+    assert out["order"].count("/api/subscribe/11") == 1
+    assert out["order"].count("/api/subscribe/22") == 1
+    assert out["opened"] == [], "the drain must not open a Steam tab any more"
+    assert set(out["done"]) == {"sub-queue-item done"}, "a confirmed item must show as done"
+    assert out["progress"] == "2 / 2"
+
+
+def test_the_subscribe_bridge_scaffolding_is_left_in_place(web_client):
+    """The new path is proven before anything is deleted; nothing is deleted.
+
+    The userscript, its endpoints and the version meta stay exactly as they
+    were. This pins their presence so a later change cannot quietly drop the
+    bridge while retiring this page's use of it; `tests/test_userscript_contract.py`
+    independently pins the script and the meta tag to each other.
+    """
+    client, _ = web_client
+
+    # The routes are still mounted and still POST-only where they were.
+    assert client.get('/api/sessionid').status_code == 405
+    assert client.get('/api/subscribed/1').status_code == 405
+    assert client.get('/api/subscribe_failed/1').status_code == 405
+    assert client.get('/api/subscribe_throttled/1').status_code == 405
+    assert client.get('/api/sub_health').status_code == 200
+    assert set(client.get('/api/sub_health').get_json()) == \
+        {"throttled_at", "throttled_id", "retry_after"}
+    assert client.get('/api/sub_failures').status_code == 200
+
+    # The userscript is still served, and the page still carries the contract it
+    # checks the script against.
+    served = client.get('/userscript/steam_subscribe.user.js')
+    assert served.status_code == 200
+    assert b"@version" in served.data
+
+    html = client.get('/').data.decode()
+    assert 'name="userscript-version"' in html
+    assert "US_EXPECTED_VER" in html
+    assert "function _userscriptPresent()" in html
+    assert "US_RAW_URL" in html
+    assert "autosubscribe=true" in client.get(
+        '/userscript/steam_subscribe.user.js').data.decode()
 
 
 def test_analysis_panel_dom_contract(web_client):
@@ -2190,50 +2828,118 @@ def test_toggle_sub_route_flips_the_queue_flag(web_client):
 
 
 JUMP_AUTHOR_DRIVER = """
-const fn = (__FN__);
+const jumpFn = (__JUMP__);
+const returnFn = (__RETURN__);
+let nowMode = false;
+const rows = [];
 const added = [];
-let searched = null;
+const elements = {
+  'filter-rows': {innerHTML: '', children: [], appendChild(child) { rows.push(child); }},
+  'author-mode-bar': {style: {}}, 'author-mode-name': {textContent: ''},
+  'filter-buttons': {style: {}}, 'btn-save-filter': {style: {}},
+  'sort-by': {value: 'subscriptions'}, 'sort-order': {value: 'DESC'},
+  'subscribed-overlay': {value: 'previously'},
+  'results-grid': {scrollTop: 900},
+};
+global.document = {getElementById: (id) => elements[id] || null};
+global._authorMode = false;
+global._preJumpView = null;
+global._selectedWid = 222;
+global._applied = null;
+global.getFilters = () => ([{field: 'Subs', op: 'gte', value: '500'}]);
+global._applyFilters = (filters) => { global._applied = filters; };
+global._setAuthorModeUi = (on, creator) => {
+  elements['author-mode-bar'].style.display = on ? 'flex' : 'none';
+  elements['author-mode-name'].textContent = on ? String(creator) : '';
+  elements['btn-save-filter'].style.display = on ? 'none' : '';
+};
+global._viewSnapshot = () => ({
+  filters: global.getFilters(),
+  sort_by: elements['sort-by'].value, sort_order: elements['sort-order'].value,
+  subscribed: elements['subscribed-overlay'].value,
+  selected: global._selectedWid, scroll: elements['results-grid'].scrollTop,
+});
+global._syncSubscribedOverlay = () => {};
+global._overlayValue = () => elements['subscribed-overlay'].value;
+global._applySubscribedOverlay = () => {};
+global._restoreView = () => Promise.resolve();
+let searched = 0;
+global.doSearch = () => { searched += 1; return Promise.resolve(); };
 global.addRow = (logic, initial) => added.push({hasLogic: logic !== undefined, initial: initial});
-global.doSearch = (reset) => { searched = reset; };
-global.document = { getElementById: () => ({ querySelectorAll: () => [] }) };
-fn('76561198765432109');
 
-// With an Author ID row already in the builder the jump must update that row
-// rather than add a second, contradictory one.
-const field = {value: 'Author ID'};
-const op = {value: 'is_not'};
-const val = {value: '999'};
-const row = {querySelector: (sel) =>
-  ({'.field-select': field, '.op-select': op, '.value-input': val})[sel] || null};
-global.document = { getElementById: () => ({ querySelectorAll: () => [row] }) };
-fn('42');
+jumpFn('76561198765432109');
+const first = {
+  mode: global._authorMode,
+  snapshot: global._preJumpView,
+  added: added.slice(),
+  cleared: elements['filter-rows'].innerHTML === '',
+  bar: elements['author-mode-bar'].style.display,
+  name: elements['author-mode-name'].textContent,
+  save: elements['btn-save-filter'].style.display,
+  sort: elements['sort-by'].value,
+  searches: searched,
+};
 
-console.log(JSON.stringify({added: added, searched: searched,
-                            op: op.value, val: val.value, field: field.value}));
+// A second jump while the mode is already on must not overwrite the snapshot
+// the Return will use with the author view it is standing in.
+jumpFn('42');
+const second = {snapshot: global._preJumpView, searches: searched};
+
+// The mode's exit goes back through the same filter-application path a restore
+// uses, with the snapshot it captured.
+returnFn().then(() => {
+  console.log(JSON.stringify({
+    first: first,
+    second: second,
+    applied: global._applied,
+    modeAfterReturn: global._authorMode,
+    nameAfterReturn: elements['author-mode-name'].textContent,
+  }));
+});
 """
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
-def test_jump_to_author_sets_the_author_id_filter_and_researches(web_client, tmp_path):
-    """The creator click must set the same filter the TUI's jump sets.
+def test_jump_to_author_enters_single_creator_mode_like_the_tui(web_client, tmp_path):
+    """The creator click must enter author mode, not just add a filter row.
 
-    The TUI builds `{"field": "Author ID", "op": "is", "value": str(creator)}`
-    and re-runs, so the web jump has to produce exactly that row through the
-    ordinary filter machinery rather than a bespoke one.
+    It used to leave the builder alone and set one more `Author ID` row, so the
+    previous filters stayed in force and the view was their intersection with
+    the author. It now mirrors the TUI's `btn-jump-author`: the rows are
+    replaced by one `Author ID` / `is` row, the filter area is swapped for the
+    author box, Save Filter is hidden, and the sort is untouched. A second jump
+    while the mode is on must not overwrite the snapshot Return depends on.
     """
     client, _ = web_client
-    fn = _extract_function(_served_inline_script(client), "jumpToAuthor")
-    result = _run_node(JUMP_AUTHOR_DRIVER.replace("__FN__", fn), tmp_path)
+    script = _served_inline_script(client)
+    driver = (JUMP_AUTHOR_DRIVER
+              .replace("__JUMP__", "(" + _extract_function(script, "jumpToAuthor") + ")")
+              .replace("__RETURN__", "(" + _extract_function(script, "returnFromAuthor") + ")"))
+    result = _run_node(driver, tmp_path)
 
-    assert result["added"] == [{
+    first = result["first"]
+    assert first["mode"] is True, "the jump must enter author mode"
+    assert first["cleared"] is True, "the old rows must be replaced, not added to"
+    assert first["added"] == [{
         "hasLogic": False,
         "initial": {"field": "Author ID", "op": "is", "value": "76561198765432109"},
-    }]
-    assert result["searched"] is True, "the jump must re-run the search"
-    # The pre-existing row wins over a second one, and is switched to `is`.
-    assert result["field"] == "Author ID"
-    assert result["op"] == "is"
-    assert result["val"] == "42"
+    }], "the one row must be the author filter the TUI builds"
+    assert first["bar"] == "flex", "the author box replaces the filter area"
+    assert first["name"] == "76561198765432109", "the box must name the creator"
+    assert first["save"] == "none", "Save Filter is hidden in single-creator mode"
+    assert first["sort"] == "subscriptions", "the sort is not a builder filter"
+    assert first["searches"] == 1, "the jump re-runs the search once"
+    assert first["snapshot"]["filters"] == [{"field": "Subs", "op": "gte", "value": "500"}]
+    assert first["snapshot"]["sort_by"] == "subscriptions"
+    assert first["snapshot"]["subscribed"] == "previously"
+
+    assert result["second"]["snapshot"] == first["snapshot"], \
+        "a second jump must not replace the snapshot Return restores"
+
+    assert result["applied"] == first["snapshot"]["filters"], \
+        "Return must put back the filters the jump replaced"
+    assert result["modeAfterReturn"] is False
+    assert result["nameAfterReturn"] == ""
 
 
 RENDER_DETAIL_DRIVER = """

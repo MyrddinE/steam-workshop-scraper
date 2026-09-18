@@ -390,6 +390,15 @@ Before replacing the rows, the app saves state to disk and snapshots the current
 
 The `btn-return` button leaves single-creator mode: it clears the flag, shows the save button again, restores the in-memory filter snapshot (replacing the author row and re-running the search), and lets state saving apply once more. The snapshot is in memory rather than re-read from `.tui_state.yaml` so that a state write between the jump and the Return cannot lose the filters the jump replaced.
 
+The Web UI now has the same mode (`jumpToAuthor`, `returnFromAuthor`, `#author-mode-bar`,
+`#btn-return-author`), and its Return additionally re-opens the item and scroll position the jump
+interrupted. **The TUI has no creator list**, and that asymmetry is one-sided in the web UI's favour:
+`src.tui` imports `get_all_authors` and never calls it, so the TUI reaches a creator only by typing an
+`Author ID` or jumping from one of their items. The web picker
+([web-ui.md](web-ui.md#the-creator-list)) is a third route to the same end, not a control the TUI
+lacks the action for, so no TUI change is needed for parity; if a TUI creator picker is ever wanted it
+would call the same `get_all_authors`.
+
 ### Subscription Queue (s/l keys)
 
 `s` toggles `is_queued_for_subscription` on the selected item. `l` opens the queue screen
