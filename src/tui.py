@@ -27,6 +27,33 @@ import threading
 import webbrowser
 import datetime
 
+def escape_markup(value) -> str:
+    """Escape Steam-derived text before interpolating it into Rich markup.
+
+    Steam titles, tag names and persona names routinely contain square
+    brackets -- *measured live*, 129,533 titles in this library hold a bracket
+    pair, and 2 of the 9 items queued for subscription did -- and a bracket
+    pair is markup to `Text.from_markup`. One that names a real style is
+    silently swallowed; one that does not is a ``MissingStyle`` error that takes
+    the whole screen down, which is exactly how ``[najar]偶像大师 ...`` crashed
+    the subscription queue.
+
+    Every value that comes from Steam passes through here before it joins a
+    markup string. The markup this module writes itself (``[b]``, colours, the
+    spinner, the ``[link=...]`` the queue builds from its own URL) is not
+    escaped. Textual widgets and `DataTable` cells parse markup from ``str``
+    too, so the helper is used for plain ``Label.update`` calls as well as
+    f-strings.
+
+    ``rich.markup.escape`` is not enough on its own: it only escapes ``[...]``
+    that already look like a tag, so an unbalanced ``[`` is left standing and
+    Textual's parser then swallows everything up to the next ``]`` -- including
+    the project's own closing tag. Escaping every ``[`` is exact for Textual's
+    parser, which treats ``\\[`` as a literal bracket. Returns a ``str`` so it
+    drops straight into an f-string.
+    """
+    return str(value).replace("[", "\\[")
+
 def format_ts(ts):
     """Converts a Unix timestamp to YYYY-MM-DD string."""
     if not ts: return "N/A"
@@ -374,7 +401,7 @@ class StatsScreen(Screen):
                 table.add_row(
                     str(app.get("appid")),
                     str(app.get("last_page_scanned", 0) or 0),
-                    cursor[:30] + "..." if len(cursor) > 30 else cursor,
+                    escape_markup(cursor[:30] + "..." if len(cursor) > 30 else cursor),
                 )
         elif name == "status_counts":
             lines = [
@@ -408,7 +435,7 @@ class StatsScreen(Screen):
             table.clear(columns=True)
             table.add_columns("Tag", "Count")
             for tag, count in sorted(value.items(), key=lambda kv: kv[1], reverse=True):
-                table.add_row(str(tag), f"{count:,}")
+                table.add_row(escape_markup(tag), f"{count:,}")
         elif name == "priority_breakdowns":
             self._set_text(name, self._format_priority(value))
 
@@ -676,6 +703,8 @@ class DaemonManagerScreen(Screen):
             # rather than rendering a view with an invisible gap in it.
             view.clear()
         for line in result.get("lines", []):
+            # RichLog parses no markup (`markup=False`), so the daemon's own
+            # lines -- including the titles it logs -- pass through literally.
             view.write(line)
         self._log_offset = result.get("offset", self._log_offset)
 
@@ -732,7 +761,13 @@ class SubscriptionQueueScreen(ModalScreen):
                     wid = item['workshop_id']
                     title = item['title']
                     url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}"
-                    link_text = RichText.from_markup(f"[link={url}]{url}[/link] : {title}")
+                    # Built with Text.append rather than Text.from_markup: the
+                    # URL keeps its link style as deliberate markup, and the
+                    # title is appended as literal characters so Steam's
+                    # brackets never reach the parser at all.
+                    link_text = RichText()
+                    link_text.append(url, style=f"link {url}")
+                    link_text.append(f" : {title}")
                     yield Static(link_text)
             
             yield Button("Close", id="btn-close-sub-queue")
@@ -931,8 +966,8 @@ class DetailsPane(VerticalScroll):
         if not creator_name:
             creator_name = str(item.get("creator", "N/A"))
             
-        self.query_one("#item-title", Label).update(f"[b]{title}[/b]")
-        self.query_one("#item-creator", Label).update(creator_name)
+        self.query_one("#item-title", Label).update(f"[b]{escape_markup(title)}[/b]")
+        self.query_one("#item-creator", Label).update(escape_markup(creator_name))
         
         jump_btn = self.query_one("#btn-jump-author", Button)
         if item.get("creator"):
@@ -972,7 +1007,8 @@ class DetailsPane(VerticalScroll):
             updated_label.display = True
             updated_label.update(f"[b]Updated:[/b] {updated_str}")
         
-        self.query_one("#stat-tags", Label).update(f"[b]Tags:[/b] {', '.join(tags_list) if tags_list else 'None'}")
+        tags_text = ", ".join(tags_list) if tags_list else "None"
+        self.query_one("#stat-tags", Label).update(f"[b]Tags:[/b] {escape_markup(tags_text)}")
         self.query_one("#stat-size", Label).update(f"[b]Size:[/b] {format_size(item.get('file_size'))}")
         self.query_one("#stat-views", Label).update(f"[b]Views:[/b] {format_count(item.get('views', 0))}")
         
@@ -1065,8 +1101,8 @@ class WorkshopItem(ListItem):
         spin = self._spinner()
         marker = self._subscription_marker()
 
-        yield Label(f"[b]{title}[/b] ({wid})")
-        yield Label(f"  By: {creator}   {spin} {marker}")
+        yield Label(f"[b]{escape_markup(title)}[/b] ({wid})")
+        yield Label(f"  By: {escape_markup(creator)}   {spin} {marker}")
 
     async def refresh_item(self) -> None:
         """Re-compose the item to reflect any changes in item_data."""
@@ -2101,9 +2137,9 @@ class ScraperApp(App):
             elif data.get("success") == 25:
                 self.notify("Subscription limit reached (15,000).", severity="warning")
             else:
-                self.notify(data.get("message", "Subscribe failed."), severity="error")
+                self.notify(escape_markup(data.get("message", "Subscribe failed.")), severity="error")
         except Exception as e:
-            self.notify(f"Subscribe request failed: {e}", severity="error")
+            self.notify(f"Subscribe request failed: {escape_markup(e)}", severity="error")
 
     def _start_webserver(self) -> None:
         """Starts the embedded web server in a background thread.

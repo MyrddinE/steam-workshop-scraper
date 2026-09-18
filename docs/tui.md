@@ -97,6 +97,12 @@ On `Input.Blurred` (when the value input loses focus), `_clamp_percentile()` rou
 
 Renders a single item in the list. Shows title (preferring `title_en`), creator name (preferring `personaname_en`), and subscription status. Each item stores `item_data` (the full search result dict) for detail rendering and state tracking.
 
+### Steam text is escaped before it is rendered
+
+Titles, tag names and persona names routinely contain square brackets — *measured live*, 129,533 titles in the library hold a bracket pair, and 2 of the 9 items queued for subscription did — and every widget here parses markup from a string (`Label.update`, `Static`, `DataTable` cells all do). A title is therefore markup unless it is escaped: `[najar]偶像大师 樋口円香（有断面+配音版）` raised `MissingStyle` and took the subscription queue down, while in the Textual-parsed widgets the same interpolation silently *ate* the tag instead of raising.
+
+Every value that comes from Steam goes through `escape_markup` in `src/tui.py`, which escapes every `[`. That is deliberately stronger than `rich.markup.escape`, which only escapes brackets that already look like a tag — an unbalanced `[` is left standing, and Textual's parser then swallows everything up to the next `]`, including the closing tag the project wrote itself. Only markup the module writes itself (`[b]`, the spinner, the subscription colours) is left unescaped. `tests/test_tui_markup_injection.py` holds the reported strings to this.
+
 ### The subscription marker
 
 The row's second line shows the owner's subscription marker next to the pending spinner, and the detail pane shows the same marker immediately before the title — the convention the web pane uses too. `_subscription_marker` and `DetailsPane.update_content` both read `src/subscription.py`, which owns the four states (`subscribed`, `pending`, `previously`, `never`), their precedence, and the glyph/colour for each, so the TUI and the web grid cannot disagree about why the same row looks the way it does. The marker replaces the old leading `*` prefix on the title line for `is_queued_for_subscription`; there is only one indicator.
@@ -298,4 +304,4 @@ The `btn-return` button leaves single-creator mode: it clears the flag, shows th
 
 ### Subscription Queue (s/l keys)
 
-`s` toggles `is_queued_for_subscription` on the selected item. `l` opens a screen listing all queued items with clickable links to their Steam pages.
+`s` toggles `is_queued_for_subscription` on the selected item. `l` opens a screen listing all queued items with clickable links to their Steam pages. Each row is built with Rich `Text.append` rather than `Text.from_markup`: the URL keeps its link style as deliberate markup and the title is appended as literal characters, so a Steam title never reaches a parser — see [Steam text is escaped before it is rendered](#steam-text-is-escaped-before-it-is-rendered).
