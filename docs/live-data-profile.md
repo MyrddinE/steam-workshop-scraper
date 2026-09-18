@@ -58,7 +58,7 @@ backlog was being filled, at discovery speed, with work on items the filters exc
 
 | Column | Reality |
 |---|---|
-| `language` | **NULL for all 1,725,544 rows.** The API merge would store it if a Steam response included it — none has — yet it is in `WORKSHOP_ITEM_COLUMNS`, the merge allow-list, and the schema. Load-bearing in form, unpopulated in practice. |
+| `language` | **Was NULL for all 1,725,544 rows; the column has since been dropped.** The API merge would have stored it if a Steam response included it, and none can: `GetPublishedFileDetails` has no language field, and the request protocol's `language` is the viewer's localization parameter, not an item property. Migration 23→24 removes the column and its index — see [schema-migrations.md](schema-migrations.md#v23--v24-drop-the-never-populated-language-column). |
 | `is_queued_for_subscription` | **`0` for every row in this snapshot.** That is the resting state, not disuse. The column backs the subscription queue: the TUI and web UI set it, the userscript polls `GET /api/queued` and clears each entry on success or failure. Do not read this snapshot as "the feature is unused". |
 | `status = 206` | **Zero occurrences.** The schema's "web scrape failed but API succeeded" status has never been written. |
 

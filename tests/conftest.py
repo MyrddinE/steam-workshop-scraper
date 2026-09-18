@@ -131,9 +131,6 @@ def deterministic_db(tmp_path_factory):
             "steam_updated_at": updated,
             "status": 200,        }
 
-        if use_chinese:
-            item["language"] = 6  # Chinese
-
         if has_translation:
             item["title_en"] = _det_pick_words(rng, _DET_LOREM_WORDS, rng.randint(1, 10))
             item["short_description_en"] = _det_pick_words(rng, _DET_LOREM_WORDS, rng.randint(1, 50))

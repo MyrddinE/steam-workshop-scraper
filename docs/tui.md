@@ -81,7 +81,7 @@ Each row contains:
 - An `Input` for the value
 - AND/OR buttons, and a Remove button (only on non-first rows)
 
-**Operator categories** mirror the web UI: text operators for Title/Description/Filename/Full Text, numeric operators (including `percentile`) for File Size/Subs/Favs/Views/Language ID/Subscriber Score/Favorite Score, and id operators for Author ID/Workshop ID/AppID.
+**Operator categories** mirror the web UI: text operators for Title/Description/Filename/Full Text, numeric operators (including `percentile`) for File Size/Subs/Favs/Views/Subscriber Score/Favorite Score, and id operators for Author ID/Workshop ID/AppID.
 
 **Field type determination** in `compose()` and `on_select_changed()` uses explicit field name checks rather than category lists, ensuring Subscriber Score and Favorite Score are consistently classified as numeric.
 

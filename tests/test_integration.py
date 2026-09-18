@@ -128,7 +128,7 @@ def test_database_migration_compatibility(tmp_path):
 
     assert "workshop_id" in cols
     assert "title" in cols
-    assert "language" in cols
+    assert "language" not in cols
     assert "translation_priority" in cols
     assert "is_queued_for_subscription" in cols
 

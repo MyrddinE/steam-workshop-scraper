@@ -15,7 +15,7 @@ WORKSHOP_ITEM_COLUMNS = frozenset({
     "short_description", "short_description_en", "steam_created_at", "steam_updated_at",
     "visibility", "banned", "ban_reason", "app_name", "file_type",
     "subscriptions", "favorited", "views",
-    "extended_description", "extended_description_en", "language",
+    "extended_description", "extended_description_en",
     "lifetime_subscriptions", "lifetime_favorited", "translation_priority",
     "is_queued_for_subscription", "wilson_favorite_score",
     "wilson_subscription_score", "needs_web_scrape",
@@ -87,8 +87,6 @@ ALL_FILTER_FIELDS = [f["field"] for f in FILTER_SCHEMA]
 FIELD_NAME_MAP = {f["field"]: f["db_col"] for f in FILTER_SCHEMA}
 # AppID backwards-compat alias
 FIELD_NAME_MAP["AppID"] = "consumer_appid"
-# Language ID is still accepted but not in the UI filter list
-FIELD_NAME_MAP["Language ID"] = "language"
 FIELD_NAME_MAP["Filename"] = "filename"
 
 # Fields that have a translated _en counterpart; these are dual-searched
@@ -130,7 +128,7 @@ USER_PRIORITY_FLOOR = 5
 # than local to `initialize_database` because the migration tests assert that
 # the chain reaches it, and a magic number repeated in nine test files is a
 # number that will be wrong after the next migration.
-EXPECTED_VERSION = 23
+EXPECTED_VERSION = 24
 
 def _build_text_search_clauses(sql: str, params: list, q_str: str, cols: list[str]) -> tuple[str, list]:
     """Applies positive/negative text search tokens to SQL via LIKE clauses."""
@@ -666,7 +664,6 @@ def initialize_database(db_path: str):
         -- Removing it from this statement breaks fresh databases.
         tags TEXT,
         extended_description TEXT,
-        language INTEGER,
         lifetime_subscriptions INTEGER,
         lifetime_favorited INTEGER,
         title_en TEXT,
@@ -718,7 +715,6 @@ def initialize_database(db_path: str):
 
     # Safe migrations for existing databases
     _safe_add_columns(cursor, "workshop_items", [
-        ("language", "INTEGER"),
         ("lifetime_subscriptions", "INTEGER"),
         ("lifetime_favorited", "INTEGER"),
         ("title_en", "TEXT"),
@@ -935,7 +931,6 @@ def initialize_database(db_path: str):
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_short_description_en ON workshop_items (short_description_en)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_extended_description_en ON workshop_items (extended_description_en)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_filename ON workshop_items (filename)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_language ON workshop_items (language)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_file_size ON workshop_items (file_size)")
 
         conn.commit()
@@ -1743,6 +1738,38 @@ def initialize_database(db_path: str):
             "with no field left in translation_queue.",
             stranded_mirrors,
         )
+
+    if db_version < 24:
+        logging.info("Running migration 23->24: dropping the never-populated language column...")
+
+        # `language` was added expecting the Steam API to return a field for it.
+        # No response this project consumes can: GetPublishedFileDetails carries
+        # no language field, and `language` exists in the request protocol only
+        # as the *viewer's* localization parameter, which the client sets and
+        # never reads back. Every row in the live database is NULL (see
+        # docs/live-data-profile.md), so the column only advertised a Steam field
+        # that does not exist, drew a permanently "N/A" tooltip line, and backed
+        # a "Language ID" filter that could not match.
+        #
+        # Dropping it follows migration 5->6's pattern for the legacy `tags`
+        # column: drop the index that references the column first (SQLite refuses
+        # to drop a column an index depends on), then the column itself. The
+        # PRAGMA guard keeps the migration idempotent and resumable -- a fresh
+        # database never has the column, and a database that already dropped it
+        # (or a partial run) skips cleanly.
+        cols = {r[1] for r in cursor.execute("PRAGMA table_info(workshop_items)").fetchall()}
+        if "language" in cols:
+            cursor.execute("DROP INDEX IF EXISTS idx_language")
+            cursor.execute("ALTER TABLE workshop_items DROP COLUMN language")
+            conn.commit()
+            cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            logging.info("  dropped idx_language and workshop_items.language")
+        else:
+            logging.info("  language column already absent; nothing to drop")
+
+        cursor.execute("PRAGMA user_version = 24")
+        conn.commit()
+        logging.info("Migration 23->24 complete.")
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")

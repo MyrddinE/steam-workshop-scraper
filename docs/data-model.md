@@ -56,7 +56,9 @@ One row per Steam Workshop item, keyed by `workshop_id` (the Steam `publishedfil
 | `views` | `views` | |
 | `lifetime_subscriptions` | `lifetime_subscriptions` | |
 | `lifetime_favorited` | `lifetime_favorited` | |
-| `language` | `language` | **Never populated.** The merge would store it if a Steam response included it, but none has; NULL for every row in the live database. |
+
+There is deliberately no `language` column: no Steam response this project
+consumes can populate one. See [Known Gaps](#known-gaps).
 
 ### Scraped and translated columns
 
@@ -176,9 +178,14 @@ that is not there.
   whether to re-queue the HTML scrape from `steam_updated_at` and whether `extended_description` is
   already present, so the HTML scrape refreshes on an item update and the image worker uses its own
   priority queue.
-* **`language` is never populated.** It is in `WORKSHOP_ITEM_COLUMNS` and the merge allow-list, so
-  the API merge would store it if a response included it — none has, and it is NULL for every row
-  in the live database.
+* **`language` no longer exists, and never had a source.** It was added as a Steam-provided column
+  expecting the API to return a language, but no response this project consumes carries one.
+  `GetPublishedFileDetails` has no language field in its response message, and `language` appears in
+  the request protocol only as the *viewer's* localization parameter — the language to render
+  `title`/`description` in — which the client would set and never read back. The recorded response
+  body in `tests/test_steam_api.py` carries none, and every row in the live database was NULL, so the
+  column backed a permanently "N/A" web-tooltip line and a "Language ID" filter that could never
+  match. Migration 23→24 drops the column and its index; the filter alias went with it.
 * **`is_queued_for_subscription` is `0` in an idle database, but it is not dead.** It backs a
   working feature: the TUI (`s`) and the web UI toggle it, the userscript polls
   `GET /api/queued` and clears each entry once it has subscribed or failed. Because it is
