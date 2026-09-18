@@ -6,6 +6,8 @@ same user who owns the profile, so the store is the one source that needs
 neither a plugin nor a hand-copied value.
 """
 
+import base64
+import json
 import os
 import sqlite3
 from unittest.mock import patch
@@ -266,6 +268,95 @@ def test_refresh_forces_a_re_read(tmp_path):
     _make_store(profile / "cookies.sqlite", [("steamLoginSecure", "SECOND", ".steamcommunity.com")])
     assert steam_login_secure(profiles_root=tmp_path) == "FIRST", "cached until asked"
     assert steam_login_secure(refresh=True, profiles_root=tmp_path) == "SECOND"
+
+
+# --- the cache and the expiry its own value carries -------------------------
+
+def _login_cookie(expires_at=None, steamid="76561198000000000"):
+    """A `steamLoginSecure` value whose token states an expiry, or states none.
+
+    `%7C%7C` is the separator form the browser stores and the config writes; the
+    token is a real three-segment shape because that is what the decoder reads.
+    """
+    claims = {} if expires_at is None else {"exp": expires_at}
+    payload = base64.urlsafe_b64encode(
+        json.dumps(claims).encode()).decode().rstrip("=")
+    token = f"eyJhbGciOiJub25lIn0.{payload}.c2ln"
+    return f"{steamid}%7C%7C{token}"
+
+
+def test_a_cached_cookie_past_its_own_expiry_is_read_again(tmp_path):
+    """The cache must not outlive the credential it holds.
+
+    A daemon runs for weeks while Steam reissues this cookie about daily, so a
+    value whose token states that it has already died is evidence the profile
+    may hold a newer one. The read has to happen on the next call, not wait for
+    a gate-shaped failure to ask for it.
+    """
+    profile = tmp_path / "abc.default-release"
+    profile.mkdir()
+    dead = _login_cookie(expires_at=1000)
+    _make_store(profile / "cookies.sqlite",
+                [("steamLoginSecure", dead, ".steamcommunity.com")])
+    assert steam_login_secure(profiles_root=tmp_path) == dead
+
+    live = _login_cookie(expires_at=9_999_999_999)
+    _make_store(profile / "cookies.sqlite",
+                [("steamLoginSecure", live, ".steamcommunity.com")])
+    assert steam_login_secure(profiles_root=tmp_path) == live, \
+        "an expired cached value must be re-read, not served"
+
+
+@pytest.mark.parametrize("value", [
+    "76561198000000000%7C%7Cnot-a-jwt",   # not three segments at all
+    _login_cookie(expires_at=None),        # a token that states no expiry
+    "76561198000000000",                   # no separator: nothing to decode
+])
+def test_a_cookie_without_a_readable_expiry_is_served_from_cache(tmp_path, value):
+    """`unknown` must not be read as `expired`: refusing to try is worse.
+
+    The contract in `src/session_cookie.py` is that an unreadable expiry is
+    `None`, never "no", and the cache must hold the same rule.
+    """
+    profile = tmp_path / "abc.default-release"
+    profile.mkdir()
+    _make_store(profile / "cookies.sqlite",
+                [("steamLoginSecure", value, ".steamcommunity.com")])
+    assert steam_login_secure(profiles_root=tmp_path) == value
+
+    (profile / "cookies.sqlite").unlink()
+    assert steam_login_secure(profiles_root=tmp_path) == value, \
+        "an unreadable expiry must not force a re-read"
+
+
+def test_a_live_cookie_is_served_from_cache_without_a_second_read(tmp_path):
+    """The browser read is not free, so the ordinary case must stay cached."""
+    profile = tmp_path / "abc.default-release"
+    profile.mkdir()
+    live = _login_cookie(expires_at=9_999_999_999)
+    _make_store(profile / "cookies.sqlite",
+                [("steamLoginSecure", live, ".steamcommunity.com")])
+    assert steam_login_secure(profiles_root=tmp_path) == live
+
+    (profile / "cookies.sqlite").unlink()
+    assert steam_login_secure(profiles_root=tmp_path) == live, "no second read"
+
+
+def test_an_empty_read_is_still_not_cached(tmp_path):
+    """A missing credential is re-read on every call; only a value is cached.
+
+    The asymmetry the entry names: an empty read was never pinned, and that
+    property has to survive the expiry check.
+    """
+    profile = tmp_path / "abc.default-release"
+    profile.mkdir()
+    _make_store(profile / "cookies.sqlite", [])
+    assert steam_login_secure(profiles_root=tmp_path) is None
+
+    live = _login_cookie(expires_at=9_999_999_999)
+    _make_store(profile / "cookies.sqlite",
+                [("steamLoginSecure", live, ".steamcommunity.com")])
+    assert steam_login_secure(profiles_root=tmp_path) == live
 
 
 # --- telling a gate from a layout change ----------------------------------

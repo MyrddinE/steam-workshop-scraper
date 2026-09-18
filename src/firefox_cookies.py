@@ -23,6 +23,8 @@ import threading
 import time
 from pathlib import Path
 
+from src import session_cookie
+
 # Firefox holds the store open in WAL mode, so the newest write may be in the
 # -wal rather than the .sqlite itself. Copying the set and reading the copy
 # avoids both the lock and a stale read.
@@ -39,10 +41,12 @@ LOGIN_COOKIE = "steamLoginSecure"
 # suffix split on a fixed offset.
 _LAST_VERSION_RE = re.compile(r"^LastVersion\s*=\s*(\d+(?:\.\d+)*)", re.MULTILINE)
 
-# There is no refresh timer. The cookie is valid for days, so the config holds a
-# copy and the browser is consulted when there is no copy yet, or when a scrape
-# looks gated and the copy is the likely culprit. Polling on a clock would copy
-# a file every few minutes to learn nothing.
+# There is no refresh timer. The cache holds a read while the credential it
+# carries is still alive, and a value whose own token says it has expired is read
+# again instead of served: Steam reissues `steamLoginSecure` about daily while a
+# daemon runs for weeks, so a value read at startup can be dead hours later. That
+# check is driven by the value's own expiry, not a clock, so a live cookie still
+# costs no file copy.
 
 _cache_lock = threading.Lock()
 _cache = {"cookies": {}, "store": None, "announced": None}
@@ -159,17 +163,40 @@ def read_steam_cookies(store_path: Path) -> dict:
             con.close()
 
 
+def _login_expired(value: str | None, now: float | None = None) -> bool:
+    """Whether a ``steamLoginSecure`` value's own token is past its expiry.
+
+    The cache must not outlive the credential it holds, and the value states when
+    it dies. :mod:`src.session_cookie` decodes that without raising, and its
+    contract is that an unreadable expiry is unknown, never expired: a value we
+    cannot decode is still worth sending, because declining to try fails in the
+    same direction and one round trip later. Only an expiry that was read and has
+    already passed answers True.
+    """
+    expires_at = session_cookie.parse(value).expires_at
+    if expires_at is None:
+        return False
+    return expires_at <= (time.time() if now is None else now)
+
+
 def browser_cookies(refresh: bool = False, profiles_root: Path | None = None) -> dict:
     """Every steamcommunity.com cookie in the profile, or {} if unavailable.
 
     The login cookie is the credential, but `sessionid` lives here too — it is
     not HttpOnly, which is why the userscript could always supply it. Reading the
     set from one place means the two cannot come from different sessions.
+
+    The first non-empty read is remembered, and re-read only when ``refresh`` is
+    asked for or the remembered ``steamLoginSecure`` says its own token has
+    expired. The whole set is re-read together in that case, so the CSRF token
+    cannot come from a different session than the credential. An empty read is
+    never cached, so a profile that gains a login is picked up on the next call.
     """
     global _cache
     with _cache_lock:
-        if not refresh and _cache["cookies"]:
-            return dict(_cache["cookies"])
+        cached = dict(_cache["cookies"])
+    if not refresh and cached and not _login_expired(cached.get(LOGIN_COOKIE)):
+        return cached
 
     store = find_cookie_store(profiles_root)
     found = read_steam_cookies(store) if store is not None else {}
@@ -197,15 +224,18 @@ def steam_login_secure(refresh: bool = False,
                        profiles_root: Path | None = None) -> str | None:
     """The current `steamLoginSecure`, or None if it cannot be found.
 
-    The last value read is remembered; pass ``refresh=True`` to look again. This
-    function has no cache lifetime of its own, because the caller decides when
-    looking again is worth a file copy: a gate-shaped scrape failure is the
-    signal, not a clock.
+    The last value read is remembered while it is still valid; pass
+    ``refresh=True`` to look again regardless. A remembered value whose own token
+    has expired is not served either: the browser may hold a newer one, so this
+    reads again by itself, which is what lets a long-running daemon recover from
+    a cookie Steam reissued overnight without waiting for a request to fail. A
+    value whose expiry cannot be decoded is still served, because unknown is not
+    the same as expired.
 
-    The value it returns does expire, though -- Steam reissues `steamLoginSecure`
-    about daily, and a profile nobody has opened keeps the stale one. Callers can
-    read that expiry off the value with :func:`src.session_cookie.parse` rather
-    than inferring it from a request that came back as the sign-in page.
+    The value does expire: Steam reissues `steamLoginSecure` about daily, and a
+    profile nobody has opened keeps the stale one. Callers can read that expiry
+    off the value with :func:`src.session_cookie.parse` rather than inferring it
+    from a request that came back as the sign-in page.
     """
     return browser_cookies(refresh=refresh, profiles_root=profiles_root).get(LOGIN_COOKIE)
 
