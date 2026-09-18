@@ -103,11 +103,14 @@ Cursor-based discovery using `IPublishedFileService/QueryFiles` with `query_type
 This is called when `get_next_items_to_scrape` returns empty — meaning the processing queue is drained and new items need to be discovered.
 
 Discovery is skipped while the daemon already has enough outstanding work: for each target AppID,
-`seed_database` returns early when at least `target_new` (100) items are fetchable — queued and not
-dead, the population `get_next_items_to_scrape` selects. The guard exists so that a healthy backlog
-is not re-crawled. It deliberately does not count items that have never been fetched: those may not
-be queued at all, and reading them as outstanding work once suppressed discovery permanently while
-the fetch queue held a single item.
+`seed_database` returns early when at least `DISCOVERY_TARGET_NEW` (200) items are fetchable — queued
+and not dead, the population `get_next_items_to_scrape` selects. The same value is the per-run fill
+target, so a pass that does run refills to 200. The guard exists so that a healthy backlog is not
+re-crawled, and the target was raised from 100 because the fetch loop drains the queue between
+discovery passes: at 100 every pass found the queue already at or above the threshold and skipped it,
+so the refill raced the drain instead of leading it. It deliberately does not count items that have
+never been fetched: those may not be queued at all, and reading them as outstanding work once
+suppressed discovery permanently while the fetch queue held a single item.
 
 ### `_run_page_discovery` (daemon)
 

@@ -112,6 +112,27 @@ def test_guard_ignores_dead_items_holding_priority(mock_sleep, mock_query, db_pa
     assert mock_query.called, "dead items must not be counted as outstanding work"
 
 
+@patch("src.daemon.query_workshop_files")
+@patch("src.daemon.time.sleep")
+def test_default_target_still_discovers_a_queue_above_the_old_buffer(mock_sleep, mock_query, db_path):
+    """Pins the default: 150 fetchable items must leave it below the threshold.
+
+    `seed_database` is called with no argument, so this exercises the default
+    `DISCOVERY_TARGET_NEW` rather than a value the caller passed. Under the old
+    default of 100 this queue was already "full" and the pass returned without a
+    request; the raised default has to keep the same queue below the threshold
+    so the pass fetches.
+    """
+    _insert(db_path, [(i, 200, 1, 100) for i in range(1, 151)])
+    assert count_fetchable_items(db_path) == 150
+
+    mock_query.return_value = {"total": 10, "items": [{"publishedfileid": "999"}], "next_cursor": ""}
+
+    Daemon(_config(db_path)).seed_database()
+
+    assert mock_query.called, "the default buffer must not be satisfied by 150 fetchable items"
+
+
 # --- migration 16 recovery -------------------------------------------------
 
 def _age_to_v15(db_path):
