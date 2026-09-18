@@ -20,8 +20,8 @@ Absolute timings are hardware-dependent; the ratios are the point.
 split into named metrics in `src/metrics.py`, and both front ends render one independent
 chunk per metric, ordered and throttled by measured cost rather than a fixed classification
 ([tui.md](tui.md), [web-ui.md](web-ui.md)). What remains is the schema-dependent half —
-per-queue completion timestamps for throughput/ETA, and the queue indexes — plus the open
-parity gaps in the table below (authors, view-state persistence).
+per-queue completion timestamps for throughput/ETA (the queue indexes have since landed as
+migration 24→25) — plus the open parity gaps in the table below (authors, view-state persistence).
 
 
 Bring the web UI to parity with the TUI, rebuild the statistics surface in both so it reports the
@@ -187,6 +187,16 @@ metric at a time. Two further problems compounded this:
 
 ### Queue indexes
 
+**Landed (migration 24→25).** The three partial composite indexes are created by
+migration 24→25 (`idx_web_scrape_queue`, `idx_image_queue`, `idx_api_queue`,
+`EXPECTED_VERSION = 25`) and documented in
+[schema-migrations.md](schema-migrations.md). `tests/test_queue_indexes.py`
+asserts with `EXPLAIN QUERY PLAN` that all three worker polls and the web and
+image statistics breakdowns plan through the matching index with no `TEMP
+B-TREE` sort — the check that the index's column order really does satisfy the
+poll's `ORDER BY`. The measurements below are the evidence the change was
+adopted on and are kept as measured.
+
 The three unindexed queues account for most of the expensive metrics, and the same missing indexes also
 affect the crawler: the web and image workers select their next item with a full scan plus a sort on
 **every poll**, not only when statistics are requested.
@@ -217,14 +227,24 @@ Caveats: a `GROUP BY` over a queue still costs time proportional to the queued r
 breakdowns improve by roughly 7× rather than becoming free; and the web queue's `> 0` predicate
 covers about 89% of rows, so its partial index is nearly full-size.
 
+**One row's framing is narrower than the code.** The shipped `priority_breakdowns` metric covers
+`translation_priority`, `needs_image` and `needs_web_scrape` only, so the table's "API queue
+breakdown" has no caller in the statistics today — it is the `GROUP BY api_priority` shape the row
+was measured on. The API queue is read in shipped code by the fetch poll and by
+`count_fetchable_items` (the daemon's "is there work?" count), and the new index serves both; the
+plan's breakdown shape is index-served too. `tests/test_queue_indexes.py` pins the shipped queries
+and notes the breakdown shape's missing caller.
+
 **Recommendation:** adopt them, as part of the schema work below rather than the repair work in
-flight.
+flight. *(Done: migration 24→25.)*
 
 ### Sequencing
 
 The schema changes this plan needs are additive and independent of the migration currently in flight
 for the full-text index. They should therefore take the next migration number rather than sharing
-one, so each can be deployed and reverted on its own.
+one, so each can be deployed and reverted on its own. *(The queue indexes took their own number,
+24→25, following this rule. The per-queue completion timestamps this plan also needs are still
+unlanded.)*
 
 ### Open decisions
 
