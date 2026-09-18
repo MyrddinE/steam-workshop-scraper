@@ -119,6 +119,58 @@ from the same config itself (`init_webserver`); both processes write into the on
 `<outbox>/web_downloads/`, and the multi-process caveat under *Concurrency*
 below applies to that directory as much as to the manifest.
 
+## Crash dumps
+
+An unhandled traceback goes to a terminal nobody is reading, so `src/crash.py`
+writes it to `<outbox_dir>/crashes/<stamp>-<process>-error<N>.txt` and registers
+it in the same manifest, with `kind: "crash"`, for the existing puller. It is
+installed by all three entry points (`src/tui.py`, `src/web_runner.py`,
+`src/daemon_runner.py`) and covers the three escape routes: `sys.excepthook`, the
+worker-thread `threading.excepthook`, and Textual's own `App._handle_exception`,
+which the TUI overrides because Textual catches the common case in its message
+pump before any hook sees it. The hook that was there before is always still
+called, so the console shows exactly what it showed before. The traceback is also
+written to the log with `logging.error(..., exc_info=True)`, because the
+maintainer reads that file too.
+
+One run can report more than one error: Textual calls `_handle_exception` once
+per unhandled error and prints only the first in normal mode, so the second
+traceback used to be discarded at print time. Every error therefore gets its own
+file, numbered in the order the process reported it; `error_occurrence` and
+`errors_this_run` in the header say which one it is. Each dump is written
+synchronously, because Textual closes its message loop as it exits.
+
+The file is a context header, the full traceback **with each frame's locals**,
+and the last ~200 formatted log records. Locals are included because the values
+in play are usually the whole answer, and they are guarded three ways:
+
+* Mapping entries -- and local variables -- whose name contains `cookie`,
+  `token`, `secret`, `password`, `passwd`, `credential`, `login` or `sessionid`,
+  or ends in `key`, are replaced with `***` before rendering. Over-redacting a
+  benign `sort_key` costs a little context; under-redacting costs a credential.
+* Every literal credential the process knows is scrubbed from the finished text,
+  longest first, the same rule the web capture uses: the current cookie set, the
+  configured `sessionid`/`steamLoginSecure` in both separator forms, the Steam
+  and OpenAI API keys from the config **and** the environment (`load_config`
+  strips an env-derived key from the config before saving, so the config alone is
+  not enough), and any value registered at runtime through
+  `crash.register_secret` -- today the pushed CSRF token in `/api/sessionid` and
+  a refreshed `steamLoginSecure` wherever it is persisted.
+* Each value is truncated (~2,000 characters), the locals per frame and the
+  whole file are capped (256 KB), and a value whose `repr` raises is skipped
+  rather than allowed to break the dump. The caps are recorded in the header.
+
+**The elision is not complete.** It is key-name based and known-value based, so
+a credential the process never registered, the config does not hold, and no key
+name describes would still be written. That is the accepted cost of including
+locals at all, and it is why the dump goes only to the owner's own outbox: it is
+pulled by their sync and is never published anywhere.
+
+If no outbox can be determined -- the config may not have loaded, which is
+exactly when a crash happens -- the dump goes beside the configured log file if
+there is one, else into the working directory, and its path is printed to the
+console. A dump the user cannot find is not a dump.
+
 ## What a capture holds
 
 One JSON record per sample:
@@ -179,6 +231,7 @@ is the file count, not the write count.
 <outbox_dir>/web_downloads/<stamp>-<kind>-<id>.json  a web pull's record
 <outbox_dir>/web_downloads/<stamp>-<kind>-<id>.body  its response body
 <outbox_dir>/image_downloads/<stamp>-<id>.json     a successful image download (metadata only)
+<outbox_dir>/crashes/<stamp>-<process>-error<N>.txt  one crash dump
 ```
 
 Every one of those files is registered as its own `manifest.json` entry with
@@ -194,7 +247,9 @@ downloads live in `<outbox_dir>/image_downloads/`, a sibling of the web capture'
 `<outbox_dir>/web_downloads/`, and are registered with `kind: "image_download"`
 and `role: "record"`. Web-download records and their bodies are registered with
 `kind: "web_download"` and a `role` of `record` or `body` — a kind of their own,
-so a puller can collect them without also pulling the failure tree.
+so a puller can collect them without also pulling the failure tree. Crash dumps
+are registered with `kind: "crash"`, their own kind again, so `--only crash`
+collects exactly them.
 
 ## Selector misses change the queue
 

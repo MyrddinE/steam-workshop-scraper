@@ -18,6 +18,7 @@ from src import metrics
 from src import images
 from src import pending
 from src import subscription
+from src import crash
 from src.config import ConfigError, load_config, save_config
 from src.daemon_control import DaemonController
 import os
@@ -1532,6 +1533,23 @@ class ScraperApp(App):
         self._restored_selected_id = self._initial_state.get("selected_workshop_id", None)
         self._has_restored_state = False
 
+    def _handle_exception(self, error: Exception) -> None:
+        """Write a crash dump before Textual renders the error and exits.
+
+        This is the only hook that sees the common case: Textual catches an
+        unhandled error from its message pump and its workers itself, so neither
+        ``sys.excepthook`` nor ``threading.excepthook`` is reached. The dump is
+        written first -- a rich console traceback is gone the moment the screen
+        is closed -- and the delegate call is unchanged, so Textual still renders
+        its own traceback (with locals, which the file also carries redacted) and
+        still exits.
+        """
+        try:
+            crash.record_exception(type(error), error, error.__traceback__)
+        except Exception:
+            logging.error("Crash dump failed", exc_info=True)
+        super()._handle_exception(error)
+
     def save_state(self) -> None:
         """Saves current UI state to disk."""
         if not self.is_mounted or not self._has_restored_state or self.is_single_creator_mode:
@@ -2177,8 +2195,20 @@ def main():
         # Disable logging if no file, as stdout corrupts TUI
         logging.getLogger().addHandler(logging.NullHandler())
 
+    # After logging is configured, so the ring-buffer handler is not dropped by
+    # the forced basicConfig above. From here an unhandled error anywhere in the
+    # process is written to the outbox; `ScraperApp._handle_exception` covers the
+    # errors Textual catches before they ever reach a hook.
+    crash.install("tui", config, config_path=config_path)
+
     app = ScraperApp(config_path)
-    app.run()
+    try:
+        app.run()
+    except BaseException:
+        # Belt to the hook's braces: a traceback that escapes `run()` still gets
+        # a dump before it propagates, and the re-raise keeps the exit the same.
+        crash.record_exception(*sys.exc_info())
+        raise
 
 if __name__ == "__main__":
     main()

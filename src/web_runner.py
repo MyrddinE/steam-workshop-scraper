@@ -5,6 +5,7 @@ import logging
 from src.config import ConfigError, load_config
 from src.database import initialize_database
 from src.webserver import app, init_webserver
+from src import crash
 
 
 def main():
@@ -22,6 +23,11 @@ def main():
     except ConfigError as exc:
         logging.error("%s", exc)
         sys.exit(2)
+    # Installed after the entry point configured logging, so the ring-buffer
+    # handler survives. It does not alter the handlers above, the exit codes or
+    # the order of anything below; it only adds a way for an unhandled traceback
+    # to reach the outbox instead of a console nobody reads.
+    crash.install("web", config, config_path=config_path)
     db_path = config.get("database", {}).get("path", "workshop.db")
     initialize_database(db_path)
     init_webserver(db_path, config, config_path=config_path)

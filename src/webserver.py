@@ -9,6 +9,7 @@ from flask import Flask, request, jsonify, render_template, send_from_directory
 from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, mark_own_subscribed, get_queued_items, FILTER_SCHEMA, bump_api_priority_for_detail, clear_pending_items
 from src.analysis import view_window_analysis
 from src import capture
+from src import crash
 from src import images
 from src import metrics
 from src import session_health
@@ -749,6 +750,12 @@ def api_sessionid():
         return jsonify({"ok": False, "message": "No sessionid provided."}), 400
 
     _sessionid = sid
+    # A pushed token and a refreshed login cookie may match nothing in the
+    # config or the browser profile, so hand both to the crash reporter now: a
+    # crash inside the subscribe route would otherwise write them verbatim.
+    crash.register_secret(sid)
+    if login_secure:
+        crash.register_secret(login_secure)
     # Only the login cookie is persisted; the CSRF token stays in memory. The
     # bridge re-pushes on a timer, and a cookie is valid for days, so a push that
     # carries the value already on disk must not rewrite the config file. That

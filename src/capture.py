@@ -396,6 +396,32 @@ def _scrub_text(text, secrets):
     return text
 
 
+def ordered_secrets(secrets) -> list:
+    """Unique credential values, longest first, ready for :func:`scrub_text`.
+
+    A value is replaced before any value it contains, which is the order the
+    whole-file scrub needs and the order :func:`elide_secrets` already returns.
+    Exposed for the crash dump, which gathers its values from several sources --
+    the cookie set, the config, the environment and the runtime registrations --
+    and so cannot take the ordering from a single elision call.
+    """
+    return _ordered_secrets(secrets)
+
+
+def scrub_text(text, secrets):
+    """Replace every literal credential value in ``text`` with ``***``.
+
+    This is the whole-file scrub :func:`_write_web_download` applies to a capture
+    body, exposed so a second writer of diagnostic text -- the crash dump in
+    :mod:`src.crash` -- removes the same literal values rather than growing a
+    second rule with its own length floor. Values shorter than
+    ``MIN_SCRUB_LENGTH`` are left alone on purpose: a real cookie jar carries
+    ``timezoneOffset=0``, and replacing every ``0`` would leave a capture that
+    describes nothing.
+    """
+    return _scrub_text(text, secrets)
+
+
 def _scrub_bytes(raw: bytes, secrets) -> bytes:
     if not raw or not secrets:
         return raw

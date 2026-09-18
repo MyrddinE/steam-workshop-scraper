@@ -184,3 +184,16 @@ def cleanup_tui_state():
     for name in (".tui_state.yaml", ".daemon_state.yaml", ".daemon_state.yaml.tmp"):
         if os.path.exists(name):
             os.remove(name)
+
+
+@pytest.fixture(autouse=True)
+def cleanup_crash_hooks():
+    """The entry points install process-wide crash hooks; no test may leak them.
+
+    `src.tui:main`, `src.web_runner:main` and `src.daemon_runner:main` all call
+    `crash.install`, and a test that drives one of them would otherwise leave
+    `sys.excepthook` and a root log handler installed for every test after it.
+    """
+    yield
+    from src import crash
+    crash.uninstall()

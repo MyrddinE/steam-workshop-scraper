@@ -46,6 +46,7 @@ from src.daemon_state import StateStore, state_path_for
 from src import pacing
 from src import images
 from src import capture
+from src import crash
 from src import session_health
 from src.subscription_sync import reconcile_own_subscriptions
 
@@ -408,6 +409,9 @@ class Daemon:
         if not fresh or fresh == current:
             return False
         self.config.setdefault("session", {})["login_secure"] = fresh
+        # The refreshed value is the live credential and may differ from the one
+        # the config previously held, so the crash reporter is told about it.
+        crash.register_secret(fresh)
         save_config(self.config_path, self.config)
         logging.info("Login cookie refreshed from the browser and saved to the config.")
         return True

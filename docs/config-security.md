@@ -99,6 +99,36 @@ Deep-merges the in-memory config into the disk file, preserving keys not present
 - `save_config` strips any config value that matches an environment variable before writing — this prevents accidentally persisting env-derived secrets.
 - The `session.id` and `session.login_secure` are stored in the config file. These are Steam session cookies. `sessionid` is a CSRF token; `steamLoginSecure` is what authenticates the session, and it is what the subscribe call and the workshop scrape both send. Treat both as secrets. `steamLoginSecure` expires — *measured live* on 2026-09-17, the token carries `exp - iat` of 24.1 hours, so Steam reissues it about daily and an untouched profile goes stale within a day — and the userscript refreshes it by pushing to `/api/sessionid`, which persists it so the daemon picks it up without a restart. The value states its own expiry and `src/session_cookie.py` reads it, so code can refuse a dead cookie without asking Steam; when one is recorded, the web UI shows a warning with a link to sign in again ([web-ui.md](web-ui.md#the-session-warning)). When `session.read_firefox_cookies` is on, the Workshop scrape and the server-side subscribe call both send the profile's whole `steamcommunity.com` cookie set instead, which includes these two plus the browser's own non-credential state (`timezoneOffset`, `steamCountry`, `browserid`, and so on). That is deliberate — it is what a real navigation sends, and the request is shaped to match one — and none of the extra cookies is a credential.
 
+### Crash Dumps
+
+An unhandled traceback is written to
+`<outbox_dir>/crashes/<stamp>-<process>-error<N>.txt` by `src/crash.py`, installed
+from all three entry points (`src/tui.py`, `src/web_runner.py`,
+`src/daemon_runner.py`). Because the traceback includes each frame's **locals**,
+this is the one outbox artefact that can hold whatever the process happened to be
+holding at crash time, so it is reduced three ways before it is written:
+
+* a mapping entry — or a local variable — whose name contains `cookie`, `token`,
+  `secret`, `password`, `passwd`, `credential`, `login` or `sessionid`, or ends
+  in `key`, has its value replaced with `***`;
+* every literal value the process knows is scrubbed from the finished text,
+  longest first: the current cookie set, `session.id` and `session.login_secure`
+  in both accepted forms, `api.key` **and** `STEAM_API_KEY`, `openai.api_key`
+  **and** `OPENAI_API_KEY` (`load_config` strips an env-derived key from the
+  config before saving, so the config alone is not enough), plus anything
+  registered at runtime through `crash.register_secret` — the pushed `sessionid`
+  and a refreshed `steamLoginSecure`;
+* values are truncated and the whole file is capped at 256 KB, with the caps
+  stated in the header.
+
+This is **not** a complete barrier. It is key-name based and known-value based,
+so a credential the process never registered, the config does not hold, and no
+key name describes would still be written. The dump therefore goes only to the
+owner's own outbox — it is collected by their sync and is never published — and
+[docs/failure-capture.md](failure-capture.md) records the same residual risk.
+With no outbox configured the dump falls back beside the configured log file,
+else into the working directory, and the path is printed to the console.
+
 ### Session Cookie Handling
 
 - The `sessionid` cookie (not HttpOnly) is captured by the userscript via `document.cookie` on `steamcommunity.com` and pushed to the server.

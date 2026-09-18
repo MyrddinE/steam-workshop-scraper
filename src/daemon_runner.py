@@ -7,6 +7,7 @@ import os
 from src.daemon import Daemon
 from src.config import ConfigError, load_config
 from src.database import initialize_database
+from src import crash
 
 
 class _SafeStreamHandler(logging.StreamHandler):
@@ -132,6 +133,12 @@ def main():
         force=True
     )
     logging.raiseExceptions = False
+
+    # After logging is configured, so the ring-buffer handler is not dropped by
+    # the forced basicConfig above. The daemon's worker threads already report a
+    # killed thread through `threading.excepthook`; this gives that traceback a
+    # destination on disk. It changes no handler, exit code or control flow.
+    crash.install("daemon", config, config_path=config_path)
 
     # Verify handler types at startup
     root = logging.getLogger()

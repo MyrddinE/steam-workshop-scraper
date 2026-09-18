@@ -70,9 +70,15 @@ def test_tui_main_no_logging(tmp_path):
         src.tui.main()
 
         mock_basic_config.assert_not_called()
-        mock_get_logger.return_value.addHandler.assert_called_once()
-        added_handler = mock_get_logger.return_value.addHandler.call_args[0][0]
-        assert isinstance(added_handler, logging.NullHandler)
+        # The crash reporter also attaches a ring-buffer handler (see
+        # `src/crash.py`), so the assertion is about *which* handlers appear:
+        # the TUI must add the NullHandler and must not add a console handler,
+        # because stdout would corrupt the screen.
+        added = [call.args[0]
+                 for call in mock_get_logger.return_value.addHandler.call_args_list]
+        assert any(isinstance(handler, logging.NullHandler) for handler in added)
+        assert not any(isinstance(handler, (logging.StreamHandler, logging.FileHandler))
+                       for handler in added)
 
 
 def test_waitress_serve_starts_and_responds():

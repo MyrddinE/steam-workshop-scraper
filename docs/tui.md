@@ -34,6 +34,34 @@ After the first `load_more_items` completes, `_has_restored_state` is set to Tru
 
 During initial mount, setting default values on Select widgets fires `on_select_changed` which would trigger redundant searches. The guard `if self._has_restored_state:` prevents searches during restoration — only the `call_after_refresh(self.execute_search)` call runs the initial query. After state is restored, user-triggered changes fire searches and save state.
 
+### Crash dumps
+
+An unhandled TUI traceback used to go to the terminal and nowhere else. `main()`
+now installs `src/crash.py` after logging is configured (`crash.install("tui",
+config, config_path=config_path)`, so the ring-buffer handler survives the forced
+`basicConfig`), and wraps `app.run()` in a `try/except` that records the
+exception and re-raises — the belt to the hooks' braces. The same installer is
+called by `src/web_runner.py` and `src/daemon_runner.py`; in those two it adds no
+handler beyond the ring buffer and changes no exit code or control flow.
+
+The TUI is the interesting case, because Textual catches an unhandled error in
+its own message pump and workers and renders a Rich traceback itself, so neither
+`sys.excepthook` nor `threading.excepthook` ever sees it.
+`ScraperApp._handle_exception` is therefore overridden to write the dump *before*
+delegating to Textual's implementation, which still renders the traceback and
+exits unchanged. Textual calls `_handle_exception` once per error and prints only
+the first in normal mode, so every call writes its own numbered dump; a second
+error is never suppressed.
+
+Each dump is `<outbox_dir>/crashes/<stamp>-tui-error<N>.txt`, registered in the
+outbox manifest with `kind: "crash"`. With no outbox configured it is written
+beside the configured log file, else into the working directory, and its path is
+printed to the console. It holds the context header, the traceback with each
+frame's locals, and the last ~200 log records; the locals are redacted by key
+name and by every known or runtime-registered credential, and truncated.
+`docs/failure-capture.md` has the file shape and the elision rule, including its
+residual risk.
+
 ---
 
 ## Search Builder
