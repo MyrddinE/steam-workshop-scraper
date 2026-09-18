@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 from datetime import datetime, timezone
+from typing import NamedTuple
 from src.database import (
     get_next_items_to_scrape, 
     insert_or_update_item, 
@@ -155,6 +156,24 @@ def user_requested_priority(inherited_prio: int) -> int:
     migration that repairs the rows this wrote has to draw the same line.
     """
     return inherited_prio if inherited_prio >= USER_PRIORITY_FLOOR else 0
+
+
+class ScrapeImageOutcome(NamedTuple):
+    """What `_flag_scrape_and_image` did with one item's dependent work.
+
+    Two facts, because they are not the same question:
+
+    * ``enriched`` -- the item matched its AppID's enrichment filters. This is
+      what gates translation and the creator-persona refresh, and it says
+      nothing about whether anything was queued.
+    * ``queued`` -- at least one of `flag_for_web_scrape` / `flag_for_image` was
+      actually called. An enriched item whose description is current and whose
+      preview needs no attempt matches the filters and queues nothing, and the
+      discovery line must say so rather than claim it is ``enriching``.
+    """
+
+    enriched: bool
+    queued: bool
 
 
 # --- API merge allow-list ----------------------------------------------------
@@ -871,25 +890,39 @@ class Daemon:
         inherited_prio = existing_data.get("api_priority", 0)
 
         self._score_wilson(merged_data)
-        enriched = self._flag_scrape_and_image(merged_data, existing_data, item_id, inherited_prio)
+        outcome = self._flag_scrape_and_image(merged_data, existing_data, item_id, inherited_prio)
 
         merged_data["status"] = 200
         insert_or_update_item(self.db_path, merged_data)
 
-        self._flag_translations(merged_data, item_id, enriched, inherited_prio)
+        self._flag_translations(merged_data, item_id, outcome.enriched, inherited_prio)
 
-        # Mark the useful event, not the common one: `enriching` says the item
-        # met its AppID's enrichment filter and is queued for a page and preview
-        # fetch. The old form marked the *rejected* item instead, which was
-        # 99.0% of discovery lines (measured live 2026-09-17 over the last 6 MB
-        # of scraper.log: 53,523 of 54,057), so the one line in a hundred worth
-        # reading was the unmarked one. Nothing is lost: an unmarked line is the
-        # item that failed the filter and is only scraped as backlog work.
-        logging.info(f"[A:{item_id}] \"{display_title}\"{' — \033[32menriching\033[0m' if enriched else ''}")
+        # Mark what happened, not what the filters decided: the marker answers
+        # "was anything queued for this item". Three states:
+        #   `current` (grey, SGR 90) -- nothing was queued: the description is
+        #       at the item's current revision and the preview needs no attempt;
+        #   `enriching` (green, SGR 32) -- the item matched its AppID's
+        #       enrichment filters and work was queued for it;
+        #   bare -- work was queued, but only as backlog, because the item did
+        #       not match the filters.
+        # Deciding by `enriched` alone mislabelled the enriched-but-current item
+        # as `enriching`, claiming a queue entry that was never made. The old
+        # form marked the *rejected* item instead, which was 99.0% of discovery
+        # lines (*measured live* 2026-09-17 over the last 6 MB of scraper.log:
+        # 53,523 of 54,057), so the one line in a hundred worth reading was the
+        # unmarked one. Nothing is lost: an unmarked line is the item that
+        # failed the filter and is only scraped as backlog work.
+        if outcome.queued and outcome.enriched:
+            marker = " — \033[32menriching\033[0m"
+        elif outcome.queued:
+            marker = ""
+        else:
+            marker = " — \033[90mcurrent\033[0m"
+        logging.info(f"[A:{item_id}] \"{display_title}\"{marker}")
         # Step 3: propose the creator for the batch-level persona refresh. The
         # per-item method no longer makes an HTTP call here; nothing about the
         # delay is touched, because the request already succeeded.
-        return self._creator_to_refresh(merged_data, enriched)
+        return self._creator_to_refresh(merged_data, outcome.enriched)
 
     def _settle_api_failure(self, merged_data: dict, item_id: int, api_status: int,
                             previous_priority: int) -> None:
@@ -944,15 +977,20 @@ class Daemon:
             merged_data.get("lifetime_subscriptions", 0) or 0)
 
     def _flag_scrape_and_image(self, merged_data: dict, existing_data: dict,
-                               item_id: int, inherited_prio: int) -> bool:
+                               item_id: int, inherited_prio: int) -> ScrapeImageOutcome:
         """Queue web-scrape and image work for this item.
 
-        Returns whether the item was enriched. Both stages are gated on the same
-        revision test, because the API refresh is the change detector: it is the
-        cheapest call and the only stage that goes stale on a timer, so when it
-        observes an unchanged steam_updated_at the dependent work is already
-        current and is not re-queued. Per-queue staleness sweeps are deliberately
-        not used.
+        Returns a :class:`ScrapeImageOutcome`: whether the item matched its
+        AppID's enrichment filters and whether any work was actually queued.
+        The two are not the same question -- an enriched item that is already
+        current queues nothing -- so the caller must not derive one from the
+        other.
+
+        Both stages are gated on the same revision test, because the API refresh
+        is the change detector: it is the cheapest call and the only stage that
+        goes stale on a timer, so when it observes an unchanged
+        steam_updated_at the dependent work is already current and is not
+        re-queued. Per-queue staleness sweeps are deliberately not used.
 
         Note the mixed sources: the revision comparison is between the pre-fetch
         record and the merged one, so both must be passed.
@@ -985,11 +1023,13 @@ class Daemon:
             revision_unchanged and existing_data.get("extended_description") is not None)
 
         enriched = False
+        queued = False
         if self._should_enrich(appid, merged_data):
             if description_is_current:
                 merged_data["extended_description"] = existing_data["extended_description"]
             else:
                 flag_for_web_scrape(self.db_path, item_id, max(3, requested_prio))
+                queued = True
             enriched = True
         elif not description_is_current:
             # Does not match the AppID's enrichment filters, so it is not
@@ -1000,6 +1040,7 @@ class Daemon:
             # queued at 1 rather than carrying its discovery priority (3) into
             # this queue and outranking an item the filters did select.
             flag_for_web_scrape(self.db_path, item_id, max(1, requested_prio))
+            queued = True
 
         # Image work, on the same revision test. Without it every API fetch
         # re-flagged the image, so previews that had not changed were downloaded
@@ -1014,7 +1055,8 @@ class Daemon:
                 or (revision_unchanged and images.can_render_image(existing_ext))):
             flag_for_image(self.db_path, item_id,
                            max(3, requested_prio) if enriched else max(1, requested_prio))
-        return enriched
+            queued = True
+        return ScrapeImageOutcome(enriched=enriched, queued=queued)
 
     def _flag_translations(self, merged_data: dict, item_id: int,
                            enriched: bool, inherited_prio: int) -> None:
