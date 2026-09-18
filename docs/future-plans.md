@@ -433,3 +433,33 @@ walk) can be the confirmer: it costs no extra request, because it already runs o
 writes `own_subscribed`. The price is latency — up to a day to notice that a subscribe silently failed
 — and that is the trade to weigh when the confirmation read is retired.
 
+---
+
+## Estimating a subscription pass from measurement
+
+**Status: Planned, low priority.** Parked deliberately: the estimate is cosmetic, and doing this properly
+costs more than the inaccuracy does today.
+
+The TUI's queue estimate prices every item at two intervals of the configured delay. *Measured live* on
+2026-09-18 that is about a third low, and for a mundane reason: a gated page read costs the interval
+**plus the request** — 6.8 s against a 6.0 s delay in the scraper's own loop, 7.7–8.6 s inside the
+subscribe pass — and the POST, exempt from the interval, still spends 1.1–1.8 s on the clock. One item
+therefore ran about 18 s against an estimate of 12 s.
+
+Two improvements, in the order they are worth doing:
+
+1. **A better starting number, from what has already been recorded.** The subscribe path's requests are
+   already timestamped twice over — every web download is captured with the moment it was made, and the
+   daemon log carries the web worker's own pace over weeks. A per-item cost derived from that history,
+   together with the delay it was measured at, beats a constant multiple of the configured delay, and it
+   can be recomputed when the delay moves.
+2. **A live correction for the rest of the queue.** Once a pass is running, the items it has finished are
+   the best evidence about the items it has not: a rolling mean of the last few item durations, applied
+   to the rows still waiting, converges within two or three items and absorbs whatever the history got
+   wrong. The row being processed is already drawn distinctly ("subscribing...") with no countdown, which
+   is the natural place to start timing each item from.
+
+Not worth doing before the Web UI moves onto the engine: that changes what a pass costs on the web side,
+and the two estimates should be re-derived together rather than twice — [tui.md](tui.md),
+[web-ui.md](web-ui.md), [code-issues.md](code-issues.md) records the inaccuracy as issue 41.
+
