@@ -524,6 +524,85 @@ def _fake_iter_metrics(record=None):
     return run
 
 
+#: Metrics the TUI deliberately draws through a widget other than a
+#: `CONTENT_IDS` Static. An exemption needs a reason here, so a new metric
+#: cannot be left unwired by silence -- the guard test below walks the catalogue
+#: and names any other metric that is missing its label or content id.
+TUI_RENDER_EXEMPTIONS = {
+    "app_tracking": "special-cased onto a DataTable in `_compose_chunk`",
+    "tag_counts": "owns the right-hand column, not a scrolling chunk",
+}
+
+
+def test_every_registered_metric_has_the_wiring_both_front_ends_need():
+    """A metric registered in `src/metrics.py` must be drawable by both panels.
+
+    The web panel discovers metrics from the catalogue and falls back to a JSON
+    dump for a value it has no renderer for, so its requirement is the catalogue
+    entry itself (name and note). The TUI has no such fallback: `_compose_chunk`
+    indexes `CONTENT_IDS`, so a registered metric without an entry raises
+    `KeyError` inside `compose` and takes the whole statistics screen down. A
+    missing renderer branch is quieter -- the chunk simply stays at its
+    "Computing…" placeholder -- and is caught by the render test below.
+
+    Every gap is reported with the metric's name and the piece that is absent,
+    so the reader does not have to reproduce the crash to find it.
+    """
+    catalogue = {m["name"]: m for m in metrics.catalogue()}
+    gaps = []
+    for name in metrics.all_names():
+        entry = catalogue.get(name)
+        if entry is None or not entry.get("note"):
+            gaps.append(f"{name}: no web catalogue entry with a note")
+        if name in TUI_RENDER_EXEMPTIONS:
+            continue
+        if name not in StatsScreen.LABELS:
+            gaps.append(f"{name}: no StatsScreen.LABELS heading")
+        if name not in StatsScreen.CONTENT_IDS:
+            gaps.append(
+                f"{name}: no StatsScreen.CONTENT_IDS entry "
+                "(stats compose would raise KeyError)")
+    assert not gaps, (
+        "registered metric(s) a front end cannot draw -- add the missing wiring "
+        "to src/tui.py, or add an exemption with its reason to "
+        "TUI_RENDER_EXEMPTIONS:\n  " + "\n  ".join(gaps))
+
+
+@pytest.mark.asyncio
+async def test_every_registered_metric_renders_in_its_tui_chunk(mock_config):
+    """A content id alone is not enough: the metric needs a renderer branch.
+
+    This drives the real screen and the real metrics against the test database,
+    so a metric with an id but no `_render_metric` branch is caught by its chunk
+    still reading "Computing…" after every metric has landed.
+    """
+    with patch('src.tui.load_config', return_value=mock_config):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+            app.push_screen(StatsScreen(app.db_path))
+            await pilot.pause(ASYNC_PAUSE)
+            screen = app.screen
+            for _ in range(300):
+                await pilot.pause(0.02)
+                if len(screen._measured_ms) >= len(metrics.all_names()):
+                    break
+
+            gaps = []
+            for name in metrics.all_names():
+                if name in TUI_RENDER_EXEMPTIONS:
+                    continue
+                widget_id = StatsScreen.CONTENT_IDS.get(name)
+                if widget_id is None:
+                    continue  # the static guard above names this gap
+                text = str(screen.query_one(f"#{widget_id}", Static).render())
+                if text in ("Computing…", "[dim]unavailable[/dim]", ""):
+                    gaps.append(
+                        f"{name}: `_render_metric` left the chunk at {text!r}")
+            assert not gaps, (
+                "registered metric(s) with no TUI renderer:\n  " + "\n  ".join(gaps))
+
+
 @pytest.mark.asyncio
 async def test_stats_screen_puts_every_metric_in_its_own_chunk(mock_config):
     """Each metric lands in its own widget, in seed order on the first pass."""
