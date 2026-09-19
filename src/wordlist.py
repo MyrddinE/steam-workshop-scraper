@@ -10,7 +10,7 @@ published list so it can be checked against the original. Every word is three to
 five lower-case letters -- one token each -- except ``yo-yo``, the single
 hyphenated entry in the list; it is kept rather than filtered so this is a faithful
 copy, and both the boundary writer and the boundary reader accept a hyphen (see
-``PHRASE_WORD`` and ``boundary_re`` in ``src/translator.py``). 1296^4 is about
+``PHRASE_WORD_RE`` and ``boundary_re`` in ``src/translator.py``). 1296^4 is about
 2.8e12 possible four-word phrases.
 """
 

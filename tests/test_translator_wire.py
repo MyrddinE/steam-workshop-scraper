@@ -240,7 +240,7 @@ def test_an_unmapped_field_falls_back_to_its_own_name():
 def test_every_alias_round_trips_through_the_wire():
     """The regexes accept the aliases -- confirmed rather than assumed.
 
-    `FIELD_LABEL` is what the tolerant fallback matches, so a label it could not
+    `FIELD_LABEL_RE` is what the tolerant fallback matches, so a label it could not
     read would silently cost a batch its alignment whenever the model mangled the
     phrase. Every alias has to survive write, split and match.
     """
