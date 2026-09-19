@@ -36,8 +36,8 @@ CREATOR_COLUMNS = {
     "api_fetched_at", "translated_at", "translation_priority",
 }
 APP_DISCOVERY_COLUMNS = {
-    "appid", "last_historical_date_scanned", "filter_text", "required_tags",
-    "excluded_tags", "window_size", "enrichment_filters", "last_cursor",
+    "appid", "filter_text", "required_tags",
+    "excluded_tags", "enrichment_filters", "last_cursor",
 }
 
 
@@ -70,7 +70,7 @@ def _seed_both_tables(db_path) -> None:
 
 
 def test_a_fresh_database_reaches_the_expected_version_under_the_new_names(db_path):
-    assert EXPECTED_VERSION == 34
+    assert EXPECTED_VERSION == 35
     assert _version(db_path) == EXPECTED_VERSION
 
     names = _table_names(db_path)
@@ -149,6 +149,13 @@ def test_the_rename_is_a_no_op_when_already_renamed_under_the_old_marker(db_path
     """
     _seed_both_tables(db_path)
     conn = get_connection(db_path)
+    # Rewind to the v29 shape first, then apply 29->30's two renames and leave
+    # the marker behind: that is the crash window. Without the rewind the
+    # database would be at the v35 shape, and 30->31 would look for a
+    # `scrape_version` the later migration had already dropped.
+    restore_pre_rename_table_names(conn)
+    conn.execute("ALTER TABLE users RENAME TO creators")
+    conn.execute("ALTER TABLE app_tracking RENAME TO app_discovery")
     conn.execute("PRAGMA user_version = 29")
     conn.commit()
     conn.close()

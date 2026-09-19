@@ -328,8 +328,7 @@ def test_a_web_scrape_success_stamps_our_clock_not_the_steam_version(db_path):
     stamp = _stored(db_path, 1, "web_scraped_at")
     assert stamp is not None
     assert before <= stamp <= after
-    assert stamp != 123456, "the completion clock is ours, not scrape_version"
-    assert _stored(db_path, 1, "scrape_version") == 123456
+    assert stamp != 123456, "the completion clock is ours, not the Steam version"
 
 
 def test_the_web_stamp_is_taken_when_the_scrape_completes_not_when_it_started(db_path, monkeypatch):

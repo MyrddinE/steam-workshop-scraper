@@ -50,7 +50,7 @@ def test_insert_or_update_item(db_path):
     item = {
         "workshop_id": 123,
         "title": "Test Item",
-        "scrape_version": 1696104000
+        "translate_version": 1696104000
     }
     # First insert should return True
     assert insert_or_update_item(db_path, item) is True
@@ -283,25 +283,17 @@ def test_search_items_pagination(db_path):
     assert results[0]["workshop_id"] == 106
 
 def test_app_tracking(db_path):
-    from src.database import get_app_tracking, update_app_tracking, save_enrichment_filters
-    
+    """`save_enrichment_filters` writes the discovery row and its filters.
+
+    This test used to drive `update_app_tracking`, which migration 34->35
+    removed with the two write-only columns it wrote. It stays pointed at the
+    real accessor: `save_enrichment_filters` creates the `app_discovery` row
+    and `get_app_tracking` reads the filter columns back.
+    """
+    from src.database import get_app_tracking, save_enrichment_filters
+
     # Initially should be None
     assert get_app_tracking(db_path, 4000) is None
-    
-    # Test update_app_tracking (last_historical_date_scanned)
-    update_app_tracking(db_path, 4000, 1600000000, 3600*24*30)
-    tracking = get_app_tracking(db_path, 4000)
-    assert tracking["last_historical_date_scanned"] == 1600000000
-    assert tracking["window_size"] == 3600*24*30
-    assert tracking["filter_text"] == ''
-    assert tracking["required_tags"] == '[]'
-    assert tracking["excluded_tags"] == '[]'
-    
-    # Update again
-    update_app_tracking(db_path, 4000, 1700000000, 3600*24*30*2)
-    tracking = get_app_tracking(db_path, 4000)
-    assert tracking["last_historical_date_scanned"] == 1700000000
-    assert tracking["window_size"] == 3600*24*30*2
 
     # Test save_enrichment_filters
     save_enrichment_filters(db_path, 4000, "test search", ["tag1", "tag2"], ["excl1"])
@@ -309,9 +301,6 @@ def test_app_tracking(db_path):
     assert tracking["filter_text"] == "test search"
     assert tracking["required_tags"] == json.dumps(["tag1", "tag2"])
     assert tracking["excluded_tags"] == json.dumps(["excl1"])
-    
-    # Ensure last_historical_date_scanned is NOT updated by save_enrichment_filters
-    assert tracking["last_historical_date_scanned"] == 1700000000
 
     # Test saving only some filters
     save_enrichment_filters(db_path, 4000, required_tags=["new_tag"])
@@ -747,7 +736,7 @@ def test_migration_14_renames_and_cleans_data(tmp_path):
     assert conn.execute("PRAGMA user_version").fetchone()[0] == EXPECTED_VERSION
     cols = {r[1] for r in conn.execute("PRAGMA table_info(workshop_items)")}
     assert {"first_seen_at", "api_fetched_at", "last_fetch_attempted_at",
-            "scrape_version", "translate_version", "steam_created_at",
+            "translate_version", "steam_created_at",
             "steam_updated_at"}.issubset(cols)
 
     rows = {r["workshop_id"]: dict(r) for r in conn.execute("SELECT * FROM workshop_items")}
@@ -759,9 +748,10 @@ def test_migration_14_renames_and_cleans_data(tmp_path):
     # api_fetched_at keeps the value only where Steam content actually arrived.
     assert rows[1]["api_fetched_at"] == 111
     assert rows[2]["api_fetched_at"] is None
-    # The pre-rename artefact is cleared where there is no Steam payload.
-    assert rows[2]["scrape_version"] is None
-    assert rows[1]["scrape_version"] == 222
+    # 13->14 renamed dt_attempted to scrape_version and cleared it where there
+    # was no Steam payload; 34->35 then dropped the column, so the cleaned
+    # values are no longer observable at the terminal version.
+    assert "scrape_version" not in cols
     # The anomalous first_seen_at row is repaired from api_fetched_at.
     assert rows[3]["first_seen_at"] == 555
 
@@ -862,9 +852,9 @@ def test_get_db_stats_fetch_recency_uses_last_fetch_attempted_at(db_path):
                                     "last_fetch_attempted_at": now})
     insert_or_update_item(db_path, {"workshop_id": 2, "fetch_status": 200,
                                     "last_fetch_attempted_at": now - 40 * 86400})
-    # A Steam-version value must NOT influence the fetch-recency breakdown.
+    # A Steam clock must NOT influence the fetch-recency breakdown.
     insert_or_update_item(db_path, {"workshop_id": 3, "fetch_status": 200,
-                                    "scrape_version": now - 40 * 86400})
+                                    "steam_updated_at": now - 40 * 86400})
 
     stats = get_db_stats(db_path)
     assert stats["fetch_recency_counts"] == {"fresh": 1, "stale": 1, "unknown": 1}

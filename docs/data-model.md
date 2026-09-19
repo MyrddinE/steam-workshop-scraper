@@ -45,7 +45,7 @@ One row per Steam Workshop item, keyed by `workshop_id` (the Steam `publishedfil
 | `title` | `title` | |
 | `short_description` | `description` | Renamed in `_merge_and_clean_api_data`; Steam calls it `description`. |
 | `steam_created_at` | `time_created` | Steam epoch seconds. |
-| `steam_updated_at` | `time_updated` | Steam epoch seconds. Also the value recorded as the scrape and translation version key. |
+| `steam_updated_at` | `time_updated` | Steam epoch seconds. Also the value recorded as the translation version key. |
 | `visibility` | `visibility` | |
 | `banned` | `banned` | |
 | `ban_reason` | `ban_reason` | |
@@ -82,9 +82,8 @@ Tags are not a column on `workshop_items`. They live in `tags(tag_id, tag_name)`
 | `first_seen_at` | STATE (ours) | Set when the row is first inserted. |
 | `api_fetched_at` | STATE (ours) | Set only when the API returned content (see [timestamps.md](timestamps.md)). |
 | `last_fetch_attempted_at` | STATE (ours) | Set on every API attempt, success or failure. |
-| `scrape_version` | STATE (Steam value) | `steam_updated_at` at the moment the web scraper ran. |
 | `translate_version` | STATE (Steam value) | `steam_updated_at` at the moment the translator ran. |
-| `web_scraped_at` | STATE (ours) | Our clock: when the web worker last scraped this item's page successfully. NULL means no success has been recorded since the column arrived in v27; unlike `scrape_version` it is not a Steam revision. |
+| `web_scraped_at` | STATE (ours) | Our clock: when the web worker last scraped this item's page successfully. NULL means no success has been recorded since the column arrived in v27; it is our completion time, not a Steam revision. |
 | `image_fetched_at` | STATE (ours) | Our clock: when the image worker last fetched this item's preview successfully. NULL means no success has been recorded since the column arrived in v27. |
 | `translated_at` | STATE (ours) | Our clock: when the translator finished the **last** queued field for this item. One stamp per item, moved on each later completion; NULL means no completion has been recorded since the column arrived in v27. The `creators` table has a column of the same name meaning "when this profile's text was translated"; the item column is the completion time of the item as a whole, because a per-field stamp is what `translate_version` already carries. |
 | `image_answer` | STATE | The preview's **outcome**, not only its file type. A real extension (`jpg`, `png`, …) means the file exists at `images/<bucket>/<id>.<ext>` and a URL may be built from it. A **wholly numeric** value is an HTTP status the server answered with: `404`/`410` mean the preview is permanently missing and will not be retried, any other code is recorded but still retryable. Any other token (`html`, `svg+xml`) is a content type that was not a picture this downloader can store. NULL means nothing has been recorded yet. One rule follows from this: **a URL is only ever built from a known image extension**, which `src/images.py` owns so the writer and every reader agree. |
@@ -198,18 +197,17 @@ things depend on it:
 These are properties of the current implementation, stated so a reader does not infer behaviour
 that is not there.
 
-* **`translate_version` drives item re-translation; `scrape_version` is only a record.** An item
+* **`translate_version` drives item re-translation.** An item
   translation is current when its `translate_version` is not older than the item's
   `steam_updated_at`, and every *item* translation trigger applies that rule (see
   [timestamps.md](timestamps.md)). A **creator's** name is the one exception, and deliberately so: a
   creator has no `steam_updated_at`, and `api_fetched_at` — the only clock left — moves on every
   profile refresh, so the refresh queues every non-ASCII name it fetches rather than trying to prove
   the name unchanged ([data-pipeline.md](data-pipeline.md#what-queues-a-field-for-translation)).
-  `scrape_version` is
-  written by the web scraper and the image worker, but no code compares it: the daemon decides
-  whether to re-queue the HTML scrape from `steam_updated_at` and whether `extended_description` is
-  already present, so the HTML scrape refreshes on an item update and the image worker uses its own
-  priority queue.
+  The item's HTML scrape is decided from `steam_updated_at` and whether `extended_description` is
+  already present, so the scrape refreshes on an item update and the image worker uses its own
+  priority queue. Migration 34→35 removed `scrape_version`, which recorded a second Steam revision
+  that no code ever compared.
 * **`language` no longer exists, and never had a source.** It was added as a Steam-provided column
   expecting the API to return a language, but no response this project consumes carries one.
   `GetPublishedFileDetails` has no language field in its response message, and `language` appears in

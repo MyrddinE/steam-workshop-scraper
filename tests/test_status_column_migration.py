@@ -29,8 +29,10 @@ from src.database import (
 from tests.conftest import restore_pre_rename_table_names
 
 OLD_INDEXES = {"idx_status", "idx_appid_status", "idx_status_scraped_version"}
+#: Recreated by 30->31; 34->35 then drops the third with `scrape_version`.
+RECREATED_THEN_DROPPED = "idx_fetch_status_scraped_version"
 NEW_INDEXES = {
-    "idx_fetch_status", "idx_appid_fetch_status", "idx_fetch_status_scraped_version",
+    "idx_fetch_status", "idx_appid_fetch_status",
 }
 
 #: The five states the column carries, one row each: fetched, dead, the legacy
@@ -93,7 +95,7 @@ def _regress_to_v30(db_path) -> None:
     """
     conn = get_connection(db_path)
     restore_pre_rename_table_names(conn)
-    for name in NEW_INDEXES:
+    for name in NEW_INDEXES | {RECREATED_THEN_DROPPED}:
         conn.execute(f"DROP INDEX IF EXISTS {name}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_status ON workshop_items (status)")
     conn.execute(
@@ -110,15 +112,16 @@ def _regress_to_v30(db_path) -> None:
 
 
 def test_a_fresh_database_names_the_column_fetch_status(db_path):
-    assert EXPECTED_VERSION == 34
+    assert EXPECTED_VERSION == 35
     assert _version(db_path) == EXPECTED_VERSION
     assert "fetch_status" in _columns(db_path)
     assert "status" not in _columns(db_path)
     assert "fetch_status" in WORKSHOP_ITEM_COLUMNS
     assert "status" not in WORKSHOP_ITEM_COLUMNS
     # The fresh path also creates the renamed indexes, since `_ensure_indexes`
-    # runs on every startup.
+    # runs on every startup; the `scrape_version` pair is gone.
     assert NEW_INDEXES <= _index_names(db_path)
+    assert RECREATED_THEN_DROPPED not in _index_names(db_path)
     assert not (OLD_INDEXES & _index_names(db_path))
 
 
@@ -143,7 +146,10 @@ def test_upgrading_a_v30_database_renames_the_column_and_keeps_every_row(db_path
     assert "status" not in _columns(db_path)
 
     indexes = _index_names(db_path)
-    assert NEW_INDEXES <= indexes, "the three indexes were not recreated under their new names"
+    assert NEW_INDEXES <= indexes, "the renamed indexes were not recreated"
+    assert RECREATED_THEN_DROPPED not in indexes, (
+        "34->35 must drop the index that embedded scrape_version"
+    )
     assert not (OLD_INDEXES & indexes), "an index named for the old column survived"
 
     # Every row survived, with its value untouched.
@@ -166,7 +172,12 @@ def test_the_recreated_indexes_name_the_column_they_index(db_path):
     assert definitions["idx_fetch_status"] == \
         "CREATE INDEX idx_fetch_status ON workshop_items (fetch_status)"
     assert "consumer_appid, fetch_status" in definitions["idx_appid_fetch_status"]
-    assert "fetch_status, scrape_version" in definitions["idx_fetch_status_scraped_version"]
+    # 30->31 also recreated `idx_fetch_status_scraped_version` here, on
+    # `(fetch_status, scrape_version)`; 34->35 then dropped it with the column,
+    # so it is pinned absent by the 34->35 migration test instead. The two
+    # renamed indexes above have no `scrape_version` in their definition and
+    # survive.
+    assert "idx_fetch_status_scraped_version" not in definitions
     for old_name in OLD_INDEXES:
         assert old_name not in definitions
 
@@ -179,6 +190,7 @@ def test_reinitialising_a_v31_database_changes_nothing(db_path):
 
     assert _version(db_path) == EXPECTED_VERSION
     assert NEW_INDEXES <= _index_names(db_path)
+    assert RECREATED_THEN_DROPPED not in _index_names(db_path)
     assert not (OLD_INDEXES & _index_names(db_path))
     assert _values_by_id(db_path) == values_before
 
@@ -208,5 +220,6 @@ def test_the_rename_is_a_no_op_when_already_renamed_under_the_old_marker(db_path
     assert "fetch_status" in _columns(db_path)
     assert "status" not in _columns(db_path)
     assert NEW_INDEXES <= _index_names(db_path)
+    assert RECREATED_THEN_DROPPED not in _index_names(db_path)
     assert not (OLD_INDEXES & _index_names(db_path))
     assert _values_by_id(db_path) == values_before

@@ -157,13 +157,6 @@ class ImageDownloadThread(threading.Thread):
                     # unclassifiable content type and a transport failure all
                     # leave it alone.
                     "image_fetched_at": int(time.time()),
-                    # Deliberately not scrape_version. The column records the
-                    # revision the *page* was scraped at, and this worker used to
-                    # write the same value into it on every download -- so an item
-                    # whose page had never been scraped still claimed a scrape at
-                    # its current revision. Nothing reads the column, which is why
-                    # it went unnoticed, but a column that cannot be trusted is
-                    # worse than one that is absent.
                 })
 
                 # Metadata only, and only under the debug switch: the image bytes

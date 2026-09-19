@@ -42,6 +42,15 @@ def restore_pre_rename_table_names(conn) -> None:
     ``entity_type``/``entity_id`` for the same reason: migrations 22->23 and
     27->28 read ``item_type``/``item_id``, so a marker rewound below 34 must
     present them. Migration 33->34 renames them forward again.
+
+    Migration 34->35 dropped three write-only columns -- ``scrape_version`` on
+    ``workshop_items`` and ``last_historical_date_scanned``/``window_size`` on
+    the discovery table. A marker rewound below 35 must present them again,
+    because the replayed chain names them: 30->31 builds
+    ``idx_fetch_status_scraped_version`` on ``(fetch_status, scrape_version)``
+    and ``_create_legacy_schema``'s populate step writes
+    ``last_historical_date_scanned``. They are re-added empty -- their contents
+    were write-only, and the drop already discarded them.
     """
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
@@ -65,6 +74,21 @@ def restore_pre_rename_table_names(conn) -> None:
             conn.execute(
                 f"ALTER TABLE workshop_items RENAME COLUMN {new_name} TO {old_name}"
             )
+
+    # `columns` predates the renames above, so re-read before restoring a
+    # dropped one.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(workshop_items)").fetchall()}
+    if "scrape_version" not in columns:
+        conn.execute("ALTER TABLE workshop_items ADD COLUMN scrape_version INTEGER")
+
+    discovery_columns = {row[1] for row in conn.execute(
+        "PRAGMA table_info(app_tracking)").fetchall()}
+    if "last_historical_date_scanned" not in discovery_columns:
+        conn.execute(
+            "ALTER TABLE app_tracking ADD COLUMN last_historical_date_scanned INTEGER")
+    if "window_size" not in discovery_columns:
+        conn.execute(
+            "ALTER TABLE app_tracking ADD COLUMN window_size INTEGER DEFAULT 2592000")
 
     queue_columns = {row[1] for row in conn.execute(
         "PRAGMA table_info(translation_queue)").fetchall()}

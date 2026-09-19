@@ -5,7 +5,7 @@ import json
 import time
 from src import pacing
 from src.daemon import Daemon, STALE_SWEEP_INTERVAL_SECONDS, API_DELAY_FLOOR
-from src.database import get_app_tracking, initialize_database, update_app_tracking
+from src.database import get_app_tracking, initialize_database
 
 @pytest.fixture
 def mock_config(db_path):

@@ -51,15 +51,15 @@ The main loop is the only thread that writes metadata fields (title, description
 
 ### Web Scraper Thread (`WebScraperThread`)
 
-Independent daemon thread. Picks up items with highest `web_scrape_priority` priority (10 = detail view, 5 = list view, 3 = new item, 1 = backlog). Downloads the Steam Community page, extracts extended_description and tags. Writes `extended_description`, `web_scrape_priority`, `scrape_version` (the Steam revision) and `web_scraped_at` (our completion time). Flags non-ASCII extended_description for translation.
+Independent daemon thread. Picks up items with highest `web_scrape_priority` priority (10 = detail view, 5 = list view, 3 = new item, 1 = backlog). Downloads the Steam Community page, extracts extended_description and tags. Writes `extended_description`, `web_scrape_priority` and `web_scraped_at` (our completion time). Flags non-ASCII extended_description for translation.
 
-**Shared state**: Reads `workshop_items` (preview_url, extended_description, etc.), writes `extended_description`, `web_scrape_priority`, `scrape_version` and `web_scraped_at` (via `insert_or_update_item`). Writes `translation_queue` via `queue_field_for_translation`. On failure it raises `api_priority` to 2. `web_scraped_at` is written only on the success branch; a miss, a wall, a throttle and a transport failure all leave it alone.
+**Shared state**: Reads `workshop_items` (preview_url, extended_description, etc.), writes `extended_description`, `web_scrape_priority` and `web_scraped_at` (via `insert_or_update_item`). Writes `translation_queue` via `queue_field_for_translation`. On failure it raises `api_priority` to 2. `web_scraped_at` is written only on the success branch; a miss, a wall, a throttle and a transport failure all leave it alone.
 
 ### Image Download Thread (`ImageDownloadThread`)
 
 Independent daemon thread. Picks up items with highest `image_priority` priority. Downloads the preview image, detects MIME/extension, saves to the bucketed `images/` directory. Writes `image_answer`, `image_priority` and `image_fetched_at`.
 
-**Shared state**: Reads `workshop_items` (preview_url, image_answer, image_priority). Writes `image_answer`, `image_priority`, `image_fetched_at`. On failure it decrements `image_priority` and raises `api_priority` to 2. It deliberately does **not** write `scrape_version`: that column records the revision the page was scraped at, and the image worker used to overwrite it on every download (issue 7; pinned by `test_a_downloaded_image_does_not_rewrite_the_scrape_version`). `image_fetched_at` is written only when the bytes are on disk — a 404, an unclassifiable content type and a transport failure all leave it alone.
+**Shared state**: Reads `workshop_items` (preview_url, image_answer, image_priority). Writes `image_answer`, `image_priority`, `image_fetched_at`. On failure it decrements `image_priority` and raises `api_priority` to 2. It writes no Steam revision: it used to overwrite `scrape_version` on every download, which made an item whose page had never been scraped claim a scrape at its current revision (issue 7); that write was removed and migration 34→35 then dropped the column. `image_fetched_at` is written only when the bytes are on disk — a 404, an unclassifiable content type and a transport failure all leave it alone.
 
 ### Translation Thread (`TranslatorThread`)
 
@@ -139,7 +139,6 @@ No formal locking protocol exists, but columns have clear ownership:
 - **Web scraper**: extended_description, web_scrape_priority, `web_scraped_at` (our completion time, success only)
 - **Image thread**: image_answer, image_priority, `image_fetched_at` (our completion time, success only)
 - **Translator**: title_en, short_description_en, extended_description_en, personaname_en, translate_version, `translated_at` on both tables (on an item it is written when the last queued field completes; for a creator the per-field write stamps `creators.translated_at`, and completion only clears `creators.translation_priority`, because a creator has no version key)
-- **Web scraper**: scrape_version, the revision the *page* was scraped at. The image thread used to write it too, which made an unscraped item claim a scrape; it no longer touches the column
 
 ### Priority Bumping
 

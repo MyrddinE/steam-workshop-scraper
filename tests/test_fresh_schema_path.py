@@ -37,6 +37,7 @@ from src.database import (
     insert_or_update_item,
     search_items,
 )
+from tests.conftest import restore_pre_rename_table_names
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
@@ -186,12 +187,15 @@ def test_fresh_path_builds_the_current_names(fresh_db_path):
     assert "app_tracking" not in snapshot["tables"]
 
     columns = {row[1] for row in snapshot["table_info"]["workshop_items"]}
-    assert {"first_seen_at", "api_fetched_at", "scrape_version",
+    assert {"first_seen_at", "api_fetched_at",
             "steam_created_at", "steam_updated_at"} <= columns
     assert {"dt_found", "dt_updated", "dt_attempted",
             "time_created", "time_updated", "tags"}.isdisjoint(columns), (
         "the fresh path kept a historical column"
     )
+    # Migration 34->35 dropped the write-only scrape_version, so the current
+    # shape does not carry it.
+    assert "scrape_version" not in columns
 
 
 def test_fresh_path_accessors_work(fresh_db_path):
@@ -258,15 +262,15 @@ def test_an_existing_database_takes_the_chain_whatever_the_flag_says(tmp_path):
 
     An existing database has a version that only the chain can carry forward,
     so it replays its pending migrations even with `legacy_chain=False`. Rewind
-    a current database to v29 by undoing 29->30's two renames and dropping the
-    marker, then confirm the default call still runs 29->30.
+    a current database to v29 by undoing every Batch 6 rename and restoring the
+    columns 34->35 dropped (the shared helper does all of it), then confirm the
+    default call still runs 29->30.
     """
     path = str(tmp_path / "existing.db")
     initialize_database(path, legacy_chain=True)
 
     conn = get_connection(path)
-    conn.execute("ALTER TABLE creators RENAME TO users")
-    conn.execute("ALTER TABLE app_discovery RENAME TO app_tracking")
+    restore_pre_rename_table_names(conn)
     conn.execute("PRAGMA user_version = 29")
     conn.commit()
     conn.close()

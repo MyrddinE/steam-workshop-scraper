@@ -7,7 +7,7 @@ several of them used to share one name and were read as if they all meant the sa
 |---|---|---|
 | Steam's clock | `steam_*` | `steam_created_at`, `steam_updated_at` (`workshop_items`) |
 | Our clock | `*_at` | `first_seen_at`, `api_fetched_at`, `last_fetch_attempted_at`, `web_scraped_at`, `image_fetched_at`, `translated_at`, `steam_download_seen_at` (`workshop_items`); `api_fetched_at`, `translated_at` (`creators`); `queued_at` (`translation_queue`) |
-| A stored Steam value used as a version key | `*_version` | `scrape_version`, `translate_version` (`workshop_items`) |
+| A stored Steam value used as a version key | `*_version` | `translate_version` (`workshop_items`) |
 
 One our-clock column carries the `steam_` prefix: `steam_download_seen_at` records when **we**
 first saw Steam's downloaded copy of a subscribed item on disk (the folder scan's one-way latch),
@@ -21,11 +21,10 @@ in the current schema.
 | Column | Table | Written by | Meaning |
 |---|---|---|---|
 | `steam_created_at` | `workshop_items` | Steam API | Steam's clock: when the author created the item. |
-| `steam_updated_at` | `workshop_items` | Steam API | Steam's clock: when the author last updated it. Also the source value for both version keys. |
+| `steam_updated_at` | `workshop_items` | Steam API | Steam's clock: when the author last updated it. Also the source value for `translate_version`. |
 | `first_seen_at` | `workshop_items` | `insert_or_update_item`, new rows only | Our clock: when the row was first inserted. |
 | `api_fetched_at` | `workshop_items` | daemon, on a successful API content pull only | Our clock: the last time the API returned usable content. |
 | `last_fetch_attempted_at` | `workshop_items` | daemon, on every API attempt | Our clock: the last time a fetch was attempted, success or failure. |
-| `scrape_version` | `workshop_items` | web scraper | Steam value: `steam_updated_at` at the moment the scraper ran. |
 | `translate_version` | `workshop_items` | translator | Steam value: `steam_updated_at` at the moment translation ran. |
 | `web_scraped_at` | `workshop_items` | web worker, on a successful scrape only | Our clock: when this item's page was last scraped successfully. |
 | `image_fetched_at` | `workshop_items` | image worker, on a successful download only | Our clock: when this item's preview image was last fetched successfully. |
@@ -37,15 +36,15 @@ in the current schema.
 
 ## Write Rules
 
-| Event | `first_seen_at` | `api_fetched_at` | `last_fetch_attempted_at` | `web_scraped_at` | `image_fetched_at` | `translated_at` | `scrape_version` | `translate_version` |
-|---|---|---|---|---|---|---|---|---|
-| Row first inserted | set | — | — | — | — | — | — | — |
-| API fetch attempted | — | — | **set** | — | — | — | — | — |
-| API content received | — | **set** | **set** | — | — | — | — | — |
-| Web scrape succeeds | — | — | — | **set** = our clock | — | — | **set** = `steam_updated_at` | — |
-| Image download succeeds | — | — | — | — | **set** = our clock | — | — | — |
-| A field is translated | — | — | — | — | — | — | — | **set** = `steam_updated_at` (or our clock when the row has no Steam payload) |
-| The item's last queued field is translated | — | — | — | — | — | **set** = our clock | — | **set** = `steam_updated_at` |
+| Event | `first_seen_at` | `api_fetched_at` | `last_fetch_attempted_at` | `web_scraped_at` | `image_fetched_at` | `translated_at` | `translate_version` |
+|---|---|---|---|---|---|---|---|
+| Row first inserted | set | — | — | — | — | — | — |
+| API fetch attempted | — | — | **set** | — | — | — | — |
+| API content received | — | **set** | **set** | — | — | — | — |
+| Web scrape succeeds | — | — | — | **set** = our clock | — | — | — |
+| Image download succeeds | — | — | — | — | **set** = our clock | — | — |
+| A field is translated | — | — | — | — | — | — | **set** = `steam_updated_at` (or our clock when the row has no Steam payload) |
+| The item's last queued field is translated | — | — | — | — | — | **set** = our clock | **set** = `steam_updated_at` |
 
 Web scraping and translation do not touch `api_fetched_at`, and never have.
 
@@ -62,10 +61,12 @@ the difference between "we did the work" and "we tried".
 
 `web_scraped_at`, `image_fetched_at` and `translated_at` are the completion
 timestamps throughput, burn-down and ETA are measured from, and they exist
-because the three queues had none of our own: the web and translation stages
-recorded only Steam's version value, and the image stage recorded nothing.
+because the three queues had none of our own: the web stage recorded only a
+Steam revision it never used, the translation stage recorded Steam's version
+value, and the image stage recorded nothing.
 Migration 26→27 adds them; [schema-migrations.md](schema-migrations.md) has the
-storage detail.
+storage detail. That unused web revision, `scrape_version`, was dropped in
+34→35.
 
 **Every row that predates the migration keeps NULL, and nothing backfills them.**
 The stages never recorded when they completed an item, so the time is not
@@ -127,11 +128,12 @@ never received API content at all (`steam_updated_at IS NULL`). Those rows now r
 never-fetched, which is correct. See [schema-migrations.md](schema-migrations.md) for the full
 migration-13→14 behaviour.
 
-## How the Version Keys Are Used
+## How the Version Key Is Used
 
-`scrape_version` and `translate_version` record the Steam update time at which the scraper and
-translator ran. Both are now compared against the current `steam_updated_at`, which is what makes
-them useful rather than merely honest.
+`translate_version` records the Steam update time at which the translator ran. It is compared
+against the current `steam_updated_at`, which is what makes it useful rather than merely honest.
+`scrape_version`, the scraper's equivalent, was dropped in migration 34→35: no code ever compared
+it, and when our own scrape time is wanted it is `web_scraped_at`.
 
 **Translation.** `translation_is_current(translated_text, translate_version, steam_updated_at)`
 decides whether a field needs (re-)translating. A translation is current when the `_en` value exists
@@ -157,10 +159,9 @@ The comparison is per **item**, not per field: `translate_version` is one column
 `workshop_items`, so an edit to any Steam-visible field makes every non-ASCII field of that item
 stale and re-queues them together. That is the granularity of the only version stamp that exists.
 
-**Scraping.** `scrape_version` is written by the web scraper alone, as the item's
-`steam_updated_at`, so it records Steam's revision rather than our clock. The image worker used to
-write the same value into it on every download, which made an item whose page had never been scraped
-claim a scrape at its current revision; it no longer touches the column (issue 7). The daemon's
-`_raise_scrape_and_image_priorities` does not read it either: it decides whether to re-queue the HTML scrape by
-comparing `steam_updated_at` against the pre-fetch record. The column therefore has no consumer —
-when our own scrape time is wanted, it is `web_scraped_at`.
+**Scraping.** There is no scrape version key. The web worker's re-queue decision is made from
+`steam_updated_at` and whether `extended_description` is already present
+(`_raise_scrape_and_image_priorities` compares `steam_updated_at` against the pre-fetch record), and
+its completion time is `web_scraped_at`. `scrape_version` used to record the same
+`steam_updated_at` the scraper ran at, but nothing consumed it; the image worker also overwrote it on
+every download until issue 7 removed that write, and migration 34→35 removed the column.
