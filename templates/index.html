@@ -2270,7 +2270,7 @@ function _renderStatusCounts(rows) {
 function _renderRecency(r) {
   return '<ul><li>Fresh: ' + fmtCount(r.fresh || 0) + '</li>'
     + '<li>Stale: ' + fmtCount(r.stale || 0) + '</li>'
-    + '<li>Never attempted: ' + fmtCount(r.blank || 0) + '</li></ul>';
+    + '<li>Never attempted: ' + fmtCount(r.unknown || 0) + '</li></ul>';
 }
 
 function _renderTranslation(t) {

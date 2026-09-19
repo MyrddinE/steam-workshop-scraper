@@ -479,7 +479,7 @@ class StatsScreen(Screen):
                 "[b]Record count by fetch recency[/b]\n"
                 f"  Fresh (last {metrics.DEFAULT_STALENESS_DAYS}d): {value.get('fresh', 0):,}\n"
                 f"  Stale: {value.get('stale', 0):,}\n"
-                f"  Never attempted: {value.get('blank', 0):,}",
+                f"  Never attempted: {value.get('unknown', 0):,}",
             )
         elif name == "coverage":
             self._set_text(name, self._format_coverage(value))

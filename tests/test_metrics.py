@@ -40,12 +40,12 @@ def _reference_translation_bucket(item) -> str:
 def _reference_recency(attempted_at, staleness_days: int = 30) -> str:
     """The classification exactly as it was written in Python."""
     if not attempted_at:
-        return "blank"
+        return "unknown"
     try:
         threshold = int(time.time()) - staleness_days * 86400
         return "fresh" if int(attempted_at) >= threshold else "stale"
     except (ValueError, TypeError):
-        return "blank"
+        return "unknown"
 
 
 TRANSLATION_BUCKETS = (
@@ -233,7 +233,7 @@ def test_translation_counts_agree_over_many_rows_at_once(db_path):
 
 
 @pytest.mark.parametrize("offset_days,expected", [
-    (None, "blank"),
+    (None, "unknown"),
     (0, "fresh"),
     (-1, "fresh"),
     (-29, "fresh"),
@@ -254,7 +254,7 @@ def test_fetch_recency_matches_the_python_it_replaced(db_path, offset_days, expe
     assert _reference_recency(row["last_fetch_attempted_at"]) == expected
 
     actual = metrics.values(metrics.compute(db_path, ["fetch_recency"]))["fetch_recency"]
-    assert actual == {"fresh": 0, "stale": 0, "blank": 0, **{expected: 1}}
+    assert actual == {"fresh": 0, "stale": 0, "unknown": 0, **{expected: 1}}
 
 
 def test_fetch_recency_honours_a_non_default_staleness(db_path):
@@ -293,7 +293,7 @@ def test_get_db_stats_still_returns_every_key_its_callers_use(db_path):
         "Translated": 0,
         "No data (never scraped)": 0,
     }
-    assert stats["fetch_recency_counts"] == {"fresh": 0, "stale": 0, "blank": 1}
+    assert stats["fetch_recency_counts"] == {"fresh": 0, "stale": 0, "unknown": 1}
     assert stats["status_counts"] == [{"status": 200, "count": 1}]
 
 

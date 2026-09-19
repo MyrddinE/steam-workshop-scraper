@@ -532,7 +532,7 @@ _FAKE_METRIC_VALUES = {
     "dead_items_by_queue": {"web": 1, "image": 0, "translation": 0, "api": 0},
     "dead_queued": 1,
     "queued_nowhere": 2,
-    "fetch_recency": {"fresh": 1, "stale": 0, "blank": 1},
+    "fetch_recency": {"fresh": 1, "stale": 0, "unknown": 1},
     "coverage": _fake_coverage(),
     "translation_status": {"Translated": 1, "Queued": 1},
     "tag_counts": {"Alpha": 2, "Beta": 1},

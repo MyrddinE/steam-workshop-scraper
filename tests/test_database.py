@@ -854,7 +854,7 @@ def test_translation_queue_legacy_null_queued_at_sorts_first(db_path):
 # ── get_db_stats classify fix ─────────────────────────────────────────────────
 
 def test_get_db_stats_fetch_recency_uses_last_fetch_attempted_at(db_path):
-    """The fresh/stale/blank breakdown measures OUR fetch recency, not Steam age."""
+    """The fresh/stale/unknown breakdown measures OUR fetch recency, not Steam age."""
     from src.database import get_db_stats
 
     now = int(time.time())
@@ -867,7 +867,7 @@ def test_get_db_stats_fetch_recency_uses_last_fetch_attempted_at(db_path):
                                     "scrape_version": now - 40 * 86400})
 
     stats = get_db_stats(db_path)
-    assert stats["fetch_recency_counts"] == {"fresh": 1, "stale": 1, "blank": 1}
+    assert stats["fetch_recency_counts"] == {"fresh": 1, "stale": 1, "unknown": 1}
     assert "dt_updated_counts" not in stats
     assert "highest_api_fetched_at" in stats
 

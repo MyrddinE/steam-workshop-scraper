@@ -529,12 +529,12 @@ def _queued_nowhere(conn, params) -> int:
 def _fetch_recency(conn, params) -> dict:
     staleness_days = int(params.get("staleness_days", DEFAULT_STALENESS_DAYS))
     threshold = int(time.time()) - staleness_days * 86400
-    counts = {"fresh": 0, "stale": 0, "blank": 0}
+    counts = {"fresh": 0, "stale": 0, "unknown": 0}
     rows = conn.execute(
         """
         SELECT CASE
-                 WHEN typeof(last_fetch_attempted_at) NOT IN ('integer', 'real') THEN 'blank'
-                 WHEN last_fetch_attempted_at IS NULL OR last_fetch_attempted_at = 0 THEN 'blank'
+                 WHEN typeof(last_fetch_attempted_at) NOT IN ('integer', 'real') THEN 'unknown'
+                 WHEN last_fetch_attempted_at IS NULL OR last_fetch_attempted_at = 0 THEN 'unknown'
                  WHEN last_fetch_attempted_at >= ? THEN 'fresh'
                  ELSE 'stale'
                END AS bucket,
