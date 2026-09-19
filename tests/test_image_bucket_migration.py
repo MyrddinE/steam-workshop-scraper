@@ -51,8 +51,8 @@ def test_migration_12_to_13(tmp_path):
     flat_img_a.write_text("dummy_image_data_a")
     
     # Already migrated image for Case B
-    char1, char2, char3 = get_image_subdirs(1055818964)
-    nested_dir_b = images_dir / char1 / char2 / char3
+    bucket1, bucket2, bucket3 = get_image_subdirs(1055818964)
+    nested_dir_b = images_dir / bucket1 / bucket2 / bucket3
     nested_dir_b.mkdir(parents=True, exist_ok=True)
     nested_img_b = nested_dir_b / "1055818964.png"
     nested_img_b.write_text("dummy_image_data_b")
@@ -90,8 +90,8 @@ def test_serve_image_resolution(tmp_path):
     
     # Let's write a dummy image file at the nested path
     wid = 1039919954
-    char1, char2, char3 = get_image_subdirs(wid)
-    nested_dir = images_dir / char1 / char2 / char3
+    bucket1, bucket2, bucket3 = get_image_subdirs(wid)
+    nested_dir = images_dir / bucket1 / bucket2 / bucket3
     nested_dir.mkdir(parents=True, exist_ok=True)
     img_file = nested_dir / f"{wid}.jpg"
     img_file.write_text("dummy_image_payload")
@@ -108,7 +108,7 @@ def test_serve_image_resolution(tmp_path):
     assert resp.data == b"dummy_image_payload"
     
     # Test nested request directly (gets served directly)
-    resp_nested = client.get(f"/images/{char1}/{char2}/{char3}/{wid}.jpg")
+    resp_nested = client.get(f"/images/{bucket1}/{bucket2}/{bucket3}/{wid}.jpg")
     assert resp_nested.status_code == 200
     assert resp_nested.data == b"dummy_image_payload"
     

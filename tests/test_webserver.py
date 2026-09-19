@@ -537,8 +537,8 @@ def test_image_serve_flat_id_resolves_to_bucket(web_client):
     """
     client, db_path = web_client
     workshop_id = 1039919954
-    char1, char2, char3 = get_image_subdirs(workshop_id)
-    nested_dir = os.path.join(os.path.dirname(db_path), "images", char1, char2, char3)
+    bucket1, bucket2, bucket3 = get_image_subdirs(workshop_id)
+    nested_dir = os.path.join(os.path.dirname(db_path), "images", bucket1, bucket2, bucket3)
     os.makedirs(nested_dir, exist_ok=True)
     payload = b"bucket-image-bytes"
     with open(os.path.join(nested_dir, f"{workshop_id}.jpg"), "wb") as f:
