@@ -69,6 +69,9 @@ v14 columns above.
 | priority | INTEGER | Priority level |
 | queued_at | INTEGER | Our clock: when queued (epoch). NULL on pre-v14 rows, where the time is unknown |
 
+Indexed by `idx_translation_queue_lookup` on `(item_type, item_id, field)`, created in
+`_create_schema` rather than by a migration (see [Indexes](#indexes) for why).
+
 ### `tags` — normalized tag names
 
 | Column | Type | Purpose |
@@ -132,6 +135,7 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 | idx_wilson_subscription_score | wilson_subscription_score | "Subscriber Score" sort |
 | idx_wilson_favorite_score | wilson_favorite_score | "Favorite Score" sort |
 | idx_translation_priority | translation_priority | Translation queue scanning |
+| idx_translation_queue_lookup | translation_queue (item_type, item_id, field) | Per-field queue lookup and the 22→23 repair's two-column `NOT EXISTS`. Created in `_create_schema` (unversioned), so the index exists when the repair runs |
 | idx_web_scrape_queue | (needs_web_scrape DESC, api_fetched_at ASC) WHERE needs_web_scrape > 0 | Web scrape worker poll and web queue breakdown (v25) |
 | idx_image_queue | (needs_image DESC, api_fetched_at ASC) WHERE needs_image > 0 | Image worker poll and image queue breakdown (v25) |
 | idx_api_queue | (api_priority DESC, api_fetched_at ASC) WHERE api_priority > 0 | API fetch worker poll and fetchable count (v25) |
@@ -866,7 +870,7 @@ The driver described under [Migration system](#migration-system-initialize_datab
 
 `_create_schema(cursor, conn)` creates the tables (`IF NOT EXISTS`) and the baseline columns, and runs the legacy data conversions every database history shares. It is the unversioned part of the schema, run before the versioned steps.
 
-`_ensure_indexes(cursor)` creates the query indexes. It is separate from `_create_schema` because several index columns (`api_fetched_at`, `scrape_version`) only exist after migration 13→14's renames, so it must run last; every statement is `IF NOT EXISTS`.
+`_ensure_indexes(cursor)` creates the query indexes. It is separate from `_create_schema` because several index columns (`api_fetched_at`, `scrape_version`) only exist after migration 13→14's renames, so it must run last; every statement is `IF NOT EXISTS`. One queue index is the exception and lives in `_create_schema` instead: `idx_translation_queue_lookup` on `translation_queue (item_type, item_id, field)`, because migration 22→23's repair runs *inside* the `MIGRATIONS` loop and an index created here would be too late to serve it. Its columns have existed since the table was created, so it is safe at every version.
 
 `MIGRATIONS` is the ordered `[(target version, function), ...]` table the driver walks. The functions are `_migration_<from>_to_<to>(cursor, conn, db_path)` and sit above the table in ascending order. See [Migration system](#migration-system-initialize_database) for the shape and for how to add the next one.
 

@@ -975,6 +975,25 @@ def _create_schema(cursor, conn):
     )
     """)
 
+    # The per-field lookup (`queue_field_for_translation`) and migration 22->23's
+    # stranded-mirror repair both predicate on this table, and 22->23 runs *inside*
+    # the MIGRATIONS loop below while `_ensure_indexes` runs after it -- so this
+    # index cannot live there: on the upgrade from a pre-v23 backup the repair
+    # would still scan. It is created here, in the unversioned schema every caller
+    # runs before the loop, which also means an existing database picks it up on
+    # the next startup with no version bump and no new migration step.
+    # `IF NOT EXISTS` matches `_ensure_indexes`' idempotence. `item_type` and
+    # `item_id` have carried these names since the table was created (migration
+    # 6->7 only converts the `dt_queued` timestamp), so this is safe at every
+    # history, including one old enough to run the whole chain. The name avoids
+    # the column names deliberately: batch 6 renames these columns, and SQLite
+    # rewrites an index *definition* on RENAME COLUMN but keeps its *name*, so
+    # `idx_translation_queue_item` would outlive its columns.
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_translation_queue_lookup "
+        "ON translation_queue (item_type, item_id, field)"
+    )
+
     # Safe migrations for existing databases
     _safe_add_columns(cursor, "workshop_items", [
         ("lifetime_subscriptions", "INTEGER"),
