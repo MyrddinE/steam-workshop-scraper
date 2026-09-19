@@ -241,7 +241,7 @@ computed by the server from the shared table, so the page holds no copy of the s
 
 Clicking the marker calls `toggleDetailQueue(wid)`, except for `subscribed`, which sends nothing —
 the only action available there would be an unsubscribe, and an accidental unsubscribe is not
-wanted. `toggleDetailQueue` POSTs the existing `/api/toggle_sub/<id>` route, which flips the
+wanted. `toggleDetailQueue` POSTs the existing `/api/toggle_subscription_queue/<id>` route, which flips the
 database flag and answers only `{ok: true}`. Since the route does not report which way the flag
 moved, the client reads the item back through the read-only `/api/item/<id>` route and re-renders
 the pane and the matching cell's marker (`_applySub`) from that payload — the same path the `s`
@@ -321,9 +321,9 @@ translation has been stored yet, matching the TUI's notice.
 
 ## Maintenance Actions
 
-The row under the detail pane (`#detail-buttons`) holds the queue and database actions: **Fetch New**, **Update Visible**, and **Clear Pending**.
+The row under the detail pane (`#detail-buttons`) holds the queue and database actions: **Fetch New**, **Update Visible**, and **Delete Never Fetched**.
 
-**Clear Pending** (`#btn-clear-pending`, `doClearPending`) mirrors the TUI's command-palette action. `confirm()` names the exact set before anything is sent — items with no status or a 404 status whose API data was never fetched — because the delete is destructive and irreversible; declining sends no request at all. On a 2xx it reports the count returned by the route and re-runs the search, on a rejected response it shows the status, and on a dead backend it shows the error, so a failed clear is never presented as a successful one.
+**Delete Never Fetched** (`#btn-delete-never-fetched`, `doDeleteNeverFetched`) mirrors the TUI's command-palette action. `confirm()` names the exact set before anything is sent — items with no status or a 404 status whose API data was never fetched — because the delete is destructive and irreversible; declining sends no request at all. On a 2xx it reports the count returned by the route and re-runs the search, on a rejected response it shows the status, and on a dead backend it shows the error, so a failed clear is never presented as a successful one.
 
 ---
 
@@ -331,7 +331,7 @@ The row under the detail pane (`#detail-buttons`) holds the queue and database a
 
 The header toolbar's **Daemon** button (`#btn-daemon`) opens `#daemon-modal`, a modal panel with the running status and PID, Start / Stop / Restart buttons, and a live log view (`#daemon-log`).
 
-While the panel is open, `_refreshDaemonStatus` polls `/api/daemon` and `_pollDaemonLog` polls `/api/daemon/log?since=<byte-offset>` every 2 seconds. The offset is the byte position returned by the previous response, so each poll transfers only new lines. The view is a bounded preview: the server reads at most 64 KiB and returns at most 500 lines, so a first poll against a large log shows its tail rather than the whole file. A `reset: true` response means the returned lines do not continue the caller's view — a first call that had to seek to the tail, a rotation or truncation, or the client having fallen more than one window behind — and `_pollDaemonLog` clears the pane before showing them, so a gap is never rendered as if it were continuous. `_closeDaemonPanel` clears the interval, so nothing polls while the panel is hidden.
+While the panel is open, `_refreshDaemonStatus` polls `/api/daemon` and `_pollDaemonLog` polls `/api/daemon/log?since_offset=<byte-offset>` every 2 seconds. The offset is the byte position returned by the previous response, so each poll transfers only new lines. The view is a bounded preview: the server reads at most 64 KiB and returns at most 500 lines, so a first poll against a large log shows its tail rather than the whole file. A `reset: true` response means the returned lines do not continue the caller's view — a first call that had to seek to the tail, a rotation or truncation, or the client having fallen more than one window behind — and `_pollDaemonLog` clears the pane before showing them, so a gap is never rendered as if it were continuous. `_closeDaemonPanel` clears the interval, so nothing polls while the panel is hidden.
 
 ---
 
@@ -361,15 +361,15 @@ The 📊 button (`#btn-stats`, `templates/index.html:128`) opens `#stats-modal` 
 `_openStatsPanel` (`templates/index.html:1316`) fetches `/api/metrics` for the catalogue — each metric's name, note and `seed_ms` hint — then builds one `<section class="stats-section" data-metric="...">` per metric, each with its own body element, and requests **every metric independently** through `GET /api/metrics/<name>` (`_loadMetric`, `templates/index.html:2437`). It deliberately does not `Promise.all` the requests: each section is filled and its own refresh timer armed the moment that metric lands, so a fast section draws while a slow one is still running. Every metric shows a human label, its note, and a value rendered to suit it, with its measured `ms` shown quietly in the heading:
 
 * **coverage** — seven progress bars on one width (API Data, Translations, Extended Web, Extended Web Translation, Images, Creator, Creator Translation), at two scopes: the whole live library (dead items excluded), and the items the target AppIDs' stored `enrichment_filters` select — what the owner cares about. Each bar's population is the flagging rule, mirrored in SQL: **Translations** is per field (`title`, `short_description`) over the filter-selected items, because `_queue_translations` returns early unless the item was enriched; **Extended Web** is the scrape's coverage and its maximum excludes the pages that answered with no description, whose count and ceiling are printed with the bar; **Extended Web Translation** hangs off it and can never be longer than it, and its population is any scraped item, not only the filter-selected ones; **Creator Translation** counts items attributed to a creator whose name is non-ASCII. The three translation bars are drawn at half the standard bar's CSS height and sit flush under their parent — no margin, padding or row between them — with the same left edge, so a shorter bar still means less coverage. A bar whose population is zero reads "Nothing to translate" rather than a stuck 0.0%. The second figure is the search builder's SQL translation of the filters, which also searches each text field's `_en` counterpart, so it can disagree with the daemon's in-memory per-item check; where they disagree, the search builder's answer is shown. With more than one target AppID the population is the union of what any target's filters select. A scope note names the AppIDs and says why the two figures coincide when a filter set is empty, unreadable, or has no fixed predicate (a percentile); an unreadable set means no exclusion, never "excludes everything". The labels and counts come from the metric, so the two front ends make the same claim about the same data in the same words.
-* **totals** — alive and dead counts with the overall total.
-* **stuck_work** — flagged in red when non-zero: the number of dead items still sitting in a queue, broken down per queue. A zero value renders as an all-clear.
-* **dead_queued**, **queued_nowhere** — the two handoff-invariant counters, rendered like `stuck_work`: red with the count when non-zero, a green all-clear sentence at the healthy zero. `dead_queued` counts dead items still holding a queue flag; `queued_nowhere` counts live items in no queue that the pipeline never completed. `dead_queued` and `stuck_work` are one question at two resolutions — the scalar invariant that must read zero, and the per-queue breakdown that says where to look — so both are kept.
+* **item_counts** — alive and dead counts with the overall total.
+* **dead_items_by_queue** — flagged in red when non-zero: the number of dead items still sitting in a queue, broken down per queue. A zero value renders as an all-clear.
+* **dead_queued**, **queued_nowhere** — the two handoff-invariant counters, rendered like `dead_items_by_queue`: red with the count when non-zero, a green all-clear sentence at the healthy zero. `dead_queued` counts dead items still holding a queue flag; `queued_nowhere` counts live items in no queue that the pipeline never completed. `dead_queued` and `dead_items_by_queue` are one question at two resolutions — the scalar invariant that must read zero, and the per-queue breakdown that says where to look — so both are kept.
 * **priority_breakdowns** — one "queue: N waiting" block per queue with the priority mix.
 * **translation_status**, **status_counts**, **fetch_recency** — labelled count lists.
 * **web_throughput**, **image_throughput**, **translation_throughput** — completions in the last hour and the last day, then the last success as a formatted timestamp. When the queue's completion column holds no stamp at all the chunk reads "no history yet" rather than showing `0`: a stage that finished before the column existed has no recorded time, and a fabricated zero would read as an idle queue. Same wording as the TUI, so the two front ends make the same claim about the same data.
 * **queue_eta** — one row per queue with outstanding depth, the rate in `per_day`, and the time to drain as `53d ± 30%`. The uncertainty is always a percentage, never an absolute span, and the time is one coarse unit so the percentage is the only second number; a queue with no completions in the window reads "no rate yet" and one with nothing outstanding reads "drained". The rate is in active time (pauses excluded), and the figure is marked `(gross)` for the three queues whose inflow nothing records. Same wording and same `_fmtDuration`/`_fmtUncertainty` shape as the TUI. The row carries the rate window, paused time and API inflow subtracted, and [data-pipeline.md](data-pipeline.md#queue-state-outstanding-rate-and-time-to-drain) owns the detail.
 * **tag_counts** — a two-column table (Tag, Count) over every tag, sorted by count descending and scrolling inside a bounded box so a long list cannot push the chunks below it off the panel. Counts print in full (`fmtExact`) rather than through `fmtCount`: a tag count is read and compared, not merely scanned, and `fmtCount` reports 5,000 as "5.00K".
-* **high_water**, **app_tracking** — a formatted timestamp and a per-AppID table.
+* **high_water**, **app_discovery** — a formatted timestamp and a per-AppID table.
 
 **Ordering is learned.** The request order is seeded from each metric's `seed_ms` on the first ever open; on every later open it is sorted by the durations measured on the previous open, persisted in `localStorage` under `stats.metric-order.v1`. The stored shape is deliberately tiny and versioned — `{v: 1, ms: {metric: milliseconds}}` — so a stale or corrupt entry from an older build is ignored rather than breaking the panel (`_loadStatsOrder`, `templates/index.html:2398`; `_statsOrder`). The DOM order is fixed when the panel opens; this open's measurements feed the next open.
 
@@ -423,7 +423,7 @@ unchanged value still costs no request until the stale re-push window elapses.
 carrying "too many requests", so the subscribe button is simply absent. The plugin checks for that
 wording before concluding anything, and reports it to `/api/subscribe_throttled/<id>` rather than
 `/api/subscribe_failed/<id>`. The difference matters: a throttled item is **left queued** so the next
-drain retries it, whereas a genuine failure is cleared. The UI polls `/api/sub_health` once per tab it
+drain retries it, whereas a genuine failure is cleared. The UI polls `/api/subscribe_throttle` once per tab it
 opens and stops opening more while Steam is refusing us, telling the user when the rest can be retried.
 The budget is per account or address and refills over minutes.
 
@@ -513,9 +513,9 @@ Wilson score percentile thresholds. Accepts `{filters, subscribed}` (filters exc
 
 Reads `.tui_state.yaml` for filter/sort state restoration. The client uses this as the **first-visit seed only**: once the browser has its own `view.state.v1` entry, this route is not called at all. The seed includes the TUI's `subscribed_overlay` value as well as `filters`, `sort_by` and `sort_order`.
 
-### `/api/clear_pending` — POST
+### `/api/delete_never_fetched_items` — POST
 
-Deletes every pending item — those with no status or a 404 status and no successful API fetch (`delete_never_fetched_items`, `src/database.py:3414`) — and returns `{ok, deleted}` with the number of rows removed. This is the same predicate and the same delete as the TUI's `action_clear_pending`; there is deliberately no dry-run mode. The UI asks for confirmation first, naming what will be deleted.
+Deletes every pending item — those with no status or a 404 status and no successful API fetch (`delete_never_fetched_items`, `src/database.py:3414`) — and returns `{ok, deleted}` with the number of rows removed. This is the same predicate and the same delete as the TUI's `action_delete_never_fetched_items`; there is deliberately no dry-run mode. The UI asks for confirmation first, naming what will be deleted.
 
 ### `/api/save_filter` — POST
 
@@ -527,7 +527,7 @@ Performs the subscribe against Steam directly, with no browser tab, and returns 
 
 It refuses before spending a request when the set has no `steamLoginSecure` (**400**, with a message naming the remedy: sign in to Steam in the browser the daemon reads cookies from, or configure `session.login_secure`), and when `session_health.evaluate_login` says the credential's own token has expired (**400**, the reason recorded through `session_health.record_rejected` so the [session warning](#the-session-warning) shows it). A Steam `success` of `2` or `15`, or an **HTTP 401**, is a refusal of the CSRF token, and what it means depends on the page read the same attempt made: beside an **authenticated** page read the credential is proven good, so **no session problem is recorded** and the refusal is logged as a token refusal (recording one is what used to tell the owner to sign in again while the login was working); beside an **anonymous** page read it is recorded as a session problem the same way as before. The response body is passed through untouched either way. A `success` of `1` records the confirmation with `mark_own_subscribed`, setting `own_subscribed` and clearing `is_queued_for_subscription` exactly as `/api/subscribed/<id>` does, and clears any recorded session problem. A missing item still answers **404** `Item not found.`, an item with no AppID still **400** `Item has no AppID.`, and a transport failure still **502**. Each of those refusals logs the `workshop_id` and the reason, and the POST line carries a SHA-256 **fingerprint** of the token — never the token itself.
 
-### `/api/toggle_sub/<id>` — POST
+### `/api/toggle_subscription_queue/<id>` — POST
 
 Flips `is_queued_for_subscription` for one item and answers `{ok: true}`. It is the route behind both the `s` shortcut on a grid cell and the detail pane's Queue/Unqueue button. It returns no new state, so the detail pane reads the item back through the read-only `/api/item/<id>` route to label its button.
 
@@ -575,7 +575,7 @@ Drive the background daemon through the shared `DaemonController`. Each returns 
 
 ### `/api/daemon/log` — GET
 
-Incremental log tail and bounded preview. Accepts `since=<byte-offset>` and returns `{lines, offset, reset}`. At most 64 KiB is read (`DaemonController.TAIL_BYTES`, `src/daemon_control.py:23`) and at most 500 lines are returned (`TAIL_LINES`, `src/daemon_control.py:24`), so a first call (`since <= 0`) returns the tail of the file rather than the whole of it. `offset` is the byte position to pass as `since` on the next poll. `reset` is true when the returned lines do not continue from `since` — the first call against a file larger than the window, a rotation or truncation, or the caller having fallen more than `max_bytes` behind — so the client knows its view has a gap and starts over. A missing or unreadable log returns an empty list rather than an error.
+Incremental log tail and bounded preview. Accepts `since_offset=<byte-offset>` and returns `{lines, offset, reset}`; the pre-rename `since` key is still accepted, because a page served before the rename may still be open in a browser. At most 64 KiB is read (`DaemonController.TAIL_BYTES`, `src/daemon_control.py:23`) and at most 500 lines are returned (`TAIL_LINES`, `src/daemon_control.py:24`), so a first call (`since_offset <= 0`) returns the tail of the file rather than the whole of it. `offset` is the byte position to pass as `since_offset` on the next poll. `reset` is true when the returned lines do not continue from `since_offset` — the first call against a file larger than the window, a rotation or truncation, or the caller having fallen more than `max_bytes` behind — so the client knows its view has a gap and starts over. A missing or unreadable log returns an empty list rather than an error.
 
 ### `/userscript/<file>` — dynamic script injection
 

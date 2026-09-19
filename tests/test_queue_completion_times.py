@@ -218,7 +218,7 @@ def test_a_queue_with_no_stamps_reports_no_history(db_path, column):
     value = metrics.values(
         metrics.compute(db_path, [QUEUE_METRIC[column]]))[QUEUE_METRIC[column]]
 
-    assert value == {"hour": None, "day": None, "last_success": None}
+    assert value == {"last_hour": None, "last_day": None, "last_success": None}
 
 
 def test_a_stamped_but_stale_queue_reports_a_measured_zero(db_path):
@@ -230,8 +230,8 @@ def test_a_stamped_but_stale_queue_reports_a_measured_zero(db_path):
     value = metrics.values(
         metrics.compute(db_path, ["web_throughput"]))["web_throughput"]
 
-    assert value["hour"] == 0
-    assert value["day"] == 0
+    assert value["last_hour"] == 0
+    assert value["last_day"] == 0
     assert value["last_success"] == now - 3 * 86400
 
 
@@ -252,8 +252,8 @@ def test_throughput_counts_only_rows_inside_the_window_and_skips_nulls(db_path, 
     value = metrics.values(
         metrics.compute(db_path, [QUEUE_METRIC[column]]))[QUEUE_METRIC[column]]
 
-    assert value["hour"] == 1
-    assert value["day"] == 2
+    assert value["last_hour"] == 1
+    assert value["last_day"] == 2
     assert value["last_success"] == now - 60
 
 

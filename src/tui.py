@@ -200,10 +200,10 @@ class StatsScreen(Screen):
     #: Human labels for the section headings, kept in step with the web panel's.
     METRIC_LABELS = {
         "high_water": "Last successful API fetch",
-        "totals": "Totals",
-        "app_tracking": "App tracking",
+        "item_counts": "Totals",
+        "app_discovery": "App discovery",
         "status_counts": "Status counts",
-        "stuck_work": "Stuck work",
+        "dead_items_by_queue": "Stuck work",
         "dead_queued": "Dead but queued",
         "queued_nowhere": "Queued nowhere",
         "fetch_recency": "Fetch recency",
@@ -221,9 +221,9 @@ class StatsScreen(Screen):
     #: in `_compose_metric_section` and `_render_metric`.
     METRIC_CONTENT_IDS = {
         "high_water": "high-water-content",
-        "totals": "totals-content",
+        "item_counts": "item-counts-content",
         "status_counts": "status-content",
-        "stuck_work": "stuck-content",
+        "dead_items_by_queue": "dead-items-by-queue-content",
         "dead_queued": "dead-queued-content",
         "queued_nowhere": "queued-nowhere-content",
         "fetch_recency": "recency-content",
@@ -285,7 +285,7 @@ class StatsScreen(Screen):
                 id=f"stats-label-{name}",
                 classes="stats-header",
             )
-            if name == "app_tracking":
+            if name == "app_discovery":
                 yield DataTable(id="app-stats-table")
             else:
                 yield Static(id=self.METRIC_CONTENT_IDS[name])
@@ -428,19 +428,19 @@ class StatsScreen(Screen):
         elif value is None:
             if name in self.METRIC_CONTENT_IDS:
                 self._set_text(name, "[dim]unavailable[/dim]")
-            elif name in ("app_tracking", "tag_counts"):
+            elif name in ("app_discovery", "tag_counts"):
                 self.query_one(
-                    "#app-stats-table" if name == "app_tracking" else "#tag-stats-table",
+                    "#app-stats-table" if name == "app_discovery" else "#tag-stats-table",
                     DataTable,
                 ).clear(columns=True)
-        elif name == "totals":
+        elif name == "item_counts":
             self._set_text(
                 name,
                 f"[b]Live items:[/b] {value.get('alive', 0):,}   "
                 f"[b]Dead:[/b] {value.get('dead', 0):,}   "
                 f"[dim](total {value.get('total', 0):,})[/dim]",
             )
-        elif name == "app_tracking":
+        elif name == "app_discovery":
             table = self.query_one("#app-stats-table", DataTable)
             table.clear(columns=True)
             table.add_columns("AppID", "Last Cursor")
@@ -459,8 +459,8 @@ class StatsScreen(Screen):
                 name,
                 "[b]Record count by status[/b]\n" + ("\n".join(lines) or "  (none)"),
             )
-        elif name == "stuck_work":
-            self._set_text(name, self._format_stuck(value))
+        elif name == "dead_items_by_queue":
+            self._set_text(name, self._format_dead_items_by_queue(value))
         elif name == "dead_queued":
             self._set_text(name, self._format_handoff_metric(
                 value,
@@ -479,7 +479,7 @@ class StatsScreen(Screen):
                 "[b]Record count by fetch recency[/b]\n"
                 f"  Fresh (last {metrics.DEFAULT_STALENESS_DAYS}d): {value.get('fresh', 0):,}\n"
                 f"  Stale: {value.get('stale', 0):,}\n"
-                f"  Never attempted: {value.get('blank', 0):,}",
+                f"  Never attempted: {value.get('unknown', 0):,}",
             )
         elif name == "coverage":
             self._set_text(name, self._format_coverage(value))
@@ -517,8 +517,8 @@ class StatsScreen(Screen):
                     "from here on.[/dim]")
         last = datetime.datetime.fromtimestamp(
             value["last_success"]).strftime("%Y-%m-%d %H:%M")
-        return (f"  Completed last hour: {value.get('hour', 0):,}\n"
-                f"  Completed last day: {value.get('day', 0):,}\n"
+        return (f"  Completed last hour: {value.get('last_hour', 0):,}\n"
+                f"  Completed last day: {value.get('last_day', 0):,}\n"
                 f"  Last success: {last}")
 
     #: Standard and subsidiary bar glyphs. A translation bar hangs off the bar
@@ -717,7 +717,7 @@ class StatsScreen(Screen):
         return "\n".join(lines)
 
     @staticmethod
-    def _format_stuck(stuck: dict) -> str:
+    def _format_dead_items_by_queue(stuck: dict) -> str:
         """Dead items still sitting in a queue, called out rather than hidden."""
         labels = (
             ("web", "Web scrape"),
@@ -1961,9 +1961,9 @@ class DatabaseCommands(Provider):
     async def discover(self) -> Iterable[DiscoveryHit]:
         """Yield commands that should be discoverable when the palette opens."""
         yield DiscoveryHit(
-            "Clear Pending Database",
-            self.app.action_clear_pending,
-            help="Remove all unscraped/pending items from the database",
+            "Delete Never Fetched Items",
+            self.app.action_delete_never_fetched_items,
+            help="Delete items that were never successfully fetched",
         )
         yield DiscoveryHit(
             "Show Subscription Queue",
@@ -1976,7 +1976,7 @@ class DatabaseCommands(Provider):
         matcher = self.matcher(query)
         
         commands = {
-            "Clear Pending Database": self.app.action_clear_pending,
+            "Delete Never Fetched Items": self.app.action_delete_never_fetched_items,
             "Show Subscription Queue": self.app.action_show_subscription_queue,
         }
         
@@ -3028,10 +3028,10 @@ class ScraperApp(App):
             row_to_delete.remove()
             self.call_after_refresh(self.execute_search)
 
-    def action_clear_pending(self) -> None:
-        """Removes all unscraped/pending items from the database."""
+    def action_delete_never_fetched_items(self) -> None:
+        """Deletes items that were never successfully fetched."""
         count = delete_never_fetched_items(self.db_path)
-        self.notify(f"Database cleared: {count} pending items removed.")
+        self.notify(f"Deleted {count} never-fetched item(s).")
         self.run_worker(self.execute_search())
 
     def action_show_stats(self) -> None:

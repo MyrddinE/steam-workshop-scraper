@@ -301,9 +301,9 @@ def query_workshop_newest_page(appid: int, cursor: str, api_key: str,
         if e.response is not None and e.response.status_code == 403:
             logging.error(f"Steam API returned 403 Forbidden for QueryFiles. "
                           "API key may be missing or invalid.")
-        return {"total": 0, "items": [], "next_cursor": "", "error": True}
+        return {"total": 0, "items": [], "next_cursor": "", "failed": True}
     except (requests.exceptions.RequestException, ValueError, KeyError):
-        return {"total": 0, "items": [], "next_cursor": "", "error": True}
+        return {"total": 0, "items": [], "next_cursor": "", "failed": True}
 
 
 def query_workshop_updated_page(appid: int, cursor: str, api_key: str, numperpage: int = 100,
@@ -331,7 +331,7 @@ def query_workshop_updated_page(appid: int, cursor: str, api_key: str, numperpag
     }
 
     if not _rate_limit(keep_running):
-        return {"abandoned": True, "total": 0, "items": [], "next_cursor": "", "error": False}
+        return {"abandoned": True, "total": 0, "items": [], "next_cursor": "", "failed": False}
     try:
         response = requests.get(url, params=params, timeout=15)
         response.raise_for_status()
@@ -341,11 +341,11 @@ def query_workshop_updated_page(appid: int, cursor: str, api_key: str, numperpag
             "total": data.get("total", 0),
             "items": items,
             "next_cursor": data.get("next_cursor", ""),  # page mode may still return a cursor
-            "error": False,
+            "failed": False,
         }
     except requests.exceptions.HTTPError as e:
         if e.response is not None and e.response.status_code == 403:
             logging.error("Steam API returned 403 Forbidden for page-mode QueryFiles.")
-        return {"total": 0, "items": [], "next_cursor": "", "error": True}
+        return {"total": 0, "items": [], "next_cursor": "", "failed": True}
     except (requests.exceptions.RequestException, ValueError, KeyError):
-        return {"total": 0, "items": [], "next_cursor": "", "error": True}
+        return {"total": 0, "items": [], "next_cursor": "", "failed": True}

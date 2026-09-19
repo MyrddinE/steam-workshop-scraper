@@ -40,12 +40,12 @@ def _reference_translation_bucket(item) -> str:
 def _reference_recency(attempted_at, staleness_days: int = 30) -> str:
     """The classification exactly as it was written in Python."""
     if not attempted_at:
-        return "blank"
+        return "unknown"
     try:
         threshold = int(time.time()) - staleness_days * 86400
         return "fresh" if int(attempted_at) >= threshold else "stale"
     except (ValueError, TypeError):
-        return "blank"
+        return "unknown"
 
 
 TRANSLATION_BUCKETS = (
@@ -93,12 +93,12 @@ def test_catalogue_matches_the_registry_in_seed_order():
 
 
 def test_compute_reports_value_cost_and_seed(db_path):
-    result = metrics.compute(db_path, ["totals"])
-    entry = result["totals"]
+    result = metrics.compute(db_path, ["item_counts"])
+    entry = result["item_counts"]
     assert entry["value"] == {"total": 0, "dead": 0, "alive": 0}
     assert entry["ms"] >= 0.0
     assert entry["note"]
-    assert entry["seed_ms"] == metrics.REGISTRY["totals"].seed_ms
+    assert entry["seed_ms"] == metrics.REGISTRY["item_counts"].seed_ms
     assert "tier" not in entry, "a cost hint is not a classification"
 
 
@@ -116,7 +116,7 @@ def test_iter_metrics_yields_every_metric_as_it_finishes(db_path):
 
 
 def test_iter_metrics_honours_a_requested_order(db_path):
-    requested = ["totals", "high_water", "coverage"]
+    requested = ["item_counts", "high_water", "coverage"]
     seen = [name for name, _ in metrics.iter_metrics(db_path, requested)]
     assert seen == requested
 
@@ -143,7 +143,7 @@ def test_iter_metrics_shares_one_connection(db_path, monkeypatch):
 
 def test_unknown_metric_is_rejected(db_path):
     with pytest.raises(KeyError, match="unknown metric"):
-        metrics.compute(db_path, ["totals", "not_a_metric"])
+        metrics.compute(db_path, ["item_counts", "not_a_metric"])
     with pytest.raises(KeyError, match="unknown metric"):
         list(metrics.iter_metrics(db_path, ["not_a_metric"]))
 
@@ -156,14 +156,14 @@ def test_a_broken_metric_does_not_take_down_the_others(db_path, monkeypatch):
     boom = metrics.Metric(name="boom", seed_ms=0.0, note="explodes", run=explode)
     monkeypatch.setitem(metrics.REGISTRY, "boom", boom)
 
-    result = metrics.compute(db_path, ["totals", "boom"])
-    assert result["totals"]["value"]["total"] == 0
+    result = metrics.compute(db_path, ["item_counts", "boom"])
+    assert result["item_counts"]["value"]["total"] == 0
     assert result["boom"]["value"] is None
 
 
 def test_values_strips_the_timing_wrapper(db_path):
-    assert metrics.values(metrics.compute(db_path, ["totals"])) == {
-        "totals": {"total": 0, "dead": 0, "alive": 0}
+    assert metrics.values(metrics.compute(db_path, ["item_counts"])) == {
+        "item_counts": {"total": 0, "dead": 0, "alive": 0}
     }
 
 
@@ -233,7 +233,7 @@ def test_translation_counts_agree_over_many_rows_at_once(db_path):
 
 
 @pytest.mark.parametrize("offset_days,expected", [
-    (None, "blank"),
+    (None, "unknown"),
     (0, "fresh"),
     (-1, "fresh"),
     (-29, "fresh"),
@@ -254,7 +254,7 @@ def test_fetch_recency_matches_the_python_it_replaced(db_path, offset_days, expe
     assert _reference_recency(row["last_fetch_attempted_at"]) == expected
 
     actual = metrics.values(metrics.compute(db_path, ["fetch_recency"]))["fetch_recency"]
-    assert actual == {"fresh": 0, "stale": 0, "blank": 0, **{expected: 1}}
+    assert actual == {"fresh": 0, "stale": 0, "unknown": 0, **{expected: 1}}
 
 
 def test_fetch_recency_honours_a_non_default_staleness(db_path):
@@ -293,7 +293,7 @@ def test_get_db_stats_still_returns_every_key_its_callers_use(db_path):
         "Translated": 0,
         "No data (never scraped)": 0,
     }
-    assert stats["fetch_recency_counts"] == {"fresh": 0, "stale": 0, "blank": 1}
+    assert stats["fetch_recency_counts"] == {"fresh": 0, "stale": 0, "unknown": 1}
     assert stats["status_counts"] == [{"status": 200, "count": 1}]
 
 
@@ -306,7 +306,7 @@ def test_get_db_stats_matches_the_metrics_it_wraps(db_path):
     stats = get_db_stats(db_path)
     computed = metrics.values(metrics.compute(db_path, [
         "status_counts", "translation_status", "tag_counts", "fetch_recency",
-        "high_water", "app_tracking", "priority_breakdowns",
+        "high_water", "app_discovery", "priority_breakdowns",
     ]))
 
     assert stats["status_counts"] == computed["status_counts"]
@@ -314,15 +314,15 @@ def test_get_db_stats_matches_the_metrics_it_wraps(db_path):
     assert stats["tag_counts"] == computed["tag_counts"]
     assert stats["fetch_recency_counts"] == computed["fetch_recency"]
     assert stats["highest_api_fetched_at"] == computed["high_water"]
-    assert stats["app_stats"] == computed["app_tracking"]
+    assert stats["app_stats"] == computed["app_discovery"]
     assert stats["priority_breakdowns"] == computed["priority_breakdowns"]
 
 
-def test_totals_separates_dead_items(db_path):
+def test_item_counts_separates_dead_items(db_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "alive", "status": 200})
     insert_or_update_item(db_path, {"workshop_id": 2, "title": "gone", "status": -1})
 
-    assert metrics.values(metrics.compute(db_path, ["totals"]))["totals"] == {
+    assert metrics.values(metrics.compute(db_path, ["item_counts"]))["item_counts"] == {
         "total": 2, "dead": 1, "alive": 1,
     }
 
@@ -378,7 +378,7 @@ def test_dead_items_are_not_counted_as_outstanding_work(db_path):
     assert breakdowns["needs_web_scrape"] == [{"prio": 5, "cnt": 1}]
 
 
-def test_stuck_work_surfaces_dead_items_still_queued(db_path):
+def test_dead_items_by_queue_surfaces_dead_items_still_queued(db_path):
     """The number the backlog deliberately leaves out must still be reported.
 
     The dead item is shaped the way `src/daemon.py` actually leaves one: the API
@@ -393,7 +393,7 @@ def test_stuck_work_surfaces_dead_items_still_queued(db_path):
         "workshop_id": 2, "title": "live", "status": 200, "needs_web_scrape": 5,
     })
 
-    stuck = metrics.values(metrics.compute(db_path, ["stuck_work"]))["stuck_work"]
+    stuck = metrics.values(metrics.compute(db_path, ["dead_items_by_queue"]))["dead_items_by_queue"]
     assert stuck == {"web": 1, "image": 1, "translation": 1, "api": 0}
 
 

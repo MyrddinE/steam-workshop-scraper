@@ -199,7 +199,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
     <div id="detail-buttons">
       <button onclick="fetch('/api/fetch_new',{method:'POST'}).then(()=>alert('Fetch-new triggered!'))">Fetch New</button>
       <button onclick="doUpdateVisible()">Update Visible</button>
-      <button id="btn-clear-pending" onclick="doClearPending()" title="Delete items that were never successfully scraped">Clear Pending</button>
+      <button id="btn-delete-never-fetched" onclick="doDeleteNeverFetched()" title="Delete items that were never successfully fetched">Delete Never Fetched</button>
       {% if open_folder_enabled %}
       <button id="btn-open-folder" onclick="openFolderFromDetail()" disabled
               title="Only a subscribed item Steam has downloaded can be opened.">Open Folder (not downloaded)</button>
@@ -1220,7 +1220,7 @@ function renderDetail(item) {
   _refreshOpenFolderButton(item);
 }
 
-// /api/toggle_sub answers only {ok: true} and says nothing about which way the
+// /api/toggle_subscription_queue answers only {ok: true} and says nothing about which way the
 // flag moved, so read the item back instead of flipping a cached guess. The `s`
 // shortcut and the subscribe drain's /api/subscribed calls change the same flag
 // without going through this pane, so a guess could name the wrong next action.
@@ -1230,7 +1230,7 @@ function renderDetail(item) {
 async function toggleDetailQueue(wid) {
   let resp;
   try {
-    resp = await fetch('/api/toggle_sub/' + wid, {method: 'POST'});
+    resp = await fetch('/api/toggle_subscription_queue/' + wid, {method: 'POST'});
   } catch (e) {
     alert('Queue update failed: ' + e.message);
     return;
@@ -1349,29 +1349,29 @@ async function doUpdateVisible() {
 }
 
 
-async function doClearPending() {
+async function doDeleteNeverFetched() {
   // Destructive and irreversible, so the prompt names the rows the server will
   // delete -- the same predicate as the TUI's action: no status (or 404) and no
   // successful API fetch -- rather than a generic "are you sure".
   const ok = confirm(
-    'Delete every item that was never successfully scraped?\n\n' +
-    'This removes all pending rows from the database: items with no status or a ' +
+    'Delete every item that was never successfully fetched?\n\n' +
+    'This removes every never-fetched row from the database: items with no status or a ' +
     '404 status that have never been fetched from the API. It cannot be undone.'
   );
   if (!ok) return;
   let resp;
   try {
-    resp = await fetch('/api/clear_pending', {method: 'POST'});
+    resp = await fetch('/api/delete_never_fetched_items', {method: 'POST'});
   } catch (e) {
-    alert('Clear pending failed: ' + e.message);
+    alert('Delete never-fetched failed: ' + e.message);
     return;
   }
   if (!resp.ok) {
-    alert('Clear pending failed: ' + resp.status + ' ' + resp.statusText);
+    alert('Delete never-fetched failed: ' + resp.status + ' ' + resp.statusText);
     return;
   }
   const data = await resp.json();
-  alert('Removed ' + data.deleted + ' pending item(s).');
+  alert('Removed ' + data.deleted + ' never-fetched item(s).');
   doSearch(true);
 }
 
@@ -1777,7 +1777,7 @@ async function _startAutoSubscribe() {
     try {
       const [qresp, fresp] = await Promise.all([
         fetch('/api/queued'),
-        fetch('/api/sub_failures')
+        fetch('/api/subscribe_failures')
       ]);
       const queued = await qresp.json();
       const failures = await fresp.json();
@@ -1823,7 +1823,7 @@ async function _startAutoSubscribe() {
   // pass -- the poll's normal release only runs when every item is verified.
   async function _checkSubThrottle() {
     try {
-      const hresp = await fetch('/api/sub_health');
+      const hresp = await fetch('/api/subscribe_throttle');
       const health = await hresp.json();
       if (!health.throttled_at) return false;
       const since = (Date.now() / 1000) - health.throttled_at;
@@ -1843,7 +1843,7 @@ async function _startAutoSubscribe() {
         'queued and can be retried in about ' +
         Math.ceil((health.retry_after - since) / 60) + ' minute(s).';
       return true;
-    } catch (e) { console.debug('sub_health check failed', e); /* keep the drain running */ return false; }
+    } catch (e) { console.debug('subscribe_throttle check failed', e); /* keep the drain running */ return false; }
   }
 
   // The schedule is one awaited request per item and nothing else: no timer
@@ -2022,7 +2022,7 @@ async function _pollDaemonLog() {
   const pre = document.getElementById('daemon-log');
   if (!pre) return;
   try {
-    const resp = await fetch('/api/daemon/log?since=' + _daemonLogOffset);
+    const resp = await fetch('/api/daemon/log?since_offset=' + _daemonLogOffset);
     const data = await resp.json();
     if (data.reset) {
       // The server jumped to the tail — first poll of a large log, rotation or
@@ -2086,12 +2086,12 @@ document.getElementById('daemon-restart').onclick = async () => {
 // table. Refresh is per metric too: each chunk re-requests itself after a delay
 // derived from its own last duration, so a slow metric cannot hold up a fast one.
 const STATS_LABELS = {
-  totals: 'Totals',
+  item_counts: 'Totals',
   high_water: 'Last successful API fetch',
-  app_tracking: 'App tracking',
+  app_discovery: 'App discovery',
   status_counts: 'Status counts',
   coverage: 'Coverage',
-  stuck_work: 'Stuck work',
+  dead_items_by_queue: 'Stuck work',
   dead_queued: 'Dead but queued',
   queued_nowhere: 'Queued nowhere',
   fetch_recency: 'Fetch recency',
@@ -2219,7 +2219,7 @@ function _renderCoverage(cov) {
   return html;
 }
 
-function _renderStuck(stuck) {
+function _renderDeadItemsByQueue(stuck) {
   const queues = [['web', 'Web scrape'], ['image', 'Image'], ['translation', 'Translation'], ['api', 'API fetch']];
   let total = 0;
   queues.forEach(function(q) { total += stuck[q[0]] || 0; });
@@ -2233,7 +2233,7 @@ function _renderStuck(stuck) {
     + '<p class="stat-label">These rows can never complete; the queues will not drain until they are cleared.</p>';
 }
 
-function _renderTotals(t) {
+function _renderItemCounts(t) {
   return '<p><b>Alive:</b> ' + fmtCount(t.alive || 0)
     + ' &nbsp; <b>Dead:</b> ' + fmtCount(t.dead || 0)
     + ' &nbsp; <span class="stat-label">Total: ' + fmtCount(t.total || 0) + '</span></p>';
@@ -2270,7 +2270,7 @@ function _renderStatusCounts(rows) {
 function _renderRecency(r) {
   return '<ul><li>Fresh: ' + fmtCount(r.fresh || 0) + '</li>'
     + '<li>Stale: ' + fmtCount(r.stale || 0) + '</li>'
-    + '<li>Never attempted: ' + fmtCount(r.blank || 0) + '</li></ul>';
+    + '<li>Never attempted: ' + fmtCount(r.unknown || 0) + '</li></ul>';
 }
 
 function _renderTranslation(t) {
@@ -2291,7 +2291,7 @@ function _renderTags(tags) {
     + '<tbody>' + rows + '</tbody></table></div>';
 }
 
-function _renderAppTracking(apps) {
+function _renderAppDiscovery(apps) {
   if (!apps || !apps.length) return '<p class="stat-label">No tracked applications.</p>';
   const rows = apps.map(function(a) {
     return '<tr><td>' + a.appid + '</td>'
@@ -2309,8 +2309,8 @@ function _renderThroughput(t) {
   if (!t || t.last_success === null || t.last_success === undefined) {
     return '<p class="stat-label">No history yet &mdash; completion times are only recorded from here on.</p>';
   }
-  return '<ul><li>Completed last hour: ' + fmtCount(t.hour || 0) + '</li>'
-    + '<li>Completed last day: ' + fmtCount(t.day || 0) + '</li>'
+  return '<ul><li>Completed last hour: ' + fmtCount(t.last_hour || 0) + '</li>'
+    + '<li>Completed last day: ' + fmtCount(t.last_day || 0) + '</li>'
     + '<li>Last success: ' + _fmtTimestamp(t.last_success) + '</li></ul>';
 }
 
@@ -2370,10 +2370,10 @@ function _renderQueueEta(value) {
 
 function _renderMetricBody(name, value) {
   if (value === null || value === undefined) return '<span class="stat-label">failed</span>';
-  if (name === 'totals') return _renderTotals(value);
+  if (name === 'item_counts') return _renderItemCounts(value);
   if (name === 'high_water') return '<p>' + _fmtTimestamp(value) + '</p>';
   if (name === 'coverage') return _renderCoverage(value);
-  if (name === 'stuck_work') return _renderStuck(value);
+  if (name === 'dead_items_by_queue') return _renderDeadItemsByQueue(value);
   if (name === 'dead_queued') return _renderHandoffCount(
     value, 'No dead item is holding a queue flag.', 'dead item(s) still hold a queue flag.');
   if (name === 'queued_nowhere') return _renderHandoffCount(
@@ -2387,7 +2387,7 @@ function _renderMetricBody(name, value) {
       || name === 'translation_throughput') return _renderThroughput(value);
   if (name === 'queue_eta') return _renderQueueEta(value);
   if (name === 'tag_counts') return _renderTags(value);
-  if (name === 'app_tracking') return _renderAppTracking(value);
+  if (name === 'app_discovery') return _renderAppDiscovery(value);
   return '<pre style="white-space:pre-wrap;margin:0">' + JSON.stringify(value) + '</pre>';
 }
 

@@ -297,16 +297,16 @@ def test_api_subscribed_makes_the_marker_subscribed(web_client):
     assert client.get('/api/item/9').get_json()["subscription_state"] == subscription.SUBSCRIBED
 
 
-def test_toggle_sub_still_only_flips_the_queue_flag(web_client):
-    """/api/toggle_sub is unchanged: it is the route both directions use."""
+def test_toggle_subscription_queue_still_only_flips_the_queue_flag(web_client):
+    """/api/toggle_subscription_queue is unchanged: it is the route both directions use."""
     client, db_path = web_client
     insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "status": 200})
 
-    client.post('/api/toggle_sub/9')
+    client.post('/api/toggle_subscription_queue/9')
     assert _row(db_path, 9)["is_queued_for_subscription"] == 1
     assert _row(db_path, 9)["own_subscribed"] == 0
 
-    client.post('/api/toggle_sub/9')
+    client.post('/api/toggle_subscription_queue/9')
     assert _row(db_path, 9)["is_queued_for_subscription"] == 0
 
 
@@ -506,7 +506,7 @@ global.renderDetail = () => {};
 global.alert = () => {};
 global.document = {querySelector: () => null};
 global.fetch = async (url) => {
-  if (url.indexOf('/api/toggle_sub/') === 0) {
+  if (url.indexOf('/api/toggle_subscription_queue/') === 0) {
     return {ok: true, status: 200, statusText: 'OK'};
   }
   if (url.indexOf('/api/item/') === 0) {

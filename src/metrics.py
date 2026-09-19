@@ -183,8 +183,8 @@ def _high_water(conn, params):
     return conn.execute("SELECT MAX(api_fetched_at) AS v FROM workshop_items").fetchone()["v"]
 
 
-@metric("totals", 2, "Item counts, split by whether the item is still alive.")
-def _totals(conn, params) -> dict:
+@metric("item_counts", 2, "Item counts, split by whether the item is still alive.")
+def _item_counts(conn, params) -> dict:
     row = conn.execute(
         "SELECT COUNT(*) AS total, "
         "       COALESCE(SUM(CASE WHEN status = -1 THEN 1 ELSE 0 END), 0) AS dead "
@@ -195,8 +195,8 @@ def _totals(conn, params) -> dict:
     return {"total": total, "dead": dead, "alive": total - dead}
 
 
-@metric("app_tracking", 3, "Discovery position per application.")
-def _app_tracking(conn, params) -> list[dict]:
+@metric("app_discovery", 3, "Discovery position per application.")
+def _app_discovery(conn, params) -> list[dict]:
     return [
         dict(r)
         for r in conn.execute(
@@ -229,16 +229,16 @@ def _completion_window(conn, column: str) -> dict:
     now = int(time.time())
     row = conn.execute(
         f"""
-        SELECT (SELECT COUNT(*) FROM workshop_items WHERE {column} >= ?) AS hour,
-               (SELECT COUNT(*) FROM workshop_items WHERE {column} >= ?) AS day,
+        SELECT (SELECT COUNT(*) FROM workshop_items WHERE {column} >= ?) AS last_hour,
+               (SELECT COUNT(*) FROM workshop_items WHERE {column} >= ?) AS last_day,
                (SELECT MAX({column}) FROM workshop_items
                  WHERE {column} IS NOT NULL) AS last_success
         """,
         (now - 3600, now - 86400),
     ).fetchone()
     if row["last_success"] is None:
-        return {"hour": None, "day": None, "last_success": None}
-    return {"hour": row["hour"], "day": row["day"], "last_success": row["last_success"]}
+        return {"last_hour": None, "last_day": None, "last_success": None}
+    return {"last_hour": row["last_hour"], "last_day": row["last_day"], "last_success": row["last_success"]}
 
 
 @metric("web_throughput", 2, "Web scrapes completed in the last hour and day, and the last success.")
@@ -410,8 +410,8 @@ def _status_counts(conn, params) -> list[dict]:
     ]
 
 
-@metric("stuck_work", 60, "Dead items still sitting in a work queue.")
-def _stuck_work(conn, params) -> dict:
+@metric("dead_items_by_queue", 60, "Dead items still sitting in a work queue.")
+def _dead_items_by_queue(conn, params) -> dict:
     """Work queued against items that are already known to be gone.
 
     An item marked dead should be in no queue, so this is expected to read zero.
@@ -455,7 +455,7 @@ def _dead_queued(conn, params) -> int:
 
     Zero is the healthy reading. A non-zero value is the number of dead items
     still encumbered by a queue, each item counted once however many flags it
-    holds. `stuck_work` answers the same question at the other resolution: this
+    holds. `dead_items_by_queue` answers the same question at the other resolution: this
     is the scalar that must read zero, and that metric is the per-queue breakdown
     that says where the flag was left set. Both are wanted -- the scalar is the
     invariant, the breakdown is the diagnosis -- so one is not a replacement for
@@ -529,12 +529,12 @@ def _queued_nowhere(conn, params) -> int:
 def _fetch_recency(conn, params) -> dict:
     staleness_days = int(params.get("staleness_days", DEFAULT_STALENESS_DAYS))
     threshold = int(time.time()) - staleness_days * 86400
-    counts = {"fresh": 0, "stale": 0, "blank": 0}
+    counts = {"fresh": 0, "stale": 0, "unknown": 0}
     rows = conn.execute(
         """
         SELECT CASE
-                 WHEN typeof(last_fetch_attempted_at) NOT IN ('integer', 'real') THEN 'blank'
-                 WHEN last_fetch_attempted_at IS NULL OR last_fetch_attempted_at = 0 THEN 'blank'
+                 WHEN typeof(last_fetch_attempted_at) NOT IN ('integer', 'real') THEN 'unknown'
+                 WHEN last_fetch_attempted_at IS NULL OR last_fetch_attempted_at = 0 THEN 'unknown'
                  WHEN last_fetch_attempted_at >= ? THEN 'fresh'
                  ELSE 'stale'
                END AS bucket,
@@ -997,7 +997,7 @@ def _priority_breakdowns(conn, params) -> dict:
     """Outstanding depth and priority mix, excluding items that cannot complete.
 
     Dead items used to be left flagged, so counting them here reported a backlog
-    that no worker could ever drain. They are counted by `stuck_work` instead,
+    that no worker could ever drain. They are counted by `dead_items_by_queue` instead,
     where the number means what it says.
     """
     out = {}

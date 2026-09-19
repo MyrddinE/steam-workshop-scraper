@@ -1877,7 +1877,7 @@ def _migration_19_to_20(cursor, conn, db_path):
     # dead, so this is not an ongoing leak -- it is the rows that were already
     # dead before that line existed. They matter because api_priority > 0 is
     # what every count of "queued for a fetch" looks at, and the statistics
-    # screen reports dead items still holding a queue flag as `stuck_work`.
+    # screen reports dead items still holding a queue flag as `dead_items_by_queue`.
     # Leaving ten thousand of them there would peg a detector whose whole
     # value is that it reads zero unless something has regressed.
     #
@@ -2221,7 +2221,7 @@ def _migration_28_to_29(cursor, conn, db_path):
     # `app_tracking.last_page_scanned` counted pages while discovery walked
     # them by number. `88397b7` replaced that with cursor discovery, which
     # resumes from `last_cursor`, and the writer went with it -- so ever
-    # since, the TUI column, the web table and the `app_tracking` metric have
+    # since, the TUI column, the web table and the `app_discovery` metric have
     # all read a column nothing sets, and displayed its DEFAULT 0. Nothing
     # references an index on it, so the column alone is dropped. The PRAGMA
     # guard keeps this idempotent and resumable, matching the `language`
@@ -3009,7 +3009,7 @@ _LEGACY_STAT_KEYS = (
     ("tag_counts", "tag_counts"),
     ("fetch_recency_counts", "fetch_recency"),
     ("highest_api_fetched_at", "high_water"),
-    ("app_stats", "app_tracking"),
+    ("app_stats", "app_discovery"),
     ("priority_breakdowns", "priority_breakdowns"),
 )
 

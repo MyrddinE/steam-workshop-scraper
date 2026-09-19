@@ -3,7 +3,7 @@
 The column counted pages while discovery walked them by number. `88397b7`
 replaced page-numbered discovery with cursor-based discovery, which resumes from
 `last_cursor`, and the writer went with it -- but three readers stayed: the TUI's
-"Last Page" column, the web table's equivalent, and the `app_tracking` metric
+"Last Page" column, the web table's equivalent, and the `app_discovery` metric
 both front ends render. All three displayed the column's DEFAULT 0 forever: a
 figure that looks like a measurement and never moves. Recorded as issue 47.
 
@@ -87,7 +87,7 @@ def test_the_migration_is_idempotent(db_path):
     assert "last_page_scanned" not in columns
 
 
-def test_the_app_tracking_metric_no_longer_returns_the_counter(db_path):
+def test_the_app_discovery_metric_no_longer_returns_the_counter(db_path):
     """The reader that fed both front ends is gone with the column."""
     conn = get_connection(db_path)
     conn.execute(
@@ -96,7 +96,7 @@ def test_the_app_tracking_metric_no_longer_returns_the_counter(db_path):
     )
     conn.commit()
 
-    assert metrics._app_tracking(conn, {}) == [
+    assert metrics._app_discovery(conn, {}) == [
         {"appid": 431960, "last_cursor": "AoJckZidMXaL38lT"}
     ]
     conn.close()

@@ -376,7 +376,7 @@ def api_items():
 
 
 @app.route('/api/state')
-def api_state():
+def api_tui_state():
     state_path = os.path.join(os.path.dirname(_db_path), ".tui_state.yaml")
     try:
         import yaml
@@ -441,18 +441,18 @@ def api_session_recheck():
     return jsonify({"ok": True, "problem": False})
 
 
-@app.route('/api/clear_pending', methods=['POST'])
-def api_clear_pending():
+@app.route('/api/delete_never_fetched_items', methods=['POST'])
+def api_delete_never_fetched_items():
     """Delete every never-successfully-fetched item.
 
     Deliberately the same predicate and the same delete as the TUI's
-    ``action_clear_pending``, both through ``delete_never_fetched_items``: the web
+    ``action_delete_never_fetched_items``, both through ``delete_never_fetched_items``: the web
     route must not grow its own idea of what "pending" means, and there is no
     dry-run because the TUI has none. The count is returned so the UI can say
     what was removed rather than claiming a generic success.
     """
     deleted = delete_never_fetched_items(_db_path)
-    logging.info("[Clear Pending] removed %d pending item(s)", deleted)
+    logging.info("[Delete Never Fetched] removed %d never-fetched item(s)", deleted)
     return jsonify({"ok": True, "deleted": deleted})
 
 
@@ -739,8 +739,8 @@ def api_sessionid():
     return jsonify({"ok": True})
 
 
-@app.route('/api/toggle_sub/<int:workshop_id>', methods=['POST'])
-def api_toggle_sub(workshop_id):
+@app.route('/api/toggle_subscription_queue/<int:workshop_id>', methods=['POST'])
+def api_toggle_subscription_queue(workshop_id):
     toggle_subscription_queue(_db_path, workshop_id)
     return jsonify({"ok": True})
 
@@ -760,13 +760,13 @@ def api_subscribed(workshop_id):
     return jsonify({"ok": True})
 
 
-_sub_failures = set()  # in-memory set of workshop_ids that failed subscription
+_subscribe_failures = set()  # in-memory set of workshop_ids that failed subscription
 
 
 @app.route('/api/subscribe_failed/<int:workshop_id>', methods=['POST'])
 def api_subscribe_failed(workshop_id):
     clear_subscription_queue(_db_path, workshop_id)
-    _sub_failures.add(workshop_id)
+    _subscribe_failures.add(workshop_id)
     return jsonify({"ok": True})
 
 
@@ -791,8 +791,8 @@ def api_subscribe_throttled(workshop_id):
     return jsonify({"ok": True, "retry_after": SUBSCRIBE_THROTTLE_PAUSE_SECONDS})
 
 
-@app.route('/api/sub_health')
-def api_sub_health():
+@app.route('/api/subscribe_throttle')
+def api_subscribe_throttle():
     """Whether Steam is currently refusing us, and for how much longer."""
     return jsonify({
         "throttled_at": _subscribe_throttled_at,
@@ -801,9 +801,9 @@ def api_sub_health():
     })
 
 
-@app.route('/api/sub_failures')
-def api_sub_failures():
-    return jsonify(sorted(_sub_failures))
+@app.route('/api/subscribe_failures')
+def api_subscribe_failures():
+    return jsonify(sorted(_subscribe_failures))
 
 
 @app.route('/api/fetch_new', methods=['POST'])
@@ -904,5 +904,20 @@ def api_daemon_restart():
 
 @app.route('/api/daemon/log')
 def api_daemon_log():
-    since_offset = request.args.get('since', 0, type=int) or 0
+    # A page cached before the Batch 4 rename still sends `since`; it is the
+    # same byte offset under its new name.
+    since_offset = request.args.get(
+        'since_offset', request.args.get('since', 0, type=int), type=int) or 0
     return jsonify(_get_daemon_controller().tail_log(since_offset))
+
+
+# Legacy route aliases. ``templates/index.html`` is served from the browser
+# cache, so a tab opened before the Batch 4 rename still calls these paths; each
+# answers through the renamed view function. Nothing outside this repo's own
+# front ends reads them, and they can go once a deploy has propagated.
+app.add_url_rule('/api/toggle_sub/<int:workshop_id>',
+                 view_func=api_toggle_subscription_queue, methods=['POST'])
+app.add_url_rule('/api/sub_health', view_func=api_subscribe_throttle)
+app.add_url_rule('/api/sub_failures', view_func=api_subscribe_failures)
+app.add_url_rule('/api/clear_pending', view_func=api_delete_never_fetched_items,
+                 methods=['POST'])

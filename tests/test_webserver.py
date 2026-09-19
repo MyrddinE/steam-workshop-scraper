@@ -338,7 +338,7 @@ def test_metric_endpoint_returns_value_and_measured_cost(web_client):
 
 
 def test_metric_endpoint_runs_only_the_requested_metric(web_client, monkeypatch):
-    """One request is one metric: asking for totals must not pay for tags."""
+    """One request is one metric: asking for item_counts must not pay for tags."""
     client, _ = web_client
     ran = []
 
@@ -351,10 +351,10 @@ def test_metric_endpoint_runs_only_the_requested_metric(web_client, monkeypatch)
         metrics.Metric(name="tag_counts", seed_ms=358.0, note="spy", run=spy),
     )
 
-    resp = client.get('/api/metrics/totals')
+    resp = client.get('/api/metrics/item_counts')
     assert resp.status_code == 200
-    assert resp.get_json()["name"] == "totals"
-    assert ran == [], "the totals request ran the tag metric"
+    assert resp.get_json()["name"] == "item_counts"
+    assert ran == [], "the item_counts request ran the tag metric"
 
 
 def test_metrics_unknown_metric_is_a_404(web_client):
@@ -1170,17 +1170,31 @@ def test_api_subscribe_failed(web_client):
     queued = client.get('/api/queued').get_json()
     assert not any(q["workshop_id"] == 999 for q in queued)
     # Failure should be tracked
-    failures = client.get('/api/sub_failures').get_json()
+    failures = client.get('/api/subscribe_failures').get_json()
     assert 999 in failures
 
 
-def test_api_sub_failures_empty(web_client):
-    """GET /api/sub_failures returns empty list when no failures."""
+def test_api_subscribe_failures_empty(web_client):
+    """GET /api/subscribe_failures returns empty list when no failures."""
     client, _ = web_client
     import src.webserver as ws
-    ws._sub_failures.clear()
-    failures = client.get('/api/sub_failures').get_json()
+    ws._subscribe_failures.clear()
+    failures = client.get('/api/subscribe_failures').get_json()
     assert failures == []
+
+
+def test_a_page_cached_before_the_rename_still_calls_the_old_routes(web_client):
+    """`templates/index.html` is served from the browser cache.
+
+    A tab opened before the Batch 4 route rename still polls the old paths, so
+    each one answers through the renamed view until the deploy has propagated.
+    """
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 4242, "is_queued_for_subscription": 0})
+    assert client.get('/api/sub_health').status_code == 200
+    assert client.get('/api/sub_failures').status_code == 200
+    assert client.post('/api/toggle_sub/4242').get_json() == {"ok": True}
+    assert client.post('/api/clear_pending').get_json()["ok"] is True
 
 
 # ── Daemon control routes ────────────────────────────────────────────────────
@@ -1256,9 +1270,17 @@ def test_daemon_start_stop_restart_routes(daemon_client):
 def test_daemon_log_route_passes_offset(daemon_client):
     client, fake = daemon_client
     fake._tail = {"lines": ["a line"], "offset": 9, "reset": False}
-    resp = client.get('/api/daemon/log?since=5')
+    resp = client.get('/api/daemon/log?since_offset=5')
     assert resp.status_code == 200
     assert resp.get_json() == {"lines": ["a line"], "offset": 9, "reset": False}
+    assert ("log", 5) in fake.calls
+
+
+def test_daemon_log_route_still_accepts_the_pre_rename_since_key(daemon_client):
+    """A page cached before the Batch 4 rename polls the offset under `since`."""
+    client, fake = daemon_client
+    resp = client.get('/api/daemon/log?since=5')
+    assert resp.status_code == 200
     assert ("log", 5) in fake.calls
 
 
@@ -1271,13 +1293,13 @@ def test_daemon_log_route_reads_configured_file_incrementally(tmp_path):
     init_webserver(db_path, config)
     client = app.test_client()
 
-    first = client.get('/api/daemon/log?since=0').get_json()
+    first = client.get('/api/daemon/log?since_offset=0').get_json()
     assert first["lines"] == ["hello", "world"]
     assert first["reset"] is False
 
     with open(log_path, "a") as f:
         f.write("again\n")
-    second = client.get(f"/api/daemon/log?since={first['offset']}").get_json()
+    second = client.get(f"/api/daemon/log?since_offset={first['offset']}").get_json()
     assert second["lines"] == ["again"]
     assert second["reset"] is False
 
@@ -1289,7 +1311,7 @@ def test_daemon_log_route_missing_file_returns_empty(tmp_path):
     init_webserver(db_path, config)
     client = app.test_client()
 
-    resp = client.get('/api/daemon/log?since=0')
+    resp = client.get('/api/daemon/log?since_offset=0')
     assert resp.status_code == 200
     assert resp.get_json() == {"lines": [], "offset": 0, "reset": False}
 
@@ -1570,7 +1592,7 @@ def test_header_port_display_is_filled_from_the_pages_own_location(web_client, t
 # it leaves alone.
 
 
-def test_clear_pending_route_deletes_only_the_pending_rows(web_client):
+def test_delete_never_fetched_route_deletes_only_the_never_fetched_rows(web_client):
     client, db_path = web_client
     # Removed: never successfully fetched, with no status or a 404.
     insert_or_update_item(db_path, {"workshop_id": 1, "status": None, "api_fetched_at": None})
@@ -1580,7 +1602,7 @@ def test_clear_pending_route_deletes_only_the_pending_rows(web_client):
     insert_or_update_item(db_path, {"workshop_id": 4, "status": None, "api_fetched_at": 1672531200})
     insert_or_update_item(db_path, {"workshop_id": 5, "status": 404, "api_fetched_at": 1672531200})
 
-    resp = client.post('/api/clear_pending')
+    resp = client.post('/api/delete_never_fetched_items')
     assert resp.status_code == 200
     assert resp.get_json() == {"ok": True, "deleted": 2}
 
@@ -1591,12 +1613,12 @@ def test_clear_pending_route_deletes_only_the_pending_rows(web_client):
     assert ids == [3, 4, 5], "the predicate removed a row it must not touch"
 
 
-def test_clear_pending_route_reports_zero_and_is_post_only(web_client):
+def test_delete_never_fetched_route_reports_zero_and_is_post_only(web_client):
     client, db_path = web_client
     insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "api_fetched_at": 1672531200})
 
-    assert client.get('/api/clear_pending').status_code == 405
-    resp = client.post('/api/clear_pending')
+    assert client.get('/api/delete_never_fetched_items').status_code == 405
+    resp = client.post('/api/delete_never_fetched_items')
     assert resp.status_code == 200
     assert resp.get_json() == {"ok": True, "deleted": 0}, \
         "an empty delete must still report the count the UI shows"
@@ -1651,30 +1673,30 @@ global.fetch = async (url, opts) => {
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
-def test_clear_pending_confirms_before_deleting_and_reports_the_count(web_client, tmp_path):
+def test_delete_never_fetched_confirms_before_deleting_and_reports_the_count(web_client, tmp_path):
     client, _ = web_client
     doc = lxml.html.fromstring(client.get('/').data.decode())
-    buttons = doc.xpath('//*[@id="btn-clear-pending"]')
-    assert len(buttons) == 1, "expected exactly one #btn-clear-pending"
+    buttons = doc.xpath('//*[@id="btn-delete-never-fetched"]')
+    assert len(buttons) == 1, "expected exactly one #btn-delete-never-fetched"
     assert buttons[0].tag == "button", "the affordance must be a button, not a link"
-    assert "doClearPending" in (buttons[0].get("onclick") or ""), \
+    assert "doDeleteNeverFetched" in (buttons[0].get("onclick") or ""), \
         "the button must call the confirming handler, not the route directly"
 
-    fn = _extract_function(_served_inline_script(client), "doClearPending")
+    fn = _extract_function(_served_inline_script(client), "doDeleteNeverFetched")
     out = _run_node(CLEAR_PENDING_DRIVER.replace("__FN__", fn), tmp_path)
 
     assert len(out["prompts"]) == 4, "every invocation must ask before deleting"
     for prompt in out["prompts"]:
         lowered = prompt.lower()
-        assert "pending" in lowered and "cannot be undone" in lowered, \
+        assert "never-fetched" in lowered and "cannot be undone" in lowered, \
             f"the confirmation must state what is deleted, not a generic warning: {prompt!r}"
-    assert out["urls"] == ["/api/clear_pending"] * 3, \
+    assert out["urls"] == ["/api/delete_never_fetched_items"] * 3, \
         "declining must send nothing; accepting must call the route"
     assert out["methods"] == ["POST"] * 3
     assert out["alerts"] == [
-        "Removed 2 pending item(s).",
-        "Clear pending failed: 500 INTERNAL SERVER ERROR",
-        "Clear pending failed: backend down",
+        "Removed 2 never-fetched item(s).",
+        "Delete never-fetched failed: 500 INTERNAL SERVER ERROR",
+        "Delete never-fetched failed: backend down",
     ]
     assert out["searches"] == 1, "only a successful clear re-runs the search"
 
@@ -2523,8 +2545,8 @@ global.fetch = async (url, opts) => {
   if (u === '/api/queued') {
     return {ok: true, status: 200, json: async () => queueItems};
   }
-  if (u === '/api/sub_failures') { return {ok: true, status: 200, json: async () => []}; }
-  if (u === '/api/sub_health') {
+  if (u === '/api/subscribe_failures') { return {ok: true, status: 200, json: async () => []}; }
+  if (u === '/api/subscribe_throttle') {
     return {ok: true, status: 200, json: async () => ({throttled_at: 0, retry_after: 300})};
   }
   return {ok: true, status: 200, json: async () => ({ok: true})};
@@ -2594,10 +2616,10 @@ def test_the_subscribe_bridge_scaffolding_is_left_in_place(web_client):
     assert client.get('/api/subscribed/1').status_code == 405
     assert client.get('/api/subscribe_failed/1').status_code == 405
     assert client.get('/api/subscribe_throttled/1').status_code == 405
-    assert client.get('/api/sub_health').status_code == 200
-    assert set(client.get('/api/sub_health').get_json()) == \
+    assert client.get('/api/subscribe_throttle').status_code == 200
+    assert set(client.get('/api/subscribe_throttle').get_json()) == \
         {"throttled_at", "throttled_id", "retry_after"}
-    assert client.get('/api/sub_failures').status_code == 200
+    assert client.get('/api/subscribe_failures').status_code == 200
 
     # The userscript is still served, and the page still carries the contract it
     # checks the script against.
@@ -2912,7 +2934,7 @@ def test_detail_payload_omits_creator_id_without_a_creator(web_client):
     assert "creator_id" not in data
 
 
-def test_toggle_sub_route_flips_the_queue_flag(web_client):
+def test_toggle_subscription_queue_route_flips_the_queue_flag(web_client):
     """/api/toggle_sub answers {ok} and flips is_queued_for_subscription.
 
     It is the route the detail pane's Queue/Unqueue button calls; the button's
@@ -2922,10 +2944,10 @@ def test_toggle_sub_route_flips_the_queue_flag(web_client):
     client, db_path = web_client
     insert_or_update_item(db_path, {"workshop_id": 4242, "title": "Q", "status": 200})
 
-    assert client.post('/api/toggle_sub/4242').get_json() == {"ok": True}
+    assert client.post('/api/toggle_subscription_queue/4242').get_json() == {"ok": True}
     assert client.get('/api/item/4242').get_json()["is_queued_for_subscription"] == 1
 
-    assert client.post('/api/toggle_sub/4242').get_json() == {"ok": True}
+    assert client.post('/api/toggle_subscription_queue/4242').get_json() == {"ok": True}
     assert client.get('/api/item/4242').get_json()["is_queued_for_subscription"] == 0
 
 
@@ -3163,7 +3185,7 @@ global._applySub = subFn;
 // about the toggle itself, so the poll is stubbed rather than run.
 global._startListPoll = () => {};
 global.fetch = async (url) => {
-  if (url.indexOf('/api/toggle_sub/') === 0) {
+  if (url.indexOf('/api/toggle_subscription_queue/') === 0) {
     serverQueued = serverQueued ? 0 : 1;
     return {ok: true, status: 200, statusText: 'OK'};
   }
@@ -3191,7 +3213,7 @@ global.fetch = async (url) => {
   const markerAfterExternalQueued = marker.getAttribute('data-sub-state');
 
   global.fetch = async (url) => {
-    if (url.indexOf('/api/toggle_sub/') === 0) {
+    if (url.indexOf('/api/toggle_subscription_queue/') === 0) {
       return {ok: false, status: 500, statusText: 'INTERNAL SERVER ERROR'};
     }
     throw new Error('the item must not be read after a failed toggle');

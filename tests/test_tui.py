@@ -394,7 +394,7 @@ async def test_tui_on_input_submitted(mock_config):
         app.execute_search.assert_not_called()  # search only on explicit button click
 
 @pytest.mark.asyncio
-async def test_tui_clear_pending_command(tmp_path):
+async def test_tui_delete_never_fetched_command(tmp_path):
     from src.tui import ScraperApp
     from src.database import initialize_database, insert_or_update_item, get_connection
     from unittest.mock import patch
@@ -417,7 +417,7 @@ async def test_tui_clear_pending_command(tmp_path):
         
         async with app.run_test() as pilot:
             # Trigger the action
-            app.action_clear_pending()
+            app.action_delete_never_fetched_items()
             await pilot.pause()
             
             # Verify DB state
@@ -526,13 +526,13 @@ def _fake_coverage(total=2, filtered_total=1):
 #: screen's real per-metric renderers run.
 _FAKE_METRIC_VALUES = {
     "high_water": 1_700_000_000,
-    "totals": {"total": 3, "alive": 2, "dead": 1},
-    "app_tracking": [{"appid": 294100, "last_cursor": "abc"}],
+    "item_counts": {"total": 3, "alive": 2, "dead": 1},
+    "app_discovery": [{"appid": 294100, "last_cursor": "abc"}],
     "status_counts": [{"status": 200, "count": 2}, {"status": -1, "count": 1}],
-    "stuck_work": {"web": 1, "image": 0, "translation": 0, "api": 0},
+    "dead_items_by_queue": {"web": 1, "image": 0, "translation": 0, "api": 0},
     "dead_queued": 1,
     "queued_nowhere": 2,
-    "fetch_recency": {"fresh": 1, "stale": 0, "blank": 1},
+    "fetch_recency": {"fresh": 1, "stale": 0, "unknown": 1},
     "coverage": _fake_coverage(),
     "translation_status": {"Translated": 1, "Queued": 1},
     "tag_counts": {"Alpha": 2, "Beta": 1},
@@ -541,10 +541,10 @@ _FAKE_METRIC_VALUES = {
         "needs_image": [],
         "needs_web_scrape": [{"prio": 10, "cnt": 1}],
     },
-    "web_throughput": {"hour": 2, "day": 5, "last_success": 1_700_000_000},
-    "image_throughput": {"hour": 1, "day": 3, "last_success": 1_700_000_000},
+    "web_throughput": {"last_hour": 2, "last_day": 5, "last_success": 1_700_000_000},
+    "image_throughput": {"last_hour": 1, "last_day": 3, "last_success": 1_700_000_000},
     # The no-history shape: a queue whose completion column holds no stamp.
-    "translation_throughput": {"hour": None, "day": None, "last_success": None},
+    "translation_throughput": {"last_hour": None, "last_day": None, "last_success": None},
     "queue_eta": {
         "window_seconds": 86400, "paused_seconds": 3600, "sweep_inflow": 4,
         "queues": {
@@ -591,7 +591,7 @@ def _fake_iter_metrics(record=None):
 #: cannot be left unwired by silence -- the guard test below walks the catalogue
 #: and names any other metric that is missing its label or content id.
 TUI_RENDER_EXEMPTIONS = {
-    "app_tracking": "special-cased onto a DataTable in `_compose_metric_section`",
+    "app_discovery": "special-cased onto a DataTable in `_compose_metric_section`",
     "tag_counts": "owns the right-hand column, not a scrolling chunk",
 }
 
@@ -686,12 +686,12 @@ async def test_stats_screen_puts_every_metric_in_its_own_chunk(mock_config):
             assert requested and requested[0] == metrics.all_names(), \
                 "the first pass must request metrics in seed order"
 
-            totals = str(screen.query_one("#totals-content", Static).render())
-            assert "Live items" in totals and "2" in totals
+            item_counts = str(screen.query_one("#item-counts-content", Static).render())
+            assert "Live items" in item_counts and "2" in item_counts
             coverage = str(screen.query_one("#coverage-content", Static).render())
             assert "API Data" in coverage and "100.0%" in coverage
             assert "Extended Web" in coverage
-            stuck = str(screen.query_one("#stuck-content", Static).render())
+            stuck = str(screen.query_one("#dead-items-by-queue-content", Static).render())
             assert "dead item(s) are still flagged" in stuck
             assert "Web scrape" in stuck
             translation = str(screen.query_one("#translation-stats-content", Static).render())
@@ -707,7 +707,7 @@ async def test_stats_screen_puts_every_metric_in_its_own_chunk(mock_config):
             # own a widget without owning a chunk in the scrolling list.
             assert len(screen.query(".stats-section")) == len(metrics.all_names()) - 1
             assert len(screen.query("#tier-costs")) == 0
-            label = str(screen.query_one("#stats-label-totals", Label).render())
+            label = str(screen.query_one("#stats-label-item_counts", Label).render())
             assert "1.0 ms" in label
 
 
@@ -811,8 +811,8 @@ def test_stats_refresh_is_per_metric_not_global():
 def test_stats_does_not_restart_a_metric_that_is_still_computing():
     screen = StatsScreen("unused.db")
     now = time.monotonic()
-    screen._inflight = {"totals"}
-    assert screen._is_due("totals", now) is False
+    screen._inflight = {"item_counts"}
+    assert screen._is_due("item_counts", now) is False
     assert screen._is_due("coverage", now) is True
 
 

@@ -131,7 +131,7 @@ def test_a_refused_discovery_page_slows_the_api_delay(db):
     """Discovery traffic is the same key, so the controller must see it."""
     daemon = _daemon(db)
     daemon.api_delay = 1.0
-    with patch("src.daemon.query_workshop_newest_page", return_value={"error": "refused"}), \
+    with patch("src.daemon.query_workshop_newest_page", return_value={"failed": "refused"}), \
          patch("src.daemon.time.sleep"), patch("src.pacing.wait"):
         daemon.seed_database(fill_target=100)
     assert daemon.api_delay == 2.0
