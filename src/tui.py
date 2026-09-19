@@ -1075,7 +1075,7 @@ class SubscriptionQueueScreen(ModalScreen):
         line = RichText()
         line.append(f"{subscription.glyph(state)} ", style=subscription.colour(state))
         line.append(f"#{item['workshop_id']}  ")
-        line.append(str(item.get("title") or "(untitled)"))
+        line.append(str(item.get("title") or "Untitled"))
         if countdown:
             line.append("  ")
             line.append(countdown, style="dim")
@@ -1431,7 +1431,7 @@ class DetailsPane(VerticalScroll):
                 if self._folder_service() is not None and self._folder_service().is_supported():
                     yield Button("Open Folder", id="btn-open-folder",
                                  classes="details-button", disabled=True)
-            yield Button("jump", id="btn-jump-author", variant="primary")
+            yield Button("Jump to Author", id="btn-jump-author", variant="primary")
 
         with Horizontal(id="title-creator-row"):
             # The subscription marker sits immediately before the title, the same
@@ -1460,8 +1460,8 @@ class DetailsPane(VerticalScroll):
             with Vertical(classes="stats-col"):
                 yield Label("Size: N/A", id="stat-size")
                 yield Label("Views: N/A", id="stat-views")
-                yield Label("Subs: N/A", id="stat-subscribers")
-                yield Label("Favs: N/A", id="stat-favorites")
+                yield Label("Subscribers: N/A", id="stat-subscribers")
+                yield Label("Favorites: N/A", id="stat-favorites")
 
         desc_container = Vertical(
             Markdown(id="detail-content"),
@@ -1718,7 +1718,7 @@ class WorkshopItem(ListItem):
 
     def compose(self) -> ComposeResult:
         wid = self.item_data.get("workshop_id", "N/A")
-        title = self.item_data.get("title_en") or self.item_data.get("title", "Unknown Title")
+        title = self.item_data.get("title_en") or self.item_data.get("title", "Untitled")
         creator = self.item_data.get("personaname_en") or self.item_data.get("personaname") or self.item_data.get("creator", "Unknown Creator")
         spin = self._spinner()
         marker = self._subscription_marker()
@@ -1968,7 +1968,7 @@ class DatabaseCommands(Provider):
         yield DiscoveryHit(
             "Show Subscription Queue",
             self.app.action_show_subscription_queue,
-            help="Show items queued for subscription as clickable links",
+            help="Subscribe each queued item through the engine",
         )
 
     async def search(self, query: str) -> Iterable[Hit]:
@@ -2003,8 +2003,8 @@ def app_bindings(platform: str | None = None) -> list[tuple[str, str, str]]:
         ("ctrl+q", "quit", "Quit"),
         ("ctrl+d", "show_daemon", "Daemon"),
         ("ctrl+r", "show_stats", "Stats"),
-        ("s", "toggle_subscription_queue", "Queue for Sub"),
-        ("l", "show_subscription_queue", "List Queued Items"),
+        ("s", "toggle_subscription_queue", "Queue for Subscription"),
+        ("l", "show_subscription_queue", "Subscription Queue"),
         ("ctrl+s", "save_filter_for_scraper", "Save Filter"),
         ("ctrl+w", "toggle_translation", "Toggle Translation"),
         ("ctrl+a", "add_and_row", "AND"),
@@ -2602,7 +2602,7 @@ class ScraperApp(App):
         search_container = Vertical(
             search_builder,
             Horizontal(
-                Button("Execute Search", id="btn-search", variant="primary"),
+                Button("Search", id="btn-search", variant="primary"),
                 Button("Save Filter for Scraper", id="btn-save-filter", variant="default"),
                 Button("Return", id="btn-return", variant="warning"),
                 classes="search-buttons"
@@ -2646,7 +2646,7 @@ class ScraperApp(App):
 
         compact_buttons = Horizontal(
             Button("Fetch New", id="btn-fetch-new", classes="compact-btn"),
-            Button("Upd.Vis", id="btn-update-visible", classes="compact-btn"),
+            Button("Update Visible", id="btn-update-visible", classes="compact-btn"),
             id="compact-buttons"
         )
 
@@ -2670,7 +2670,7 @@ class ScraperApp(App):
         yield Footer()
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
-        pass  # search only on explicit "Execute Search" click
+        pass  # search only on explicit "Search" click
 
     async def on_select_changed(self, event: Select.Changed) -> None:
         # A field change may have added or removed the builder's Subscribed row,

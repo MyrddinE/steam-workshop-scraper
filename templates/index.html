@@ -224,7 +224,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 
 <div id="sub-queue-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;overflow-y:auto;padding:2rem">
   <div style="max-width:600px;margin:0 auto">
-    <h2>Auto-Subscribing...</h2>
+    <h2>Subscription Queue</h2>
     <p id="sub-progress" style="color:var(--pico-muted-color)"></p>
     <div id="sub-queue-list"></div>
     <button id="sub-clear-failed" style="margin-top:1rem;display:none">Clear Failed</button>
@@ -1208,8 +1208,8 @@ function renderDetail(item) {
     <div class="stat-row"><span class="stat-label">Size:</span> <span class="${sc}">${size || 'N/A'}</span></div>
     ${updated ? `<div class="stat-row"><span class="stat-label">Updated:</span> ${updated}</div>` : ''}
     <div class="stat-row"><span class="stat-label">Views:</span> ${fmtCount(item.views || 0)}</div>
-    <div class="stat-row"><span class="stat-label">Subs:</span> ${fmtCount(subs)} / ${fmtCount(lsubs)}</div>
-    <div class="stat-row"><span class="stat-label">Favs:</span> ${fmtCount(favs)} / ${fmtCount(lfavs)}</div>
+    <div class="stat-row"><span class="stat-label">Subscribers:</span> ${fmtCount(subs)} / ${fmtCount(lsubs)}</div>
+    <div class="stat-row"><span class="stat-label">Favorites:</span> ${fmtCount(favs)} / ${fmtCount(lfavs)}</div>
     <div class="stat-row"><span class="stat-label">Tags:</span> <small>${tags}</small></div>
     <p><button onclick="doSubscribe(${item.workshop_id});return false;">Subscribe</button> ${toggle}</p>
     ${notice}
