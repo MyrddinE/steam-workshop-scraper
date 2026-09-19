@@ -837,22 +837,14 @@ def _demote_filtered_out_queue_priorities(conn) -> tuple[int, int]:
     return web_demoted, image_demoted
 
 
-def initialize_database(db_path: str):
-    """
-    Initializes the SQLite database and creates the workshop_items table and indexes.
+def _create_schema(cursor, conn):
+    """Create every table and baseline column that predates v1.
 
-    This is also the one place the journal mode is set. WAL is a persistent
-    property of the file rather than of a connection, so establishing it here
-    covers every later ``get_connection`` -- the daemon, the TUI and the web
-    runner all call this before they read or write. Setting it here rather than
-    per connection matters: a journal-mode transition needs a moment where
-    nothing else holds a lock, which the connection's busy timeout does not
-    wait out, and a reader that only wants a row must not risk it.
+    This is the unversioned part of the schema: the tables and columns that
+    a fresh database starts with, plus the best-effort ``_safe_add_columns``
+    calls and legacy data conversions that every history shares. It runs on
+    every call, before the versioned migrations in ``MIGRATIONS``.
     """
-    conn = get_connection(db_path)
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL;")
-
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS workshop_items (
         workshop_id INTEGER PRIMARY KEY,
@@ -1074,306 +1066,16 @@ def initialize_database(db_path: str):
         )
         conn.commit()
 
-    # Schema versioning: run migrations cumulatively from current to expected version
-    db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
-    logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
-
-    if db_version < 1:
-        logging.info("Running migration 0→1: recalculating Wilson subscriber scores...")
-        import math
-        # Migration 0→1: recalculate Wilson subscriber score with correct formula
-        # (subscriptions/lifetime_subscriptions instead of lifetime_subscriptions/views)
-        cursor.execute("""
-            SELECT workshop_id, favorited, subscriptions, lifetime_subscriptions, views
-            FROM workshop_items
-        """)
-        for row in cursor.fetchall():
-            def wl(s, v):
-                if v == 0:
-                    return 0.0
-                p = min(float(s) / v, 1.0)
-                z2 = 1.96 * 1.96
-                d = 1 + z2 / v
-                n = p + z2 / (2*v) - 1.96 * math.sqrt(max(0.0, p*(1-p)/v) + z2/(4*v*v))
-                return max(0.0, min(1.0, n / d))
-            fav_score = wl(row["favorited"] or 0, row["views"] or 0)
-            sub_score = wl(row["subscriptions"] or 0, row["lifetime_subscriptions"] or 0)
-            cursor.execute(
-                "UPDATE workshop_items SET wilson_favorite_score = ?, wilson_subscription_score = ? WHERE workshop_id = ?",
-                (fav_score, sub_score, row["workshop_id"])
-            )
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 1")
-        logging.info("Migration 0→1 complete.")
-
-    if db_version < 2:
-        logging.info("Running migration 1→2: normalizing malformed JSON tags...")
-        cursor.execute("""
-            SELECT workshop_id, tags FROM workshop_items
-            WHERE tags IS NOT NULL AND tags != '' AND tags != '[]'
-        """)
-        fixed = 0
-        for row in cursor.fetchall():
-            try:
-                json.loads(row["tags"])
-            except (json.JSONDecodeError, TypeError):
-                cursor.execute(
-                    "UPDATE workshop_items SET tags = ? WHERE workshop_id = ?",
-                    (normalize_tags(row["tags"]), row["workshop_id"])
-                )
-                fixed += 1
-        if fixed:
-            conn.commit()
-        cursor.execute("PRAGMA user_version = 2")
-        logging.info(f"Migration 1→2 complete. Fixed {fixed} malformed tag entries.")
-
-    if db_version < 3:
-        logging.info("Running migration 2→3: adding web scrape flag and translation queue...")
-        # Set needs_web_scrape=1 for items missing extended descriptions
-        cursor.execute("""
-            UPDATE workshop_items SET needs_web_scrape = 1
-            WHERE extended_description IS NULL AND status IN (200, 206)
-        """)
-        updated = cursor.rowcount
-        # Backfill existing translation_priority into translation_queue
-        cursor.execute("""
-            SELECT workshop_id, title, short_description, extended_description,
-                   translation_priority
-            FROM workshop_items WHERE translation_priority > 0
-        """)
-        for row in cursor.fetchall():
-            now_iso = datetime.now(timezone.utc).isoformat()
-            for field, text in [("title_en", row["title"]),
-                                 ("short_description_en", row["short_description"]),
-                                 ("extended_description_en", row["extended_description"])]:
-                if text and not text.isascii():
-                    cursor.execute(
-                        "INSERT INTO translation_queue (item_type, item_id, field, original_text, priority, dt_queued) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        ("item", row["workshop_id"], field, text, row["translation_priority"], now_iso)
-                    )
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 3")
-        logging.info(f"Migration 2→3 complete. Set needs_web_scrape=1 on {updated} items.")
-
-    if db_version < 4:
-        logging.info("Running migration 3→4: adding image download flag...")
-        cursor.execute("""
-            UPDATE workshop_items SET needs_image = 1
-            WHERE preview_url IS NOT NULL AND preview_url != ''
-              AND image_extension IS NULL
-        """)
-        updated = cursor.rowcount
-        cursor.execute("PRAGMA user_version = 4")
-        logging.info(f"Migration 3→4 complete. Set needs_image=1 on {updated} items.")
-
-    if db_version < 5:
-        logging.info("Running migration 4→5: FTS5 full-text search + missing indexes...")
-
-        cursor.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS workshop_fts USING fts5(
-                title, title_en,
-                short_description, short_description_en,
-                extended_description, extended_description_en,
-                content='workshop_items', content_rowid='workshop_id'
-            )
-        """)
-
-        # Populate FTS5 from existing data (content-sync needs initial rebuild)
-        cursor.execute("""
-            INSERT INTO workshop_fts(workshop_fts) VALUES ('rebuild')
-        """)
-        logging.info("FTS5 table created and populated (content-sync with workshop_items)")
-
-        # New indexes for translated fields and other searchable columns
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_title_en ON workshop_items (title_en)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_short_description_en ON workshop_items (short_description_en)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_extended_description_en ON workshop_items (extended_description_en)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_filename ON workshop_items (filename)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_file_size ON workshop_items (file_size)")
-
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 5")
-        logging.info("Migration 4→5 complete.")
-
-    if db_version < 6:
-        logging.info("Running migration 5→6: normalized tag schema (tags + workshop_tags tables)...")
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS tags (
-                tag_id   INTEGER PRIMARY KEY,
-                tag_name TEXT UNIQUE NOT NULL
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS workshop_tags (
-                workshop_id INTEGER NOT NULL,
-                tag_id      INTEGER NOT NULL,
-                PRIMARY KEY (workshop_id, tag_id)
-            ) WITHOUT ROWID
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_workshop_tags_tag_id ON workshop_tags (tag_id)")
-        conn.commit()
-
-        # Populate via _ensure_tag_ids — stress-test the runtime code path.
-        # Defensive: if the tags column was already dropped by a previous
-        # partial run, skip population (tables exist but no JSON to convert).
-        cols = [c[1] for c in cursor.execute("PRAGMA table_info(workshop_items)").fetchall()]
-        if "tags" in cols:
-            import json as _json
-            cursor.execute("SELECT workshop_id, tags FROM workshop_items WHERE tags IS NOT NULL AND tags != '' AND tags != '[]'")
-            rows = cursor.fetchall()
-            logging.info(f"Migrating tags for {len(rows)} items...")
-
-            # Phase 1: collect all unique tag names and bulk-create IDs
-            all_tag_names = set()
-            phase1_failures = 0
-            phase1_last_error = None
-            for i, row in enumerate(rows):
-                try:
-                    tag_names = _json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
-                    if isinstance(tag_names, list):
-                        for t in tag_names:
-                            all_tag_names.add(t.get("tag") if isinstance(t, dict) else str(t))
-                # A malformed row is counted and reported once after the loop: capture is
-                # not configured yet this early, so a per-row record would be a no-op.
-                except Exception as exc:
-                    pass
-                    phase1_failures += 1
-                    phase1_last_error = exc
-                if (i + 1) % 50000 == 0:
-                    logging.debug(f"  tag collection progress: {i + 1}/{len(rows)}")
-            if phase1_failures:
-                # initialize_database runs before failure capture is configured, so a
-                # capture call here would be a no-op; aggregate instead of per-row logs.
-                logging.warning(
-                    "Tags migration 5→6 phase 1 (collect tag names): %d of %d rows "
-                    "could not be parsed; the legacy tags column is dropped later, so "
-                    "those tags are lost (last error: %s)",
-                    phase1_failures, len(rows), phase1_last_error,
-                )
-            logging.info(f"  Phase 1: creating IDs for {len(all_tag_names)} unique tag names...")
-            _ensure_tag_ids(db_path, list(all_tag_names))
-            logging.info("  Tag IDs created.")
-
-            # Phase 2: insert workshop_tags associations in batches using in-memory lookup
-            tag_lookup = {r["tag_name"]: r["tag_id"] for r in cursor.execute("SELECT tag_id, tag_name FROM tags").fetchall()}
-            logging.info(f"  Phase 2: inserting associations ({len(rows)} items)...")
-            batch_size = 10000
-            sub_batch = 1000
-            phase2_failures = 0
-            phase2_last_error = None
-            for i, row in enumerate(rows):
-                try:
-                    tag_names = _json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
-                    if not isinstance(tag_names, list):
-                        continue
-                    for t in tag_names:
-                        name = t.get("tag") if isinstance(t, dict) else str(t)
-                        tid = tag_lookup.get(name)
-                        if tid is not None:
-                            cursor.execute(
-                                "INSERT OR IGNORE INTO workshop_tags (workshop_id, tag_id) VALUES (?, ?)",
-                                (row["workshop_id"], tid)
-                            )
-                # A malformed row is counted and reported once after the loop: capture is
-                # not configured yet this early, so a per-row record would be a no-op.
-                except Exception as exc:
-                    pass
-                    phase2_failures += 1
-                    phase2_last_error = exc
-                if (i + 1) % sub_batch == 0:
-                    logging.debug(f"  tag progress: {i + 1}/{len(rows)}")
-                if (i + 1) % batch_size == 0:
-                    conn.commit()
-                    logging.info(f"  migrated {i + 1}/{len(rows)} items")
-
-            if phase2_failures:
-                # initialize_database runs before failure capture is configured, so a
-                # capture call here would be a no-op; aggregate instead of per-row logs.
-                logging.warning(
-                    "Tags migration 5→6 phase 2 (insert workshop_tags associations): "
-                    "%d of %d rows failed; the legacy tags column is dropped later, so "
-                    "those associations are lost (last error: %s)",
-                    phase2_failures, len(rows), phase2_last_error,
-                )
-            conn.commit()
-            logging.info(f"Tags: {cursor.execute('SELECT COUNT(*) FROM tags').fetchone()[0]} unique tags, "
-                         f"{cursor.execute('SELECT COUNT(*) FROM workshop_tags').fetchone()[0]} associations")
-
-            # Drop the legacy JSON column in a tight transaction
-            conn.execute("BEGIN")
-            cursor.execute("DROP INDEX IF EXISTS idx_tags")
-            cursor.execute("ALTER TABLE workshop_items DROP COLUMN tags")
-            cursor.execute("PRAGMA user_version = 6")
-            conn.commit()
-            logging.info("Dropped legacy tags column — migration 5→6 complete.")
-        else:
-            cursor.execute("PRAGMA user_version = 6")
-            conn.commit()
-            logging.info("Migration 5→6 complete (tags column already dropped, skipping population).")
-
-        compact_tag_ids(db_path)
-
-    if db_version < 7:
-        logging.info("Running migration 6→7: converting dt_* columns from TEXT (ISO) to INTEGER (Unix epoch)...")
-
-        # Drop indexes that reference dt_* columns — required before DROP COLUMN
-        for idx in ["idx_dt_updated", "idx_dt_attempted", "idx_status_dt_attempted", "idx_creator_dt_updated"]:
-            cursor.execute(f"DROP INDEX IF EXISTS {idx}")
-
-        tables_cols = {
-            "workshop_items": ["dt_found", "dt_updated", "dt_attempted", "dt_translated"],
-            "users": ["dt_updated", "dt_translated"],
-            "translation_queue": ["dt_queued"],
-        }
-        for table, cols in tables_cols.items():
-            for col in cols:
-                col_info = {r[1]: r[2] for r in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
-                new_col = col + "_new"
-
-                if col in col_info and col_info[col].upper() == "INTEGER":
-                    logging.debug(f"  {table}.{col} already INTEGER, skipping")
-                    continue
-
-                if new_col in col_info:
-                    logging.debug(f"  {table}.{col}: {new_col} exists from partial run, finishing rename")
-                    cursor.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
-                    cursor.execute(f"ALTER TABLE {table} RENAME COLUMN {new_col} TO {col}")
-                    continue
-
-                logging.debug(f"  converting {table}.{col}")
-                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {new_col} INTEGER")
-                cursor.execute(f"UPDATE {table} SET {new_col} = CAST(strftime('%s', {col}) AS INTEGER) WHERE {col} IS NOT NULL")
-                cursor.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
-                cursor.execute(f"ALTER TABLE {table} RENAME COLUMN {new_col} TO {col}")
-
-        # Rebuild indexes dropped with their TEXT columns
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_dt_updated ON workshop_items (dt_updated)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_dt_attempted ON workshop_items (dt_attempted)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_status_dt_attempted ON workshop_items (status, dt_attempted)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_dt_updated ON workshop_items (creator, dt_updated)")
-
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 7")
-        logging.info("Migration 6→7 complete.")
-
-    if db_version < 8:
-        logging.info("Running migration 7→8: adding indexes on all sortable columns...")
-        sort_indexes = [
-            "time_created", "time_updated",
-            "file_size", "subscriptions", "favorited", "views",
-            "wilson_subscription_score", "wilson_favorite_score",
-        ]
-        for col in sort_indexes:
-            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{col} ON workshop_items ({col})")
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 8")
-        logging.info("Migration 7→8 complete.")
-
-    if db_version < 9:
-        logging.info("Running migration 8→9: recalculating favorite scores with lifetime_subscriptions denominator...")
-        import math
+def _migration_0_to_1(cursor, conn, db_path):
+    logging.info("Running migration 0→1: recalculating Wilson subscriber scores...")
+    import math
+    # Migration 0→1: recalculate Wilson subscriber score with correct formula
+    # (subscriptions/lifetime_subscriptions instead of lifetime_subscriptions/views)
+    cursor.execute("""
+        SELECT workshop_id, favorited, subscriptions, lifetime_subscriptions, views
+        FROM workshop_items
+    """)
+    for row in cursor.fetchall():
         def wl(s, v):
             if v == 0:
                 return 0.0
@@ -1382,864 +1084,1157 @@ def initialize_database(db_path: str):
             d = 1 + z2 / v
             n = p + z2 / (2*v) - 1.96 * math.sqrt(max(0.0, p*(1-p)/v) + z2/(4*v*v))
             return max(0.0, min(1.0, n / d))
+        fav_score = wl(row["favorited"] or 0, row["views"] or 0)
+        sub_score = wl(row["subscriptions"] or 0, row["lifetime_subscriptions"] or 0)
+        cursor.execute(
+            "UPDATE workshop_items SET wilson_favorite_score = ?, wilson_subscription_score = ? WHERE workshop_id = ?",
+            (fav_score, sub_score, row["workshop_id"])
+        )
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 1")
+    logging.info("Migration 0→1 complete.")
 
-        cursor.execute("""
-            SELECT workshop_id, favorited, lifetime_subscriptions
-            FROM workshop_items WHERE favorited IS NOT NULL
-        """)
-        updated = 0
-        for row in cursor.fetchall():
-            fav_score = wl(row["favorited"] or 0, row["lifetime_subscriptions"] or 0)
+def _migration_1_to_2(cursor, conn, db_path):
+    logging.info("Running migration 1→2: normalizing malformed JSON tags...")
+    cursor.execute("""
+        SELECT workshop_id, tags FROM workshop_items
+        WHERE tags IS NOT NULL AND tags != '' AND tags != '[]'
+    """)
+    fixed = 0
+    for row in cursor.fetchall():
+        try:
+            json.loads(row["tags"])
+        except (json.JSONDecodeError, TypeError):
             cursor.execute(
-                "UPDATE workshop_items SET wilson_favorite_score = ? WHERE workshop_id = ?",
-                (fav_score, row["workshop_id"])
+                "UPDATE workshop_items SET tags = ? WHERE workshop_id = ?",
+                (normalize_tags(row["tags"]), row["workshop_id"])
             )
-            updated += 1
+            fixed += 1
+    if fixed:
         conn.commit()
-        cursor.execute("PRAGMA user_version = 9")
-        logging.info(f"Migration 8→9 complete. Recalculated {updated} favorite scores.")
+    cursor.execute("PRAGMA user_version = 2")
+    logging.info(f"Migration 1→2 complete. Fixed {fixed} malformed tag entries.")
 
-    if db_version < 10:
-        logging.info("Running migration 9->10: adding index on is_queued_for_subscription...")
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_is_queued ON workshop_items (is_queued_for_subscription)"
+def _migration_2_to_3(cursor, conn, db_path):
+    logging.info("Running migration 2→3: adding web scrape flag and translation queue...")
+    # Set needs_web_scrape=1 for items missing extended descriptions
+    cursor.execute("""
+        UPDATE workshop_items SET needs_web_scrape = 1
+        WHERE extended_description IS NULL AND status IN (200, 206)
+    """)
+    updated = cursor.rowcount
+    # Backfill existing translation_priority into translation_queue
+    cursor.execute("""
+        SELECT workshop_id, title, short_description, extended_description,
+               translation_priority
+        FROM workshop_items WHERE translation_priority > 0
+    """)
+    for row in cursor.fetchall():
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for field, text in [("title_en", row["title"]),
+                             ("short_description_en", row["short_description"]),
+                             ("extended_description_en", row["extended_description"])]:
+            if text and not text.isascii():
+                cursor.execute(
+                    "INSERT INTO translation_queue (item_type, item_id, field, original_text, priority, dt_queued) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    ("item", row["workshop_id"], field, text, row["translation_priority"], now_iso)
+                )
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 3")
+    logging.info(f"Migration 2→3 complete. Set needs_web_scrape=1 on {updated} items.")
+
+def _migration_3_to_4(cursor, conn, db_path):
+    logging.info("Running migration 3→4: adding image download flag...")
+    cursor.execute("""
+        UPDATE workshop_items SET needs_image = 1
+        WHERE preview_url IS NOT NULL AND preview_url != ''
+          AND image_extension IS NULL
+    """)
+    updated = cursor.rowcount
+    cursor.execute("PRAGMA user_version = 4")
+    logging.info(f"Migration 3→4 complete. Set needs_image=1 on {updated} items.")
+
+def _migration_4_to_5(cursor, conn, db_path):
+    logging.info("Running migration 4→5: FTS5 full-text search + missing indexes...")
+
+    cursor.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS workshop_fts USING fts5(
+            title, title_en,
+            short_description, short_description_en,
+            extended_description, extended_description_en,
+            content='workshop_items', content_rowid='workshop_id'
         )
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 10")
-        logging.info("Migration 9→10 complete.")
+    """)
 
-    if db_version < 11:
-        logging.info("Running migration 10->11: repurposing dt_* columns...")
+    # Populate FTS5 from existing data (content-sync needs initial rebuild)
+    cursor.execute("""
+        INSERT INTO workshop_fts(workshop_fts) VALUES ('rebuild')
+    """)
+    logging.info("FTS5 table created and populated (content-sync with workshop_items)")
 
-        # Step 1: dt_attempted (fetch time) → dt_found where dt_found is NULL.
-        # Preserves our best approximation of when the item was first found,
-        # since most items have only been fetched once.
-        cursor.execute(
-            "UPDATE workshop_items SET dt_found = dt_attempted "
-            "WHERE dt_found IS NULL AND dt_attempted IS NOT NULL"
+    # New indexes for translated fields and other searchable columns
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_title_en ON workshop_items (title_en)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_short_description_en ON workshop_items (short_description_en)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_extended_description_en ON workshop_items (extended_description_en)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_filename ON workshop_items (filename)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_file_size ON workshop_items (file_size)")
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 5")
+    logging.info("Migration 4→5 complete.")
+
+def _migration_5_to_6(cursor, conn, db_path):
+    logging.info("Running migration 5→6: normalized tag schema (tags + workshop_tags tables)...")
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tags (
+            tag_id   INTEGER PRIMARY KEY,
+            tag_name TEXT UNIQUE NOT NULL
         )
-        found_count = cursor.rowcount
-        logging.info(f"  Step 1: dt_attempted -> dt_found for {found_count} items")
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS workshop_tags (
+            workshop_id INTEGER NOT NULL,
+            tag_id      INTEGER NOT NULL,
+            PRIMARY KEY (workshop_id, tag_id)
+        ) WITHOUT ROWID
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_workshop_tags_tag_id ON workshop_tags (tag_id)")
+    conn.commit()
 
-        # Step 2: dt_attempted (fetch time) → dt_updated where dt_updated is NULL.
-        cursor.execute(
-            "UPDATE workshop_items SET dt_updated = dt_attempted "
-            "WHERE dt_updated IS NULL AND dt_attempted IS NOT NULL"
-        )
-        updated_count = cursor.rowcount
-        logging.info(f"  Step 2: dt_attempted -> dt_updated for {updated_count} items")
-
-        # Step 3: dt_attempted → time_updated (version marker for web scrape).
-        cursor.execute(
-            "UPDATE workshop_items SET dt_attempted = time_updated "
-            "WHERE time_updated IS NOT NULL"
-        )
-        attempted_count = cursor.rowcount
-        logging.info(f"  Step 3: dt_attempted = time_updated for {attempted_count} items")
-
-        # Step 4: dt_translated → time_updated where translation exists.
-        cursor.execute(
-            "UPDATE workshop_items SET dt_translated = time_updated "
-            "WHERE dt_translated IS NOT NULL AND time_updated IS NOT NULL"
-        )
-        trans_count = cursor.rowcount
-
-        # For items with translations but no time_updated, leave as-is (epoch already).
-        cursor.execute(
-            "SELECT COUNT(*) FROM workshop_items "
-            "WHERE dt_translated IS NOT NULL AND time_updated IS NULL"
-        )
-        trans_skipped = cursor.fetchone()[0]
-        logging.info(f"  Step 4: dt_translated = time_updated for {trans_count} items, "
-                     f"{trans_skipped} items with translation but no time_updated left as-is")
-
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 11")
-        logging.info("Migration 10->11 complete.")
-
-    if db_version < 12:
-        logging.info("Running migration 11->12: adding api_priority column...")
-        staleness_days = 30 # Use default for migration
-        threshold = int(time.time()) - staleness_days * 86400
-
-        cols = {r[1] for r in cursor.execute("PRAGMA table_info(workshop_items)").fetchall()}
-        if "api_priority" not in cols:
-            cursor.execute(
-                "ALTER TABLE workshop_items ADD COLUMN api_priority INTEGER NOT NULL DEFAULT 0"
-            )
-
-        # Never-scraped items (status IS NULL) → priority 3 (default new-item)
-        cursor.execute(
-            "UPDATE workshop_items SET api_priority = 3 WHERE status IS NULL"
-        )
-        never_count = cursor.rowcount
-
-        # Stale items → priority 1 (periodic refresh)
-        cursor.execute(
-            "UPDATE workshop_items SET api_priority = 1 "
-            "WHERE status = 200 AND dt_updated IS NOT NULL AND dt_updated < ?",
-            (threshold,)
-        )
-        stale_count = cursor.rowcount
-
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 12")
-        logging.info(f"Migration 11->12 complete. "
-                      f"Never-scraped={never_count}, Stale={stale_count}")
-
-    if db_version < 13:
-        logging.info("Running migration 12->13: migrating image folder structure to 3-level hexadecimal hash bucket folders...")
-        db_dir = os.path.dirname(os.path.abspath(db_path))
-        base_images_dir = os.path.join(db_dir, "images")
-        if not os.path.isdir(base_images_dir):
-            base_images_dir = "images"
-
-        cursor.execute("SELECT workshop_id, image_extension FROM workshop_items WHERE image_extension IS NOT NULL AND image_extension != ''")
+    # Populate via _ensure_tag_ids — stress-test the runtime code path.
+    # Defensive: if the tags column was already dropped by a previous
+    # partial run, skip population (tables exist but no JSON to convert).
+    cols = [c[1] for c in cursor.execute("PRAGMA table_info(workshop_items)").fetchall()]
+    if "tags" in cols:
+        import json as _json
+        cursor.execute("SELECT workshop_id, tags FROM workshop_items WHERE tags IS NOT NULL AND tags != '' AND tags != '[]'")
         rows = cursor.fetchall()
+        logging.info(f"Migrating tags for {len(rows)} items...")
 
-        migrated_count = 0
-        already_migrated_count = 0
-        missing_count = 0
-
-        for row in rows:
-            wid = row["workshop_id"]
-            ext = row["image_extension"]
-
-            old_path = os.path.join(base_images_dir, f"{wid}.{ext}")
-
-            char1, char2, char3 = get_image_subdirs(wid)
-            new_dir = os.path.join(base_images_dir, char1, char2, char3)
-            new_path = os.path.join(new_dir, f"{wid}.{ext}")
-
-            if os.path.exists(old_path):
-                os.makedirs(new_dir, exist_ok=True)
-                os.rename(old_path, new_path)
-                migrated_count += 1
-            elif os.path.exists(new_path):
-                already_migrated_count += 1
-            else:
-                missing_count += 1
-
-        cursor.execute("PRAGMA user_version = 13")
-        conn.commit()
-        logging.info(f"Migration 12->13 complete. Migrated: {migrated_count}, Already: {already_migrated_count}, Missing: {missing_count}")
-
-    if db_version < 14:
-        logging.info("Running migration 13->14: renaming timestamp columns to the three-clock vocabulary...")
-
-        def _table_columns(table):
-            return {r[1] for r in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
-
-        def _rename_column(table, old_name, new_name):
-            """Rename `old_name` -> `new_name` if needed.
-
-            Idempotent/resumable: returns True only when the rename was actually
-            performed. A re-run after a partial migration (or on a fresh database
-            whose CREATE TABLE already carries the name) is a safe no-op.
-            """
-            cols = _table_columns(table)
-            if old_name in cols and new_name not in cols:
-                cursor.execute(f"ALTER TABLE {table} RENAME COLUMN {old_name} TO {new_name}")
-                return True
-            return False
-
-        # --- Step 1: last_fetch_attempted_at ---------------------------------
-        # Our attempt clock. Add the column and backfill it from the OLD
-        # dt_updated, which was written on every attempt (success or failure),
-        # so that value genuinely IS the attempt time. This must happen before
-        # the rename below removes the dt_updated name.
-        item_cols = _table_columns("workshop_items")
-        if "last_fetch_attempted_at" not in item_cols:
-            cursor.execute("ALTER TABLE workshop_items ADD COLUMN last_fetch_attempted_at INTEGER")
-        if "dt_updated" in item_cols:
-            cursor.execute(
-                "UPDATE workshop_items SET last_fetch_attempted_at = dt_updated "
-                "WHERE last_fetch_attempted_at IS NULL AND dt_updated IS NOT NULL"
+        # Phase 1: collect all unique tag names and bulk-create IDs
+        all_tag_names = set()
+        phase1_failures = 0
+        phase1_last_error = None
+        for i, row in enumerate(rows):
+            try:
+                tag_names = _json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
+                if isinstance(tag_names, list):
+                    for t in tag_names:
+                        all_tag_names.add(t.get("tag") if isinstance(t, dict) else str(t))
+            # A malformed row is counted and reported once after the loop: capture is
+            # not configured yet this early, so a per-row record would be a no-op.
+            except Exception as exc:
+                pass
+                phase1_failures += 1
+                phase1_last_error = exc
+            if (i + 1) % 50000 == 0:
+                logging.debug(f"  tag collection progress: {i + 1}/{len(rows)}")
+        if phase1_failures:
+            # initialize_database runs before failure capture is configured, so a
+            # capture call here would be a no-op; aggregate instead of per-row logs.
+            logging.warning(
+                "Tags migration 5→6 phase 1 (collect tag names): %d of %d rows "
+                "could not be parsed; the legacy tags column is dropped later, so "
+                "those tags are lost (last error: %s)",
+                phase1_failures, len(rows), phase1_last_error,
             )
-            logging.info("  last_fetch_attempted_at backfilled from dt_updated for %d rows",
-                         cursor.rowcount)
-            # Commit the backfill on its own before the (metadata-only) renames.
-            # On the production database this UPDATE touches ~1.7M rows, and
-            # holding that plus the DDL in one transaction grows the WAL without
-            # bound. Commit, then force a checkpoint so the (multi-hundred-MB)
-            # WAL is flushed back into the database before the later DDL runs:
-            # leaving it un-checkpointed makes a subsequent DROP INDEX fail with
-            # SQLITE_CANTOPEN on this filesystem.
-            conn.commit()
-            cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        logging.info(f"  Phase 1: creating IDs for {len(all_tag_names)} unique tag names...")
+        _ensure_tag_ids(db_path, list(all_tag_names))
+        logging.info("  Tag IDs created.")
 
-        # --- Step 2: rename every clock column -------------------------------
-        renames = {
-            "workshop_items": [
-                ("dt_found", "first_seen_at"),          # our clock: first insert
-                ("dt_updated", "api_fetched_at"),       # our clock: last SUCCESS
-                ("dt_attempted", "scrape_version"),     # Steam value: version key
-                ("dt_translated", "translate_version"), # Steam value: version key
-                ("time_created", "steam_created_at"),   # Steam clock
-                ("time_updated", "steam_updated_at"),   # Steam clock
-            ],
-            "users": [
-                ("dt_updated", "api_fetched_at"),       # our clock
-                ("dt_translated", "translated_at"),     # our clock (NOT a version)
-            ],
-            "translation_queue": [
-                ("dt_queued", "queued_at"),             # our clock: queue time
-            ],
-        }
-        for table, pairs in renames.items():
-            for old_name, new_name in pairs:
-                if _rename_column(table, old_name, new_name):
-                    logging.info("  renamed %s.%s -> %s", table, old_name, new_name)
+        # Phase 2: insert workshop_tags associations in batches using in-memory lookup
+        tag_lookup = {r["tag_name"]: r["tag_id"] for r in cursor.execute("SELECT tag_id, tag_name FROM tags").fetchall()}
+        logging.info(f"  Phase 2: inserting associations ({len(rows)} items)...")
+        batch_size = 10000
+        sub_batch = 1000
+        phase2_failures = 0
+        phase2_last_error = None
+        for i, row in enumerate(rows):
+            try:
+                tag_names = _json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
+                if not isinstance(tag_names, list):
+                    continue
+                for t in tag_names:
+                    name = t.get("tag") if isinstance(t, dict) else str(t)
+                    tid = tag_lookup.get(name)
+                    if tid is not None:
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO workshop_tags (workshop_id, tag_id) VALUES (?, ?)",
+                            (row["workshop_id"], tid)
+                        )
+            # A malformed row is counted and reported once after the loop: capture is
+            # not configured yet this early, so a per-row record would be a no-op.
+            except Exception as exc:
+                pass
+                phase2_failures += 1
+                phase2_last_error = exc
+            if (i + 1) % sub_batch == 0:
+                logging.debug(f"  tag progress: {i + 1}/{len(rows)}")
+            if (i + 1) % batch_size == 0:
+                conn.commit()
+                logging.info(f"  migrated {i + 1}/{len(rows)} items")
 
-        # queued_at is deliberately NOT backfilled: we genuinely do not know when
-        # the pre-existing queue rows were queued, and inventing a timestamp in a
-        # migration whose purpose is removing misleading values would defeat it.
-        # get_next_batch_for_translation keeps NULL (= unknown) ahead of dated
-        # rows, so ordering within the legacy backlog stays arbitrary until it
-        # drains.
-        queued_null_count = cursor.execute(
-            "SELECT COUNT(*) FROM translation_queue WHERE queued_at IS NULL"
-        ).fetchone()[0]
-        logging.info("  left queued_at NULL on %d pre-existing translation_queue rows; "
-                     "their ordering stays arbitrary until the backlog drains",
-                     queued_null_count)
+        if phase2_failures:
+            # initialize_database runs before failure capture is configured, so a
+            # capture call here would be a no-op; aggregate instead of per-row logs.
+            logging.warning(
+                "Tags migration 5→6 phase 2 (insert workshop_tags associations): "
+                "%d of %d rows failed; the legacy tags column is dropped later, so "
+                "those associations are lost (last error: %s)",
+                phase2_failures, len(rows), phase2_last_error,
+            )
+        conn.commit()
+        logging.info(f"Tags: {cursor.execute('SELECT COUNT(*) FROM tags').fetchone()[0]} unique tags, "
+                     f"{cursor.execute('SELECT COUNT(*) FROM workshop_tags').fetchone()[0]} associations")
 
-        # --- Step 3: clear the migration artefact ----------------------------
-        # Migration 10->11 repurposed dt_attempted into a Steam version key by
-        # setting it to time_updated, but rows with no Steam payload kept their
-        # pre-migration fetch time. Now that the column is scrape_version those
-        # stale values are meaningless. They are already preserved in
-        # first_seen_at, so clearing them loses nothing.
+        # Drop the legacy JSON column in a tight transaction
+        conn.execute("BEGIN")
+        cursor.execute("DROP INDEX IF EXISTS idx_tags")
+        cursor.execute("ALTER TABLE workshop_items DROP COLUMN tags")
+        cursor.execute("PRAGMA user_version = 6")
+        conn.commit()
+        logging.info("Dropped legacy tags column — migration 5→6 complete.")
+    else:
+        cursor.execute("PRAGMA user_version = 6")
+        conn.commit()
+        logging.info("Migration 5→6 complete (tags column already dropped, skipping population).")
+
+    compact_tag_ids(db_path)
+
+def _migration_6_to_7(cursor, conn, db_path):
+    logging.info("Running migration 6→7: converting dt_* columns from TEXT (ISO) to INTEGER (Unix epoch)...")
+
+    # Drop indexes that reference dt_* columns — required before DROP COLUMN
+    for idx in ["idx_dt_updated", "idx_dt_attempted", "idx_status_dt_attempted", "idx_creator_dt_updated"]:
+        cursor.execute(f"DROP INDEX IF EXISTS {idx}")
+
+    tables_cols = {
+        "workshop_items": ["dt_found", "dt_updated", "dt_attempted", "dt_translated"],
+        "users": ["dt_updated", "dt_translated"],
+        "translation_queue": ["dt_queued"],
+    }
+    for table, cols in tables_cols.items():
+        for col in cols:
+            col_info = {r[1]: r[2] for r in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
+            new_col = col + "_new"
+
+            if col in col_info and col_info[col].upper() == "INTEGER":
+                logging.debug(f"  {table}.{col} already INTEGER, skipping")
+                continue
+
+            if new_col in col_info:
+                logging.debug(f"  {table}.{col}: {new_col} exists from partial run, finishing rename")
+                cursor.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
+                cursor.execute(f"ALTER TABLE {table} RENAME COLUMN {new_col} TO {col}")
+                continue
+
+            logging.debug(f"  converting {table}.{col}")
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {new_col} INTEGER")
+            cursor.execute(f"UPDATE {table} SET {new_col} = CAST(strftime('%s', {col}) AS INTEGER) WHERE {col} IS NOT NULL")
+            cursor.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
+            cursor.execute(f"ALTER TABLE {table} RENAME COLUMN {new_col} TO {col}")
+
+    # Rebuild indexes dropped with their TEXT columns
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_dt_updated ON workshop_items (dt_updated)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_dt_attempted ON workshop_items (dt_attempted)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_status_dt_attempted ON workshop_items (status, dt_attempted)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_dt_updated ON workshop_items (creator, dt_updated)")
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 7")
+    logging.info("Migration 6→7 complete.")
+
+def _migration_7_to_8(cursor, conn, db_path):
+    logging.info("Running migration 7→8: adding indexes on all sortable columns...")
+    sort_indexes = [
+        "time_created", "time_updated",
+        "file_size", "subscriptions", "favorited", "views",
+        "wilson_subscription_score", "wilson_favorite_score",
+    ]
+    for col in sort_indexes:
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{col} ON workshop_items ({col})")
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 8")
+    logging.info("Migration 7→8 complete.")
+
+def _migration_8_to_9(cursor, conn, db_path):
+    logging.info("Running migration 8→9: recalculating favorite scores with lifetime_subscriptions denominator...")
+    import math
+    def wl(s, v):
+        if v == 0:
+            return 0.0
+        p = min(float(s) / v, 1.0)
+        z2 = 1.96 * 1.96
+        d = 1 + z2 / v
+        n = p + z2 / (2*v) - 1.96 * math.sqrt(max(0.0, p*(1-p)/v) + z2/(4*v*v))
+        return max(0.0, min(1.0, n / d))
+
+    cursor.execute("""
+        SELECT workshop_id, favorited, lifetime_subscriptions
+        FROM workshop_items WHERE favorited IS NOT NULL
+    """)
+    updated = 0
+    for row in cursor.fetchall():
+        fav_score = wl(row["favorited"] or 0, row["lifetime_subscriptions"] or 0)
         cursor.execute(
-            "UPDATE workshop_items SET scrape_version = NULL "
-            "WHERE steam_updated_at IS NULL AND scrape_version IS NOT NULL"
+            "UPDATE workshop_items SET wilson_favorite_score = ? WHERE workshop_id = ?",
+            (fav_score, row["workshop_id"])
         )
-        logging.info("  cleared stale scrape_version on %d rows that have no Steam payload",
+        updated += 1
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 9")
+    logging.info(f"Migration 8→9 complete. Recalculated {updated} favorite scores.")
+
+def _migration_9_to_10(cursor, conn, db_path):
+    logging.info("Running migration 9->10: adding index on is_queued_for_subscription...")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_is_queued ON workshop_items (is_queued_for_subscription)"
+    )
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 10")
+    logging.info("Migration 9→10 complete.")
+
+def _migration_10_to_11(cursor, conn, db_path):
+    logging.info("Running migration 10->11: repurposing dt_* columns...")
+
+    # Step 1: dt_attempted (fetch time) → dt_found where dt_found is NULL.
+    # Preserves our best approximation of when the item was first found,
+    # since most items have only been fetched once.
+    cursor.execute(
+        "UPDATE workshop_items SET dt_found = dt_attempted "
+        "WHERE dt_found IS NULL AND dt_attempted IS NOT NULL"
+    )
+    found_count = cursor.rowcount
+    logging.info(f"  Step 1: dt_attempted -> dt_found for {found_count} items")
+
+    # Step 2: dt_attempted (fetch time) → dt_updated where dt_updated is NULL.
+    cursor.execute(
+        "UPDATE workshop_items SET dt_updated = dt_attempted "
+        "WHERE dt_updated IS NULL AND dt_attempted IS NOT NULL"
+    )
+    updated_count = cursor.rowcount
+    logging.info(f"  Step 2: dt_attempted -> dt_updated for {updated_count} items")
+
+    # Step 3: dt_attempted → time_updated (version marker for web scrape).
+    cursor.execute(
+        "UPDATE workshop_items SET dt_attempted = time_updated "
+        "WHERE time_updated IS NOT NULL"
+    )
+    attempted_count = cursor.rowcount
+    logging.info(f"  Step 3: dt_attempted = time_updated for {attempted_count} items")
+
+    # Step 4: dt_translated → time_updated where translation exists.
+    cursor.execute(
+        "UPDATE workshop_items SET dt_translated = time_updated "
+        "WHERE dt_translated IS NOT NULL AND time_updated IS NOT NULL"
+    )
+    trans_count = cursor.rowcount
+
+    # For items with translations but no time_updated, leave as-is (epoch already).
+    cursor.execute(
+        "SELECT COUNT(*) FROM workshop_items "
+        "WHERE dt_translated IS NOT NULL AND time_updated IS NULL"
+    )
+    trans_skipped = cursor.fetchone()[0]
+    logging.info(f"  Step 4: dt_translated = time_updated for {trans_count} items, "
+                 f"{trans_skipped} items with translation but no time_updated left as-is")
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 11")
+    logging.info("Migration 10->11 complete.")
+
+def _migration_11_to_12(cursor, conn, db_path):
+    logging.info("Running migration 11->12: adding api_priority column...")
+    staleness_days = 30 # Use default for migration
+    threshold = int(time.time()) - staleness_days * 86400
+
+    cols = {r[1] for r in cursor.execute("PRAGMA table_info(workshop_items)").fetchall()}
+    if "api_priority" not in cols:
+        cursor.execute(
+            "ALTER TABLE workshop_items ADD COLUMN api_priority INTEGER NOT NULL DEFAULT 0"
+        )
+
+    # Never-scraped items (status IS NULL) → priority 3 (default new-item)
+    cursor.execute(
+        "UPDATE workshop_items SET api_priority = 3 WHERE status IS NULL"
+    )
+    never_count = cursor.rowcount
+
+    # Stale items → priority 1 (periodic refresh)
+    cursor.execute(
+        "UPDATE workshop_items SET api_priority = 1 "
+        "WHERE status = 200 AND dt_updated IS NOT NULL AND dt_updated < ?",
+        (threshold,)
+    )
+    stale_count = cursor.rowcount
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 12")
+    logging.info(f"Migration 11->12 complete. "
+                  f"Never-scraped={never_count}, Stale={stale_count}")
+
+def _migration_12_to_13(cursor, conn, db_path):
+    logging.info("Running migration 12->13: migrating image folder structure to 3-level hexadecimal hash bucket folders...")
+    db_dir = os.path.dirname(os.path.abspath(db_path))
+    base_images_dir = os.path.join(db_dir, "images")
+    if not os.path.isdir(base_images_dir):
+        base_images_dir = "images"
+
+    cursor.execute("SELECT workshop_id, image_extension FROM workshop_items WHERE image_extension IS NOT NULL AND image_extension != ''")
+    rows = cursor.fetchall()
+
+    migrated_count = 0
+    already_migrated_count = 0
+    missing_count = 0
+
+    for row in rows:
+        wid = row["workshop_id"]
+        ext = row["image_extension"]
+
+        old_path = os.path.join(base_images_dir, f"{wid}.{ext}")
+
+        char1, char2, char3 = get_image_subdirs(wid)
+        new_dir = os.path.join(base_images_dir, char1, char2, char3)
+        new_path = os.path.join(new_dir, f"{wid}.{ext}")
+
+        if os.path.exists(old_path):
+            os.makedirs(new_dir, exist_ok=True)
+            os.rename(old_path, new_path)
+            migrated_count += 1
+        elif os.path.exists(new_path):
+            already_migrated_count += 1
+        else:
+            missing_count += 1
+
+    cursor.execute("PRAGMA user_version = 13")
+    conn.commit()
+    logging.info(f"Migration 12->13 complete. Migrated: {migrated_count}, Already: {already_migrated_count}, Missing: {missing_count}")
+
+def _migration_13_to_14(cursor, conn, db_path):
+    logging.info("Running migration 13->14: renaming timestamp columns to the three-clock vocabulary...")
+
+    def _table_columns(table):
+        return {r[1] for r in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
+
+    def _rename_column(table, old_name, new_name):
+        """Rename `old_name` -> `new_name` if needed.
+
+        Idempotent/resumable: returns True only when the rename was actually
+        performed. A re-run after a partial migration (or on a fresh database
+        whose CREATE TABLE already carries the name) is a safe no-op.
+        """
+        cols = _table_columns(table)
+        if old_name in cols and new_name not in cols:
+            cursor.execute(f"ALTER TABLE {table} RENAME COLUMN {old_name} TO {new_name}")
+            return True
+        return False
+
+    # --- Step 1: last_fetch_attempted_at ---------------------------------
+    # Our attempt clock. Add the column and backfill it from the OLD
+    # dt_updated, which was written on every attempt (success or failure),
+    # so that value genuinely IS the attempt time. This must happen before
+    # the rename below removes the dt_updated name.
+    item_cols = _table_columns("workshop_items")
+    if "last_fetch_attempted_at" not in item_cols:
+        cursor.execute("ALTER TABLE workshop_items ADD COLUMN last_fetch_attempted_at INTEGER")
+    if "dt_updated" in item_cols:
+        cursor.execute(
+            "UPDATE workshop_items SET last_fetch_attempted_at = dt_updated "
+            "WHERE last_fetch_attempted_at IS NULL AND dt_updated IS NOT NULL"
+        )
+        logging.info("  last_fetch_attempted_at backfilled from dt_updated for %d rows",
                      cursor.rowcount)
-
-        # --- Step 4: api_fetched_at means "last SUCCESSFUL API content pull" --
-        # The old dt_updated was written on every attempt, so rows that never
-        # received API content (steam_updated_at IS NULL: the 500/404/-1 rows)
-        # would otherwise inherit pure attempt times under a name that promises
-        # success. This is the best available approximation: for a row that
-        # succeeded once and then failed a later attempt, the old dt_updated
-        # holds the FAILURE time and the true last-success time cannot be
-        # recovered from the existing data. It self-corrects on the next
-        # successful fetch.
-        cursor.execute(
-            "UPDATE workshop_items SET api_fetched_at = NULL "
-            "WHERE steam_updated_at IS NULL AND api_fetched_at IS NOT NULL"
-        )
-        logging.info(
-            "  api_fetched_at cleared on %d rows that never received API content "
-            "(approximation: true last-success time is unrecoverable where a later attempt failed)",
-            cursor.rowcount)
-
-        # --- Step 5: repair the anomalous first_seen_at row ------------------
-        # A caller once passed first_seen_at=None explicitly, suppressing the
-        # insert default; one live row ended up with first_seen_at IS NULL. Its
-        # api_fetched_at is a usable lower bound on when it was first seen.
-        cursor.execute(
-            "UPDATE workshop_items SET first_seen_at = api_fetched_at "
-            "WHERE first_seen_at IS NULL AND api_fetched_at IS NOT NULL"
-        )
-        logging.info("  first_seen_at repaired from api_fetched_at for %d rows", cursor.rowcount)
-
-        # Commit the cleanup DML explicitly before any DDL below. Python's
-        # sqlite3 module otherwise commits an open DML transaction implicitly at
-        # the first DDL statement, which on a multi-hundred-MB WAL leaves the
-        # connection unable to open the database for the *next* DDL
-        # (SQLITE_CANTOPEN). Checkpointing keeps the WAL small as well.
-        conn.commit()
-        cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-
-        # --- Step 6: recreate the affected indexes under clear names ---------
-        # SQLite rewrites index *definitions* on RENAME COLUMN but keeps the old
-        # index *names*, so drop the stale idx_dt_* names and recreate them
-        # explicitly against the new columns.
-        for idx in ["idx_dt_updated", "idx_dt_attempted",
-                    "idx_status_dt_attempted", "idx_creator_dt_updated"]:
-            cursor.execute(f"DROP INDEX IF EXISTS {idx}")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_fetched_at ON workshop_items (api_fetched_at)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_scraped_version ON workshop_items (scrape_version)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_status_scraped_version ON workshop_items (status, scrape_version)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_api_fetched_at ON workshop_items (creator, api_fetched_at)")
-
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 14")
-        conn.commit()
-        logging.info("Migration 13->14 complete.")
-
-    if db_version < 15:
-        logging.info("Running migration 14->15: rebuilding the full-text index and adding sync triggers...")
-
-        # Migration 4->5 created workshop_fts and populated it once, but installed
-        # no triggers and never rebuilt it again. Every row inserted, updated or
-        # deleted since is therefore missing from the index: on the production
-        # database it held 640,471 documents against 1,725,544 items (62.9 %
-        # absent). Rebuild it from the content table first, then keep it correct.
-        cursor.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS workshop_fts USING fts5(
-                title, title_en,
-                short_description, short_description_en,
-                extended_description, extended_description_en,
-                content='workshop_items', content_rowid='workshop_id'
-            )
-        """)
-
-        # The rebuild rewrites a large part of the index, so commit and checkpoint
-        # it on its own before the DDL below starts. This mirrors migration 13->14:
-        # holding a multi-hundred-MB WAL open across later DDL is what produced
+        # Commit the backfill on its own before the (metadata-only) renames.
+        # On the production database this UPDATE touches ~1.7M rows, and
+        # holding that plus the DDL in one transaction grows the WAL without
+        # bound. Commit, then force a checkpoint so the (multi-hundred-MB)
+        # WAL is flushed back into the database before the later DDL runs:
+        # leaving it un-checkpointed makes a subsequent DROP INDEX fail with
         # SQLITE_CANTOPEN on this filesystem.
-        cursor.execute("INSERT INTO workshop_fts(workshop_fts) VALUES ('rebuild')")
         conn.commit()
         cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        logging.info("  full-text index rebuilt from workshop_items")
 
-        # External-content FTS5 has no way to look up a row's old tokens, so
-        # removal must go through the special 'delete' command with the OLD
-        # column values. A plain DELETE FROM workshop_fts would silently leave the
-        # old tokens in the index and corrupt every later MATCH.
-        _FTS_COLUMNS = ("title", "title_en", "short_description",
-                        "short_description_en", "extended_description",
-                        "extended_description_en")
-        fts_cols = ", ".join(_FTS_COLUMNS)
-        fts_new = ", ".join(f"new.{c}" for c in _FTS_COLUMNS)
-        fts_old = ", ".join(f"old.{c}" for c in _FTS_COLUMNS)
+    # --- Step 2: rename every clock column -------------------------------
+    renames = {
+        "workshop_items": [
+            ("dt_found", "first_seen_at"),          # our clock: first insert
+            ("dt_updated", "api_fetched_at"),       # our clock: last SUCCESS
+            ("dt_attempted", "scrape_version"),     # Steam value: version key
+            ("dt_translated", "translate_version"), # Steam value: version key
+            ("time_created", "steam_created_at"),   # Steam clock
+            ("time_updated", "steam_updated_at"),   # Steam clock
+        ],
+        "users": [
+            ("dt_updated", "api_fetched_at"),       # our clock
+            ("dt_translated", "translated_at"),     # our clock (NOT a version)
+        ],
+        "translation_queue": [
+            ("dt_queued", "queued_at"),             # our clock: queue time
+        ],
+    }
+    for table, pairs in renames.items():
+        for old_name, new_name in pairs:
+            if _rename_column(table, old_name, new_name):
+                logging.info("  renamed %s.%s -> %s", table, old_name, new_name)
 
-        cursor.execute("DROP TRIGGER IF EXISTS workshop_items_fts_insert")
-        cursor.execute("DROP TRIGGER IF EXISTS workshop_items_fts_delete")
-        cursor.execute("DROP TRIGGER IF EXISTS workshop_items_fts_update")
+    # queued_at is deliberately NOT backfilled: we genuinely do not know when
+    # the pre-existing queue rows were queued, and inventing a timestamp in a
+    # migration whose purpose is removing misleading values would defeat it.
+    # get_next_batch_for_translation keeps NULL (= unknown) ahead of dated
+    # rows, so ordering within the legacy backlog stays arbitrary until it
+    # drains.
+    queued_null_count = cursor.execute(
+        "SELECT COUNT(*) FROM translation_queue WHERE queued_at IS NULL"
+    ).fetchone()[0]
+    logging.info("  left queued_at NULL on %d pre-existing translation_queue rows; "
+                 "their ordering stays arbitrary until the backlog drains",
+                 queued_null_count)
 
-        cursor.execute(f"""
-            CREATE TRIGGER workshop_items_fts_insert AFTER INSERT ON workshop_items BEGIN
-                INSERT INTO workshop_fts(rowid, {fts_cols})
-                VALUES (new.workshop_id, {fts_new});
-            END
-        """)
-        cursor.execute(f"""
-            CREATE TRIGGER workshop_items_fts_delete AFTER DELETE ON workshop_items BEGIN
-                INSERT INTO workshop_fts(workshop_fts, rowid, {fts_cols})
-                VALUES ('delete', old.workshop_id, {fts_old});
-            END
-        """)
-        # Scoped to the six indexed columns on purpose: most writes to
-        # workshop_items are queue/priority updates that touch none of them, and an
-        # unscoped trigger would rewrite a chunk of the index on every priority
-        # bump. insert_or_update_item builds its SET list from the keys actually
-        # supplied, so this fires exactly when an indexed column is written.
-        cursor.execute(f"""
-            CREATE TRIGGER workshop_items_fts_update
-            AFTER UPDATE OF {fts_cols} ON workshop_items BEGIN
-                INSERT INTO workshop_fts(workshop_fts, rowid, {fts_cols})
-                VALUES ('delete', old.workshop_id, {fts_old});
-                INSERT INTO workshop_fts(rowid, {fts_cols})
-                VALUES (new.workshop_id, {fts_new});
-            END
-        """)
+    # --- Step 3: clear the migration artefact ----------------------------
+    # Migration 10->11 repurposed dt_attempted into a Steam version key by
+    # setting it to time_updated, but rows with no Steam payload kept their
+    # pre-migration fetch time. Now that the column is scrape_version those
+    # stale values are meaningless. They are already preserved in
+    # first_seen_at, so clearing them loses nothing.
+    cursor.execute(
+        "UPDATE workshop_items SET scrape_version = NULL "
+        "WHERE steam_updated_at IS NULL AND scrape_version IS NOT NULL"
+    )
+    logging.info("  cleared stale scrape_version on %d rows that have no Steam payload",
+                 cursor.rowcount)
 
+    # --- Step 4: api_fetched_at means "last SUCCESSFUL API content pull" --
+    # The old dt_updated was written on every attempt, so rows that never
+    # received API content (steam_updated_at IS NULL: the 500/404/-1 rows)
+    # would otherwise inherit pure attempt times under a name that promises
+    # success. This is the best available approximation: for a row that
+    # succeeded once and then failed a later attempt, the old dt_updated
+    # holds the FAILURE time and the true last-success time cannot be
+    # recovered from the existing data. It self-corrects on the next
+    # successful fetch.
+    cursor.execute(
+        "UPDATE workshop_items SET api_fetched_at = NULL "
+        "WHERE steam_updated_at IS NULL AND api_fetched_at IS NOT NULL"
+    )
+    logging.info(
+        "  api_fetched_at cleared on %d rows that never received API content "
+        "(approximation: true last-success time is unrecoverable where a later attempt failed)",
+        cursor.rowcount)
+
+    # --- Step 5: repair the anomalous first_seen_at row ------------------
+    # A caller once passed first_seen_at=None explicitly, suppressing the
+    # insert default; one live row ended up with first_seen_at IS NULL. Its
+    # api_fetched_at is a usable lower bound on when it was first seen.
+    cursor.execute(
+        "UPDATE workshop_items SET first_seen_at = api_fetched_at "
+        "WHERE first_seen_at IS NULL AND api_fetched_at IS NOT NULL"
+    )
+    logging.info("  first_seen_at repaired from api_fetched_at for %d rows", cursor.rowcount)
+
+    # Commit the cleanup DML explicitly before any DDL below. Python's
+    # sqlite3 module otherwise commits an open DML transaction implicitly at
+    # the first DDL statement, which on a multi-hundred-MB WAL leaves the
+    # connection unable to open the database for the *next* DDL
+    # (SQLITE_CANTOPEN). Checkpointing keeps the WAL small as well.
+    conn.commit()
+    cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    # --- Step 6: recreate the affected indexes under clear names ---------
+    # SQLite rewrites index *definitions* on RENAME COLUMN but keeps the old
+    # index *names*, so drop the stale idx_dt_* names and recreate them
+    # explicitly against the new columns.
+    for idx in ["idx_dt_updated", "idx_dt_attempted",
+                "idx_status_dt_attempted", "idx_creator_dt_updated"]:
+        cursor.execute(f"DROP INDEX IF EXISTS {idx}")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_fetched_at ON workshop_items (api_fetched_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_scraped_version ON workshop_items (scrape_version)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_status_scraped_version ON workshop_items (status, scrape_version)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_api_fetched_at ON workshop_items (creator, api_fetched_at)")
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 14")
+    conn.commit()
+    logging.info("Migration 13->14 complete.")
+
+def _migration_14_to_15(cursor, conn, db_path):
+    logging.info("Running migration 14->15: rebuilding the full-text index and adding sync triggers...")
+
+    # Migration 4->5 created workshop_fts and populated it once, but installed
+    # no triggers and never rebuilt it again. Every row inserted, updated or
+    # deleted since is therefore missing from the index: on the production
+    # database it held 640,471 documents against 1,725,544 items (62.9 %
+    # absent). Rebuild it from the content table first, then keep it correct.
+    cursor.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS workshop_fts USING fts5(
+            title, title_en,
+            short_description, short_description_en,
+            extended_description, extended_description_en,
+            content='workshop_items', content_rowid='workshop_id'
+        )
+    """)
+
+    # The rebuild rewrites a large part of the index, so commit and checkpoint
+    # it on its own before the DDL below starts. This mirrors migration 13->14:
+    # holding a multi-hundred-MB WAL open across later DDL is what produced
+    # SQLITE_CANTOPEN on this filesystem.
+    cursor.execute("INSERT INTO workshop_fts(workshop_fts) VALUES ('rebuild')")
+    conn.commit()
+    cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    logging.info("  full-text index rebuilt from workshop_items")
+
+    # External-content FTS5 has no way to look up a row's old tokens, so
+    # removal must go through the special 'delete' command with the OLD
+    # column values. A plain DELETE FROM workshop_fts would silently leave the
+    # old tokens in the index and corrupt every later MATCH.
+    _FTS_COLUMNS = ("title", "title_en", "short_description",
+                    "short_description_en", "extended_description",
+                    "extended_description_en")
+    fts_cols = ", ".join(_FTS_COLUMNS)
+    fts_new = ", ".join(f"new.{c}" for c in _FTS_COLUMNS)
+    fts_old = ", ".join(f"old.{c}" for c in _FTS_COLUMNS)
+
+    cursor.execute("DROP TRIGGER IF EXISTS workshop_items_fts_insert")
+    cursor.execute("DROP TRIGGER IF EXISTS workshop_items_fts_delete")
+    cursor.execute("DROP TRIGGER IF EXISTS workshop_items_fts_update")
+
+    cursor.execute(f"""
+        CREATE TRIGGER workshop_items_fts_insert AFTER INSERT ON workshop_items BEGIN
+            INSERT INTO workshop_fts(rowid, {fts_cols})
+            VALUES (new.workshop_id, {fts_new});
+        END
+    """)
+    cursor.execute(f"""
+        CREATE TRIGGER workshop_items_fts_delete AFTER DELETE ON workshop_items BEGIN
+            INSERT INTO workshop_fts(workshop_fts, rowid, {fts_cols})
+            VALUES ('delete', old.workshop_id, {fts_old});
+        END
+    """)
+    # Scoped to the six indexed columns on purpose: most writes to
+    # workshop_items are queue/priority updates that touch none of them, and an
+    # unscoped trigger would rewrite a chunk of the index on every priority
+    # bump. insert_or_update_item builds its SET list from the keys actually
+    # supplied, so this fires exactly when an indexed column is written.
+    cursor.execute(f"""
+        CREATE TRIGGER workshop_items_fts_update
+        AFTER UPDATE OF {fts_cols} ON workshop_items BEGIN
+            INSERT INTO workshop_fts(workshop_fts, rowid, {fts_cols})
+            VALUES ('delete', old.workshop_id, {fts_old});
+            INSERT INTO workshop_fts(rowid, {fts_cols})
+            VALUES (new.workshop_id, {fts_new});
+        END
+    """)
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 15")
+    conn.commit()
+    logging.info("Migration 14->15 complete.")
+
+def _migration_15_to_16(cursor, conn, db_path):
+    logging.info("Running migration 15->16: requeueing items stranded by transient API failures...")
+
+    # Before this version a transient API failure (status 500) cleared
+    # api_priority, and _promote_stale_items promotes only rows at status 200.
+    # A failed item therefore left every queue with nothing able to bring it
+    # back: not queued, and ineligible for the staleness sweep. On the
+    # production database that stranded 2,581 rows. Requeue them at backlog
+    # priority so they are retried rather than abandoned.
+    cursor.execute(
+        "UPDATE workshop_items SET api_priority = 1 "
+        "WHERE status = 500 AND api_priority = 0"
+    )
+    stranded_failures = cursor.rowcount
+
+    # Rows discovered but never attempted are unreachable for the same
+    # structural reason: not queued, and the sweep only promotes rows that
+    # have succeeded at least once. Permanent failures (status -1) are left
+    # alone -- they are correctly dequeued.
+    cursor.execute(
+        "UPDATE workshop_items SET api_priority = 1 "
+        "WHERE status IS NULL AND api_fetched_at IS NULL AND api_priority = 0"
+    )
+    stranded_unattempted = cursor.rowcount
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 16")
+    conn.commit()
+    logging.info(
+        "Migration 15->16 complete. Requeued %d transient failures and %d never-attempted items.",
+        stranded_failures, stranded_unattempted,
+    )
+
+def _migration_16_to_17(cursor, conn, db_path):
+    logging.info("Running migration 16->17: removing dead items from the work queues...")
+
+    # A dead item (status -1) can never complete, but the permanent-failure
+    # path only cleared api_priority. needs_web_scrape, needs_image and
+    # translation_priority were left set, and those queues select on their
+    # flag alone with no dead-item guard, so the rows were retried forever
+    # and the queues could never drain. About ten thousand rows on the
+    # production database. api_priority is deliberately not touched here:
+    # the 404 path already zeroes it, and a dead row still holding an API
+    # priority is a separate defect.
+    cursor.execute(
+        "UPDATE workshop_items "
+        "SET needs_web_scrape = 0, needs_image = 0, translation_priority = 0 "
+        "WHERE status = -1"
+    )
+    dequeued_dead = cursor.rowcount
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 17")
+    conn.commit()
+    logging.info(
+        "Migration 16->17 complete. Removed %d dead items from the work queues.",
+        dequeued_dead,
+    )
+
+def _migration_17_to_18(cursor, conn, db_path):
+    logging.info("Running migration 17->18: requeueing items dequeued without a description...")
+
+    # Before 17894f7 the web worker tested the *dict* the scraper returned
+    # rather than the description inside it. A page whose description selector
+    # did not match comes back as a truthy dict with description None, so the
+    # item was written with extended_description NULL and
+    # needs_web_scrape = 0 -- recorded as a finished scrape and permanently
+    # out of the queue. On the 2026-09-12 snapshot that stranded 63,229 rows.
+    #
+    # Priority 1 is the backlog level migration 15->16 used for the rows a
+    # transient failure had stranded: high enough that the item is retried,
+    # but below the 3/5/10 of new and current work, so it cannot jump ahead
+    # of the live queue. Dead items (status -1) are excluded because they can
+    # never complete and issue 17 keeps them out of every queue.
+    #
+    # SQLite's cursor.rowcount counts the rows the UPDATE *matched*, not the
+    # rows whose value actually changed. That cannot inflate this count: every
+    # matched row moves from 0 to 1 (and a re-run matches nothing), so the
+    # count below is exact.
+    cursor.execute(
+        "UPDATE workshop_items SET needs_web_scrape = 1 "
+        "WHERE needs_web_scrape = 0 "
+        "AND COALESCE(extended_description, '') = '' "
+        "AND (status IS NULL OR status <> -1)"
+    )
+    stranded_descriptionless = cursor.rowcount
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 18")
+    conn.commit()
+    logging.info(
+        "Migration 17->18 complete. Requeued %d description-less items.",
+        stranded_descriptionless,
+    )
+
+def _migration_18_to_19(cursor, conn, db_path):
+    logging.info("Running migration 18->19: requeueing items stranded by cursor discovery...")
+
+    # Cursor discovery inserted bare rows and let the api_priority column
+    # default decide whether they were queued. That default is not stable
+    # across database histories: CREATE TABLE declares DEFAULT 3, but the
+    # ALTER TABLE in migration 11->12 gives an existing database DEFAULT 0.
+    # On a migrated database -- the production one -- every discovered row
+    # therefore landed at 0, which means "not queued", and the fetch queue
+    # selects api_priority > 0, so nothing ever fetched them. Migration
+    # 15->16 requeued the rows already stranded by this but left the cause
+    # in place, so it kept stranding more; the daemon now passes the
+    # priority explicitly. Requeue the same never-attempted population at
+    # the same backlog priority as 15->16's second statement. The status
+    # predicate excludes dead rows (status = -1) and the other queue flags
+    # are deliberately untouched: this is an API-fetch queue repair, not a
+    # scrape, image or translation decision.
+    cursor.execute(
+        "UPDATE workshop_items SET api_priority = 1 "
+        "WHERE status IS NULL AND api_fetched_at IS NULL AND api_priority = 0"
+    )
+    stranded_unattempted = cursor.rowcount
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 19")
+    conn.commit()
+    logging.info(
+        "Migration 18->19 complete. Requeued %d never-attempted items stranded by cursor discovery.",
+        stranded_unattempted,
+    )
+
+def _migration_19_to_20(cursor, conn, db_path):
+    logging.info("Running migration 19->20: clearing queue priority from dead items...")
+
+    # The permanent-failure path clears api_priority when it marks an item
+    # dead, so this is not an ongoing leak -- it is the rows that were already
+    # dead before that line existed. They matter because api_priority > 0 is
+    # what every count of "queued for a fetch" looks at, and the statistics
+    # screen reports dead items still holding a queue flag as `stuck_work`.
+    # Leaving ten thousand of them there would peg a detector whose whole
+    # value is that it reads zero unless something has regressed.
+    #
+    # Only api_priority: the other queue flags were cleared by 16->17, and
+    # status is what makes an item dead in the first place.
+    cursor.execute(
+        "UPDATE workshop_items SET api_priority = 0 "
+        "WHERE status = -1 AND api_priority > 0"
+    )
+    dead_priority_cleared = cursor.rowcount
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 20")
+    conn.commit()
+    logging.info(
+        "Migration 19->20 complete. Cleared the queue priority of %d dead items.",
+        dead_priority_cleared,
+    )
+
+def _migration_20_to_21(cursor, conn, db_path):
+    logging.info("Running migration 20->21: recording the owner's subscription columns...")
+
+    # The two columns are added by _safe_add_columns above (a fresh database
+    # gets them in CREATE TABLE, an existing one by ALTER). This migration
+    # records the version bump and does one defensive thing. `own_subscribed`
+    # is a boolean, and a NULL in it is the wrong value: the state derivation
+    # would read it as false, but only by accident of truthiness.
+    #
+    # SQLite fills existing rows from the column's DEFAULT when it ALTERs, so
+    # with `DEFAULT 0` declared in both schema places there is normally nothing
+    # to fix and the UPDATE below matches no rows. It is kept anyway because it
+    # costs one scan and the alternative is trusting that the default was always
+    # declared -- which is the assumption that produced issue 20, where
+    # `CREATE TABLE` and `ALTER` disagreed about `api_priority`'s default.
+    cursor.execute(
+        "UPDATE workshop_items SET own_subscribed = 0 WHERE own_subscribed IS NULL"
+    )
+    defaulted = cursor.rowcount
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 21")
+    conn.commit()
+    logging.info(
+        "Migration 20->21 complete. own_subscribed needed defaulting on %d row(s) "
+        "(normally none -- the column default already covers them); "
+        "own_first_subscribed_at stays NULL on every row, because no item has been "
+        "observed subscribed yet and a stamp would claim an observation never made.",
+        defaulted,
+    )
+
+def _migration_21_to_22(cursor, conn, db_path):
+    logging.info("Running migration 21->22: demoting queue priority of filter-excluded items...")
+
+    # The queue flags are priority columns (`needs_web_scrape` and
+    # `needs_image`), and the daemon used to hand them the item's whole
+    # pre-fetch `api_priority` -- so a newly discovered item, which carries 3,
+    # put an item the enrichment filters excluded into the same band as the
+    # ones they selected. The daemon no longer does that; this is the rows it
+    # already stamped that way. It matters because those rows are served
+    # first: measured live, 760,782 web entries and 668,269 image ones from
+    # excluded items were queued ahead of 107,365 items the filters had
+    # chosen.
+    #
+    # `MAX(stored, new)` is why these rows cannot fix themselves: a priority
+    # is never downgraded by a later fetch, so an item stamped 3 stays 3 until
+    # something scrapes it, and the queue that was already a year deep only
+    # gets deeper. Nothing here needs a schema change, so the version bump is
+    # the whole of the schema work.
+    web_demoted, image_demoted = _demote_filtered_out_queue_priorities(conn)
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 22")
+    conn.commit()
+    logging.info(
+        "Migration 21->22 complete. Returned %d web and %d image queue entries to "
+        "backlog priority; items the filters select kept the priority they had.",
+        web_demoted, image_demoted,
+    )
+
+def _migration_22_to_23(cursor, conn, db_path):
+    logging.info("Running migration 22->23: repairing stranded translation-queue mirrors...")
+
+    # `translation_priority` is a mirror of `translation_queue`: it is raised
+    # when a field is queued and the translator zeroes it when the item's
+    # last queue row is deleted. Before this version
+    # `flag_field_for_translation` wrote the queue row and the mirror on two
+    # separate connections, so a translator drain landing between them could
+    # delete the row and zero the mirror, after which the helper's second
+    # statement raised the mirror again from `MAX(0, priority)`. The item was
+    # then permanently drawn as having translation work with nothing queued
+    # behind it, because every producer skips a translation that is already
+    # current, so nothing ever re-queues the field to clear it. The helper is
+    # now a single transaction; this repairs the rows the old one stranded.
+    #
+    # Only `workshop_items`: at this version a user's name translation was
+    # tracked on `users.translation_priority` alone and never got a
+    # `translation_queue` row, so that mirror was not expected to match this
+    # table. v27->v28 makes the user mirror a mirror of the queue as well and
+    # repairs the creator rows this migration deliberately skipped. Only the
+    # high direction is repaired -- a queue row whose mirror is zero still has
+    # its work picked up, because the translator selects on the queue, not the
+    # mirror -- and dead rows are not special-cased: a mirror with nothing
+    # queued is wrong for them too.
+    cursor.execute(
+        "UPDATE workshop_items SET translation_priority = 0 "
+        "WHERE translation_priority > 0 "
+        "AND NOT EXISTS ("
+        "SELECT 1 FROM translation_queue q "
+        "WHERE q.item_type = 'item' AND q.item_id = workshop_items.workshop_id"
+        ")"
+    )
+    stranded_mirrors = cursor.rowcount
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 23")
+    conn.commit()
+    logging.info(
+        "Migration 22->23 complete. Cleared the translation mirror on %d item(s) "
+        "with no field left in translation_queue.",
+        stranded_mirrors,
+    )
+
+def _migration_23_to_24(cursor, conn, db_path):
+    logging.info("Running migration 23->24: dropping the never-populated language column...")
+
+    # `language` was added expecting the Steam API to return a field for it.
+    # No response this project consumes can: GetPublishedFileDetails carries
+    # no language field, and `language` exists in the request protocol only
+    # as the *viewer's* localization parameter, which the client sets and
+    # never reads back. Every row in the live database is NULL (see
+    # docs/live-data-profile.md), so the column only advertised a Steam field
+    # that does not exist, drew a permanently "N/A" tooltip line, and backed
+    # a "Language ID" filter that could not match.
+    #
+    # Dropping it follows migration 5->6's pattern for the legacy `tags`
+    # column: drop the index that references the column first (SQLite refuses
+    # to drop a column an index depends on), then the column itself. The
+    # PRAGMA guard keeps the migration idempotent and resumable -- a fresh
+    # database never has the column, and a database that already dropped it
+    # (or a partial run) skips cleanly.
+    cols = {r[1] for r in cursor.execute("PRAGMA table_info(workshop_items)").fetchall()}
+    if "language" in cols:
+        cursor.execute("DROP INDEX IF EXISTS idx_language")
+        cursor.execute("ALTER TABLE workshop_items DROP COLUMN language")
         conn.commit()
-        cursor.execute("PRAGMA user_version = 15")
-        conn.commit()
-        logging.info("Migration 14->15 complete.")
+        cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        logging.info("  dropped idx_language and workshop_items.language")
+    else:
+        logging.info("  language column already absent; nothing to drop")
 
-    if db_version < 16:
-        logging.info("Running migration 15->16: requeueing items stranded by transient API failures...")
+    cursor.execute("PRAGMA user_version = 24")
+    conn.commit()
+    logging.info("Migration 23->24 complete.")
 
-        # Before this version a transient API failure (status 500) cleared
-        # api_priority, and _promote_stale_items promotes only rows at status 200.
-        # A failed item therefore left every queue with nothing able to bring it
-        # back: not queued, and ineligible for the staleness sweep. On the
-        # production database that stranded 2,581 rows. Requeue them at backlog
-        # priority so they are retried rather than abandoned.
+def _migration_24_to_25(cursor, conn, db_path):
+    logging.info("Running migration 24->25: indexing the three work queues...")
+
+    # The web, image and API workers each find the head of their own queue
+    # with a full scan plus a sort on **every poll** -- not only when the
+    # statistics screen is open -- and the statistics breakdowns pay for the
+    # same missing indexes. Each query asks for exactly
+    # `WHERE <queue_column> > 0 ORDER BY <queue_column> DESC,
+    # api_fetched_at ASC`, so a partial composite index in that shape lets
+    # the poll read one index entry and stop and lets the breakdown walk the
+    # index instead of sorting the table.
+    #
+    # Measured on a copy of the production snapshot (see docs/future-plans.md,
+    # "Queue indexes"): the web and image polls drop from 258 ms and 252 ms to
+    # ~0 ms, the web and image breakdowns from 470/401 ms to 70/59 ms, and the
+    # API queue from 219 ms to 0.4 ms. The three indexes total 52.4 MB (2.8%
+    # of the database) and took 2.3 s to build; index maintenance is 1.0 us
+    # per completion update. The one-time build is deliberately not treated
+    # as a cost to optimise.
+    #
+    # The web queue's `> 0` predicate covers about 89% of rows, so its
+    # partial index is nearly full-size -- the shape of that queue, not a
+    # defect. `IF NOT EXISTS` (and the separate commit for the version bump)
+    # keeps a partial run resumable and re-runnable.
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_web_scrape_queue "
+        "ON workshop_items (needs_web_scrape DESC, api_fetched_at ASC) "
+        "WHERE needs_web_scrape > 0"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_image_queue "
+        "ON workshop_items (needs_image DESC, api_fetched_at ASC) "
+        "WHERE needs_image > 0"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_api_queue "
+        "ON workshop_items (api_priority DESC, api_fetched_at ASC) "
+        "WHERE api_priority > 0"
+    )
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 25")
+    conn.commit()
+    logging.info(
+        "Migration 24->25 complete. Indexed the web, image and API fetch queues."
+    )
+
+def _migration_25_to_26(cursor, conn, db_path):
+    logging.info("Running migration 25->26: adding the local downloaded-at latch...")
+
+    # `downloaded_at` records when this app first saw Steam's downloaded copy
+    # of a subscribed item on disk. It is added by `_safe_add_columns` above
+    # (a fresh database gets it from CREATE TABLE, an existing one by ALTER),
+    # so this migration normally only records the version bump.
+    #
+    # Every pre-existing row is left NULL on purpose: the latch is a local
+    # observation, and no item has been observed downloaded yet on the run
+    # that introduces the column. The first scan after startup fills it in
+    # for items that are both subscribed and on disk.
+    cursor.execute("PRAGMA user_version = 26")
+    conn.commit()
+    logging.info(
+        "Migration 25->26 complete. downloaded_at stays NULL on every row; the "
+        "first folder scan fills it in for subscribed items Steam has on disk."
+    )
+
+def _migration_26_to_27(cursor, conn, db_path):
+    logging.info(
+        "Running migration 26->27: adding the per-queue completion clocks..."
+    )
+
+    # `web_scraped_at`, `image_fetched_at` and `translated_at` are our clock
+    # for the three stages that had no completion time. They are added by
+    # `_safe_add_columns` above (a fresh database gets them from CREATE
+    # TABLE, an existing one by ALTER), so the columns exist by the time
+    # this block runs.
+    #
+    # Every pre-existing row is left NULL, deliberately and permanently:
+    # the stages did not record this, so no value can be reconstructed for
+    # them, and inventing one would fabricate a rate. A migration must not
+    # backfill, and the metrics report "no history yet" for a column with no
+    # stamps rather than reading the absence as zero throughput.
+    #
+    # The three partial indexes are shaped for the one reader that is not a
+    # worker: the throughput metrics. Each new metric asks for the rows
+    # inside a recent window and the newest stamp, and a plain index over
+    # 2.6M rows would also index the NULL history that can never match. The
+    # `IS NOT NULL` predicate keeps the index empty on the run that creates
+    # it and proportional to recorded completions afterwards. Measured on a
+    # 2.6M-row copy: the full scan the metric would otherwise run costs
+    # 73-85 ms per statement, the partial index serves each in 0.0-0.2 ms.
+    for column in ("web_scraped_at", "image_fetched_at", "translated_at"):
         cursor.execute(
-            "UPDATE workshop_items SET api_priority = 1 "
-            "WHERE status = 500 AND api_priority = 0"
+            f"CREATE INDEX IF NOT EXISTS idx_{column} "
+            f"ON workshop_items ({column}) WHERE {column} IS NOT NULL"
         )
-        stranded_failures = cursor.rowcount
 
-        # Rows discovered but never attempted are unreachable for the same
-        # structural reason: not queued, and the sweep only promotes rows that
-        # have succeeded at least once. Permanent failures (status -1) are left
-        # alone -- they are correctly dequeued.
-        cursor.execute(
-            "UPDATE workshop_items SET api_priority = 1 "
-            "WHERE status IS NULL AND api_fetched_at IS NULL AND api_priority = 0"
-        )
-        stranded_unattempted = cursor.rowcount
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 27")
+    conn.commit()
+    logging.info(
+        "Migration 26->27 complete. The three completion clocks stay NULL on "
+        "every existing row; the stages fill them in from now on."
+    )
 
+def _migration_27_to_28(cursor, conn, db_path):
+    logging.info(
+        "Running migration 27->28: returning stranded creator names to the "
+        "translation queue..."
+    )
+
+    # Issue 45: a creator's name was queued by raising
+    # `users.translation_priority`, which was the whole producer while
+    # `get_next_translation_item` (since removed) scanned both tables by that
+    # flag. When the per-field `translation_queue` replaced that scan the
+    # producer was never ported, so every creator flagged since has had no
+    # queue row behind it and `translation_queue` has never held an
+    # `item_type='user'` row. This
+    # is the user-side counterpart of v22->v23, which repaired the item side
+    # of the same stranded-mirror state, and of migration 2->3, which
+    # backfilled raised item mirrors into per-field queue rows.
+    #
+    # Two statements, in this order:
+    #   1. every flagged creator whose name genuinely needs translating gets
+    #      the queue row the producer owed it;
+    #   2. every remaining flagged creator loses the flag, because after (1)
+    #      a raised mirror with no queue row is stranded again.
+    #
+    # The predicates are inlined rather than imported: a migration must keep
+    # meaning what it meant at this version, so it cannot track a helper that
+    # may change later. The ASCII test is the one `metrics._ascii_sql`
+    # documents -- UTF-8 bytes equal characters exactly when the text is
+    # ASCII -- and the currency rule is the one `metrics._creator_current_sql`
+    # applies to the Creator Translation bar, so the migration, the bar and
+    # the producer agree on what "needs translating" means. The mirror's own
+    # value is carried into the row's priority, as in 2->3.
+    #
+    # *Measured in the 2026-09-18 backup*: 7,237 creators carried the flag,
+    # 7,233 of them with a non-ASCII name and no current translation -- which
+    # statement (1) queues -- and 4 whose name is ASCII, which statement (2)
+    # clears. No creator needing translation was unflagged, so the flag is a
+    # complete census of the backlog and this migration need look no further.
+    cursor.execute(
+        "INSERT INTO translation_queue "
+        "(item_type, item_id, field, original_text, priority, queued_at) "
+        "SELECT 'user', steamid, 'personaname_en', personaname, "
+        "       translation_priority, ? "
+        "FROM users "
+        "WHERE translation_priority > 0 "
+        "  AND personaname IS NOT NULL AND personaname <> '' "
+        "  AND NOT (length(CAST(personaname AS BLOB)) = length(personaname)) "
+        "  AND NOT (COALESCE(personaname_en, '') <> '' AND ("
+        "             api_fetched_at IS NULL "
+        "             OR (translated_at IS NOT NULL "
+        "                 AND translated_at >= api_fetched_at))) "
+        "  AND NOT EXISTS ("
+        "      SELECT 1 FROM translation_queue q "
+        "      WHERE q.item_type = 'user' AND q.item_id = users.steamid "
+        "        AND q.field = 'personaname_en')",
+        (int(time.time()),),
+    )
+    queued = cursor.rowcount
+
+    cursor.execute(
+        "UPDATE users SET translation_priority = 0 "
+        "WHERE translation_priority > 0 "
+        "AND NOT EXISTS ("
+        "    SELECT 1 FROM translation_queue q "
+        "    WHERE q.item_type = 'user' AND q.item_id = users.steamid"
+        ")"
+    )
+    cleared = cursor.rowcount
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 28")
+    conn.commit()
+    logging.info(
+        "Migration 27->28 complete. Queued %d creator name(s) whose flag had "
+        "no queue row behind it, and cleared %d flag(s) with nothing left to "
+        "translate.",
+        queued, cleared,
+    )
+
+def _migration_28_to_29(cursor, conn, db_path):
+    logging.info("Running migration 28->29: dropping the dead page counter...")
+
+    # `app_tracking.last_page_scanned` counted pages while discovery walked
+    # them by number. `88397b7` replaced that with cursor discovery, which
+    # resumes from `last_cursor`, and the writer went with it -- so ever
+    # since, the TUI column, the web table and the `app_tracking` metric have
+    # all read a column nothing sets, and displayed its DEFAULT 0. Nothing
+    # references an index on it, so the column alone is dropped. The PRAGMA
+    # guard keeps this idempotent and resumable, matching the `language`
+    # drop: a fresh database never has the column, and a partial run that
+    # already dropped it skips cleanly.
+    cols = {r[1] for r in cursor.execute("PRAGMA table_info(app_tracking)").fetchall()}
+    if "last_page_scanned" in cols:
+        cursor.execute("ALTER TABLE app_tracking DROP COLUMN last_page_scanned")
         conn.commit()
-        cursor.execute("PRAGMA user_version = 16")
-        conn.commit()
-        logging.info(
-            "Migration 15->16 complete. Requeued %d transient failures and %d never-attempted items.",
-            stranded_failures, stranded_unattempted,
-        )
+        cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        logging.info("  dropped app_tracking.last_page_scanned")
+    else:
+        logging.info("  app_tracking.last_page_scanned already absent; nothing to drop")
 
-    if db_version < 17:
-        logging.info("Running migration 16->17: removing dead items from the work queues...")
+    cursor.execute("PRAGMA user_version = 29")
+    conn.commit()
+    logging.info("Migration 28->29 complete.")
 
-        # A dead item (status -1) can never complete, but the permanent-failure
-        # path only cleared api_priority. needs_web_scrape, needs_image and
-        # translation_priority were left set, and those queues select on their
-        # flag alone with no dead-item guard, so the rows were retried forever
-        # and the queues could never drain. About ten thousand rows on the
-        # production database. api_priority is deliberately not touched here:
-        # the 404 path already zeroes it, and a dead row still holding an API
-        # priority is a separate defect.
-        cursor.execute(
-            "UPDATE workshop_items "
-            "SET needs_web_scrape = 0, needs_image = 0, translation_priority = 0 "
-            "WHERE status = -1"
-        )
-        dequeued_dead = cursor.rowcount
+def _ensure_indexes(cursor):
+    """Create the query indexes, after the column renames migrations perform.
 
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 17")
-        conn.commit()
-        logging.info(
-            "Migration 16->17 complete. Removed %d dead items from the work queues.",
-            dequeued_dead,
-        )
-
-    if db_version < 18:
-        logging.info("Running migration 17->18: requeueing items dequeued without a description...")
-
-        # Before 17894f7 the web worker tested the *dict* the scraper returned
-        # rather than the description inside it. A page whose description selector
-        # did not match comes back as a truthy dict with description None, so the
-        # item was written with extended_description NULL and
-        # needs_web_scrape = 0 -- recorded as a finished scrape and permanently
-        # out of the queue. On the 2026-09-12 snapshot that stranded 63,229 rows.
-        #
-        # Priority 1 is the backlog level migration 15->16 used for the rows a
-        # transient failure had stranded: high enough that the item is retried,
-        # but below the 3/5/10 of new and current work, so it cannot jump ahead
-        # of the live queue. Dead items (status -1) are excluded because they can
-        # never complete and issue 17 keeps them out of every queue.
-        #
-        # SQLite's cursor.rowcount counts the rows the UPDATE *matched*, not the
-        # rows whose value actually changed. That cannot inflate this count: every
-        # matched row moves from 0 to 1 (and a re-run matches nothing), so the
-        # count below is exact.
-        cursor.execute(
-            "UPDATE workshop_items SET needs_web_scrape = 1 "
-            "WHERE needs_web_scrape = 0 "
-            "AND COALESCE(extended_description, '') = '' "
-            "AND (status IS NULL OR status <> -1)"
-        )
-        stranded_descriptionless = cursor.rowcount
-
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 18")
-        conn.commit()
-        logging.info(
-            "Migration 17->18 complete. Requeued %d description-less items.",
-            stranded_descriptionless,
-        )
-
-    if db_version < 19:
-        logging.info("Running migration 18->19: requeueing items stranded by cursor discovery...")
-
-        # Cursor discovery inserted bare rows and let the api_priority column
-        # default decide whether they were queued. That default is not stable
-        # across database histories: CREATE TABLE declares DEFAULT 3, but the
-        # ALTER TABLE in migration 11->12 gives an existing database DEFAULT 0.
-        # On a migrated database -- the production one -- every discovered row
-        # therefore landed at 0, which means "not queued", and the fetch queue
-        # selects api_priority > 0, so nothing ever fetched them. Migration
-        # 15->16 requeued the rows already stranded by this but left the cause
-        # in place, so it kept stranding more; the daemon now passes the
-        # priority explicitly. Requeue the same never-attempted population at
-        # the same backlog priority as 15->16's second statement. The status
-        # predicate excludes dead rows (status = -1) and the other queue flags
-        # are deliberately untouched: this is an API-fetch queue repair, not a
-        # scrape, image or translation decision.
-        cursor.execute(
-            "UPDATE workshop_items SET api_priority = 1 "
-            "WHERE status IS NULL AND api_fetched_at IS NULL AND api_priority = 0"
-        )
-        stranded_unattempted = cursor.rowcount
-
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 19")
-        conn.commit()
-        logging.info(
-            "Migration 18->19 complete. Requeued %d never-attempted items stranded by cursor discovery.",
-            stranded_unattempted,
-        )
-
-    if db_version < 20:
-        logging.info("Running migration 19->20: clearing queue priority from dead items...")
-
-        # The permanent-failure path clears api_priority when it marks an item
-        # dead, so this is not an ongoing leak -- it is the rows that were already
-        # dead before that line existed. They matter because api_priority > 0 is
-        # what every count of "queued for a fetch" looks at, and the statistics
-        # screen reports dead items still holding a queue flag as `stuck_work`.
-        # Leaving ten thousand of them there would peg a detector whose whole
-        # value is that it reads zero unless something has regressed.
-        #
-        # Only api_priority: the other queue flags were cleared by 16->17, and
-        # status is what makes an item dead in the first place.
-        cursor.execute(
-            "UPDATE workshop_items SET api_priority = 0 "
-            "WHERE status = -1 AND api_priority > 0"
-        )
-        dead_priority_cleared = cursor.rowcount
-
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 20")
-        conn.commit()
-        logging.info(
-            "Migration 19->20 complete. Cleared the queue priority of %d dead items.",
-            dead_priority_cleared,
-        )
-
-    if db_version < 21:
-        logging.info("Running migration 20->21: recording the owner's subscription columns...")
-
-        # The two columns are added by _safe_add_columns above (a fresh database
-        # gets them in CREATE TABLE, an existing one by ALTER). This migration
-        # records the version bump and does one defensive thing. `own_subscribed`
-        # is a boolean, and a NULL in it is the wrong value: the state derivation
-        # would read it as false, but only by accident of truthiness.
-        #
-        # SQLite fills existing rows from the column's DEFAULT when it ALTERs, so
-        # with `DEFAULT 0` declared in both schema places there is normally nothing
-        # to fix and the UPDATE below matches no rows. It is kept anyway because it
-        # costs one scan and the alternative is trusting that the default was always
-        # declared -- which is the assumption that produced issue 20, where
-        # `CREATE TABLE` and `ALTER` disagreed about `api_priority`'s default.
-        cursor.execute(
-            "UPDATE workshop_items SET own_subscribed = 0 WHERE own_subscribed IS NULL"
-        )
-        defaulted = cursor.rowcount
-
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 21")
-        conn.commit()
-        logging.info(
-            "Migration 20->21 complete. own_subscribed needed defaulting on %d row(s) "
-            "(normally none -- the column default already covers them); "
-            "own_first_subscribed_at stays NULL on every row, because no item has been "
-            "observed subscribed yet and a stamp would claim an observation never made.",
-            defaulted,
-        )
-
-    if db_version < 22:
-        logging.info("Running migration 21->22: demoting queue priority of filter-excluded items...")
-
-        # The queue flags are priority columns (`needs_web_scrape` and
-        # `needs_image`), and the daemon used to hand them the item's whole
-        # pre-fetch `api_priority` -- so a newly discovered item, which carries 3,
-        # put an item the enrichment filters excluded into the same band as the
-        # ones they selected. The daemon no longer does that; this is the rows it
-        # already stamped that way. It matters because those rows are served
-        # first: measured live, 760,782 web entries and 668,269 image ones from
-        # excluded items were queued ahead of 107,365 items the filters had
-        # chosen.
-        #
-        # `MAX(stored, new)` is why these rows cannot fix themselves: a priority
-        # is never downgraded by a later fetch, so an item stamped 3 stays 3 until
-        # something scrapes it, and the queue that was already a year deep only
-        # gets deeper. Nothing here needs a schema change, so the version bump is
-        # the whole of the schema work.
-        web_demoted, image_demoted = _demote_filtered_out_queue_priorities(conn)
-
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 22")
-        conn.commit()
-        logging.info(
-            "Migration 21->22 complete. Returned %d web and %d image queue entries to "
-            "backlog priority; items the filters select kept the priority they had.",
-            web_demoted, image_demoted,
-        )
-
-    if db_version < 23:
-        logging.info("Running migration 22->23: repairing stranded translation-queue mirrors...")
-
-        # `translation_priority` is a mirror of `translation_queue`: it is raised
-        # when a field is queued and the translator zeroes it when the item's
-        # last queue row is deleted. Before this version
-        # `flag_field_for_translation` wrote the queue row and the mirror on two
-        # separate connections, so a translator drain landing between them could
-        # delete the row and zero the mirror, after which the helper's second
-        # statement raised the mirror again from `MAX(0, priority)`. The item was
-        # then permanently drawn as having translation work with nothing queued
-        # behind it, because every producer skips a translation that is already
-        # current, so nothing ever re-queues the field to clear it. The helper is
-        # now a single transaction; this repairs the rows the old one stranded.
-        #
-        # Only `workshop_items`: at this version a user's name translation was
-        # tracked on `users.translation_priority` alone and never got a
-        # `translation_queue` row, so that mirror was not expected to match this
-        # table. v27->v28 makes the user mirror a mirror of the queue as well and
-        # repairs the creator rows this migration deliberately skipped. Only the
-        # high direction is repaired -- a queue row whose mirror is zero still has
-        # its work picked up, because the translator selects on the queue, not the
-        # mirror -- and dead rows are not special-cased: a mirror with nothing
-        # queued is wrong for them too.
-        cursor.execute(
-            "UPDATE workshop_items SET translation_priority = 0 "
-            "WHERE translation_priority > 0 "
-            "AND NOT EXISTS ("
-            "SELECT 1 FROM translation_queue q "
-            "WHERE q.item_type = 'item' AND q.item_id = workshop_items.workshop_id"
-            ")"
-        )
-        stranded_mirrors = cursor.rowcount
-
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 23")
-        conn.commit()
-        logging.info(
-            "Migration 22->23 complete. Cleared the translation mirror on %d item(s) "
-            "with no field left in translation_queue.",
-            stranded_mirrors,
-        )
-
-    if db_version < 24:
-        logging.info("Running migration 23->24: dropping the never-populated language column...")
-
-        # `language` was added expecting the Steam API to return a field for it.
-        # No response this project consumes can: GetPublishedFileDetails carries
-        # no language field, and `language` exists in the request protocol only
-        # as the *viewer's* localization parameter, which the client sets and
-        # never reads back. Every row in the live database is NULL (see
-        # docs/live-data-profile.md), so the column only advertised a Steam field
-        # that does not exist, drew a permanently "N/A" tooltip line, and backed
-        # a "Language ID" filter that could not match.
-        #
-        # Dropping it follows migration 5->6's pattern for the legacy `tags`
-        # column: drop the index that references the column first (SQLite refuses
-        # to drop a column an index depends on), then the column itself. The
-        # PRAGMA guard keeps the migration idempotent and resumable -- a fresh
-        # database never has the column, and a database that already dropped it
-        # (or a partial run) skips cleanly.
-        cols = {r[1] for r in cursor.execute("PRAGMA table_info(workshop_items)").fetchall()}
-        if "language" in cols:
-            cursor.execute("DROP INDEX IF EXISTS idx_language")
-            cursor.execute("ALTER TABLE workshop_items DROP COLUMN language")
-            conn.commit()
-            cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            logging.info("  dropped idx_language and workshop_items.language")
-        else:
-            logging.info("  language column already absent; nothing to drop")
-
-        cursor.execute("PRAGMA user_version = 24")
-        conn.commit()
-        logging.info("Migration 23->24 complete.")
-
-    if db_version < 25:
-        logging.info("Running migration 24->25: indexing the three work queues...")
-
-        # The web, image and API workers each find the head of their own queue
-        # with a full scan plus a sort on **every poll** -- not only when the
-        # statistics screen is open -- and the statistics breakdowns pay for the
-        # same missing indexes. Each query asks for exactly
-        # `WHERE <queue_column> > 0 ORDER BY <queue_column> DESC,
-        # api_fetched_at ASC`, so a partial composite index in that shape lets
-        # the poll read one index entry and stop and lets the breakdown walk the
-        # index instead of sorting the table.
-        #
-        # Measured on a copy of the production snapshot (see docs/future-plans.md,
-        # "Queue indexes"): the web and image polls drop from 258 ms and 252 ms to
-        # ~0 ms, the web and image breakdowns from 470/401 ms to 70/59 ms, and the
-        # API queue from 219 ms to 0.4 ms. The three indexes total 52.4 MB (2.8%
-        # of the database) and took 2.3 s to build; index maintenance is 1.0 us
-        # per completion update. The one-time build is deliberately not treated
-        # as a cost to optimise.
-        #
-        # The web queue's `> 0` predicate covers about 89% of rows, so its
-        # partial index is nearly full-size -- the shape of that queue, not a
-        # defect. `IF NOT EXISTS` (and the separate commit for the version bump)
-        # keeps a partial run resumable and re-runnable.
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_web_scrape_queue "
-            "ON workshop_items (needs_web_scrape DESC, api_fetched_at ASC) "
-            "WHERE needs_web_scrape > 0"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_image_queue "
-            "ON workshop_items (needs_image DESC, api_fetched_at ASC) "
-            "WHERE needs_image > 0"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_api_queue "
-            "ON workshop_items (api_priority DESC, api_fetched_at ASC) "
-            "WHERE api_priority > 0"
-        )
-
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 25")
-        conn.commit()
-        logging.info(
-            "Migration 24->25 complete. Indexed the web, image and API fetch queues."
-        )
-
-    if db_version < 26:
-        logging.info("Running migration 25->26: adding the local downloaded-at latch...")
-
-        # `downloaded_at` records when this app first saw Steam's downloaded copy
-        # of a subscribed item on disk. It is added by `_safe_add_columns` above
-        # (a fresh database gets it from CREATE TABLE, an existing one by ALTER),
-        # so this migration normally only records the version bump.
-        #
-        # Every pre-existing row is left NULL on purpose: the latch is a local
-        # observation, and no item has been observed downloaded yet on the run
-        # that introduces the column. The first scan after startup fills it in
-        # for items that are both subscribed and on disk.
-        cursor.execute("PRAGMA user_version = 26")
-        conn.commit()
-        logging.info(
-            "Migration 25->26 complete. downloaded_at stays NULL on every row; the "
-            "first folder scan fills it in for subscribed items Steam has on disk."
-        )
-
-    if db_version < 27:
-        logging.info(
-            "Running migration 26->27: adding the per-queue completion clocks..."
-        )
-
-        # `web_scraped_at`, `image_fetched_at` and `translated_at` are our clock
-        # for the three stages that had no completion time. They are added by
-        # `_safe_add_columns` above (a fresh database gets them from CREATE
-        # TABLE, an existing one by ALTER), so the columns exist by the time
-        # this block runs.
-        #
-        # Every pre-existing row is left NULL, deliberately and permanently:
-        # the stages did not record this, so no value can be reconstructed for
-        # them, and inventing one would fabricate a rate. A migration must not
-        # backfill, and the metrics report "no history yet" for a column with no
-        # stamps rather than reading the absence as zero throughput.
-        #
-        # The three partial indexes are shaped for the one reader that is not a
-        # worker: the throughput metrics. Each new metric asks for the rows
-        # inside a recent window and the newest stamp, and a plain index over
-        # 2.6M rows would also index the NULL history that can never match. The
-        # `IS NOT NULL` predicate keeps the index empty on the run that creates
-        # it and proportional to recorded completions afterwards. Measured on a
-        # 2.6M-row copy: the full scan the metric would otherwise run costs
-        # 73-85 ms per statement, the partial index serves each in 0.0-0.2 ms.
-        for column in ("web_scraped_at", "image_fetched_at", "translated_at"):
-            cursor.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_{column} "
-                f"ON workshop_items ({column}) WHERE {column} IS NOT NULL"
-            )
-
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 27")
-        conn.commit()
-        logging.info(
-            "Migration 26->27 complete. The three completion clocks stay NULL on "
-            "every existing row; the stages fill them in from now on."
-        )
-
-    if db_version < 28:
-        logging.info(
-            "Running migration 27->28: returning stranded creator names to the "
-            "translation queue..."
-        )
-
-        # Issue 45: a creator's name was queued by raising
-        # `users.translation_priority`, which was the whole producer while
-        # `get_next_translation_item` (since removed) scanned both tables by that
-        # flag. When the per-field `translation_queue` replaced that scan the
-        # producer was never ported, so every creator flagged since has had no
-        # queue row behind it and `translation_queue` has never held an
-        # `item_type='user'` row. This
-        # is the user-side counterpart of v22->v23, which repaired the item side
-        # of the same stranded-mirror state, and of migration 2->3, which
-        # backfilled raised item mirrors into per-field queue rows.
-        #
-        # Two statements, in this order:
-        #   1. every flagged creator whose name genuinely needs translating gets
-        #      the queue row the producer owed it;
-        #   2. every remaining flagged creator loses the flag, because after (1)
-        #      a raised mirror with no queue row is stranded again.
-        #
-        # The predicates are inlined rather than imported: a migration must keep
-        # meaning what it meant at this version, so it cannot track a helper that
-        # may change later. The ASCII test is the one `metrics._ascii_sql`
-        # documents -- UTF-8 bytes equal characters exactly when the text is
-        # ASCII -- and the currency rule is the one `metrics._creator_current_sql`
-        # applies to the Creator Translation bar, so the migration, the bar and
-        # the producer agree on what "needs translating" means. The mirror's own
-        # value is carried into the row's priority, as in 2->3.
-        #
-        # *Measured in the 2026-09-18 backup*: 7,237 creators carried the flag,
-        # 7,233 of them with a non-ASCII name and no current translation -- which
-        # statement (1) queues -- and 4 whose name is ASCII, which statement (2)
-        # clears. No creator needing translation was unflagged, so the flag is a
-        # complete census of the backlog and this migration need look no further.
-        cursor.execute(
-            "INSERT INTO translation_queue "
-            "(item_type, item_id, field, original_text, priority, queued_at) "
-            "SELECT 'user', steamid, 'personaname_en', personaname, "
-            "       translation_priority, ? "
-            "FROM users "
-            "WHERE translation_priority > 0 "
-            "  AND personaname IS NOT NULL AND personaname <> '' "
-            "  AND NOT (length(CAST(personaname AS BLOB)) = length(personaname)) "
-            "  AND NOT (COALESCE(personaname_en, '') <> '' AND ("
-            "             api_fetched_at IS NULL "
-            "             OR (translated_at IS NOT NULL "
-            "                 AND translated_at >= api_fetched_at))) "
-            "  AND NOT EXISTS ("
-            "      SELECT 1 FROM translation_queue q "
-            "      WHERE q.item_type = 'user' AND q.item_id = users.steamid "
-            "        AND q.field = 'personaname_en')",
-            (int(time.time()),),
-        )
-        queued = cursor.rowcount
-
-        cursor.execute(
-            "UPDATE users SET translation_priority = 0 "
-            "WHERE translation_priority > 0 "
-            "AND NOT EXISTS ("
-            "    SELECT 1 FROM translation_queue q "
-            "    WHERE q.item_type = 'user' AND q.item_id = users.steamid"
-            ")"
-        )
-        cleared = cursor.rowcount
-
-        conn.commit()
-        cursor.execute("PRAGMA user_version = 28")
-        conn.commit()
-        logging.info(
-            "Migration 27->28 complete. Queued %d creator name(s) whose flag had "
-            "no queue row behind it, and cleared %d flag(s) with nothing left to "
-            "translate.",
-            queued, cleared,
-        )
-
-    if db_version < 29:
-        logging.info("Running migration 28->29: dropping the dead page counter...")
-
-        # `app_tracking.last_page_scanned` counted pages while discovery walked
-        # them by number. `88397b7` replaced that with cursor discovery, which
-        # resumes from `last_cursor`, and the writer went with it -- so ever
-        # since, the TUI column, the web table and the `app_tracking` metric have
-        # all read a column nothing sets, and displayed its DEFAULT 0. Nothing
-        # references an index on it, so the column alone is dropped. The PRAGMA
-        # guard keeps this idempotent and resumable, matching the `language`
-        # drop: a fresh database never has the column, and a partial run that
-        # already dropped it skips cleanly.
-        cols = {r[1] for r in cursor.execute("PRAGMA table_info(app_tracking)").fetchall()}
-        if "last_page_scanned" in cols:
-            cursor.execute("ALTER TABLE app_tracking DROP COLUMN last_page_scanned")
-            conn.commit()
-            cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            logging.info("  dropped app_tracking.last_page_scanned")
-        else:
-            logging.info("  app_tracking.last_page_scanned already absent; nothing to drop")
-
-        cursor.execute("PRAGMA user_version = 29")
-        conn.commit()
-        logging.info("Migration 28->29 complete.")
-
-    # Create indexes for faster querying
+    Separate from :func:`_create_schema` because several of these name columns
+    that only exist once migration 13->14 has renamed them (``api_fetched_at``,
+    ``scrape_version``), so they must run last. Idempotent: every statement is
+    ``IF NOT EXISTS``.
+    """
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON workshop_items (status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_fetched_at ON workshop_items (api_fetched_at)")
@@ -2265,8 +2260,76 @@ def initialize_database(db_path: str):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_wilson_subscription_score ON workshop_items (wilson_subscription_score)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_wilson_favorite_score ON workshop_items (wilson_favorite_score)")
 
+# Ordered schema migrations: (target user_version, function). The functions
+# above are defined in this same order, and each one runs only when the file's
+# recorded version is below its target. Add a new migration at the end and a
+# new entry here -- see docs/schema-migrations.md.
+MIGRATIONS = [
+    (1, _migration_0_to_1),
+    (2, _migration_1_to_2),
+    (3, _migration_2_to_3),
+    (4, _migration_3_to_4),
+    (5, _migration_4_to_5),
+    (6, _migration_5_to_6),
+    (7, _migration_6_to_7),
+    (8, _migration_7_to_8),
+    (9, _migration_8_to_9),
+    (10, _migration_9_to_10),
+    (11, _migration_10_to_11),
+    (12, _migration_11_to_12),
+    (13, _migration_12_to_13),
+    (14, _migration_13_to_14),
+    (15, _migration_14_to_15),
+    (16, _migration_15_to_16),
+    (17, _migration_16_to_17),
+    (18, _migration_17_to_18),
+    (19, _migration_18_to_19),
+    (20, _migration_19_to_20),
+    (21, _migration_20_to_21),
+    (22, _migration_21_to_22),
+    (23, _migration_22_to_23),
+    (24, _migration_23_to_24),
+    (25, _migration_24_to_25),
+    (26, _migration_25_to_26),
+    (27, _migration_26_to_27),
+    (28, _migration_27_to_28),
+    (29, _migration_28_to_29),
+]
+
+def initialize_database(db_path: str):
+    """
+    Initializes the SQLite database and creates the workshop_items table and indexes.
+
+    This is also the one place the journal mode is set. WAL is a persistent
+    property of the file rather than of a connection, so establishing it here
+    covers every later ``get_connection`` -- the daemon, the TUI and the web
+    runner all call this before they read or write. Setting it here rather than
+    per connection matters: a journal-mode transition needs a moment where
+    nothing else holds a lock, which the connection's busy timeout does not
+    wait out, and a reader that only wants a row must not risk it.
+
+    The driver is deliberately short: create the schema, read the recorded
+    version, then run the pending functions from ``MIGRATIONS`` in ascending
+    order. Each migration keeps the exact body it had at its version.
+    """
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL;")
+
+    _create_schema(cursor, conn)
+
+    # Schema versioning: run migrations cumulatively from current to expected version
+    db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
+    logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
+
+    for version, migrate in MIGRATIONS:
+        if db_version < version:
+            migrate(cursor, conn, db_path)
+
+    _ensure_indexes(cursor)
     conn.commit()
     conn.close()
+
 
 def toggle_subscription_queue_status(db_path: str, workshop_id: int):
     """Toggles the subscription queue status for a workshop item."""
