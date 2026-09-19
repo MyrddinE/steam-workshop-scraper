@@ -11,7 +11,7 @@ from src.database import (
     search_items,
     get_connection,
     count_never_fetched_items,
-    clear_pending_items,
+    delete_never_fetched_items,
     flag_for_web_scrape,
     flag_for_image,
     bump_api_priority_for_list,
@@ -105,7 +105,7 @@ def test_search_items(db_path):
     assert len(results_tags) == 1
     assert results_tags[0]["workshop_id"] == 4
 
-def test_clear_pending_items(db_path):
+def test_delete_never_fetched_items(db_path):
     """Test clearing pending items (status NULL or 404 AND api_fetched_at NULL)."""
     # 1. Pending (status NULL, api_fetched_at NULL) - Should be removed
     insert_or_update_item(db_path, {"workshop_id": 1, "status": None, "api_fetched_at": None})
@@ -118,7 +118,7 @@ def test_clear_pending_items(db_path):
 
     insert_or_update_item(db_path, {"workshop_id": 5, "status": 200, "api_fetched_at": 1672531200})
 
-    deleted_count = clear_pending_items(db_path)
+    deleted_count = delete_never_fetched_items(db_path)
     assert deleted_count == 2
     
     conn = get_connection(db_path)

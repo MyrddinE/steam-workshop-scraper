@@ -13,7 +13,7 @@ from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, L
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.worker import Worker, WorkerState
-from src.database import search_items, get_all_creator_ids, initialize_database, get_item_details, save_enrichment_filters, clear_pending_items, toggle_subscription_queue_status, get_subscription_queue_items, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, bump_api_priority_for_list, bump_api_priority_for_detail, get_subscription_states, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES
+from src.database import search_items, get_all_creator_ids, initialize_database, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue_status, get_subscription_queue_items, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, bump_api_priority_for_list, bump_api_priority_for_detail, get_subscription_states, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES
 from src.analysis import view_window_analysis
 from src import metrics
 from src import db_poll
@@ -3029,7 +3029,7 @@ class ScraperApp(App):
 
     def action_clear_pending(self) -> None:
         """Removes all unscraped/pending items from the database."""
-        count = clear_pending_items(self.db_path)
+        count = delete_never_fetched_items(self.db_path)
         self.notify(f"Database cleared: {count} pending items removed.")
         self.run_worker(self.execute_search())
 

@@ -6,7 +6,7 @@ import time
 import re
 import logging
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, bump_api_priority_for_detail, clear_pending_items
+from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, bump_api_priority_for_detail, delete_never_fetched_items
 from src.analysis import view_window_analysis
 from src import capture
 from src import crash
@@ -446,12 +446,12 @@ def api_clear_pending():
     """Delete every never-successfully-fetched item.
 
     Deliberately the same predicate and the same delete as the TUI's
-    ``action_clear_pending``, both through ``clear_pending_items``: the web
+    ``action_clear_pending``, both through ``delete_never_fetched_items``: the web
     route must not grow its own idea of what "pending" means, and there is no
     dry-run because the TUI has none. The count is returned so the UI can say
     what was removed rather than claiming a generic success.
     """
-    deleted = clear_pending_items(_db_path)
+    deleted = delete_never_fetched_items(_db_path)
     logging.info("[Clear Pending] removed %d pending item(s)", deleted)
     return jsonify({"ok": True, "deleted": deleted})
 

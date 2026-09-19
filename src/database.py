@@ -3411,7 +3411,7 @@ def update_app_tracking_cursor(db_path: str, appid: int, cursor: str) -> None:
     conn.commit()
     conn.close()
 
-def clear_pending_items(db_path: str) -> int:
+def delete_never_fetched_items(db_path: str) -> int:
     """
     Removes all workshop items that are 'pending' (never successfully scraped).
     Criteria: (status IS NULL OR status = 404) AND api_fetched_at IS NULL.
