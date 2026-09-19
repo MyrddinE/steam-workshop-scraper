@@ -81,17 +81,19 @@ Removing the per-connection journal-mode pragma (issue 43) removed the common wa
 
 `tests/test_tui.py:246` defines `test_tui_infinite_scroll` **inside the body** of `test_tui_jump_to_author_clears_multiple_rows` (`:207`, decorated `@pytest.mark.skip`), so it is a nested function that pytest never collects — its own decorators are applied to a local name and do nothing. The file holds 25 `def test_` and collects 24, and `--collect-only` finds no `test_tui_infinite_scroll`. Nothing fails and nothing reports, because the enclosing skip hides the loss: this is a silent coverage hole rather than a broken test, and it is invisible in the suite output. Fixing it is a decision rather than a move, since two questions are entangled — whether the inner test should be promoted to module level, which turns it on, and whether it would then pass, given that the test it sits inside was skipped for being timing-sensitive. Found by the style-consistency review while counting test definitions against collected tests. [tui.md](tui.md)
 
-### Issue 51
+### Issue 58
 
-**Zero reads as "N/A" in the TUI and "0" in the web** — *Open*, Low
+**A NULL count reads `N/A` in the TUI and `0` in the web** — *Open*, Low
 
-The two front ends answer the same question differently: `format_count(0)` in the TUI returns `[gray]N/A[/gray]` (`src/tui.py:123-130`) while `fmtCount(0)` in the page returns `'0'` (`templates/index.html:562-564`), so every count that reaches zero reads as unknown on one side and as a measured zero on the other. Layout may differ between the front ends but function may not, so one of the two is wrong about what a zero means — and the TUI's `N/A` additionally collapses "no data" and "measured zero" into one string. [architecture.md](architecture.md), [tui.md](tui.md), [web-ui.md](web-ui.md)
-
-### Issue 57
-
-**`translation_queue` has no index, so every translated item scans the whole queue** — *Open*, Medium
-
-The table carries no index beyond its primary key — nothing on `(item_type, item_id)`, and none added by `_ensure_indexes`. `_migration_22_to_23` clears a stranded mirror with a correlated `NOT EXISTS` against it, so for each of the 98,812 items whose `translation_priority` is raised it scans all 127,384 queue rows. *Measured on a copy of the 2026-09-18 production database* (2,528,304 items, `user_version` 22, on this machine): that single step takes **520.4 s**, while the whole remaining chain 23→29 takes 132 s — a **652 s** total from v22 to v29. The same missing index taxes the translator at runtime, because its completion pass runs `SELECT COUNT(*) FROM translation_queue WHERE item_type=? AND item_id=?` once per translated item in a batch, a full scan each time. That one-time cost is behind production now: it reached **v28** on 2026-09-19, so the 8.7-minute step was paid on the way there — the owner's observation that the v28 update took *more than a minute* matches the 114 s measured here for 27→28, which is the measurement transferring. What remains is the runtime cost, paid every batch rather than once. `initialize_database` is called by the daemon, the TUI and the web runner alike, so whichever starts first runs a pending migration while the others wait, and anyone restoring a pre-v23 backup still pays the 8.7 minutes. An index added in a new migration could not help that upgrade, because 22→23 runs before it: it would have to be created in `_create_schema`, which runs before the migration loop, or the repair must resolve the queued ids once instead of per row. Every other row count in that run was preserved, with `translation_queue` growing by the 7,233 creator names migration 27→28 restores. [schema-migrations.md](schema-migrations.md), [data-model.md](data-model.md)
+Issue 51 made a measured zero read `0` on both sides, but the *missing* value still diverges:
+`format_count(None)` in the TUI returns `[gray]N/A[/gray]` (`src/tui.py`), while `fmtCount(null)` in
+the page returns `'0'` (`templates/index.html`), and the web's callers pass a NULL column through as
+`item.views || 0`. A row whose count column is NULL therefore reads as unknown on one side and as a
+measured zero on the other — the same class of defect issue 51 fixed, on the case it left. One of
+the two has to move: either the TUI shows `0` for a NULL count to match the web, or the web keeps a
+way to say "unknown" so that neither front end claims a measurement it does not have. The second is
+the better reading of the data and the larger change. [architecture.md](architecture.md),
+[tui.md](tui.md), [web-ui.md](web-ui.md)
 
 ## Recently closed
 
@@ -357,3 +359,23 @@ It priced two gated page reads at the configured delay, which counts the interva
 ### An item the page already showed as subscribed stayed in the queue
 
 `subscribe_item`'s `ALREADY_SUBSCRIBED` short-circuit returned the observation without recording it: an item whose page already shows `toggled` costs no POST, which is right, but it also left `is_queued_for_subscription` set, so `get_subscription_queue_items` kept listing it and every pass spent one gated page read rediscovering it. It now records through `mark_own_subscribed` — which sets `own_subscribed`, clears the queue entry and stamps the sticky first-seen time — and still sends no request. The entry as first written also blamed the daily reconcile, and that half was wrong: `apply_own_subscriptions` has cleared the same flag for every id its walk saw since `7a9f42e`, pinned by `test_a_stale_queue_flag_is_cleared_when_the_item_is_found_subscribed`, and the entry had been written from the `own_subscribed = 1` statement without reading the one directly above it. Both halves are now stated in that function's docstring, and it gained a guard for the bound — [data-pipeline.md](data-pipeline.md#subscribe-engine-browser-free), [data-model.md](data-model.md)
+
+### Zero read as "N/A" in the TUI and "0" in the web
+
+**Was issue 51.** `format_count` treated a measured zero, a missing value and an unparsable one
+alike, so the TUI read every zero as unknown while the web read it as a zero. A zero now prints `0`
+in the gray band, matching the web's `fmtCount(0)`; only a value that is missing (`None` or `""`) or
+cannot be coerced falls back to `N/A`, so the two meanings are no longer collapsed. `format_ts(0)` is
+deliberately unchanged — an epoch-zero timestamp is still meaningless. The remaining divergence on
+the *missing* case is recorded as issue 58.
+
+### `translation_queue` had no index
+
+**Was issue 57.** Every per-field lookup and the translator's completion count scanned the whole
+queue — 8.6 ms each on the production-scale queue — and the 22→23 repair's correlated
+`NOT EXISTS` took 8.7 minutes. The table now carries `idx_translation_queue_lookup` on
+`(item_type, item_id, field)`, created in `_create_schema` so that it exists *before* the migration
+loop: the repair runs inside that loop and `_ensure_indexes` runs after it. The lookup measures
+**3.2 µs**, and a v22→v29 upgrade chain takes about 14–21 s instead of 652 s — a cost
+production has already paid, kept here as the evidence that the index is used. [schema-migrations.md]
+(schema-migrations.md), [data-model.md](data-model.md)
