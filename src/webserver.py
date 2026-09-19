@@ -6,7 +6,7 @@ import time
 import re
 import logging
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue, clear_subscription_queue_status, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, bump_api_priority_for_detail, delete_never_fetched_items
+from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue, clear_subscription_queue, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, bump_api_priority_for_detail, delete_never_fetched_items
 from src.analysis import view_window_analysis
 from src import capture
 from src import crash
@@ -765,7 +765,7 @@ _sub_failures = set()  # in-memory set of workshop_ids that failed subscription
 
 @app.route('/api/subscribe_failed/<int:workshop_id>', methods=['POST'])
 def api_subscribe_failed(workshop_id):
-    clear_subscription_queue_status(_db_path, workshop_id)
+    clear_subscription_queue(_db_path, workshop_id)
     _sub_failures.add(workshop_id)
     return jsonify({"ok": True})
 

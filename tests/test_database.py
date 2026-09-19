@@ -16,7 +16,7 @@ from src.database import (
     flag_for_image,
     bump_api_priority_for_list,
     bump_api_priority_for_detail,
-    clear_subscription_queue_status,
+    clear_subscription_queue,
     get_subscription_queue_items,
     EXPECTED_VERSION,
 )
@@ -658,10 +658,10 @@ def test_bump_api_priority_for_list_and_detail(db_path):
     assert p1 == 10  # bumped to 10
 
 
-def test_clear_subscription_queue_status(db_path):
-    """clear_subscription_queue_status sets flag to 0."""
+def test_clear_subscription_queue(db_path):
+    """clear_subscription_queue sets flag to 0."""
     insert_or_update_item(db_path, {"workshop_id": 1, "is_queued_for_subscription": 1})
-    clear_subscription_queue_status(db_path, 1)
+    clear_subscription_queue(db_path, 1)
     queued = get_subscription_queue_items(db_path)
     assert not any(q["workshop_id"] == 1 for q in queued)
 

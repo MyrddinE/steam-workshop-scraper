@@ -2343,7 +2343,7 @@ def toggle_subscription_queue(db_path: str, workshop_id: int):
     conn.commit()
     conn.close()
 
-def clear_subscription_queue_status(db_path: str, workshop_id: int):
+def clear_subscription_queue(db_path: str, workshop_id: int):
     """Explicitly clears the subscription queue flag for a workshop item."""
     conn = get_connection(db_path)
     conn.execute(
