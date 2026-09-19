@@ -231,6 +231,11 @@ class SubscribeOutcome:
 
 
 # The engine's own summary line for the TUI, one short phrase per outcome.
+# ``REFUSED`` is deliberately not "cannot tell": the engine records it for the
+# cases it determined -- no session, no login, no item row, no AppID, and a
+# button-less page whose state it could not read -- so the phrase must not claim
+# the result is unknown. The cause differs per outcome and is written to the log
+# by the caller, so the phrase points there rather than guessing one of them.
 _STATUS_LABELS = {
     ALREADY: "already subscribed",
     SUBSCRIBED: "subscribed",
@@ -238,7 +243,7 @@ _STATUS_LABELS = {
     THROTTLED: "left queued (throttled)",
     SESSION_PROBLEM: "session problem",
     TOKEN_REFUSED: "refused (stale CSRF token)",
-    REFUSED: "cannot tell",
+    REFUSED: "refused (see log)",
     FAILED: "failed",
 }
 

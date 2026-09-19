@@ -90,7 +90,7 @@ The main entry point for all searches. Accepts filters as a list of dicts with k
 1. **Column selection**: Uses `summary_only` columns (grid view) or `w.*` (full detail). Both include tags from the junction table via a correlated subquery.
 2. **Filter processing**: Separates filters into three categories:
    - Percentile filters (op="percentile") — handled separately after the base WHERE clause is built
-   - Tag filters (field maps to "tags") — routed through `_build_json_tag_clause`
+   - Tag filters (field maps to "tags") — routed through `_build_tag_clause`
    - Full Text (field maps to "full_text") — routed through `_build_fts_clause`
    - Enum filters (field maps to `subscribed_state`) — routed through `_build_subscribed_clause`
    - Dual-field (field in `_EN_FIELDS` and operator in `_TEXT_OPS`) — expanded to search both columns
@@ -129,9 +129,12 @@ A `db_col` of `subscribed_state` is handed to `_build_subscribed_clause` before
 the operator table below is consulted; the enum's `is`/`is_not` are answered from
 `SUBSCRIBED_FILTERS`, not by the generic `col = ?` / `col != ?` cases.
 
-### `_build_json_tag_clause` (database)
+### `_build_tag_clause` (database)
 
-Builds WHERE clauses for the tag junction table (`workshop_tags` + `tags`). Operators:
+Builds WHERE clauses for the tag junction table (`workshop_tags` + `tags`). The
+name no longer mentions JSON because the JSON column went at migration 5→6; the
+body has only ever built `EXISTS`/`NOT EXISTS` over the junction table, so it
+takes the operator and value and no column name. Operators:
 
 | Operator | Clause |
 |---|---|
@@ -227,7 +230,7 @@ When `tags` is present in the item data dict, the function:
 
 Given a column name, a percentile value (0-99, clamped), and a set of base (non-percentile) filters: computes the minimum value in the top (100-P)% bucket using NTILE(100). P=0 returns None (no filter — all items pass).
 
-The function builds a filtered WHERE clause from the base filters (using the same `_build_filter_clause` and `_build_json_tag_clause` routing as `search_items`), then runs:
+The function builds a filtered WHERE clause from the base filters (using the same `_build_filter_clause` and `_build_tag_clause` routing as `search_items`), then runs:
 
 ```sql
 SELECT COALESCE(MIN(col), 0) FROM (

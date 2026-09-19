@@ -343,6 +343,49 @@ def test_an_image_failure_is_captured_with_status_and_headers(outbox):
     assert record["body_bytes"] == 0
 
 
+def test_an_image_failure_does_not_store_the_failure_digest_as_a_class_digest(outbox):
+    """`shape.class_digest` promises a class-name hash, and an image has no body."""
+    capture.record_image_download(42, "u", False, http_status=404,
+                                  error="HTTP 404", error_type="Exception")
+
+    group_dir, samples = _image_failure_records(outbox)
+    with open(os.path.join(group_dir, samples[0]), encoding="utf-8") as handle:
+        record = json.load(handle)
+
+    expected = hashlib.sha256(record["signature"].encode("utf-8", "replace")).hexdigest()
+    assert record["failure_digest"] == expected
+    assert record["shape"]["class_digest"] is None, \
+        "an image failure has no CSS class names to digest"
+    assert record["shape"]["class_count"] == 0
+
+
+def test_image_group_reconstruction_counts_new_and_legacy_records(outbox):
+    """An outbox written by the old writer stored the failure digest in
+    `shape.class_digest`; the rebuild must count records of both shapes."""
+    capture.record_image_download(42, "u", False, http_status=404,
+                                  error="HTTP 404", error_type="Exception")
+    gid = capture.group_id(capture.IMAGE_FAILURE_KIND, None, capture.IMAGE_STAGE)
+    group_dir, samples = _image_failure_records(outbox)
+    with open(os.path.join(group_dir, samples[0]), encoding="utf-8") as handle:
+        new_record = json.load(handle)
+
+    legacy = {
+        "kind": capture.IMAGE_FAILURE_KIND,
+        "signature": "http=404|content_type=|error=LegacyError",
+        "shape": {"class_digest": "legacy-digest", "class_count": 0, "title_tag": None},
+    }
+    with open(os.path.join(group_dir, "legacy-1.json"), "w", encoding="utf-8") as handle:
+        json.dump(legacy, handle)
+
+    # Rebuild the group the way `_load_group` does when the state file is gone.
+    os.remove(os.path.join(group_dir, capture.GROUP_STATE_NAME))
+    capture._groups.pop(gid, None)
+    group = capture._load_group(gid)
+
+    assert set(group["digests"]) == {new_record["failure_digest"], "legacy-digest"}
+    assert group["sample_count"] == 2
+
+
 def test_a_transport_failure_is_captured_with_the_exception(outbox):
     capture.record_image_download(
         7, "https://cdn.example.invalid/7.jpg", False,

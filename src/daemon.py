@@ -324,7 +324,6 @@ class Daemon:
         self.config = config
         self.config_path = config_path
         self.running = True
-        self.last_filters = {}
         
         # Implement default fallbacks
         self.db_path = config.get("database", {}).get("path", "workshop.db")
@@ -437,9 +436,6 @@ class Daemon:
         self.workshop_folders = WorkshopFolders(self.db_path, self.config)
         self.workshop_folders.log_status()
         self._last_download_scan = None
-        
-        # Pre-load initial filter state to avoid false positives on startup
-        self._load_initial_filter_state()
         
         # Setup graceful shutdown
         signal.signal(signal.SIGINT, self.handle_shutdown)
@@ -571,15 +567,6 @@ class Daemon:
             # everything". Both mean enrich.
             return True
         return _evaluate_filters(item, filters)
-
-    def _load_initial_filter_state(self):
-        """Pre-loads filter state and page tracking from the DB on startup."""
-        for appid in self.target_appids:
-            app_tracking = get_app_tracking(self.db_path, appid)
-            if app_tracking:
-                self.last_filters[appid] = {
-                    "last_cursor": app_tracking.get("last_cursor") or ""
-                }
 
     def handle_shutdown(self, signum, frame):
         """Signals the loop to stop and finishes the current batch safely."""
@@ -819,8 +806,7 @@ class Daemon:
     def _fetch_batch(self, error_message: str = "Database error in process_batch"):
         """Read one batch from the database. Returns None on database error."""
         try:
-            return get_next_items_to_scrape(self.db_path, limit=self.batch_size,
-                                            staleness_days=self.item_staleness_days)
+            return get_next_items_to_scrape(self.db_path, limit=self.batch_size)
         except Exception as e:
             logging.error(f"{error_message}: {e}")
             time.sleep(5)

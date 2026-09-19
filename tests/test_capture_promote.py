@@ -68,6 +68,34 @@ def test_api_captures_land_in_the_api_area(outbox, tmp_path):
     assert os.path.isdir(os.path.join(fixtures, "steam_api"))
 
 
+@pytest.mark.parametrize("kind, area", [
+    ("web_selector_miss", "web"),
+    ("web_item_missing", "web"),
+    ("web_description_absent", "web"),
+    ("web_gated", "web"),
+    ("web_unknown", "web"),
+    ("api_unparsed_body", "steam_api"),
+    ("api_unparseable_tags", "steam_api"),
+    ("api_unhandled_status", "steam_api"),
+])
+def test_every_recorded_kind_routes_into_a_fixture_area(kind, area):
+    """A kind missing from the table promotes into fixtures/other/."""
+    assert capture_promote.area_for(kind) == area
+
+
+def test_an_unparseable_tags_capture_promotes_into_the_api_area(outbox, tmp_path):
+    """The kind is recorded by `insert_or_update_item` and has a JSON body."""
+    record_path = _make_capture(outbox, kind="api_unparseable_tags",
+                                body="['fruit', 'sweet'", http_status=None,
+                                final_url="")
+    fixtures = str(tmp_path / "tests" / "fixtures")
+
+    meta = capture_promote.promote(record_path, outbox, fixtures)
+
+    assert meta["area"] == "steam_api"
+    assert os.path.exists(os.path.join(fixtures, "steam_api", meta["body"]))
+
+
 def test_credentials_are_scrubbed_from_the_fixture(outbox, tmp_path):
     record_path = _make_capture(
         outbox, kind="api_unparsed_body",

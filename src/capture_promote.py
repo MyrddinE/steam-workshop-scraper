@@ -31,7 +31,12 @@ import sys
 
 FIXTURE_AREAS = {
     "web_selector_miss": "web",
+    "web_item_missing": "web",
+    "web_description_absent": "web",
+    "web_gated": "web",
+    "web_unknown": "web",
     "api_unparsed_body": "steam_api",
+    "api_unparseable_tags": "steam_api",
     "api_unhandled_status": "steam_api",
 }
 

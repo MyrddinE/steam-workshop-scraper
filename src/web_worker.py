@@ -290,8 +290,14 @@ class WebScraperThread(threading.Thread):
         conn.close()
 
     def _capture_scrape_failure(self, item: dict, url: str, scrape_data: dict,
-                                kind: str = "web_selector_miss") -> None:
-        """Record the served page as evidence for whichever miss it was."""
+                                kind: str) -> None:
+        """Record the served page as evidence for whichever miss it was.
+
+        ``kind`` is required: a default here filed three unrelated misses under
+        ``web_selector_miss``, which is exactly the distinction the failure tree
+        exists to preserve. The selector is recorded only for the kind that is
+        about the selector.
+        """
         capture.record_failure(
             kind=kind,
             stage="web_scrape",
@@ -320,7 +326,8 @@ class WebScraperThread(threading.Thread):
         off from, but it yielded nothing, so it must not reset the failure streak
         either.
         """
-        self._capture_scrape_failure(item, url, scrape_data)
+        self._capture_scrape_failure(item, url, scrape_data,
+                                     kind="web_description_absent")
         logging.warning(
             "[W:%s] Item page has no extended description; clearing needs_web_scrape",
             item["workshop_id"])
@@ -366,7 +373,7 @@ class WebScraperThread(threading.Thread):
         request rate cannot fix a session that is not working, so the delay is
         left alone.
         """
-        self._capture_scrape_failure(item, url, scrape_data)
+        self._capture_scrape_failure(item, url, scrape_data, kind="web_gated")
         logging.warning(
             "[W:%s] Page looks gated (no item markup; HTTP %s); leaving the item "
             "queued and the delay unchanged.",
@@ -393,7 +400,7 @@ class WebScraperThread(threading.Thread):
             conn.commit()
             conn.close()
         else:
-            self._capture_scrape_failure(item, url, scrape_data)
+            self._capture_scrape_failure(item, url, scrape_data, kind="web_unknown")
             logging.warning(
                 "[W:%s] Page was not the item's and matched no known condition "
                 "(HTTP %s); leaving needs_web_scrape unchanged and backing off.",

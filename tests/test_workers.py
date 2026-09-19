@@ -793,34 +793,94 @@ def test_a_missing_item_is_captured_as_its_own_kind(db_path, tmp_path):
 
 
 
-def test_selector_miss_is_captured(db_path, tmp_path):
+def _only_capture_record(outbox, kind):
+    """The one sample record a run filed under ``kind``, read back as JSON."""
     import json
+    from src import capture
+
+    group = capture.group_id(kind, None, "web_scrape")
+    group_dir = outbox / "failures" / group
+    records = [p for p in group_dir.glob("*.json") if p.name != "_group.json"]
+    assert len(records) == 1, f"expected one {kind} capture, found {len(records)}"
+    return json.loads(records[0].read_text())
+
+
+def test_a_descriptionless_item_page_is_captured_under_its_own_kind(db_path, tmp_path):
+    """The page is the item's and simply has no description: not a selector miss."""
     from src import capture
     from src.database import insert_or_update_item
 
     outbox = tmp_path / "outbox"
     capture.configure(str(outbox))
     try:
-        insert_or_update_item(db_path, {"workshop_id": 42, "needs_web_scrape": 5})
-        _run_web_worker(db_path, {"workshop_id": 42, "steam_updated_at": 1}, MISS)
+        insert_or_update_item(db_path, {"workshop_id": 21, "needs_web_scrape": 5})
+        _run_web_worker(db_path, {"workshop_id": 21, "steam_updated_at": 1},
+                        ITEM_PAGE_WITHOUT_DESCRIPTION)
+    finally:
+        capture.configure(None)
+
+    record = _only_capture_record(outbox, "web_description_absent")
+    assert record["kind"] == "web_description_absent"
+    assert record["selector"] is None, "this page is the item's; no selector failed"
+
+
+def test_a_gated_page_is_captured_under_its_own_kind(db_path, tmp_path):
+    from src import capture
+    from src.database import insert_or_update_item
+
+    outbox = tmp_path / "outbox"
+    capture.configure(str(outbox))
+    try:
+        insert_or_update_item(db_path, {"workshop_id": 22, "needs_web_scrape": 5})
+        gated = dict(MISS, body='<title>Steam Community :: Error</title>'
+                                '<div id="AgeCheck">age check</div>')
+        _run_web_worker(db_path, {"workshop_id": 22, "steam_updated_at": 1}, gated)
+    finally:
+        capture.configure(None)
+
+    record = _only_capture_record(outbox, "web_gated")
+    assert record["kind"] == "web_gated"
+    assert record["selector"] is None
+
+
+def test_an_unattributable_page_is_captured_as_unknown(db_path, tmp_path):
+    from src import capture
+    from src.database import insert_or_update_item
+
+    outbox = tmp_path / "outbox"
+    capture.configure(str(outbox))
+    try:
+        insert_or_update_item(db_path, {"workshop_id": 23, "needs_web_scrape": 5})
+        _run_web_worker(db_path, {"workshop_id": 23, "steam_updated_at": 1}, MISS)
+    finally:
+        capture.configure(None)
+
+    record = _only_capture_record(outbox, "web_unknown")
+    assert record["kind"] == "web_unknown"
+    assert record["selector"] is None
+
+
+def test_no_miss_is_still_filed_under_the_retired_selector_kind(db_path, tmp_path):
+    """``web_selector_miss`` was the default and described none of these paths."""
+    from src import capture
+    from src.database import insert_or_update_item
+
+    outbox = tmp_path / "outbox"
+    capture.configure(str(outbox))
+    try:
+        insert_or_update_item(db_path, {"workshop_id": 24, "needs_web_scrape": 5})
+        _run_web_worker(db_path, {"workshop_id": 24, "steam_updated_at": 1}, MISS)
     finally:
         capture.configure(None)
 
     from src.web_scraper import DESCRIPTION_SELECTOR
-    group = capture.group_id("web_selector_miss", DESCRIPTION_SELECTOR, "web_scrape")
-    group_dir = outbox / "failures" / group
-    records = [p for p in group_dir.glob("*.json") if p.name != "_group.json"]
-    assert len(records) == 1
-    record = json.loads(records[0].read_text())
-    assert record["workshop_id"] == 42
-    assert record["stage"] == "web_scrape"
-    assert record["http_status"] == 200
-    assert "workshopItemDescription" in record["selector"]
+    retired = outbox / "failures" / capture.group_id(
+        "web_selector_miss", DESCRIPTION_SELECTOR, "web_scrape")
+    assert not retired.exists(), "the default kind must not be used for an unknown page"
 
 
-def test_selector_miss_records_the_page_shape(db_path, tmp_path):
+def test_an_unattributable_page_records_the_page_shape(db_path, tmp_path):
     """The capture must describe the page well enough to recognise the break."""
-    import json
     from src import capture
     from src.database import insert_or_update_item
 
@@ -834,11 +894,7 @@ def test_selector_miss_records_the_page_shape(db_path, tmp_path):
     finally:
         capture.configure(None)
 
-    from src.web_scraper import DESCRIPTION_SELECTOR
-    group = capture.group_id("web_selector_miss", DESCRIPTION_SELECTOR, "web_scrape")
-    group_dir = outbox / "failures" / group
-    record = json.loads(next(p for p in group_dir.glob("*.json")
-                             if p.name != "_group.json").read_text())
+    record = _only_capture_record(outbox, "web_unknown")
     assert record["shape"]["title_tag"] == "Workshop Error"
     assert record["shape"]["class_count"] == 1
 

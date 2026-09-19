@@ -36,6 +36,14 @@ def test_index_returns_html(web_client):
     assert b'<!DOCTYPE html>' in resp.data
 
 
+def test_the_server_no_longer_registers_the_unused_number_filters(web_client):
+    """The browser formats counts in JS; these filters had no template consumer."""
+    from src.webserver import app
+
+    assert "fcount" not in app.jinja_env.filters
+    assert "fsize" not in app.jinja_env.filters
+
+
 def test_layout_scaffold_is_present(web_client):
     """The layout CSS targets #results-pane and #right-pane; assert that scaffold exists.
 
@@ -586,6 +594,51 @@ def test_api_items_reports_the_image_state_the_page_branches_on(web_client):
     assert items[13]["image_state"] == "other" and items[13]["image_resolved"] is True
     assert items[14]["image_state"] == "absent" and items[14]["image_resolved"] is False
     assert items[15]["image_state"] == "transient" and items[15]["image_resolved"] is False
+
+
+def test_the_api_image_resolved_agrees_with_the_shared_predicate(web_client):
+    """Every state's answer is `images.is_resolved`, not a page-local copy of it."""
+    from src import images
+    from src.database import insert_or_update_item
+
+    client, db_path = web_client
+    stored = ((21, "jpg"), (22, "404"), (23, "html"), (24, None), (25, "503"))
+    for wid, ext in stored:
+        row = {"workshop_id": wid, "title": f"item {wid}", "status": 200}
+        if ext is not None:
+            row["image_extension"] = ext
+        insert_or_update_item(db_path, row)
+
+    items = {it["workshop_id"]: it
+             for it in client.post('/api/items',
+                                   json={"ids": [wid for wid, _ in stored]}).get_json()}
+
+    for wid, ext in stored:
+        assert items[wid]["image_state"] == images.image_state(ext)
+        assert items[wid]["image_resolved"] is images.is_resolved(ext)
+
+
+def test_the_api_image_resolved_is_decided_by_images_py(web_client, monkeypatch):
+    """A change to the shared predicate must move the page, not be re-derived."""
+    from src import images
+    from src.database import insert_or_update_item
+
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 31, "title": "x", "status": 200,
+                                    "image_extension": "jpg"})
+
+    calls = []
+
+    def spy(stored):
+        calls.append(stored)
+        return False
+
+    monkeypatch.setattr(images, "is_resolved", spy)
+
+    item = client.post('/api/items', json={"ids": [31]}).get_json()[0]
+
+    assert calls == ["jpg"], "the page must ask src/images.py, not spell the rule out"
+    assert item["image_resolved"] is False
 
 
 def _image_cell_js():

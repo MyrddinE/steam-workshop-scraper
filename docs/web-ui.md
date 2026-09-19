@@ -60,6 +60,12 @@ Two layers of validation: a capture-phase `blur` event listener on the document 
 4. A pending marker in the corner names the stage the item is waiting on, by speed, colour and — on hover — a `title`: image rotates at 1x and is vivid green, translation 4x slower and mid green, the web scrape 16x slower and grey. `_pendingStage` picks the **fastest** stage that is pending, so a marker about to clear is never hidden behind a slower one, and the slow grey marker — which may stay for hours — is the quietest thing on the cell. `_applyPending` sets one `pending-<stage>` class, clearing the others, and writes the stage's wording onto the marker's `title`. The durations, colours and wording are mirrored from `src/pending.py`, and `tests/test_pending.py` fails if any of them disagree — the wording is kept in the shared table rather than the template, because the TUI draws the same state and a page-local description could drift from it. `api_priority` is deliberately not a stage: a list only shows items the API has already returned, so a pending refresh is not content anyone is waiting on.
 4. `_placeSentinel()` handles infinite scroll by checking whether the first item of the batch is visible and placing or removing the scroll sentinel accordingly
 
+Every number the grid and the detail pane show is formatted in the browser: `fmtCount` (three
+significant digits with a K/M suffix) for views and subscription counts, `fmtExact` (grouped exact
+digits) where a value is read rather than scanned, and `fmtSize` for file sizes. There is no
+server-side equivalent: no template passes a value through a Jinja number filter, so the
+`fcount`/`fsize` filters the server used to register had no consumer and were removed.
+
 ### State Persistence
 
 The TUI saves filter/sort state to `.tui_state.yaml`, which the web UI reads through `GET /api/state`. That file is the TUI's: it has the TUI's shape (`scroll_y`, `selected_workshop_id`) and is rewritten on the TUI's schedule, so writing the browser's view back into it would have the two front ends overwriting fields the other does not understand. The browser therefore keeps its own view in `localStorage` under `view.state.v1` — filter rows, `sort_by`, `sort_order`, the `Subscribed:` overlay value, the open item and the grid's scroll position.
@@ -493,6 +499,11 @@ The same detail payload, but applies detail-level priority (web, image, translat
 ### `/api/items` — POST
 
 Bulk ID lookup. Accepts `{ids: [1, 2, 3]}`. Returns the same summary fields as `/api/search` for efficiency. Used by image polling.
+
+Both list routes attach the image classification the grid branches on before serialising: `image_state`
+(from `images.image_state`) and `image_resolved`, which is `images.is_resolved(stored)` itself rather
+than the server spelling out which states are settled. `src/images.py` is the one decider, so a change
+to the predicate moves the page and the TUI together instead of leaving the page quietly disagreeing.
 
 ### `/api/cutoffs` — POST
 

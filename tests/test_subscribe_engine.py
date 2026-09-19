@@ -756,3 +756,19 @@ def test_the_pass_spaces_every_item(tmp_path, monkeypatch):
     assert [o.status for o in outcomes] == [engine.ALREADY, engine.ALREADY]
     assert waits[0] == 8.0
     assert waits[1] == pytest.approx(8.0)
+
+
+# ── the status vocabulary ────────────────────────────────────────────────────
+
+def test_the_refused_label_does_not_claim_the_result_is_unknown():
+    """``REFUSED`` covers outcomes the engine determined, not an unknown state."""
+    label = engine.status_label(engine.REFUSED)
+
+    assert label != "cannot tell"
+    assert label == "refused (see log)"
+
+
+def test_the_two_refusal_labels_are_distinguishable():
+    assert engine.status_label(engine.REFUSED) != engine.status_label(
+        engine.TOKEN_REFUSED)
+

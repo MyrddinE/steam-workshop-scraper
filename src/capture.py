@@ -641,13 +641,20 @@ def _write_image_failure_sample(gid, digest, sample_number, signature, workshop_
         "body_file": None,
         "body_bytes": 0,
         "signature": signature,
-        "shape": {"class_digest": digest, "class_count": 0, "title_tag": None},
+        # An image failure has no body, so there are no CSS class names and no
+        # class digest to record. `failure_digest` is the hash of `signature`,
+        # which is what the group's per-shape bound actually keys on; the shape
+        # keeps its class-name fields so a reader of either record kind sees the
+        # same keys, but `class_digest` is honestly null rather than the failure
+        # digest under a name that promises a class-name hash.
+        "failure_digest": digest,
+        "shape": {"class_digest": None, "class_count": 0, "title_tag": None},
         "captured_at": now,
         "app_version": app_version(),
     }
     _write_atomic(record_path, json.dumps(record, indent=2, sort_keys=True).encode("utf-8"))
     update_manifest(_outbox_dir, _manifest_entry(
-        _outbox_dir, record_path, role="sample", group=gid, class_digest=digest,
+        _outbox_dir, record_path, role="sample", group=gid, failure_digest=digest,
         workshop_id=workshop_id))
     return record
 
@@ -906,7 +913,13 @@ def _reconstruct_from_samples(gid, group) -> None:
                 record = json.load(handle)
         except (OSError, ValueError):
             continue
-        digest = (record.get("shape") or {}).get("class_digest")
+        # A page capture keys by the body's class digest. An image failure has no
+        # body and keys by the failure signature's digest, which new records
+        # carry as `failure_digest`; a record written before that field existed
+        # stored the same digest in `shape.class_digest`, so the fallback keeps
+        # an outbox from the old writer countable.
+        shape = record.get("shape") or {}
+        digest = shape.get("class_digest") or record.get("failure_digest")
         if not digest:
             continue
         entry = group["digests"].setdefault(

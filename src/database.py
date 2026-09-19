@@ -333,7 +333,7 @@ def _compute_percentile_threshold(db_path: str, db_col: str, percentile_val, bas
             if f_db_col == "tags":
                 if op in ("is", "is_not"):
                     continue
-                clause, clause_params = _build_json_tag_clause(f_db_col, op, val)
+                clause, clause_params = _build_tag_clause(op, val)
             elif f_db_col == "full_text":
                 continue  # FTS5 virtual column, not a real column
             else:
@@ -358,9 +358,10 @@ def _compute_percentile_threshold(db_path: str, db_col: str, percentile_val, bas
     conn.close()
     return threshold if threshold else None
 
-def _build_json_tag_clause(db_col: str, op: str, val) -> tuple[str, list]:
-    """Tag queries now use the junction table (workshop_tags + tags) instead of
-    json_each on a JSON column.  Contains/does_not_contain match exact tag names."""
+def _build_tag_clause(op: str, val) -> tuple[str, list]:
+    """Tag queries use the junction table (workshop_tags + tags); the JSON column
+    this was named for is gone at migration 5->6. Contains/does_not_contain match
+    exact tag names."""
     if op == "contains":
         return ("EXISTS (SELECT 1 FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id = w.workshop_id AND t.tag_name = ?)", [val])
     if op == "does_not_contain":
@@ -415,7 +416,7 @@ def build_filter_clause_sql(filters: list[dict]) -> tuple[str, list]:
         if db_col == "tags":
             if op in ("is", "is_not"):
                 continue
-            clause, clause_params = _build_json_tag_clause(db_col, op, val)
+            clause, clause_params = _build_tag_clause(op, val)
         elif db_col == "full_text":
             if op in ("is_empty", "is_not_empty"):
                 clause = f"w.rowid {'IN' if op == 'is_not_empty' else 'NOT IN'} (SELECT rowid FROM workshop_fts)"
@@ -2671,7 +2672,7 @@ def queued_anywhere_predicate() -> str:
     )
 
 
-def get_next_items_to_scrape(db_path: str, limit: int = 10, staleness_days: int = 30) -> list[dict]:
+def get_next_items_to_scrape(db_path: str, limit: int = 10) -> list[dict]:
     """
     Retrieves the next batch of workshop items to be scraped.
     Prioritizes by api_priority (higher = more urgent), then oldest api_fetched_at
@@ -2796,9 +2797,8 @@ def get_item_details(db_path: str, workshop_id: int) -> dict | None:
 
 def search_items(db_path: str, query: str = "", appid: int = None, 
                  title_query: str = "", desc_query: str = "", filename_query: str = "",
-                 tags_query: str = "", tags: str = "", filters: list[dict] = None,
+                 tags: str = "", filters: list[dict] = None,
                  creator: str = "", numeric_filters: dict = None, 
-                 required_tags: list[str] = None, excluded_tags: list[str] = None,
                  summary_only: bool = False, 
                  sort_by: str = None, sort_order: str = "ASC",
                  limit: int = None, offset: int = None,
@@ -2846,7 +2846,7 @@ def search_items(db_path: str, query: str = "", appid: int = None,
     if filename_query:
         sql, params = _build_text_search_clauses(sql, params, filename_query, ["filename"])
     if tags:
-        clause, clause_params = _build_json_tag_clause("tags", "contains", tags)
+        clause, clause_params = _build_tag_clause("contains", tags)
         sql += f" AND {clause}"
         params.extend(clause_params)
 
@@ -2988,7 +2988,7 @@ def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None,
             if db_col == "tags":
                 if op in ("is", "is_not"):
                     continue
-                clause, clause_params = _build_json_tag_clause(db_col, op, val)
+                clause, clause_params = _build_tag_clause(op, val)
             else:
                 clause, clause_params = _build_filter_clause(db_col, op, val)
             if clause:

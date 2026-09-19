@@ -15,7 +15,7 @@ housekeeping — the staleness sweep (`_maybe_promote_stale_items`), the subscri
 the **first batch after a restart**, which is why a fresh daemon can be minutes away from its first API
 fetch while its scraper, image and discovery threads are already working. Each invocation then:
 
-1. Calls `get_next_items_to_scrape` to retrieve up to `batch_size` items due for processing. Selection is `api_priority > 0` and `status` not `-1`, ordered by `api_priority DESC, api_fetched_at ASC`, so never-successfully-fetched items (`api_fetched_at IS NULL`) come first within a priority band.
+1. Calls `get_next_items_to_scrape` to retrieve up to `batch_size` items due for processing. Selection is `api_priority > 0` and `status` not `-1`, ordered by `api_priority DESC, api_fetched_at ASC`, so never-successfully-fetched items (`api_fetched_at IS NULL`) come first within a priority band. The call takes `limit` alone: `item_staleness_days` is **not** a fetch argument. It is the window `_promote_stale_items` uses to put already-fetched items back in the queue, so it is applied by that sweep and not by this SELECT.
 2. If no items are available, waits for the discovery thread to refill the queue. Discovery is no longer the main loop's job: it runs on its own thread (see [threading.md](threading.md)) so that the queue is refilled while the loop is still draining it, rather than only after it has drained. The wait is woken by the thread's signal instead of polling the database, and still gives up after ten minutes so the outer loop re-checks.
 3. Fetches metadata for the whole batch in one Steam Web API request via `get_workshop_details_batch` (title, description, tags, file_size, preview_url, creator, subscriptions, etc.), then processes the items **in the order the queue returned them**, matching each to its result by `publishedfileid`. The batch is chunked into several requests only if `batch_size` exceeds the endpoint's per-request id ceiling (`STEAM_API_MAX_IDS_PER_REQUEST`, 100).
 4. Merges API data with existing DB row via `_merge_and_clean_api_data`, which filters to `MERGE_ITEM_KEYS` (derived from `WORKSHOP_ITEM_COLUMNS`), remaps `creator_app_id`/`consumer_app_id` to `creator_appid`/`consumer_appid`, remaps `description` to `short_description`, and remaps the API's `time_created`/`time_updated` to `steam_created_at`/`steam_updated_at`. Unknown API keys are discarded with a log message.
@@ -356,6 +356,24 @@ So one run is:
    `success: 1` is a **disagreement**: nothing is recorded and the item stays queued, because the page
    is the authority and the JSON is corroboration only. A throttle page on the confirmation read stays
    queued; any other button-less page reports that the result cannot be told.
+
+**Outcome vocabulary.** Each run ends in one status, and the TUI's queue row renders its phrase from
+`subscribe_engine._STATUS_LABELS`:
+
+| Status | Phrase | Meaning |
+|---|---|---|
+| `already_subscribed` | already subscribed | the pre-read's `toggled` said so; no request was sent |
+| `subscribed` | subscribed | the confirmation read said so; `mark_own_subscribed` was recorded |
+| `disagreement` | unverified (sources disagree) | Steam said success but the page did not; nothing recorded |
+| `throttled` | left queued (throttled) | Steam's throttle shell; the item stays queued |
+| `session_problem` | session problem | a refusal beside an anonymous page read; a session problem is recorded |
+| `token_refused` | refused (stale CSRF token) | a refusal beside an authenticated page read: the login works, the token was stale |
+| `refused` | refused (see log) | the engine would not send or could not read the state — no session, no login, no item row, no AppID, or a page with no subscribe button. The cause differs per case and the caller logs it, so the phrase points there |
+| `failed` | failed | the attempt raised |
+
+`refused` is deliberately **not** "cannot tell": every outcome it covers was determined — either the
+item cannot be subscribed or its button could not be read — and only the cause varied. It is kept
+distinct from `token_refused`, whose phrase names the one cause, the stale CSRF token.
 
 **The confirmation read is evidence-gathering, not the design.** It doubles each item's page reads,
 so it is isolated in `confirm_subscription` behind the module-level `VERIFY_AFTER_SUBSCRIBE` switch;
@@ -748,4 +766,4 @@ Used to compute `wilson_favorite_score` (using `favorited / lifetime_subscriptio
 
 Computes p99, p90, p50 percentile thresholds for both Wilson scores across the filtered dataset. Uses SQLite's `NTILE(100)` window function to divide scores into 100 buckets (sorted descending, nulls last). Returns the minimum value in buckets 1, 10, and 50 as the p99, p90, and p50 cutoffs respectively. These are used by both UIs for color-coded score display (gold for top 1%, yellow for top 10%, white for top 50%, gray below).
 
-Filters for the cutoffs exclude any filter with the `percentile` operator (to avoid circularity — the percentile query can't reference itself) and route tag filters through `_build_json_tag_clause` (junction table).
+Filters for the cutoffs exclude any filter with the `percentile` operator (to avoid circularity — the percentile query can't reference itself) and route tag filters through `_build_tag_clause` (junction table).
