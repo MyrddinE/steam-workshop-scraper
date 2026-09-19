@@ -891,7 +891,8 @@ The `users` table holds Steam creators — there are no application users anywhe
 project — so it becomes `creators`; its `steamid` primary key already says whose id it is.
 `app_tracking`'s live columns are the discovery cursor and the enrichment filters, not
 "tracking", so it becomes `app_discovery`. Both are pure table renames: the columns and the
-`item_type = 'user'` queue value deliberately keep their names here. The `creator`
+`item_type = 'user'` queue value deliberately keep their names here (migration 33→34 later
+renames the column to `entity_type`; the `'user'` value stays). The `creator`
 foreign-key column is renamed to `creator_steamid` by migration 31→32 instead.
 
 ```sql
