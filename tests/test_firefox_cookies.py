@@ -420,7 +420,7 @@ def test_a_gated_miss_refreshes_the_cookie_and_makes_no_second_request():
     miss = {"description": None, "body": "<title>Steam Community :: Error</title>"}
     refreshed = []
     with patch("src.web_worker.scrape_extended_details") as scrape:
-        _worker_with(lambda: refreshed.append(1) or True)._refresh_login_cookie_if_gated(item, miss)
+        _worker_with(lambda: refreshed.append(1) or True)._refresh_login_cookie_if_gated_or_signed_out(item, miss)
     assert refreshed == [1], "the gated miss must refresh the login cookie"
     assert scrape.call_count == 0, "and must not re-scrape"
 
@@ -430,7 +430,7 @@ def test_an_unchanged_cookie_does_not_earn_a_request_either():
     item = {"workshop_id": 1}
     miss = {"description": None, "body": "<title>Steam Community :: Error</title>"}
     with patch("src.web_worker.scrape_extended_details") as scrape:
-        _worker_with(lambda: False)._refresh_login_cookie_if_gated(item, miss)
+        _worker_with(lambda: False)._refresh_login_cookie_if_gated_or_signed_out(item, miss)
         assert scrape.call_count == 0
 
 
@@ -439,7 +439,7 @@ def test_a_normal_miss_refreshes_nothing_and_requests_nothing():
     miss = {"description": None, "body": "<div class='account_pulldown'>me</div>"}
     refreshed = []
     with patch("src.web_worker.scrape_extended_details") as scrape:
-        _worker_with(lambda: refreshed.append(1) or True)._refresh_login_cookie_if_gated(item, miss)
+        _worker_with(lambda: refreshed.append(1) or True)._refresh_login_cookie_if_gated_or_signed_out(item, miss)
     assert refreshed == [], "a signed-in page is not evidence of a stale cookie"
     assert scrape.call_count == 0
 
@@ -448,5 +448,5 @@ def test_no_configured_source_means_no_refresh_and_no_retry():
     item = {"workshop_id": 1}
     miss = {"description": None, "body": "<title>Steam Community :: Error</title>"}
     with patch("src.web_worker.scrape_extended_details") as scrape:
-        _worker_with(None)._refresh_login_cookie_if_gated(item, miss)
+        _worker_with(None)._refresh_login_cookie_if_gated_or_signed_out(item, miss)
         assert scrape.call_count == 0

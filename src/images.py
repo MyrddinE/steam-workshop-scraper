@@ -58,9 +58,9 @@ PERMANENT_IMAGE_STATUSES = frozenset({404, 410})
 
 # The three classifications the rest of the code branches on.
 PRESENT = "present"       # a real extension; a file exists; build the URL
-PERMANENT = "permanent"   # a definitive answer; do not retry, do not render
+PERMANENTLY_MISSING = "permanent"   # a definitive answer; do not retry, do not render
 TRANSIENT = "transient"   # some other status; recorded, but still worth retrying
-OTHER = "other"           # a content type that was not an image
+NOT_AN_IMAGE = "other"           # a content type that was not an image
 ABSENT = "absent"         # nothing recorded yet
 
 
@@ -94,10 +94,10 @@ def image_state(stored) -> str:
     if is_image_extension(value):
         return PRESENT
     if is_status_marker(value):
-        return PERMANENT if int(value) in PERMANENT_IMAGE_STATUSES else TRANSIENT
+        return PERMANENTLY_MISSING if int(value) in PERMANENT_IMAGE_STATUSES else TRANSIENT
     # A non-numeric, non-image token: the server served something that is not a
     # picture, and it will serve the same thing next time.
-    return OTHER
+    return NOT_AN_IMAGE
 
 
 def can_render_image(stored) -> bool:
@@ -118,7 +118,7 @@ def blocks_retry(stored) -> bool:
     gates use; note it is *not* the same question as :func:`can_render_image`,
     because a real image still needs re-fetching when the item is revised.
     """
-    return image_state(stored) in (PERMANENT, OTHER)
+    return image_state(stored) in (PERMANENTLY_MISSING, NOT_AN_IMAGE)
 
 
 def is_resolved(stored) -> bool:

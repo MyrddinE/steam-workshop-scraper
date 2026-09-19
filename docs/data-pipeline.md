@@ -200,7 +200,7 @@ A daemon thread that picks up items from `get_next_web_scrape_item`, ordered by 
 | `RATE_LIMITED` | the body reports "too many requests" | untouched | the delay doubles, at once |
 | `ITEM_MISSING` | HTTP 404/410, or the page's item-error wording | `needs_web_scrape = 0` | no back-off |
 | `ITEM_PAGE_WITHOUT_DESCRIPTION` | `workshopItem` present, `highlightContent` absent | `needs_web_scrape = 0` | neutral: neither success nor failure |
-| `GATE` | no item markup, plus an age-check, sign-in or error marker | untouched | no back-off; `_refresh_login_cookie_if_gated` has already re-read the login cookie if the page looked gated |
+| `GATED` | no item markup, plus an age-check, sign-in or error marker | untouched | no back-off; `_refresh_login_cookie_if_gated_or_signed_out` has already re-read the login cookie if the page looked gated |
 | `UNKNOWN` | a transport failure, a 5xx, or a page that is neither the item's nor a recognised condition | untouched (a transport failure also raises `api_priority` to 2) | grows `web_delay` |
 
 A 5xx is `UNKNOWN` whatever its body says: the status is a server fault with no attributable cause, so it keeps the back-off.
@@ -242,10 +242,10 @@ the signed-in markers is therefore caused by the throttling, not by a bad cookie
 page must not be read as evidence that the session has lapsed.
 
 **Gated pages**: A miss whose body carries no item markup but does look like an error page, an age
-check or a sign-in wall is classified `GATE`. `_refresh_login_cookie_if_gated` has already re-read the
+check or a sign-in wall is classified `GATED`. `_refresh_login_cookie_if_gated_or_signed_out` has already re-read the
 login cookie when the page looked gated or signed out, so the next request carries the freshest
 credential. Nothing is re-scraped immediately: the miss goes through `classify_scrape` and takes the
-ordinary `GATE` path, which leaves the item queued in its place and the delay alone (a slower pace
+ordinary `GATED` path, which leaves the item queued in its place and the delay alone (a slower pace
 cannot fix a session that is not working), and the queue retries it under the worker's own adaptive
 delay. A merely broken page therefore cannot double the request rate either.
 

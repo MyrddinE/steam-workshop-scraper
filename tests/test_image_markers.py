@@ -21,8 +21,8 @@ from src.images import (
     IMAGE_EXTENSIONS,
     MAGIC_EXT_MAP,
     MIME_MAP,
-    OTHER,
-    PERMANENT,
+    NOT_AN_IMAGE,
+    PERMANENTLY_MISSING,
     PRESENT,
     TRANSIENT,
     blocks_retry,
@@ -51,7 +51,7 @@ def test_a_real_extension_is_a_picture(ext):
 
 @pytest.mark.parametrize("code", ["404", "410"])
 def test_a_permanent_status_is_final_and_never_a_picture(code):
-    assert image_state(code) == PERMANENT
+    assert image_state(code) == PERMANENTLY_MISSING
     assert not can_render_image(code), "a status must never become a URL"
     assert blocks_retry(code), "a 404 will still be a 404 next time"
     assert is_resolved(code)
@@ -69,7 +69,7 @@ def test_any_other_status_stays_retryable(code):
 @pytest.mark.parametrize("token", ["html", "json", "plain", "svg+xml"])
 def test_a_non_image_type_is_final(token):
     """What was served once is what will be served next time."""
-    assert image_state(token) == OTHER
+    assert image_state(token) == NOT_AN_IMAGE
     assert not can_render_image(token)
     assert blocks_retry(token)
 

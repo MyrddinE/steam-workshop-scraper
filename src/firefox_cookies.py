@@ -32,7 +32,7 @@ _SIDECARS = ("", "-wal", "-shm")
 
 COOKIE_STORE_NAME = "cookies.sqlite"
 COMPATIBILITY_FILE = "compatibility.ini"
-STEAM_HOST = "%steamcommunity.com"
+STEAM_HOST_LIKE = "%steamcommunity.com"
 LOGIN_COOKIE = "steamLoginSecure"
 
 # Firefox writes `LastVersion` as `<version>_<buildid>`; a User-Agent carries the
@@ -138,14 +138,14 @@ def read_steam_cookies(store_path: Path) -> dict:
     with tempfile.TemporaryDirectory(prefix="ffcookies-") as tmp:
         copied = _copy_store(Path(store_path), Path(tmp))
         try:
-            con = sqlite3.connect(f"file:{copied}?mode=ro", uri=True)
+            connection = sqlite3.connect(f"file:{copied}?mode=ro", uri=True)
         except sqlite3.Error as exc:
             logging.warning("Could not open the Firefox cookie store: %s", exc)
             return {}
         try:
             found = {}
-            for name, value in con.execute(
-                "SELECT name, value FROM moz_cookies WHERE host LIKE ?", (STEAM_HOST,)
+            for name, value in connection.execute(
+                "SELECT name, value FROM moz_cookies WHERE host LIKE ?", (STEAM_HOST_LIKE,)
             ):
                 if name and value:
                     found[name] = value
@@ -160,7 +160,7 @@ def read_steam_cookies(store_path: Path) -> dict:
             )
             return {}
         finally:
-            con.close()
+            connection.close()
 
 
 def _login_expired(value: str | None, now: float | None = None) -> bool:

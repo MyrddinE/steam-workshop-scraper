@@ -297,7 +297,7 @@ def test_an_image_success_is_captured_only_when_the_switch_is_on(db_path, tmp_pa
     assert not (outbox / "image_downloads").exists()
 
     # Switch on: metadata is recorded and points at the file on disk.
-    capture.configure(str(outbox), image_capture=True)
+    capture.configure(str(outbox), capture_image_downloads=True)
     try:
         _run_image_worker(db_path, response=response, images_root=str(images_root))
     finally:
@@ -327,7 +327,7 @@ def test_no_image_capture_writes_the_bytes_into_the_outbox(db_path, tmp_path):
     insert_or_update_item(db_path, {"workshop_id": 5, "needs_image": 1,
                                     "preview_url": "http://example.com/img.jpg"})
 
-    capture.configure(str(outbox), image_capture=True)
+    capture.configure(str(outbox), capture_image_downloads=True)
     try:
         _run_image_worker(db_path, response=_FakeImageResponse(
             headers={"Content-Type": "image/png"}, body=image_bytes),
@@ -533,7 +533,7 @@ def test_repeated_walls_grow_the_web_delay(db_path):
     worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
                              [FOUND] * 5 + [MISS] * 2)
 
-    assert worker.web_had_streak is False, "the walls ended the success streak"
+    assert worker.web_had_success_streak is False, "the walls ended the success streak"
     assert worker.web_failures >= 2
     assert worker.web_delay > WEB_DELAY_DEFAULT, "repeated walls must slow the scraper down"
 
@@ -550,7 +550,7 @@ def test_a_descriptionless_item_is_neutral_for_pacing(db_path):
     # A streak is in progress: one wall has just landed and the next wall would
     # grow the delay. The description-less page must leave all of that alone.
     worker = WebScraperThread(db_path, ".pauselock")
-    worker.web_had_streak = True
+    worker.web_had_success_streak = True
     worker.web_failures = 1
     worker.web_successes = 0
 
@@ -595,7 +595,7 @@ def test_classify_scrape_names_every_outcome():
         ITEM_PAGE_WITHOUT_DESCRIPTION) is ScrapeOutcome.ITEM_PAGE_WITHOUT_DESCRIPTION
     assert classify_scrape(
         dict(MISS, body='<title>Steam Community :: Error</title><div id="AgeCheck">x</div>')
-    ) is ScrapeOutcome.GATE
+    ) is ScrapeOutcome.GATED
     assert classify_scrape(MISS) is ScrapeOutcome.UNKNOWN
     assert classify_scrape(None) is ScrapeOutcome.UNKNOWN
     # A 5xx is a server fault with no attributable cause, whatever the body says.
@@ -616,7 +616,7 @@ def test_a_404_does_not_grow_the_delay_and_clears_the_queue(db_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
 
     worker = WebScraperThread(db_path, ".pauselock")
-    worker.web_had_streak = True
+    worker.web_had_success_streak = True
     worker.web_failures = 1
 
     worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
@@ -635,7 +635,7 @@ def test_steams_missing_item_page_clears_the_queue_despite_http_200(db_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
 
     worker = WebScraperThread(db_path, ".pauselock")
-    worker.web_had_streak = True
+    worker.web_had_success_streak = True
     worker.web_failures = 1
 
     worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
@@ -655,7 +655,7 @@ def test_a_transport_failure_still_grows_the_delay(db_path):
     worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
                              [FOUND] * 5 + [None] * 2)
 
-    assert worker.web_had_streak is False, "the transport failures ended the streak"
+    assert worker.web_had_success_streak is False, "the transport failures ended the streak"
     assert worker.web_failures >= 2
     assert worker.web_delay > WEB_DELAY_DEFAULT, "a transport failure still slows the scraper"
 
@@ -695,7 +695,7 @@ def test_a_gate_does_not_grow_the_delay(db_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
 
     worker = WebScraperThread(db_path, ".pauselock")
-    worker.web_had_streak = True
+    worker.web_had_success_streak = True
     worker.web_failures = 1
 
     gated = dict(MISS, body='<title>Steam Community :: Error</title>'
@@ -986,7 +986,7 @@ def test_the_item_page_pull_is_captured_as_a_full_exchange(db_path, tmp_path):
         },
     }
     outbox = tmp_path / "outbox"
-    capture.configure(str(outbox), web_download_capture=True)
+    capture.configure(str(outbox), capture_web_downloads=True)
     try:
         _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1}, page)
     finally:

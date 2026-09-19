@@ -314,7 +314,7 @@ python3 -m src.capture_promote --from <outbox>/failures
 
 For each capture it writes `tests/fixtures/<area>/<name>.<ext>` plus a
 `.meta.json` sidecar, then regenerates `tests/test_ingest_regressions.py`
-parametrized over every fixture found. The area comes from `FIXTURE_AREAS`,
+parametrized over every fixture found. The area comes from `FIXTURE_AREA_BY_KIND`,
 keyed by the record's `kind`: every web kind lands in `tests/fixtures/web/`,
 every API kind in `tests/fixtures/steam_api/`, and a kind not in the table falls
 back to `tests/fixtures/other/` — so a kind the code records but the table omits

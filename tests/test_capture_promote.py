@@ -80,7 +80,7 @@ def test_api_captures_land_in_the_api_area(outbox, tmp_path):
 ])
 def test_every_recorded_kind_routes_into_a_fixture_area(kind, area):
     """A kind missing from the table promotes into fixtures/other/."""
-    assert capture_promote.area_for(kind) == area
+    assert capture_promote.fixture_area_for(kind) == area
 
 
 def test_an_unparseable_tags_capture_promotes_into_the_api_area(outbox, tmp_path):

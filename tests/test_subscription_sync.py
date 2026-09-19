@@ -682,7 +682,7 @@ def test_the_subscriptions_page_pull_is_captured(sync_env, tmp_path):
     page = _page([1], 1).replace("</body>", f"<span>{secret}</span></body>")
     configure({1: page}, login=secret)
     outbox = tmp_path / "outbox"
-    capture.configure(str(outbox), web_download_capture=True)
+    capture.configure(str(outbox), capture_web_downloads=True)
     try:
         subscription_sync.reconcile_own_subscriptions(db_path, 294100, {})
     finally:

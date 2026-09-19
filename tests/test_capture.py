@@ -445,7 +445,7 @@ def _image_capture_active():
     so the recorder's own guard is the only thing that needs to consult this one.
     """
     with capture._lock:
-        return bool(capture._outbox_dir) and capture._image_capture
+        return bool(capture._outbox_dir) and capture._capture_image_downloads
 
 
 def test_an_image_success_is_captured_only_with_the_switch_on(outbox):
@@ -458,7 +458,7 @@ def test_an_image_success_is_captured_only_with_the_switch_on(outbox):
         content_length="2048", bytes_written=2048, saved_path="images/42.jpg") is False
     assert not os.path.isdir(os.path.join(outbox, "image_downloads"))
 
-    capture.configure(outbox, image_capture=True)
+    capture.configure(outbox, capture_image_downloads=True)
     try:
         assert _image_capture_active() is True
         assert capture.record_image_download(
@@ -484,7 +484,7 @@ def test_an_image_success_is_captured_only_with_the_switch_on(outbox):
 
 def test_image_capture_never_writes_a_body_file(outbox):
     """Assert on the files written: metadata only, success or failure."""
-    capture.configure(outbox, image_capture=True)
+    capture.configure(outbox, capture_image_downloads=True)
     try:
         capture.record_image_download(
             42, "u", True, http_status=200, content_type="image/png",

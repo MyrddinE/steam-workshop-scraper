@@ -72,7 +72,7 @@ def _record_item_page(workshop_id=1, ok=True, body=None):
     """Record one item-page pull through the generic entry point."""
     data = _scrape(ok=ok, body=body)
     return capture.record_web_download(
-        capture.ITEM_PAGE_KIND, workshop_id, data["request"]["url"], data, ok=ok)
+        capture.ITEM_PAGE_KIND, workshop_id, data["request"]["url"], data, succeeded=ok)
 
 
 def _records(outbox):
@@ -90,13 +90,13 @@ def test_off_unless_configured(outbox):
 
 
 def test_on_without_an_outbox_is_still_off():
-    capture.configure(None, web_download_capture=True)
+    capture.configure(None, capture_web_downloads=True)
     assert capture.web_download_capture_active() is False
 
 
 def test_every_pull_is_saved(tmp_path):
     """No cap: a debugging switch that stops early is worse than none."""
-    capture.configure(str(tmp_path), web_download_capture=True)
+    capture.configure(str(tmp_path), capture_web_downloads=True)
     try:
         assert capture.web_download_capture_active() is True
         for i in range(25):
@@ -108,7 +108,7 @@ def test_every_pull_is_saved(tmp_path):
 
 def test_successes_are_recorded_as_well_as_misses(tmp_path):
     """The failure capture only ever holds misses, which is the whole gap."""
-    capture.configure(str(tmp_path), web_download_capture=True)
+    capture.configure(str(tmp_path), capture_web_downloads=True)
     try:
         _record_item_page(1, ok=True)
         _record_item_page(2, ok=False)
@@ -120,7 +120,7 @@ def test_successes_are_recorded_as_well_as_misses(tmp_path):
 
 def test_the_body_is_kept_whole(tmp_path):
     """Scripts carry g_steamID; stripping them would drop the decisive signal."""
-    capture.configure(str(tmp_path), web_download_capture=True)
+    capture.configure(str(tmp_path), capture_web_downloads=True)
     try:
         body = '<html><script>var g_steamID = "76561198000000000";</script>' \
                '<div class="account_pulldown">me</div></html>'
@@ -137,12 +137,12 @@ def test_the_body_is_kept_whole(tmp_path):
 
 def test_a_record_carries_both_sides_of_the_exchange(tmp_path):
     """The request and the answer, not just the page that came back."""
-    capture.configure(str(tmp_path), web_download_capture=True)
+    capture.configure(str(tmp_path), capture_web_downloads=True)
     try:
         data = _scrape()
         data["response_headers"] = {"Content-Type": "text/html"}
         capture.record_web_download(capture.ITEM_PAGE_KIND, 7, data["request"]["url"],
-                                    data, ok=True)
+                                    data, succeeded=True)
         record = _records(str(tmp_path))[0]
         assert record["kind"] == "item_page"
         assert record["request"]["method"] == "GET"
@@ -168,7 +168,7 @@ def test_the_steam_id_is_extracted(value, expected):
 
 
 def test_markers_are_recorded_not_interpreted(tmp_path):
-    capture.configure(str(tmp_path), web_download_capture=True)
+    capture.configure(str(tmp_path), capture_web_downloads=True)
     try:
         _record_item_page(1, body='<div class="account_pulldown">me</div>')
         markers = _records(str(tmp_path))[0]["auth_markers"]
@@ -218,7 +218,7 @@ def test_no_credential_value_reaches_the_outbox(tmp_path):
     diagnostic point.
     """
     outbox = tmp_path / "outbox"
-    capture.configure(str(outbox), web_download_capture=True)
+    capture.configure(str(outbox), capture_web_downloads=True)
     try:
         capture.record_web_download(
             capture.SUBSCRIBE_KIND, 1, "https://steamcommunity.com/subscribe",
@@ -285,7 +285,7 @@ def test_a_throttled_page_is_not_mistaken_for_a_stale_cookie():
     called = []
     with patch("src.web_worker.scrape_extended_details") as scrape:
         WebScraperThread("test.db", "nope.lock", {}, None,
-                         lambda: called.append(1) or True)._refresh_login_cookie_if_gated(item, throttled)
+                         lambda: called.append(1) or True)._refresh_login_cookie_if_gated_or_signed_out(item, throttled)
         assert scrape.call_count == 0, "the request is never repeated"
         assert called == [1], "but the cookie is still re-read: a local read costs no budget"
 
@@ -298,7 +298,7 @@ def test_a_definitive_404_is_not_treated_as_a_gate():
     called = []
     with patch("src.web_worker.scrape_extended_details") as scrape:
         WebScraperThread("test.db", "nope.lock", {}, None,
-                         lambda: called.append(1) or True)._refresh_login_cookie_if_gated(
+                         lambda: called.append(1) or True)._refresh_login_cookie_if_gated_or_signed_out(
                              {"workshop_id": 1}, page)
     assert scrape.call_count == 0, "a gone item is never worth a request"
     assert called == [], "and it is not a session problem to refresh for"
@@ -342,7 +342,7 @@ def test_a_throttled_page_does_not_shadow_the_auth_check():
     throttled = {"description": None, "body": "<h1>Too many requests</h1>"}
     with patch("src.web_worker.scrape_extended_details") as scrape:
         WebScraperThread("test.db", "nope.lock", {}, None,
-                         lambda: calls.append("refresh") or True)._refresh_login_cookie_if_gated(
+                         lambda: calls.append("refresh") or True)._refresh_login_cookie_if_gated_or_signed_out(
                              {"workshop_id": 1}, throttled)
     assert calls == ["refresh"], "the auth reaction still fires"
     assert scrape.call_count == 0, "the request is never repeated"
@@ -355,7 +355,7 @@ def test_a_signed_out_page_refreshes_the_cookie_without_a_second_request():
     refreshed = []
     with patch("src.web_worker.scrape_extended_details") as scrape:
         WebScraperThread("test.db", "nope.lock", {}, None,
-                         lambda: refreshed.append(1) or True)._refresh_login_cookie_if_gated(
+                         lambda: refreshed.append(1) or True)._refresh_login_cookie_if_gated_or_signed_out(
                              {"workshop_id": 1}, page)
     assert refreshed == [1]
     assert scrape.call_count == 0
@@ -381,7 +381,7 @@ def test_a_signed_out_scrape_records_the_problem_for_the_ui():
 
     with patch("src.web_worker.scrape_extended_details", return_value=miss):
         WebScraperThread("test.db", "nope.lock", {}, None,
-                         lambda: False)._refresh_login_cookie_if_gated({"workshop_id": 1}, miss)
+                         lambda: False)._refresh_login_cookie_if_gated_or_signed_out({"workshop_id": 1}, miss)
 
     problem = session_health.read("test.db")
     assert problem is not None
@@ -396,7 +396,7 @@ def test_a_later_signed_in_scrape_clears_the_problem():
     good = {"description": None, "body": "<div class='account_pulldown'>me</div>"}
 
     WebScraperThread("test.db", "nope.lock", {}, None,
-                     lambda: True)._refresh_login_cookie_if_gated({"workshop_id": 1}, good)
+                     lambda: True)._refresh_login_cookie_if_gated_or_signed_out({"workshop_id": 1}, good)
 
     assert session_health.read("test.db") is None
 
@@ -408,7 +408,7 @@ def test_a_signed_in_page_leaves_a_healthy_session_alone():
 
     with patch("src.web_worker.scrape_extended_details", return_value=miss):
         WebScraperThread("test.db", "nope.lock", {}, None,
-                         lambda: True)._refresh_login_cookie_if_gated({"workshop_id": 1}, miss)
+                         lambda: True)._refresh_login_cookie_if_gated_or_signed_out({"workshop_id": 1}, miss)
 
     assert session_health.read("test.db") is None
 
@@ -422,7 +422,7 @@ def test_a_throttled_page_makes_no_claim_about_the_cookie():
     throttled = {"description": None, "body": "<h1>Too many requests</h1>"}
 
     WebScraperThread("test.db", "nope.lock", {}, None,
-                     lambda: True)._refresh_login_cookie_if_gated({"workshop_id": 1}, throttled)
+                     lambda: True)._refresh_login_cookie_if_gated_or_signed_out({"workshop_id": 1}, throttled)
 
     assert session_health.read("test.db") == {
         "detail": "the login cookie expired", "detected_at": 1000}
