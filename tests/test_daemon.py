@@ -557,7 +557,7 @@ def test_process_item_500_records_attempt_but_not_fetch(db_path, tmp_path):
     existing = {"workshop_id": 1, "status": 200, "api_priority": 5,
                 "api_fetched_at": 1000, "last_fetch_attempted_at": 1000}
 
-    with patch("src.daemon.get_workshop_details_api", return_value={"status": 500}):
+    with patch("src.daemon.get_workshop_details", return_value={"status": 500}):
         daemon._process_item(existing)
 
     conn = get_connection(db_path)
@@ -578,7 +578,7 @@ def test_process_item_404_records_attempt_but_not_fetch(db_path, tmp_path):
     existing = {"workshop_id": 1, "status": 200, "api_priority": 5,
                 "api_fetched_at": 1000, "last_fetch_attempted_at": 1000}
 
-    with patch("src.daemon.get_workshop_details_api", return_value={"status": 404}):
+    with patch("src.daemon.get_workshop_details", return_value={"status": 404}):
         daemon._process_item(existing)
 
     conn = get_connection(db_path)
@@ -607,7 +607,7 @@ def test_process_item_404_clears_every_queue_flag(db_path, tmp_path):
                 "needs_web_scrape": 5, "needs_image": 10,
                 "translation_priority": 3}
 
-    with patch("src.daemon.get_workshop_details_api", return_value={"status": 404}):
+    with patch("src.daemon.get_workshop_details", return_value={"status": 404}):
         daemon._process_item(existing)
 
     conn = get_connection(db_path)
@@ -631,7 +631,7 @@ def test_process_item_success_moves_both_clocks(db_path, tmp_path):
     existing = {"workshop_id": 1, "status": 200, "api_priority": 5,
                 "api_fetched_at": 1000, "last_fetch_attempted_at": 1000}
 
-    with patch("src.daemon.get_workshop_details_api",
+    with patch("src.daemon.get_workshop_details",
                return_value={"title": "T", "status": 200}):
         daemon._process_item(existing)
 

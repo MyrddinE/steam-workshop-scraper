@@ -58,7 +58,7 @@ def _daemon(db_path, tmp_path) -> Daemon:
 
 def _discover(db_path, tmp_path, workshop_id: int = 999) -> int:
     """Run real discovery over one synthetic page result (no network)."""
-    with mock.patch("src.daemon.query_workshop_files") as query, \
+    with mock.patch("src.daemon.query_workshop_newest_page") as query, \
             mock.patch("src.daemon.time.sleep"):
         query.return_value = {
             "total": 1,

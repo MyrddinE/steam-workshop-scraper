@@ -221,13 +221,13 @@ def test_captured_failure_is_handled_gracefully(case):
             assert "description" in result and "tags" in result
         return
 
-    from src.steam_api import get_workshop_details_api
+    from src.steam_api import get_workshop_details
 
     with responses.RequestsMock() as rsps:
         rsps.add(responses.POST, case["url"], body=body,
                  status=case["status"], content_type=case["content_type"])
         try:
-            result = get_workshop_details_api(1, "TEST_KEY")
+            result = get_workshop_details(1, "TEST_KEY")
         except ValueError:
             # Documented current behaviour: a non-JSON body propagates. Recorded
             # here so a change of behaviour is a deliberate edit, not an accident.

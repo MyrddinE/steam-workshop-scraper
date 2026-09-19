@@ -4,10 +4,10 @@ import pytest
 import responses
 import requests
 from src.steam_api import (
-    get_workshop_details_api,
+    get_workshop_details,
     get_workshop_details_batch,
     query_workshop_items,
-    query_workshop_files,
+    query_workshop_newest_page,
     get_player_summaries,
     STEAM_API_MAX_IDS_PER_REQUEST,
 )
@@ -73,7 +73,7 @@ def test_get_workshop_details_api_success():
         status=200
     )
 
-    details = get_workshop_details_api(item_id=104603291, api_key="TEST_KEY")
+    details = get_workshop_details(item_id=104603291, api_key="TEST_KEY")
     assert details is not None
     assert details["title"] == "Extended Spawnmenu"
     assert details["creator"] == "76561197996891752"
@@ -92,7 +92,7 @@ def test_get_workshop_details_api_success():
 ])
 def test_get_workshop_details_api_errors(setup_fn, expected_status):
     setup_fn(STEAM_API_URL)
-    details = get_workshop_details_api(item_id=123, api_key="TEST_KEY")
+    details = get_workshop_details(item_id=123, api_key="TEST_KEY")
     assert details["status"] == expected_status
 @responses.activate
 def test_get_player_summaries_success():
@@ -139,7 +139,7 @@ def test_query_workshop_files_success():
         }
     }
     responses.add(responses.GET, url, json=mock_data, status=200)
-    result = query_workshop_files(4000, cursor="*", api_key="TEST_KEY")
+    result = query_workshop_newest_page(4000, cursor="*", api_key="TEST_KEY")
     assert result["total"] == 2
     assert len(result["items"]) == 2
     assert result["items"][0]["publishedfileid"] == "111"
@@ -149,7 +149,7 @@ def test_query_workshop_files_success():
 def test_query_workshop_files_empty():
     url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
     responses.add(responses.GET, url, json={"response": {}}, status=200)
-    result = query_workshop_files(4000, cursor="*", api_key="TEST_KEY")
+    result = query_workshop_newest_page(4000, cursor="*", api_key="TEST_KEY")
     assert result["total"] == 0
     assert len(result["items"]) == 0
     assert result["next_cursor"] == ""
@@ -158,7 +158,7 @@ def test_query_workshop_files_empty():
 def test_query_workshop_files_error():
     url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
     responses.add(responses.GET, url, status=500)
-    result = query_workshop_files(4000, cursor="*", api_key="TEST_KEY")
+    result = query_workshop_newest_page(4000, cursor="*", api_key="TEST_KEY")
     assert result["total"] == 0
     assert len(result["items"]) == 0
 
@@ -166,7 +166,7 @@ def test_query_workshop_files_error():
 def test_query_workshop_files_partial_response():
     url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
     responses.add(responses.GET, url, json={}, status=200)
-    result = query_workshop_files(4000, cursor="*", api_key="TEST_KEY")
+    result = query_workshop_newest_page(4000, cursor="*", api_key="TEST_KEY")
     assert result["total"] == 0
     assert len(result["items"]) == 0
 
@@ -202,7 +202,7 @@ def test_non_json_body_is_captured_and_still_reported_as_500(tmp_path):
         responses.add(responses.POST, STEAM_API_URL,
                       body="<html><body>proxy error</body></html>",
                       status=200, content_type="text/html")
-        result = get_workshop_details_api(4242, "TEST_KEY")
+        result = get_workshop_details(4242, "TEST_KEY")
     finally:
         capture.configure(None)
 
@@ -229,7 +229,7 @@ def test_non_json_body_with_capture_off_writes_nothing(tmp_path):
     capture.configure(None)
     responses.add(responses.POST, STEAM_API_URL,
                   body="<html>proxy</html>", status=200, content_type="text/html")
-    result = get_workshop_details_api(1, "TEST_KEY")
+    result = get_workshop_details(1, "TEST_KEY")
 
     assert result == {"status": 500, "publishedfileid": 1}
     assert not (tmp_path / "outbox").exists()

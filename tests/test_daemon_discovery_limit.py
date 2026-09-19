@@ -4,7 +4,7 @@ from unittest.mock import patch, MagicMock
 from src.daemon import Daemon
 from src.database import initialize_database, count_never_fetched_items, update_app_tracking_cursor
 
-@patch('src.daemon.query_workshop_files')
+@patch('src.daemon.query_workshop_newest_page')
 @patch('src.daemon.time.sleep')
 def test_seed_database_fetches_multiple_cursors(mock_sleep, mock_query, tmp_path):
     """Test that seed_database continues while next_cursor is provided."""
@@ -31,7 +31,7 @@ def test_seed_database_fetches_multiple_cursors(mock_sleep, mock_query, tmp_path
     assert count_never_fetched_items(db_path) == 120
 
 
-@patch('src.daemon.query_workshop_files')
+@patch('src.daemon.query_workshop_newest_page')
 @patch('src.daemon.time.sleep')
 def test_seed_database_stops_after_enough_items(mock_sleep, mock_query, tmp_path):
     """Test that seed_database stops after discovering >= fill_target items."""
@@ -57,7 +57,7 @@ def test_seed_database_stops_after_enough_items(mock_sleep, mock_query, tmp_path
     assert count_never_fetched_items(db_path) == 110
 
 
-@patch('src.daemon.query_workshop_files')
+@patch('src.daemon.query_workshop_newest_page')
 @patch('src.daemon.time.sleep')
 def test_seed_database_resumes_from_cursor(mock_sleep, mock_query, tmp_path):
     """Test that seed_database resumes from the stored last_cursor."""
@@ -86,7 +86,7 @@ def test_seed_database_resumes_from_cursor(mock_sleep, mock_query, tmp_path):
     assert count_never_fetched_items(db_path) == 120
 
 
-@patch('src.daemon.query_workshop_files')
+@patch('src.daemon.query_workshop_newest_page')
 @patch('src.daemon.time.sleep')
 def test_seed_database_starts_from_star(mock_sleep, mock_query, tmp_path):
     """Test that seed_database starts with cursor='*' when nothing stored."""

@@ -2,7 +2,7 @@ import pytest
 import json
 import sqlite3
 from unittest.mock import patch, MagicMock
-from src.steam_api import get_workshop_details_api
+from src.steam_api import get_workshop_details
 from src.web_scraper import scrape_extended_details
 from src.database import (
     initialize_database, insert_or_update_item, search_items,
@@ -11,7 +11,7 @@ from src.database import (
 
 @pytest.mark.integration
 def test_live_steam_api_contract():
-    details = get_workshop_details_api(item_id=104603291, api_key="")
+    details = get_workshop_details(item_id=104603291, api_key="")
     assert details is not None
     assert details["title"] == "Extended Spawnmenu"
     assert "description" in details

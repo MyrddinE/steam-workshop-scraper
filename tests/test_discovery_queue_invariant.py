@@ -102,7 +102,7 @@ def _api_priority_default(db_path: str) -> str:
 
 def _discover_one_item(db_path: str) -> int:
     """Run the cursor-discovery path and return the one workshop_id it found."""
-    with patch("src.daemon.query_workshop_files") as mock_query, \
+    with patch("src.daemon.query_workshop_newest_page") as mock_query, \
             patch("src.daemon.time.sleep"):
         mock_query.return_value = {
             "total": 1,

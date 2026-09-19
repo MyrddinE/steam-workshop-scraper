@@ -27,7 +27,7 @@ fetch while its scraper, image and discovery threads are already working. Each i
 
 **Missing ids**: `get_workshop_details_batch` keys results by each entry's `publishedfileid`, never by position, and ignores duplicate or unrequested ids. A requested id the response omits is reported as a synthetic `500`, not a `404`: the response not covering an id is a different claim from Steam having deleted the item, and a `404` would mark it permanently dead. It is therefore settled as a temporary failure and retried, rather than being silently skipped at the front of the queue.
 
-**Error handling**: the batch helper returns `None` when the *request* failed — a transport error, a timeout, an HTTP error such as 429, or a body that is not JSON — and the daemon settles every id it carried as a temporary `500`. It returns a mapping (an empty successful response included) when the request returned and parsed. The daemon maps a per-item `404` to `status = -1` (dead), clears every queue flag so the item is in no queue, and persists a `500` as `status = 500` for a later attempt. Both paths stamp `last_fetch_attempted_at`; the `500` path leaves `api_fetched_at` untouched. `get_workshop_details_api(item_id)` remains the one-id spelling and returns the same shapes.
+**Error handling**: the batch helper returns `None` when the *request* failed — a transport error, a timeout, an HTTP error such as 429, or a body that is not JSON — and the daemon settles every id it carried as a temporary `500`. It returns a mapping (an empty successful response included) when the request returned and parsed. The daemon maps a per-item `404` to `status = -1` (dead), clears every queue flag so the item is in no queue, and persists a `500` as `status = 500` for a later attempt. Both paths stamp `last_fetch_attempted_at`; the `500` path leaves `api_fetched_at` untouched. `get_workshop_details(item_id)` remains the one-id spelling and returns the same shapes.
 
 **Dynamic delay**: `api_delay` is driven by **requests**, not items — one change per batched POST, never per item. A request that returns and parses is a success whatever its individual results say (a batch of 50 of which 10 are "not found" is a completely successful API call), and it resets the failure streak. The rule is TCP congestion control, not a safety net: every refused request doubles the delay and healthy operation walks it back down, so the client converges on the fastest rate Steam will sustain — a limit that is not published and may move. Steady state is a sawtooth around that rate.
 
@@ -118,15 +118,15 @@ suppressed discovery permanently while the fetch queue held a single item.
 
 A periodic alternative to cursor-based discovery. Enabled when a `.fetch_new` trigger file exists, when `_cursor_exhausted` is True, or when at least 500 items have been scraped (`api_fetched_at IS NOT NULL`). Runs at most once per 24 hours (tracked via `_last_page_discovery`), unless the trigger file bypasses the cooldown.
 
-Uses `query_workshop_page_updated`, which calls QueryFiles with `query_type=21` (rank by last updated, most recent first) and cursor-based pagination. It walks up to 500 pages per AppID, comparing each item's returned `time_updated` against the stored `steam_updated_at` and upserting new or changed items as bare rows at `api_priority = 5`. Stops when a page yields no new or changed items.
+Uses `query_workshop_updated_page`, which calls QueryFiles with `query_type=21` (rank by last updated, most recent first) and cursor-based pagination. It walks up to 500 pages per AppID, comparing each item's returned `time_updated` against the stored `steam_updated_at` and upserting new or changed items as bare rows at `api_priority = 5`. Stops when a page yields no new or changed items.
 
 After page mode completes, the daemon resumes normal cursor-based discovery.
 
-### `query_workshop_files` (steam_api)
+### `query_workshop_newest_page` (steam_api)
 
 Calls `IPublishedFileService/QueryFiles/v1/` with cursor-based pagination. Parameters: `query_type=1` (publication date), `cursor`, `numperpage=100`, `appid`. Returns `{total, items, next_cursor}`. Rate-limited via `_rate_limit()`.
 
-### `query_workshop_page_updated` (steam_api)
+### `query_workshop_updated_page` (steam_api)
 
 Same API endpoint but with `query_type=21` (last updated) and cursor-based pagination. Used exclusively by `_run_page_discovery`. Returns the same `{total, items, next_cursor}` shape.
 
@@ -138,7 +138,7 @@ Same API endpoint but with `query_type=21` (last updated) and cursor-based pagin
 
 Calls `ISteamRemoteStorage/GetPublishedFileDetails/v1/` once for many ids — `itemcount=N` with `publishedfileids[0..N-1]` — and returns a `{id: detail}` mapping. Results are matched by each entry's `publishedfileid`, never by position, so a reordered, duplicated or extended response cannot mis-assign a result. A requested id the response omits is filled in as `{status: 500}` — deliberately not a `404`, which would mark the item permanently dead. Returns `None` when the request itself failed (transport, timeout, HTTP error, or unparseable body); that is the signal the daemon backs off on. The per-request ceiling is `STEAM_API_MAX_IDS_PER_REQUEST = 100`, taken from the documented `GetPlayerSummaries` limit and applied to `GetPublishedFileDetails` too, which publishes no cap.
 
-### `get_workshop_details_api` (steam_api)
+### `get_workshop_details` (steam_api)
 
 The one-id spelling of the batch call, kept for existing callers. Returns `{status: 500}` on a request failure and `{status: 404}` when the item is not found or `result != 1`. Returns the raw detail dict otherwise, containing the API's `title`, `description`, `tags`, `file_size`, `preview_url`, `creator`, `subscriptions`, `favorited`, `views`, `time_created`, `time_updated`, and more (these are the raw API field names; `_merge_and_clean_api_data` renames some of them before storage).
 

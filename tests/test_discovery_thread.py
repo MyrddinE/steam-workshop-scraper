@@ -131,7 +131,7 @@ def test_a_refused_discovery_page_slows_the_api_delay(db):
     """Discovery traffic is the same key, so the controller must see it."""
     daemon = _daemon(db)
     daemon.api_delay = 1.0
-    with patch("src.daemon.query_workshop_files", return_value={"error": "refused"}), \
+    with patch("src.daemon.query_workshop_newest_page", return_value={"error": "refused"}), \
          patch("src.daemon.time.sleep"), patch("src.pacing.wait"):
         daemon.seed_database(fill_target=100)
     assert daemon.api_delay == 2.0
@@ -141,7 +141,7 @@ def test_a_healthy_discovery_page_decays_the_api_delay(db):
     daemon = _daemon(db)
     daemon.api_delay = 1.0
     daemon._api_clock._at = pacing.now() - pacing.HALF_LIFE_SECONDS
-    with patch("src.daemon.query_workshop_files",
+    with patch("src.daemon.query_workshop_newest_page",
                return_value={"total": 0, "items": [], "next_cursor": ""}), \
          patch("src.daemon.time.sleep"), patch("src.pacing.wait"):
         daemon.seed_database(fill_target=100)
@@ -152,7 +152,7 @@ def test_an_abandoned_page_is_not_counted_as_a_refusal(db):
     """A shutdown is not evidence about the request rate."""
     daemon = _daemon(db)
     daemon.api_delay = 1.0
-    with patch("src.daemon.query_workshop_files", return_value={"abandoned": True}), \
+    with patch("src.daemon.query_workshop_newest_page", return_value={"abandoned": True}), \
          patch("src.daemon.time.sleep"), patch("src.pacing.wait"):
         daemon.seed_database(fill_target=100)
     assert daemon.api_delay == 1.0, "abandoning a wait must not move the delay"
@@ -162,7 +162,7 @@ def test_the_discovery_walk_reports_how_much_it_found(db):
     """The thread signals on the strength of this, so it has to be real."""
     daemon = _daemon(db)
     items = [{"publishedfileid": str(i)} for i in range(1, 4)]
-    with patch("src.daemon.query_workshop_files",
+    with patch("src.daemon.query_workshop_newest_page",
                return_value={"total": 3, "items": items, "next_cursor": ""}), \
          patch("src.daemon.time.sleep"), patch("src.pacing.wait"):
         found = daemon.seed_database(fill_target=100)

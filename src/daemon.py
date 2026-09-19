@@ -26,13 +26,13 @@ from src.database import (
     WORKSHOP_ITEM_COLUMNS,
 )
 from src.steam_api import (
-    get_workshop_details_api,
+    get_workshop_details,
     get_workshop_details_batch,
     query_workshop_items,
     get_player_summaries,
-    query_workshop_files,
+    query_workshop_newest_page,
     set_api_delay,
-    query_workshop_page_updated,
+    query_workshop_updated_page,
     STEAM_API_MAX_IDS_PER_REQUEST,
 )
 from src.translator import TranslatorThread, is_ascii
@@ -58,7 +58,7 @@ from src.workshop_folders import WorkshopFolders, DOWNLOAD_SCAN_INTERVAL_SECONDS
 HANDLED_API_STATUSES = frozenset({200, 404, 500})
 
 # The only API outcome that cannot succeed on retry. Everything else -- 500,
-# transport exceptions (which get_workshop_details_api reports as 500), and any
+# transport exceptions (which get_workshop_details reports as 500), and any
 # status without its own branch -- is retried at one priority level lower.
 PERMANENT_API_STATUSES = frozenset({404})
 
@@ -852,7 +852,7 @@ class Daemon:
 
         # Step 1: Query API
         if api_data is None:
-            api_data = get_workshop_details_api(item_id, self.api_key)
+            api_data = get_workshop_details(item_id, self.api_key)
         api_status = api_data.get("status", 0)
 
         if api_status not in HANDLED_API_STATUSES:
@@ -1074,7 +1074,7 @@ class Daemon:
                 images.blocks_retry(existing_ext)
                 or (revision_unchanged and images.can_render_image(existing_ext))):
             raise_image_priority(self.db_path, item_id,
-                           max(3, requested_priority) if enriched else max(1, requested_priority))
+                                 max(3, requested_priority) if enriched else max(1, requested_priority))
             queued = True
         return ScrapeImageOutcome(enriched=enriched, queued=queued)
 
@@ -1313,8 +1313,8 @@ class Daemon:
             while cursor and self.running:
                 if self._pid_file_removed():
                     break
-                result = query_workshop_files(appid, cursor=cursor, api_key=self.api_key,
-                                              keep_running=self._discovery_alive)
+                result = query_workshop_newest_page(appid, cursor=cursor, api_key=self.api_key,
+                                                    keep_running=self._discovery_alive)
                 if result.get("abandoned"):
                     logging.info("Abandoned discovery for AppID %s: the daemon is stopping.", appid)
                     break
@@ -1407,7 +1407,7 @@ class Daemon:
             cursor = "*"
             page = 0
             while cursor and self.running and page < 500:
-                result = query_workshop_page_updated(
+                result = query_workshop_updated_page(
                     appid, cursor, self.api_key, keep_running=self._discovery_alive)
                 if result.get("abandoned"):
                     logging.info("Abandoned page discovery for AppID %s: the daemon is stopping.", appid)

@@ -70,7 +70,7 @@ def test_count_unscraped_items_keeps_its_meaning(db_path):
 
 # --- the guard -------------------------------------------------------------
 
-@patch("src.daemon.query_workshop_files")
+@patch("src.daemon.query_workshop_newest_page")
 @patch("src.daemon.time.sleep")
 def test_guard_runs_discovery_when_unscraped_backlog_is_unfetchable(mock_sleep, mock_query, db_path):
     """The regression: a large never-fetched, unqueued backlog must not suppress discovery."""
@@ -85,7 +85,7 @@ def test_guard_runs_discovery_when_unscraped_backlog_is_unfetchable(mock_sleep, 
     assert mock_query.called, "discovery must run when the fetch queue cannot supply work"
 
 
-@patch("src.daemon.query_workshop_files")
+@patch("src.daemon.query_workshop_newest_page")
 @patch("src.daemon.time.sleep")
 def test_guard_skips_discovery_when_fetchable_queue_is_deep(mock_sleep, mock_query, db_path):
     """A genuine backlog still suppresses discovery -- the guard's purpose is intact."""
@@ -99,7 +99,7 @@ def test_guard_skips_discovery_when_fetchable_queue_is_deep(mock_sleep, mock_que
     assert not mock_query.called, "discovery should be skipped when the queue is genuinely full"
 
 
-@patch("src.daemon.query_workshop_files")
+@patch("src.daemon.query_workshop_newest_page")
 @patch("src.daemon.time.sleep")
 def test_guard_ignores_dead_items_holding_priority(mock_sleep, mock_query, db_path):
     """Dead rows keep api_priority > 0; they are not work and must not fill the queue."""
@@ -112,7 +112,7 @@ def test_guard_ignores_dead_items_holding_priority(mock_sleep, mock_query, db_pa
     assert mock_query.called, "dead items must not be counted as outstanding work"
 
 
-@patch("src.daemon.query_workshop_files")
+@patch("src.daemon.query_workshop_newest_page")
 @patch("src.daemon.time.sleep")
 def test_default_target_still_discovers_a_queue_above_the_old_buffer(mock_sleep, mock_query, db_path):
     """Pins the default: 150 fetchable items must leave it below the threshold.
