@@ -32,7 +32,7 @@ The cross-platform solution uses the PID file as a shutdown indicator:
 2. The daemon checks `os.path.exists(".daemon.pid")` at several points: at the top of `process_batch` before the housekeeping, after the batch read, per item, per details chunk, before the creator refresh, per discovery or subscription page, and every second in the idle wait. If the file is missing, it initiates graceful shutdown.
 3. The TUI's Stop button deletes the PID file (which the daemon detects at its next checkpoint).
 4. The controller signals a process directly only when it started that process itself and holds its `Popen` handle — on Windows that is the daemon; on Unix the `--daemon` double-fork makes the daemon a grandchild, so the file is the channel. A PID merely read out of the file is never signalled: a stale or corrupted file can name an unrelated process, and killing it would report the daemon stopped while it kept running.
-5. It waits up to `STOP_TIMEOUT_SECONDS` (15 s) for exit. If it owns the process it then force-kills it through the handle; if it does not, it removes the file and reports that the daemon did not exit rather than killing an unknown PID.
+5. It waits up to `STOP_TIMEOUT_SECONDS` (25 s, derived in `src/daemon_control.py` as the longest single main-thread block, 15 s, plus the daemon's 5 s join budget and a 5 s margin). If it owns the process it then force-kills it through the handle; if it does not, it removes the file and reports that the daemon did not exit rather than killing an unknown PID.
 
 ---
 

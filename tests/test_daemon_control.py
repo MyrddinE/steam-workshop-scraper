@@ -61,6 +61,30 @@ def _pid_file(tmp_path, name=".daemon.pid"):
     return str(tmp_path / name)
 
 
+def test_the_stop_grace_is_the_daemons_documented_worst_case():
+    """The grace and the daemon's own budget are tied constants.
+
+    The daemon's main thread can be inside one 15 s request or busy-timeout
+    wait, then it needs its 5 s join budget and the margin for the PID-file
+    tick, the failure-capture flush and teardown. The budget half is mirrored
+    here rather than imported (importing ``src.daemon`` would pull its whole
+    dependency graph into the TUI and web processes), so this test is what
+    stops the two drifting apart. The 15 s request bound itself is pinned only
+    by the comment in ``daemon_control`` -- there is no cheap way to read a
+    ``requests`` timeout off the call graph, and asserting a literal here would
+    only duplicate it.
+    """
+    from src.daemon import SHUTDOWN_BUDGET_SECONDS
+
+    assert daemon_control._DAEMON_JOIN_BUDGET_SECONDS == SHUTDOWN_BUDGET_SECONDS, (
+        "the join budget mirrored from src/daemon.py has drifted")
+    assert daemon_control.STOP_TIMEOUT_SECONDS == (
+        daemon_control._LONGEST_MAIN_THREAD_BLOCK_SECONDS
+        + SHUTDOWN_BUDGET_SECONDS
+        + daemon_control._SHUTDOWN_MARGIN_SECONDS
+    ), "STOP_TIMEOUT_SECONDS must spell out the derivation, not a guessed number"
+
+
 def test_read_pid_handles_missing_empty_and_garbage(tmp_path):
     pid_file = _pid_file(tmp_path)
     controller = DaemonController(pid_file=pid_file)

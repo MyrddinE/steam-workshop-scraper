@@ -13,8 +13,37 @@ import subprocess
 import sys
 import time
 
-# How long a graceful stop waits before escalating to a forced kill.
-STOP_TIMEOUT_SECONDS = 15.0
+# How long a graceful stop waits before escalating to a forced kill. It is
+# derived from the daemon's documented worst case, not guessed:
+#
+#   the longest single blocking call the daemon's *main thread* can be inside
+#   when the stop is requested          15 s
+#     -- the SQLite busy timeout on every connection (src/database.py) and the
+#        subscriptions page fetch (src/subscription_sync._fetch_page), both 15 s;
+#        the Steam API calls on that path are 10 s (src/steam_api.py), and the
+#        15 s workers (image download, web scrape, page discovery) run on their
+#        own threads, so the largest single main-thread block is 15 s.
+#   + the daemon's own join budget                5 s  (SHUTDOWN_BUDGET_SECONDS in src/daemon.py)
+#   + margin                                      5 s  (the up-to-1 s PID-file
+#        tick in Daemon._wait_for_work, the failure-capture flush, this
+#        controller's own half-second poll and process teardown)
+#   = 25 s
+#
+# The request/DB block and the daemon's join budget are therefore tied to this
+# number: raising either without raising STOP_TIMEOUT_SECONDS means the
+# controller force-kills a daemon that is still unwinding. The join budget is
+# written out rather than imported so this module does not drag the daemon's
+# whole import graph into the TUI and web processes; a test pins the two
+# together.
+_LONGEST_MAIN_THREAD_BLOCK_SECONDS = 15.0
+_DAEMON_JOIN_BUDGET_SECONDS = 5.0
+_SHUTDOWN_MARGIN_SECONDS = 5.0
+
+STOP_TIMEOUT_SECONDS = (
+    _LONGEST_MAIN_THREAD_BLOCK_SECONDS
+    + _DAEMON_JOIN_BUDGET_SECONDS
+    + _SHUTDOWN_MARGIN_SECONDS
+)
 
 # The log view is a preview, not an export. The production log runs to hundreds
 # of megabytes, so every read is bounded and the caller is told when its view has

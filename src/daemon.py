@@ -143,11 +143,13 @@ DISCOVERY_IDLE_SECONDS = 30.0
 # and waited for together, and whatever is still alive when this expires is named
 # in the log and left behind.
 #
-# It is deliberately a single-digit number well inside the controller's
-# ``STOP_TIMEOUT_SECONDS`` (15 s in ``src/daemon_control.py``): the notice of a
-# removed PID file can take up to about a second to reach the loop in
-# ``_wait_for_work``, the join phase adds this, and the closing snapshot and
-# failure-capture flush still have to fit in what remains before the kill.
+# It is deliberately a single-digit number. The controller's
+# ``STOP_TIMEOUT_SECONDS`` (25 s in ``src/daemon_control.py``) is derived as
+# the longest single main-thread block (15 s) plus this budget plus a 5 s
+# margin, so this constant is one of the two terms that set the grace and must
+# not be raised without raising that one; ``tests/test_daemon_control.py``
+# pins the pairing. ``daemon_control`` mirrors this value instead of importing
+# it, so the coupling is stated in both comments and checked by that test.
 SHUTDOWN_BUDGET_SECONDS = 5.0
 
 # The owner's subscriptions are reconciled once per appid at startup and then on
