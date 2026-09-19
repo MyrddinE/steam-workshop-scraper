@@ -42,8 +42,9 @@ def test_format_count():
     assert "344K" in format_count(344000)
     assert "3.44M" in format_count(3440000)
     assert "34.4M" in format_count(34400000)
-    assert "N/A" in format_count(0)
+    assert "0" in format_count(0) and "N/A" not in format_count(0)
     assert "N/A" in format_count(None)
+    assert "N/A" in format_count("")
 
 # ── Wilson score filter evaluation ───────────────────────────────────────────
 

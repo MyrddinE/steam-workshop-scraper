@@ -121,8 +121,12 @@ def format_size(size_bytes):
         return "N/A"
 
 def format_count(n):
-    """Humanizes a number to 3 significant digits with K/M suffix and color markup."""
-    if not n or n == 0:
+    """Humanizes a number to 3 significant digits with K/M suffix and color markup.
+
+    A zero is a measured zero and reads "0"; only a value that is missing or
+    cannot be coerced to a number is unknown and reads "N/A".
+    """
+    if n is None or n == "":
         return "[gray]N/A[/gray]"
     try:
         n = int(n)
