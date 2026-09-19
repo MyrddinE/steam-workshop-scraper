@@ -133,6 +133,14 @@ Ordering (`get_next_batch_for_translation`) is `priority DESC`, then NULL-`queue
 of dated rows, then `queued_at ASC`. The explicit NULL-first term keeps the legacy backlog from
 being jumped by newly queued work at the same priority.
 
+`idx_translation_queue_lookup` on `(item_type, item_id, field)` serves both the per-field lookup
+`queue_field_for_translation` runs before every queue write and migration 22→23's correlated
+`NOT EXISTS` repair, which constrains only the first two columns. Unlike the other query indexes it
+is created by `_create_schema` rather than `_ensure_indexes`: the repair runs inside the migration
+loop, before `_ensure_indexes` does, so an index created there would not exist yet when the repair
+scans. Creating it in the unversioned schema also means an existing database picks it up on the next
+startup without a migration step.
+
 ## Queue Priorities
 
 The work-queue columns share a vocabulary but not a single distribution. The intended scale is:
