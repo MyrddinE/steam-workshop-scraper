@@ -415,17 +415,25 @@ A daemon thread that batch-translates text fields. Uses OpenAI-compatible API wi
 1. Builds a prompt containing all fields as a JSON array with `{id, field, text}` entries.
 2. Sends to the OpenAI API. Parses the response, accepting both `"translated"` and `"text"` keys.
 3. For each successfully translated field, updates the corresponding `_en` column on `workshop_items` or `users`, stamps `translate_version` (or `translated_at` on `users`), and deletes the queue entry.
-4. After the batch, for each item that had translations processed, checks if any remaining queue entries exist. If none remain, sets `translation_priority = 0` and stamps the item's `translated_at` — our clock for the completion of the item as a whole — in the same statement and transaction. A field write while another field is still queued is a partial stage and does not stamp.
+4. After the batch, for each translated id — a `(item_type, item_id)` pair, so a creator's steamid can never be counted or completed against `workshop_items` — checks whether any queue entry for that id remains. For an **item** with none left, it sets `translation_priority = 0` and stamps the item's `translated_at` — our clock for the completion of the item as a whole — in the same statement and transaction; a field write while another field is still queued is a partial stage and does not stamp. For a **creator** with none left, it clears `users.translation_priority`: the per-field write in step 3 already stamped `users.translated_at`, and a creator has no version key to stamp.
 
 **Error recovery**: API failures log an error and retry on the next cycle. Individual field failures (no translation returned) are counted and logged.
 
 ### `flag_for_translation` (database)
 
-Sets `translation_priority` on a `workshop_items` or `users` row. Used by the daemon when a non-ASCII field is first detected.
+Sets `translation_priority` on a `workshop_items` or `users` row and nothing else.
+It is the **superseded producer** from the era when the mirror *was* the queue:
+`get_next_translation_item` scanned both tables by that flag, so raising it was a
+complete producer and `_build_user_record` calling it directly was correct. Nothing
+in `src/` calls either function now — only `tests/test_database.py` exercises them —
+because the current design queues a field with `flag_field_for_translation` and
+derives the mirror from the queue. Raising the mirror without a queue row is exactly
+the stranded state migrations 22→23 and 27→28 repair, so these two are traps rather
+than tools; see [code-issues.md](code-issues.md) entry 45.
 
 ### `flag_field_for_translation` (database)
 
-Inserts or bumps an entry in `translation_queue`, and also raises the parent row's `translation_priority` via `MAX`. Checks if the field already exists in the queue; if so, bumps its priority (never downgrades). If new, inserts with the given priority and `queued_at = now`.
+Inserts or bumps an entry in `translation_queue`, and also raises the parent row's `translation_priority` via `MAX`. Checks if the field already exists in the queue; if so, bumps its priority (never downgrades). If new, inserts with the given priority and `queued_at = now`. This is the **only** producer: it queues item fields and, since issue 45, a creator's `personaname_en` as well, called by `_store_user_record` after the profile upsert (the mirror needs the `users` row to exist).
 
 **Both writes happen in one transaction on one connection.** They used to run on two connections, and the translator drains the queue on its own thread: a drain landing between them deleted the row and zeroed the mirror, after which the second write raised the mirror again with nothing queued behind it. The item then read as permanently pending, because every producer skips a translation that is already current, so nothing ever re-queued the field to clear it. Migration 22→23 repairs the rows the old helper stranded.
 
@@ -435,8 +443,9 @@ Called when items are displayed in the list or detail view. For each non-ASCII t
 
 ### What queues a field for translation
 
-Four events add a field to `translation_queue`. They all apply the same freshness
-rule; they differ only in which fields they consider and at what priority.
+Five events add a field to `translation_queue`. Four of them apply the same
+freshness rule; they differ only in which fields they consider and at what
+priority. The fifth, a creator's name, is the exception and says why below.
 
 | Trigger | Code path | Fields | Priority | Skips a current translation? |
 |---|---|---|---|---|
@@ -444,6 +453,7 @@ rule; they differ only in which fields they consider and at what priority.
 | Web scrape succeeds | `web_worker.py`, `WebScraperThread` | `extended_description_en` | 3 | Yes |
 | Item appears in a list | `bump_translation_for_list` (TUI list load, `POST /api/search`) | all three | 5 | Yes |
 | Item opened in the detail pane | `bump_translation_for_detail` (TUI selection, `GET /api/item/<id>`) | all three | 10 | Yes |
+| Daemon refreshes a creator's profile | `daemon.py`, `_store_user_record` (from `_refresh_creators` and `expand_user_discovery`) | `personaname_en` | 1 | **No** |
 
 Two conditions apply to every trigger:
 
@@ -458,6 +468,18 @@ its `translate_version` is not older than the item's `steam_updated_at`. The tra
 `translate_version` with `steam_updated_at` at translation time, so a source edit makes the
 translation stale and it is re-queued; unchanged text is left alone. See
 [timestamps.md](timestamps.md).
+
+**A creator's name is the exception to that freshness rule, deliberately.** A
+creator has no `steam_updated_at`, and the only clock the rule could compare —
+`api_fetched_at` — moves on every profile refresh, so "current" cannot survive the
+very refresh that calls the producer. Skipping there would leave the Creator
+Translation bar counting a name as untranslated with nothing queued behind it, so
+`_store_user_record` queues every non-ASCII name it is handed, right after the
+profile upsert (`flag_field_for_translation` raises the mirror in the same
+transaction as the queue row, so the `users` row must exist first). The cost is at
+most one re-translation per creator per refresh cycle, and a profile is only
+refreshed when an enriched item proposes its creator and the profile's
+`api_fetched_at` is older than `user_staleness_days` (default 90).
 
 This replaced a pair of defects. The two background triggers used to check only that the text was
 non-ASCII, while the two user-view triggers also checked for an existing translation. Since a

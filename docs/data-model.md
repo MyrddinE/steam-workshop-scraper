@@ -110,10 +110,10 @@ One row per Steam creator whose profile has been fetched, keyed by `steamid`.
 |---|---|---|
 | `steamid` | STEAM | SteamID64, primary key. |
 | `personaname` | STEAM | Display name. |
-| `personaname_en` | TRANSLATED | Translated display name. |
+| `personaname_en` | TRANSLATED | Translated display name, written by the translator when it drains the creator's `personaname_en` queue row. |
 | `api_fetched_at` | STATE (ours) | Our clock: when the profile was last refreshed. |
 | `translated_at` | TRANSLATED/STATE | Our wall-clock time of the last translation. This is **not** a Steam version key: users have no `steam_updated_at`. |
-| `translation_priority` | QUEUE | Name translation priority. |
+| `translation_priority` | QUEUE | Translation queue mirror, exactly as on `workshop_items`: raised by `flag_field_for_translation` in the same transaction as the `translation_queue` row and zeroed by the translator when the creator's last queue row is deleted. A priority above `0` therefore means the creator has at least one queued field. Migration 27→28 queued the flags that had no row behind them and cleared the ones with nothing left to translate. |
 
 ## `translation_queue`
 
@@ -179,9 +179,14 @@ things depend on it:
 These are properties of the current implementation, stated so a reader does not infer behaviour
 that is not there.
 
-* **`translate_version` drives re-translation; `scrape_version` is only a record.** A translation
-  is current when its `translate_version` is not older than the item's `steam_updated_at`, and every
-  translation trigger applies that rule (see [timestamps.md](timestamps.md)). `scrape_version` is
+* **`translate_version` drives item re-translation; `scrape_version` is only a record.** An item
+  translation is current when its `translate_version` is not older than the item's
+  `steam_updated_at`, and every *item* translation trigger applies that rule (see
+  [timestamps.md](timestamps.md)). A **creator's** name is the one exception, and deliberately so: a
+  creator has no `steam_updated_at`, and `api_fetched_at` — the only clock left — moves on every
+  profile refresh, so the refresh queues every non-ASCII name it fetches rather than trying to prove
+  the name unchanged ([data-pipeline.md](data-pipeline.md#what-queues-a-field-for-translation)).
+  `scrape_version` is
   written by the web scraper and the image worker, but no code compares it: the daemon decides
   whether to re-queue the HTML scrape from `steam_updated_at` and whether `extended_description` is
   already present, so the HTML scrape refreshes on an item update and the image worker uses its own

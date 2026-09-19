@@ -217,7 +217,7 @@ USER_PRIORITY_FLOOR = 5
 # than local to `initialize_database` because the migration tests assert that
 # the chain reaches it, and a magic number repeated in nine test files is a
 # number that will be wrong after the next migration.
-EXPECTED_VERSION = 27
+EXPECTED_VERSION = 28
 
 def _build_text_search_clauses(sql: str, params: list, q_str: str, cols: list[str]) -> tuple[str, list]:
     """Applies positive/negative text search tokens to SQL via LIKE clauses."""
@@ -1980,11 +1980,13 @@ def initialize_database(db_path: str):
         # current, so nothing ever re-queues the field to clear it. The helper is
         # now a single transaction; this repairs the rows the old one stranded.
         #
-        # Only `workshop_items`: a user's name translation is tracked on
-        # `users.translation_priority` and never gets `translation_queue` rows,
-        # so that mirror is not expected to match this table. Only the high
-        # direction is repaired -- a queue row whose mirror is zero still has its
-        # work picked up, because the translator selects on the queue, not the
+        # Only `workshop_items`: at this version a user's name translation was
+        # tracked on `users.translation_priority` alone and never got a
+        # `translation_queue` row, so that mirror was not expected to match this
+        # table. v27->v28 makes the user mirror a mirror of the queue as well and
+        # repairs the creator rows this migration deliberately skipped. Only the
+        # high direction is repaired -- a queue row whose mirror is zero still has
+        # its work picked up, because the translator selects on the queue, not the
         # mirror -- and dead rows are not special-cased: a mirror with nothing
         # queued is wrong for them too.
         cursor.execute(
@@ -2141,6 +2143,83 @@ def initialize_database(db_path: str):
         logging.info(
             "Migration 26->27 complete. The three completion clocks stay NULL on "
             "every existing row; the stages fill them in from now on."
+        )
+
+    if db_version < 28:
+        logging.info(
+            "Running migration 27->28: returning stranded creator names to the "
+            "translation queue..."
+        )
+
+        # Issue 45: a creator's name was queued by raising
+        # `users.translation_priority`, which was the whole producer while
+        # `get_next_translation_item` scanned both tables by that flag. When the
+        # per-field `translation_queue` replaced that scan the producer was never
+        # ported, so every creator flagged since has had no queue row behind it
+        # and `translation_queue` has never held an `item_type='user'` row. This
+        # is the user-side counterpart of v22->v23, which repaired the item side
+        # of the same stranded-mirror state, and of migration 2->3, which
+        # backfilled raised item mirrors into per-field queue rows.
+        #
+        # Two statements, in this order:
+        #   1. every flagged creator whose name genuinely needs translating gets
+        #      the queue row the producer owed it;
+        #   2. every remaining flagged creator loses the flag, because after (1)
+        #      a raised mirror with no queue row is stranded again.
+        #
+        # The predicates are inlined rather than imported: a migration must keep
+        # meaning what it meant at this version, so it cannot track a helper that
+        # may change later. The ASCII test is the one `metrics._ascii_sql`
+        # documents -- UTF-8 bytes equal characters exactly when the text is
+        # ASCII -- and the currency rule is the one `metrics._creator_current_sql`
+        # applies to the Creator Translation bar, so the migration, the bar and
+        # the producer agree on what "needs translating" means. The mirror's own
+        # value is carried into the row's priority, as in 2->3.
+        #
+        # *Measured in the 2026-09-18 backup*: 7,237 creators carried the flag,
+        # 7,233 of them with a non-ASCII name and no current translation -- which
+        # statement (1) queues -- and 4 whose name is ASCII, which statement (2)
+        # clears. No creator needing translation was unflagged, so the flag is a
+        # complete census of the backlog and this migration need look no further.
+        cursor.execute(
+            "INSERT INTO translation_queue "
+            "(item_type, item_id, field, original_text, priority, queued_at) "
+            "SELECT 'user', steamid, 'personaname_en', personaname, "
+            "       translation_priority, ? "
+            "FROM users "
+            "WHERE translation_priority > 0 "
+            "  AND personaname IS NOT NULL AND personaname <> '' "
+            "  AND NOT (length(CAST(personaname AS BLOB)) = length(personaname)) "
+            "  AND NOT (COALESCE(personaname_en, '') <> '' AND ("
+            "             api_fetched_at IS NULL "
+            "             OR (translated_at IS NOT NULL "
+            "                 AND translated_at >= api_fetched_at))) "
+            "  AND NOT EXISTS ("
+            "      SELECT 1 FROM translation_queue q "
+            "      WHERE q.item_type = 'user' AND q.item_id = users.steamid "
+            "        AND q.field = 'personaname_en')",
+            (int(time.time()),),
+        )
+        queued = cursor.rowcount
+
+        cursor.execute(
+            "UPDATE users SET translation_priority = 0 "
+            "WHERE translation_priority > 0 "
+            "AND NOT EXISTS ("
+            "    SELECT 1 FROM translation_queue q "
+            "    WHERE q.item_type = 'user' AND q.item_id = users.steamid"
+            ")"
+        )
+        cleared = cursor.rowcount
+
+        conn.commit()
+        cursor.execute("PRAGMA user_version = 28")
+        conn.commit()
+        logging.info(
+            "Migration 27->28 complete. Queued %d creator name(s) whose flag had "
+            "no queue row behind it, and cleared %d flag(s) with nothing left to "
+            "translate.",
+            queued, cleared,
         )
 
     # Create indexes for faster querying

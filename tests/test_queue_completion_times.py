@@ -144,7 +144,7 @@ def _regress_to_v26(db_path):
 
 def test_a_fresh_database_carries_the_three_completion_clocks(db_path):
     columns, version = _columns_and_version(db_path)
-    assert EXPECTED_VERSION == 27, "the clocks are migration 26->27"
+    assert EXPECTED_VERSION >= 27, "the clocks are migration 26->27"
     assert version == EXPECTED_VERSION
     assert set(COMPLETION_COLUMNS) <= columns
     assert set(COMPLETION_INDEXES) <= set(_index_sql(db_path))
