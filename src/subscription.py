@@ -128,7 +128,7 @@ def subscription_state(item: dict) -> str:
     return NEVER
 
 
-def spec(state: str) -> tuple[str, str, str, str]:
+def marker_spec(state: str) -> tuple[str, str, str, str]:
     """``(glyph, colour, css class, label)`` for ``state``."""
     try:
         return MARKER_SPECS[state]
@@ -138,12 +138,12 @@ def spec(state: str) -> tuple[str, str, str, str]:
 
 def glyph(state: str) -> str:
     """The Unicode character the marker draws for ``state``."""
-    return spec(state)[0]
+    return marker_spec(state)[0]
 
 
 def colour(state: str) -> str:
     """The hex colour both front ends use for ``state``."""
-    return spec(state)[1]
+    return marker_spec(state)[1]
 
 
 def tooltip(state: str) -> str:

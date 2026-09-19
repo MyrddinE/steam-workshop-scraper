@@ -303,7 +303,7 @@ def _attach_subscription(item: dict) -> dict:
     what "previously" looks like is the drift the shared module exists to stop.
     """
     state = subscription.subscription_state(item)
-    glyph, colour, css, label = subscription.spec(state)
+    glyph, colour, css, label = subscription.marker_spec(state)
     item["subscription_state"] = state
     item["subscription_glyph"] = glyph
     item["subscription_colour"] = colour

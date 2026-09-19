@@ -1547,7 +1547,7 @@ class DetailsPane(VerticalScroll):
         # The marker and its colour come from src/subscription.py, the same table
         # the web grid and pane render from.
         sub_state = subscription.subscription_state(item)
-        sub_glyph, sub_colour, _css, _label = subscription.spec(sub_state)
+        sub_glyph, sub_colour, _css, _label = subscription.marker_spec(sub_state)
         sub_marker = self.query_one("#item-sub-marker", Label)
         sub_marker.update(f"[{sub_colour}]{sub_glyph}[/]")
         sub_marker.tooltip = subscription.tooltip(sub_state)
@@ -1713,7 +1713,7 @@ class WorkshopItem(ListItem):
         to change it.
         """
         state = subscription.subscription_state(self.item_data)
-        glyph, colour, _css, _label = subscription.spec(state)
+        glyph, colour, _css, _label = subscription.marker_spec(state)
         return f"[{colour}]{glyph}[/]"
 
     def compose(self) -> ComposeResult:

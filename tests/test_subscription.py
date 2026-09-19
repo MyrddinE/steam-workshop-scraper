@@ -132,7 +132,7 @@ def test_each_adjacent_pair_of_the_stated_precedence():
 
 # --- the appearance table ---------------------------------------------------
 
-def test_every_state_has_a_spec_and_a_tooltip():
+def test_every_state_has_a_marker_spec_and_a_tooltip():
     assert set(subscription.MARKER_SPECS) == set(subscription.STATE_PRECEDENCE)
     assert set(subscription.MARKER_TOOLTIPS) == set(subscription.STATE_PRECEDENCE)
 
@@ -164,7 +164,7 @@ def test_downloaded_is_a_solid_star_in_a_green_of_its_own():
 
 
 def test_the_downloaded_label_and_tooltip_say_what_it_means():
-    assert subscription.spec(subscription.DOWNLOADED)[3] == "Subscribed, and downloaded"
+    assert subscription.marker_spec(subscription.DOWNLOADED)[3] == "Subscribed, and downloaded"
     assert (subscription.tooltip(subscription.DOWNLOADED)
             == "You are subscribed to this item and Steam has downloaded it.")
 
@@ -177,9 +177,9 @@ def test_queued_and_previously_share_a_glyph_but_not_a_colour():
             != subscription.colour(subscription.PREVIOUSLY))
 
 
-def test_the_spec_and_the_named_getters_agree():
+def test_the_marker_spec_and_the_named_getters_agree():
     for state in subscription.STATE_PRECEDENCE:
-        glyph, colour, css, label = subscription.spec(state)
+        glyph, colour, css, label = subscription.marker_spec(state)
         assert (glyph, colour) == (
             subscription.glyph(state), subscription.colour(state))
         assert css and label
@@ -199,13 +199,13 @@ def test_only_the_three_actionable_states_are_clickable():
 
 
 def test_every_css_class_is_distinct():
-    assert len({subscription.spec(s)[2] for s in subscription.STATE_PRECEDENCE}) == len(
+    assert len({subscription.marker_spec(s)[2] for s in subscription.STATE_PRECEDENCE}) == len(
         subscription.STATE_PRECEDENCE)
 
 
 def test_an_unknown_state_is_a_loud_error():
     with pytest.raises(ValueError):
-        subscription.spec("nonsense")
+        subscription.marker_spec("nonsense")
     with pytest.raises(ValueError):
         subscription.glyph("nonsense")
     with pytest.raises(ValueError):
@@ -259,7 +259,7 @@ def test_the_template_renders_the_glyphs_and_colours_from_the_shared_table():
     for name in ("showSubscriptionMarker", "_applySub", "onSubMarkerClick"):
         body = _function_body(html, name)
         for state in subscription.STATE_PRECEDENCE:
-            _glyph, colour, _css, _label = subscription.spec(state)
+            _glyph, colour, _css, _label = subscription.marker_spec(state)
             assert colour not in body, \
                 f"{name} must take {state}'s colour from the payload"
         for glyph in ("\u2605", "\u2606", "\u25cb"):
@@ -274,7 +274,7 @@ def test_the_tui_draws_the_same_glyphs_and_colours():
     """The TUI's markers come from the table, not from literals."""
     source = TUI_SOURCE.read_text(encoding="utf-8")
     assert "subscription.subscription_state(" in source
-    assert "subscription.spec(" in source
+    assert "subscription.marker_spec(" in source
     # The old leading-`*` queue prefix must be gone: one indicator, not two.
     assert '"*"' not in source
     assert "[green]*[/green]" not in source

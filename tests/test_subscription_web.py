@@ -61,8 +61,8 @@ def test_the_item_payload_carries_the_whole_marker(web_client):
     assert item["subscription_state"] == subscription.NEVER
     assert item["subscription_glyph"] == subscription.glyph(subscription.NEVER)
     assert item["subscription_colour"] == subscription.colour(subscription.NEVER)
-    assert item["subscription_class"] == subscription.spec(subscription.NEVER)[2]
-    assert item["subscription_label"] == subscription.spec(subscription.NEVER)[3]
+    assert item["subscription_class"] == subscription.marker_spec(subscription.NEVER)[2]
+    assert item["subscription_label"] == subscription.marker_spec(subscription.NEVER)[3]
     assert item["subscription_tooltip"] == subscription.tooltip(subscription.NEVER)
     assert item["subscription_clickable"] is True
 
