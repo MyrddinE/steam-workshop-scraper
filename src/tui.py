@@ -523,14 +523,75 @@ class StatsScreen(Screen):
                 f"  Completed last day: {value.get('day', 0):,}\n"
                 f"  Last success: {last}")
 
-    #: The five stages the coverage figure counts, in display order.
-    COVERAGE_STAGES = (
-        ("api_fetched", "API data"),
-        ("described", "Description"),
-        ("imaged", "Image"),
-        ("translated", "Translation"),
-        ("attributed", "Creator"),
-    )
+    #: Standard and subsidiary bar glyphs. A translation bar hangs off the bar
+    #: above it, so it is drawn with lower-half/lower-eighth blocks where the
+    #: standard bar uses a full cell and a shade: visibly thinner in height,
+    #: with the same left edge and the same length semantics, so a shorter bar
+    #: still means less coverage. There is no way to shrink a line of text's
+    #: height, and shrinking the bar's *length* would be read as coverage, so
+    #: the glyph carries the subordination instead.
+    COVERAGE_BAR_WIDTH = 20
+    COVERAGE_GLYPHS = {
+        False: ("█", "░"),
+        True: ("▄", "▁"),
+    }
+
+    @staticmethod
+    def _coverage_bar_line(bar: dict, label_width: int) -> str:
+        """One bar: a label, the percentage of live items, the bar, the counts.
+
+        ``pct`` comes from the metric rather than being recomputed here, so the
+        terminal and the browser print the same number. A bar whose reachable
+        population is zero shows its empty track and the metric's own words
+        instead of a percentage that would sit at 0.0% forever.
+        """
+        label = f"{bar.get('label') or bar.get('key', ''):<{label_width}}"
+        width = StatsScreen.COVERAGE_BAR_WIDTH
+        on, off = StatsScreen.COVERAGE_GLYPHS[bool(bar.get("subsidiary"))]
+        maximum = bar.get("maximum", 0) or 0
+        if maximum <= 0:
+            # The bar keeps its column even with no percentage, so every bar
+            # shares one left edge and a length still means the same thing.
+            track = f"[dim]{off * width}[/dim]"
+            return f"{label} {' ' * 6}  {track}  {bar.get('empty') or 'Nothing to reach'}"
+        pct = bar.get("pct") or 0.0
+        filled = max(0, min(width, int(round(pct / 100 * width))))
+        return (f"{label} {pct:5.1f}%  [green]{on * filled}[/green]"
+                f"[dim]{off * (width - filled)}[/dim]  "
+                f"{bar.get('done', 0):,} / {bar.get('total', 0):,}")
+
+    @staticmethod
+    def _coverage_block(scope: dict) -> list[str]:
+        """The bar rows for one scope, each subsidiary flush under its parent.
+
+        The bars of a parent/subsidiary pair are emitted back to back with
+        nothing between them -- no blank line, no explanation -- so the
+        subordination is visible before any number is read. The explanations
+        follow the pair's bars, so they can never open a gap inside it.
+        """
+        bars = scope.get("bars") or []
+        if not bars:
+            return []
+        label_width = max(len(b.get("label") or b.get("key", "")) for b in bars)
+        lines: list[str] = []
+        index = 0
+        while index < len(bars):
+            bar = bars[index]
+            group = [bar]
+            if index + 1 < len(bars) and bars[index + 1].get("subsidiary"):
+                group.append(bars[index + 1])
+                index += 2
+            else:
+                index += 1
+            lines += [StatsScreen._coverage_bar_line(member, label_width)
+                      for member in group]
+            # Child first, so the parent's own explanation reads last in the
+            # block rather than between the parent and its subsidiary.
+            for member in reversed(group):
+                detail = member.get("detail")
+                if detail:
+                    lines.append(f"  [dim]{escape_markup(detail)}[/dim]")
+        return lines
 
     @staticmethod
     def _format_coverage(cov: dict) -> str:
@@ -542,32 +603,23 @@ class StatsScreen(Screen):
         daemon's per-item check. The note under the second block says which
         scope it is and, when the two coincide, why: an AppID with no filters,
         or one whose stored filters cannot be read, excludes nothing.
+
+        The bars themselves are the metric's: it owns the labels, the counts and
+        the reachable maximum, so this renderer only lays them out.
         """
         total = cov.get("total", 0) or 0
         if not total:
             return "[dim]No live items to cover.[/dim]"
 
-        def bar(done: int, denominator: int) -> str:
-            pct = done / denominator * 100
-            filled = int(round(pct / 100 * 20))
-            return (f"{pct:5.1f}%  [green]{'█' * filled}[/green]"
-                    f"[dim]{'░' * (20 - filled)}[/dim]  {done:,} / {denominator:,}")
-
-        def block(counts: dict, denominator: int) -> list[str]:
-            return [
-                f"{label:<12} {bar(counts.get(key, 0) or 0, denominator)}"
-                for key, label in StatsScreen.COVERAGE_STAGES
-            ]
-
         lines = [f"[b]Live items:[/b] {total:,}", "", "[b]All live items[/b]"]
-        lines += block(cov, total)
+        lines += StatsScreen._coverage_block(cov)
 
         filtered = cov.get("filtered")
         if isinstance(filtered, dict):
             f_total = filtered.get("total", 0) or 0
             lines += ["", "[b]Target AppIDs' enrichment filters — what I care about[/b]"]
             if f_total:
-                lines += block(filtered, f_total)
+                lines += StatsScreen._coverage_block(filtered)
             else:
                 lines.append("  [dim]No live items match the filters.[/dim]")
             lines.append(f"  [dim]{StatsScreen._coverage_scope_note(filtered)}[/dim]")

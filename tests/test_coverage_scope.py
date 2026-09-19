@@ -96,12 +96,15 @@ def test_both_figures_are_reported_with_the_same_stage_shape(db_path):
 
     cov = _coverage(db_path, [294100])
 
-    stages = {"total", "api_fetched", "described", "imaged", "translated", "attributed"}
-    assert stages <= set(cov)
-    assert stages <= set(cov["filtered"])
-    assert cov["api_fetched"] == 1
-    assert cov["filtered"]["api_fetched"] == 1
-    assert cov["filtered"]["described"] == 1
+    keys = [bar["key"] for bar in cov["bars"]]
+    assert keys == ["api_fetched", "translations", "described", "web_translated",
+                    "imaged", "attributed", "creator_translated"]
+    assert keys == [bar["key"] for bar in cov["filtered"]["bars"]]
+    bars = {bar["key"]: bar for bar in cov["bars"]}
+    filtered_bars = {bar["key"]: bar for bar in cov["filtered"]["bars"]}
+    assert bars["api_fetched"]["done"] == 1
+    assert filtered_bars["api_fetched"]["done"] == 1
+    assert filtered_bars["described"]["done"] == 1
 
 
 def test_multiple_target_appids_are_unioned(db_path):

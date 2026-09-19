@@ -538,29 +538,159 @@ def _fetch_recency(conn, params) -> dict:
 # coverage, at two scopes
 # --------------------------------------------------------------------------
 
-#: The five stages the coverage figure counts, in display order.
-COVERAGE_STAGES = ("api_fetched", "described", "imaged", "translated", "attributed")
+#: What a bar whose reachable population is empty says. A zero population is a
+#: legitimate answer -- there is nothing to translate -- and must not be drawn as
+#: a permanent 0.0%.
+NOTHING_TO_TRANSLATE = "Nothing to translate"
 
 #: Live items only: dead items can never be covered.
 _LIVE_ITEMS = "(w.status IS NULL OR w.status <> -1)"
 
 
-def _coverage_counts(conn, where_sql: str, params: list) -> dict:
-    """The six coverage counts over whatever population ``where_sql`` selects."""
+def _ascii_sql(column: str) -> str:
+    """SQL for Python's ``str.isascii()`` on a column, NULL/empty reading ASCII.
+
+    The same UTF-8-bytes-equals-characters test ``_IS_ASCII`` uses: the two
+    lengths agree exactly when every character is single-byte, control
+    characters included. ``COALESCE`` makes NULL and '' ASCII, which is what
+    ``is_ascii`` does with a falsy value, so the flagging rule and this
+    translation of it agree on the empty field too.
+    """
+    return (f"length(CAST(COALESCE({column}, '') AS BLOB)) "
+            f"= length(COALESCE({column}, ''))")
+
+
+def _field_current_sql(en_column: str) -> str:
+    """SQL for :func:`translation_is_current` on one item field.
+
+    ``translation_is_current(translated, translate_version, steam_updated_at)``
+    is written out here for the same reason the scoped figure is written out
+    elsewhere: the metric must compare the stored translation against the item's
+    current Steam revision exactly as the flagging path does, or a bar and the
+    work it measures could disagree. A NULL ``steam_updated_at`` means no change
+    can be detected, so a stored translation counts as current; a NULL
+    ``translate_version`` is unknown provenance and does not.
+    """
+    return (f"COALESCE(w.{en_column}, '') <> '' AND ("
+            f"w.steam_updated_at IS NULL OR ("
+            f"w.translate_version IS NOT NULL "
+            f"AND w.translate_version >= w.steam_updated_at))")
+
+
+def _creator_current_sql() -> str:
+    """SQL for :func:`translation_is_current` on a creator's name.
+
+    The name lives on ``users`` and has no Steam revision, so the pair of clocks
+    that decide currency are both ours: ``translated_at`` (stamped when the name
+    was translated) against ``api_fetched_at`` (stamped when the persona was
+    last fetched). With no fetch time the stored name cannot be stale, so a
+    stored translation is current -- the same NULL rule the item fields use.
+    """
+    return ("COALESCE(u.personaname_en, '') <> '' AND ("
+            "u.api_fetched_at IS NULL OR ("
+            "u.translated_at IS NOT NULL "
+            "AND u.translated_at >= u.api_fetched_at))")
+
+
+def _coverage_scan(conn, where_sql: str, params: list) -> dict:
+    """Every count the bars need, from one pass over the scope's live items.
+
+    The population tests here are the flagging rules, in SQL. A field is in a
+    translation bar's population exactly when the code that queues it would
+    queue it: non-empty and non-ASCII (``flag_field_for_translation`` returns
+    early on an empty or ASCII field), and a stored translation counts only when
+    :func:`translation_is_current` says it is current. The creator's name is the
+    same test read through ``users``, counted per item so the bar is comparable
+    with the per-item bars around it.
+
+    ``blank_answers`` is the scrape's legitimate-blank ceiling: a page that was
+    scraped and answered with an empty description can never make the Extended
+    Web bar move, so it is subtracted from that bar's maximum. The one other
+    settled-blank path -- a served item page whose description element is absent
+    -- records no item column to count, so the ceiling counts the scraped-empty
+    rows alone; see ``docs/data-pipeline.md``.
+    """
+    title = _ascii_sql("w.title")
+    short = _ascii_sql("w.short_description")
+    extended = _ascii_sql("w.extended_description")
+    persona = _ascii_sql("u.personaname")
     row = conn.execute(
         f"""
         SELECT COUNT(*) AS total,
                COALESCE(SUM(CASE WHEN w.api_fetched_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS api_fetched,
                COALESCE(SUM(CASE WHEN COALESCE(w.extended_description, '') <> '' THEN 1 ELSE 0 END), 0) AS described,
+               COALESCE(SUM(CASE WHEN w.web_scraped_at IS NOT NULL
+                                  AND COALESCE(w.extended_description, '') = ''
+                                 THEN 1 ELSE 0 END), 0) AS blank_answers,
                COALESCE(SUM(CASE WHEN COALESCE(w.image_extension, '') <> '' THEN 1 ELSE 0 END), 0) AS imaged,
-               COALESCE(SUM(CASE WHEN w.translate_version IS NOT NULL THEN 1 ELSE 0 END), 0) AS translated,
-               COALESCE(SUM(CASE WHEN COALESCE(w.creator, '') <> '' THEN 1 ELSE 0 END), 0) AS attributed
+               COALESCE(SUM(CASE WHEN COALESCE(w.creator, '') <> '' THEN 1 ELSE 0 END), 0) AS attributed,
+               COALESCE(SUM(CASE WHEN COALESCE(w.title, '') <> '' AND NOT ({title})
+                                 THEN 1 ELSE 0 END), 0) AS title_need,
+               COALESCE(SUM(CASE WHEN COALESCE(w.title, '') <> '' AND NOT ({title})
+                                  AND ({_field_current_sql('title_en')})
+                                 THEN 1 ELSE 0 END), 0) AS title_done,
+               COALESCE(SUM(CASE WHEN COALESCE(w.short_description, '') <> '' AND NOT ({short})
+                                 THEN 1 ELSE 0 END), 0) AS short_need,
+               COALESCE(SUM(CASE WHEN COALESCE(w.short_description, '') <> '' AND NOT ({short})
+                                  AND ({_field_current_sql('short_description_en')})
+                                 THEN 1 ELSE 0 END), 0) AS short_done,
+               COALESCE(SUM(CASE WHEN COALESCE(w.extended_description, '') <> '' AND NOT ({extended})
+                                 THEN 1 ELSE 0 END), 0) AS extended_need,
+               COALESCE(SUM(CASE WHEN COALESCE(w.extended_description, '') <> '' AND NOT ({extended})
+                                  AND ({_field_current_sql('extended_description_en')})
+                                 THEN 1 ELSE 0 END), 0) AS extended_done,
+               COALESCE(SUM(CASE WHEN u.personaname IS NOT NULL AND NOT ({persona})
+                                 THEN 1 ELSE 0 END), 0) AS creator_need,
+               COALESCE(SUM(CASE WHEN u.personaname IS NOT NULL AND NOT ({persona})
+                                  AND ({_creator_current_sql()})
+                                 THEN 1 ELSE 0 END), 0) AS creator_done,
+               COALESCE(SUM(CASE WHEN (COALESCE(w.title, '') = '' OR ({title}))
+                                  AND (COALESCE(w.short_description, '') = '' OR ({short}))
+                                 THEN 1 ELSE 0 END), 0) AS api_needs_none
         FROM workshop_items w
+        LEFT JOIN users u ON w.creator = u.steamid
         WHERE {where_sql}
         """,
         params,
     ).fetchone()
-    return {key: row[key] or 0 for key in ("total",) + COVERAGE_STAGES}
+    return {key: row[key] or 0 for key in row.keys()}
+
+
+def _reachable_detail(total: int, maximum: int, explanation: str) -> str:
+    """The counts behind a shortened bar: what it can reach, and why.
+
+    Every bar is drawn on one width representing 100% of the scope's live items,
+    so a bar whose reachable share is small is not a defect; this sentence is
+    what says so. Its percentage is the reachable share, a different number from
+    the fill percentage printed beside the bar (the share already done), and both
+    are computed in this module so the two cannot come from different places.
+    """
+    if not total:
+        return explanation
+    return (f"reachable {maximum:,} of {total:,} ({maximum / total * 100:.1f}%): "
+            f"{explanation}")
+
+
+def _coverage_bar(key: str, label: str, subsidiary: bool, done: int, maximum: int,
+                  total: int, detail: str | None, empty: str | None = None) -> dict:
+    """One bar, with everything a front end needs to draw and label it.
+
+    ``pct`` is the bar's length as a share of the scope's live items, computed
+    here once so the terminal and the browser cannot print different numbers. It
+    is ``None`` when the reachable population is empty, which is the case a
+    front end renders with ``empty`` instead of a stuck 0.0%.
+    """
+    return {
+        "key": key,
+        "label": label,
+        "subsidiary": subsidiary,
+        "done": int(done),
+        "maximum": int(maximum),
+        "total": int(total),
+        "pct": None if maximum <= 0 or total <= 0 else round(done / total * 100, 1),
+        "detail": detail,
+        "empty": empty,
+    }
 
 
 def _care_about_population(conn, target_appids) -> tuple[str, list, dict]:
@@ -633,9 +763,61 @@ def _care_about_population(conn, target_appids) -> tuple[str, list, dict]:
     }
 
 
+def _coverage_bars(counts: dict, total: int, translations: dict) -> list[dict]:
+    """The seven bars for one scope, in pipeline order.
+
+    ``counts`` is the scope's scan and ``translations`` the filter-selected scan
+    that feeds the Translations bar at both scopes (the flagging path only ever
+    queues enriched items, so that bar's population does not follow the scope).
+    Every bar is on the same width -- ``total`` live items -- and a bar's
+    ``maximum`` is the count it can ever reach, its population.
+    """
+    blank = counts["blank_answers"]
+    reachable_web = max(0, total - blank)
+    translation_max = translations["title_need"] + translations["short_need"]
+    translation_done = translations["title_done"] + translations["short_done"]
+    return [
+        _coverage_bar("api_fetched", "API Data", False,
+                      counts["api_fetched"], total, total, None),
+        _coverage_bar(
+            "translations", "Translations", True,
+            translation_done, translation_max, total,
+            _reachable_detail(
+                total, translation_max,
+                "non-ASCII title/short-description fields of filter-selected "
+                f"items; {translations['api_needs_none']:,} filter-selected "
+                "items need none"),
+            NOTHING_TO_TRANSLATE),
+        _coverage_bar(
+            "described", "Extended Web", False,
+            counts["described"], reachable_web, total,
+            _reachable_detail(
+                total, reachable_web,
+                f"{blank:,} scraped pages answered with no description")),
+        _coverage_bar(
+            "web_translated", "Extended Web Translation", True,
+            counts["extended_done"], counts["extended_need"], total,
+            _reachable_detail(
+                total, counts["extended_need"],
+                "non-ASCII descriptions of scraped items"),
+            NOTHING_TO_TRANSLATE),
+        _coverage_bar("imaged", "Images", False,
+                      counts["imaged"], total, total, None),
+        _coverage_bar("attributed", "Creator", False,
+                      counts["attributed"], total, total, None),
+        _coverage_bar(
+            "creator_translated", "Creator Translation", True,
+            counts["creator_done"], counts["creator_need"], total,
+            _reachable_detail(
+                total, counts["creator_need"],
+                "items whose creator's name is non-ASCII"),
+            NOTHING_TO_TRANSLATE),
+    ]
+
+
 @metric("coverage", 80, "How much of the live library each stage has reached, at both scopes.")
 def _coverage(conn, params) -> dict:
-    """Processing coverage over live items, at two scopes side by side.
+    """Processing coverage over live items, at two scopes, as seven bars.
 
     The first figure is the whole live library: this is the progress view, and
     outstanding depth says how much is queued while only coverage says how far
@@ -643,25 +825,63 @@ def _coverage(conn, params) -> dict:
     never be covered, and counting them would make coverage fall as the library
     is cleaned up.
 
-    The second figure, under ``filtered``, is the same coverage restricted to
-    *what the owner cares about*: the items the target AppIDs'
-    ``enrichment_filters`` select. Its population is the one the daemon calls
-    *enriched*. Each AppID contributes ``consumer_appid = ? AND <its filters>``
-    and the AppIDs are ORed together, so with more than one target the figure is
-    the **union** of what any target's filters select. The AppIDs come from the
-    ``target_appids`` parameter when a front end can supply the configured list,
-    and otherwise from every row in ``app_tracking``.
+    The second figure, under ``filtered``, is the same bars restricted to *what
+    the owner cares about*: the items the target AppIDs' ``enrichment_filters``
+    select. Its population is the one the daemon calls *enriched*. Each AppID
+    contributes ``consumer_appid = ? AND <its filters>`` and the AppIDs are ORed
+    together, so with more than one target the figure is the **union** of what
+    any target's filters select. The AppIDs come from the ``target_appids``
+    parameter when a front end can supply the configured list, and otherwise
+    from every row in ``app_tracking``.
 
-    **This figure is a translation, not a re-derivation of the daemon's per-item
-    decision.** It is built by :func:`src.database.build_filter_clause_sql`, the
-    same SQL builder a search uses, while the daemon's in-memory
+    **The bars' populations are the flagging rules, in SQL**, so a bar and the
+    work it measures cannot disagree. Each field is counted exactly when the code
+    that queues it would queue it, and a stored translation counts only when
+    :func:`translation_is_current` says it is current -- non-ASCII, non-empty,
+    taken at the item's current Steam revision. The three translation bars have
+    three different scopes, because the code that feeds them does:
+
+    * **Translations** is per *field*, not per item, over ``title`` and
+      ``short_description``. ``_flag_translations`` returns early unless the item
+      was enriched, so its population is the non-ASCII API fields of the
+      **filter-selected** items. It is the one population that does not follow
+      the displayed scope: the same absolute figures appear in both blocks, only
+      the denominator (the block's live items) changes.
+    * **Extended Web Translation** is over ``extended_description``. The scrape
+      flags its description for translation regardless of enrichment, so its
+      population is **any scraped item** with a non-ASCII description -- not only
+      the filter-selected ones. Its maximum is at most the Extended Web bar's,
+      because a non-ASCII description is a description.
+    * **Creator Translation** is over ``users.personaname``. Only enriched items
+      refresh a persona, but the name lives per user and is shared by every item
+      that creator made, so the bar counts **items attributed to a creator whose
+      name is non-ASCII**, which keeps it comparable with the per-item bars.
+
+    The **Extended Web** bar is the scrape's coverage, not one field's: live items
+    with a non-empty ``extended_description``. Its maximum excludes the pages
+    that legitimately carried no description -- a scrape that answered with an
+    empty description can never move the bar -- so the ceiling is shown rather
+    than a full-width track promising work that cannot exist.
+
+    A bar whose population is zero is not a divide by zero and not a stuck 0.0%:
+    its ``pct`` is ``None`` and both front ends print ``NOTHING_TO_TRANSLATE``.
+    A library with nothing to translate has nothing to translate, and the bar
+    says so.
+
+    **The scoped figure is a translation, not a re-derivation of the daemon's
+    per-item decision.** It is built by :func:`src.database.build_filter_clause_sql`,
+    the same SQL builder a search uses, while the daemon's in-memory
     :func:`src.database._evaluate_filters` reads the original columns alone. The
     builder also searches each text field's ``_en`` counterpart, so the two can
     disagree on an item whose original text does not match but whose stored
     translation does. Where they disagree, this is the search builder's answer; the
     demotion walk deliberately keeps using the Python one. A ``percentile``
     filter has no fixed predicate and is skipped by both, since it is relative to
-    the result set it is computed over.
+    the result set it is computed over. The same caveat the old filtered figure
+    carried now applies to the Translations bar's population, whose rule
+    (``_flag_translations``) is Python today and whose metric is this SQL, and to
+    the Creator Translation bar's population, whose rule is ``is_ascii`` in
+    ``_build_user_record`` and whose metric is :func:`_creator_current_sql`.
 
     An unreadable or empty filter set means *everything* for that AppID
     (:func:`enrichment_filters_for`'s contract: ``None`` and ``[]`` both mean no
@@ -676,14 +896,27 @@ def _coverage(conn, params) -> dict:
     the bar permanently short of the truth. What is still outstanding is an item
     with no answer at all.
     """
-    overall = _coverage_counts(conn, _LIVE_ITEMS, [])
+    overall_counts = _coverage_scan(conn, _LIVE_ITEMS, [])
     predicate, predicate_params, detail = _care_about_population(
         conn, params.get("target_appids"))
     if predicate:
-        filtered = _coverage_counts(conn, f"{_LIVE_ITEMS} AND {predicate}", predicate_params)
+        filtered_counts = _coverage_scan(
+            conn, f"{_LIVE_ITEMS} AND {predicate}", list(predicate_params))
     else:
-        filtered = dict(overall)
-    return {**overall, "filtered": {**filtered, **detail}}
+        filtered_counts = dict(overall_counts)
+
+    total = overall_counts["total"]
+    filtered_total = filtered_counts["total"]
+    overall = {
+        "total": total,
+        "bars": _coverage_bars(overall_counts, total, filtered_counts),
+    }
+    filtered = {
+        "total": filtered_total,
+        "bars": _coverage_bars(filtered_counts, filtered_total, filtered_counts),
+        **detail,
+    }
+    return {**overall, "filtered": filtered}
 
 
 # --------------------------------------------------------------------------

@@ -290,6 +290,15 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .stats-chunk-body ul { margin:.2rem 0 0 1rem; }
 .stats-chunk-body progress { margin:0; }
 .stats-table td, .stats-table th { padding:.15rem .5rem .15rem 0; }
+/* Coverage bars share one width, so a shorter bar means less coverage. A
+   subsidiary bar (a stage hanging off the bar above it) is half the height of
+   the standard one -- the browser's equivalent of the TUI's half-height block
+   glyph -- and the two rows are flush: no padding, no spacing, no gap. */
+.coverage-table { border-collapse:collapse; }
+.coverage-table td { padding-top:0; padding-bottom:0; }
+.coverage-table progress { height:1rem; width:100%; }
+.coverage-table tr.coverage-child progress { height:.5rem; }
+.coverage-detail td { color:var(--pico-muted-color); font-size:.8em; padding-top:.1rem; }
 /* Tags are the one metric that is a long list rather than a handful of
    numbers, so it scrolls inside a bounded box instead of pushing every
    chunk below it off the screen. */
@@ -2106,24 +2115,51 @@ function _fmtTimestamp(ts) {
   return ts ? new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ') : 'never';
 }
 
-const COVERAGE_STAGES = [
-  ['api_fetched', 'API data'],
-  ['described', 'Description'],
-  ['imaged', 'Image'],
-  ['translated', 'Translation'],
-  ['attributed', 'Creator'],
-];
-
-function _coverageRows(counts, total) {
-  return COVERAGE_STAGES.map(function(stage) {
-    const done = counts[stage[0]] || 0;
-    const pct = done / total * 100;
-    return '<tr><td>' + stage[1] + '</td>'
-      + '<td style="white-space:nowrap">' + fmtCount(done) + ' / ' + fmtCount(total) + '</td>'
-      + '<td style="width:45%"><progress value="' + pct.toFixed(1) + '" max="100"></progress></td>'
-      + '<td>' + pct.toFixed(1) + '%</td></tr>';
-  }).join('');
+// ── coverage rows ─────────────────────────────────────────────────────────
+// The row rendering is extracted and run by tests/test_coverage_bars.py
+// between these two markers, so the browser's rows are pinned by behaviour
+// rather than by a substring. Do not rename or remove the markers.
+function _coverageRow(bar) {
+  const cls = bar.subsidiary ? 'coverage-row coverage-child' : 'coverage-row coverage-parent';
+  const label = _escapeHtml(bar.label || bar.key || '');
+  if (!bar.maximum) {
+    // A zero population is a legitimate answer, not a stuck 0.0%: draw the
+    // empty track and print the metric's own words, so both front ends say
+    // the same thing about a library with nothing to translate.
+    return '<tr class="' + cls + '"><td>' + label + '</td><td></td>'
+      + '<td style="width:45%"><progress value="0" max="100"></progress></td>'
+      + '<td>' + _escapeHtml(bar.empty || 'Nothing to reach') + '</td></tr>';
+  }
+  const pct = bar.pct || 0;
+  return '<tr class="' + cls + '"><td>' + label + '</td>'
+    + '<td style="white-space:nowrap">' + fmtCount(bar.done) + ' / ' + fmtCount(bar.total) + '</td>'
+    + '<td style="width:45%"><progress value="' + pct.toFixed(1) + '" max="100"></progress></td>'
+    + '<td>' + pct.toFixed(1) + '%</td></tr>';
 }
+
+function _coverageRows(scope) {
+  // A parent and its subsidiary are emitted as consecutive rows with nothing
+  // between them, so the subsidiary row is flush against the bar above it: no
+  // margin, no padding, no paragraph. The counts that explain a pair follow
+  // its rows, never open a gap inside it. The subsidiary row's class draws its
+  // progress element at half height, the browser's equivalent of the TUI's
+  // half-height block glyph.
+  const bars = scope.bars || [];
+  let html = '';
+  for (let i = 0; i < bars.length; i++) {
+    const group = [bars[i]];
+    if (i + 1 < bars.length && bars[i + 1].subsidiary) group.push(bars[++i]);
+    html += group.map(_coverageRow).join('');
+    for (let j = group.length - 1; j >= 0; j--) {
+      if (group[j].detail) {
+        html += '<tr class="coverage-detail"><td colspan="4">'
+          + _escapeHtml(group[j].detail) + '</td></tr>';
+      }
+    }
+  }
+  return html;
+}
+// ── end coverage rows ─────────────────────────────────────────────────────
 
 function _coverageScopeNote(filtered) {
   // Why the two coverage figures are what they are. The second is the search
@@ -2156,14 +2192,15 @@ function _renderCoverage(cov) {
   if (!total) return '<p class="stat-label">No live items to cover.</p>';
   let html = '<p class="stat-label">All live items: ' + fmtCount(total)
     + ' (dead items excluded).</p>'
-    + '<table class="stats-table"><tbody>' + _coverageRows(cov, total) + '</tbody></table>';
+    + '<table class="stats-table coverage-table"><tbody>' + _coverageRows(cov)
+    + '</tbody></table>';
   const filtered = cov.filtered;
   if (filtered && typeof filtered === 'object') {
     const fTotal = filtered.total || 0;
     html += '<p class="stat-label" style="margin-top:8px">Target AppIDs&rsquo; enrichment'
       + ' filters &mdash; what I care about: ' + fmtCount(fTotal) + '</p>';
     if (fTotal) {
-      html += '<table class="stats-table"><tbody>' + _coverageRows(filtered, fTotal)
+      html += '<table class="stats-table coverage-table"><tbody>' + _coverageRows(filtered)
         + '</tbody></table>';
     } else {
       html += '<p class="stat-label">No live items match the filters.</p>';

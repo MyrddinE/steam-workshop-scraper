@@ -483,6 +483,45 @@ async def test_tui_detail_priority_applied_once_per_pane_load(mock_config, mock_
 # stats screen: one independent chunk per metric
 # --------------------------------------------------------------------------
 
+def _coverage_bar(key, label, subsidiary, done, maximum, total, detail=None, empty=None):
+    """One coverage bar shaped exactly as `src.metrics` returns it."""
+    return {"key": key, "label": label, "subsidiary": subsidiary, "done": done,
+            "maximum": maximum, "total": total,
+            "pct": None if maximum <= 0 or total <= 0 else round(done / total * 100, 1),
+            "detail": detail, "empty": empty}
+
+
+def _fake_coverage(total=2, filtered_total=1):
+    def bars(scope_total, api_done, described, imaged, attributed):
+        return [
+            _coverage_bar("api_fetched", "API Data", False, api_done, scope_total, scope_total),
+            _coverage_bar("translations", "Translations", True, 0, 1, scope_total,
+                          "reachable 1 of 2 (50.0%): non-ASCII title/short-description "
+                          "fields of filter-selected items; 1 filter-selected items need none",
+                          metrics.NOTHING_TO_TRANSLATE),
+            _coverage_bar("described", "Extended Web", False, described, scope_total, scope_total,
+                          "reachable 2 of 2 (100.0%): 0 scraped pages answered with no description"),
+            _coverage_bar("web_translated", "Extended Web Translation", True, 0, 1, scope_total,
+                          "reachable 1 of 2 (50.0%): non-ASCII descriptions of scraped items",
+                          metrics.NOTHING_TO_TRANSLATE),
+            _coverage_bar("imaged", "Images", False, imaged, scope_total, scope_total),
+            _coverage_bar("attributed", "Creator", False, attributed, scope_total, scope_total),
+            _coverage_bar("creator_translated", "Creator Translation", True, 0, 1, scope_total,
+                          "reachable 1 of 2 (50.0%): items whose creator's name is non-ASCII",
+                          metrics.NOTHING_TO_TRANSLATE),
+        ]
+    return {
+        "total": total,
+        "bars": bars(total, 2, 1, 1, 1),
+        "filtered": {
+            "total": filtered_total,
+            "bars": bars(filtered_total, 1, 0, 1, 1),
+            "appids": [294100], "with_filters": [294100], "restricting": [294100],
+            "unreadable": [],
+        },
+    }
+
+
 #: One fake value per metric, shaped exactly as the metric returns it, so the
 #: screen's real per-metric renderers run.
 _FAKE_METRIC_VALUES = {
@@ -494,16 +533,7 @@ _FAKE_METRIC_VALUES = {
     "dead_queued": 1,
     "queued_nowhere": 2,
     "fetch_recency": {"fresh": 1, "stale": 0, "blank": 1},
-    "coverage": {
-        "total": 2, "api_fetched": 2, "described": 1,
-        "imaged": 1, "translated": 0, "attributed": 1,
-        "filtered": {
-            "total": 1, "api_fetched": 1, "described": 0,
-            "imaged": 1, "translated": 0, "attributed": 1,
-            "appids": [294100], "with_filters": [294100], "restricting": [294100],
-            "unreadable": [],
-        },
-    },
+    "coverage": _fake_coverage(),
     "translation_status": {"Translated": 1, "Queued": 1},
     "tag_counts": {"Alpha": 2, "Beta": 1},
     "priority_breakdowns": {
@@ -659,7 +689,8 @@ async def test_stats_screen_puts_every_metric_in_its_own_chunk(mock_config):
             totals = str(screen.query_one("#totals-content", Static).render())
             assert "Live items" in totals and "2" in totals
             coverage = str(screen.query_one("#coverage-content", Static).render())
-            assert "API data" in coverage and "100.0%" in coverage
+            assert "API Data" in coverage and "100.0%" in coverage
+            assert "Extended Web" in coverage
             stuck = str(screen.query_one("#stuck-content", Static).render())
             assert "dead item(s) are still flagged" in stuck
             assert "Web scrape" in stuck
