@@ -298,8 +298,8 @@ def test_get_db_stats_empty_defaults(db_path):
 
 
 def test_build_filter_clause_unknown_operator():
-    from src.database import _build_filter_clause
-    clause, params = _build_filter_clause("title", "bogus_op", "val")
+    from src.database import _build_single_filter_clause
+    clause, params = _build_single_filter_clause("title", "bogus_op", "val")
     assert clause == ""
     assert params == []
 

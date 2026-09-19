@@ -38,7 +38,7 @@ Select/`<select>` for its value control (`is`/`is_not` are the only operators).
 Its `db_col` is the virtual `subscribed_state`, because no single column answers
 the question: the value selects one of six predicates over four existing columns.
 
-`SUBSCRIBED_FILTERS` is the single value table both evaluators read — `sql` is
+`SUBSCRIBED_VALUE_SPECS` is the single value table both evaluators read — `sql` is
 the fragment the SELECT path uses and `matches` is the same predicate over an
 in-memory row. Writing the six cases once is deliberate: they span four columns,
 and a second copy in `_evaluate_single_filter` is exactly how the SQL search and
@@ -63,7 +63,7 @@ matches nothing in both evaluators, the same as any unknown value (`is` matches
 nothing, `is_not` matches everything), keeping the pair complementary instead of
 one side silently matching the whole table.
 
-### `_EN_FIELDS` (database)
+### `_EN_COLUMN_FOR` (database)
 
 Identifies columns with translated `_en` counterparts. When a text-matching operator is applied to a field in this set, the clause is expanded to search both the original and `_en` column. Currently: `title → title_en`, `short_description → short_description_en`, `extended_description → extended_description_en`.
 
@@ -93,8 +93,8 @@ The main entry point for all searches. Accepts filters as a list of dicts with k
    - Tag filters (field maps to "tags") — routed through `_build_tag_clause`
    - Full Text (field maps to "full_text") — routed through `_build_fts_clause`
    - Enum filters (field maps to `subscribed_state`) — routed through `_build_subscribed_clause`
-   - Dual-field (field in `_EN_FIELDS` and operator in `_TEXT_OPS`) — expanded to search both columns
-   - All others — routed through `_build_filter_clause`
+   - Dual-field (field in `_EN_COLUMN_FOR` and operator in `_TEXT_OPS`) — expanded to search both columns
+   - All others — routed through `_build_single_filter_clause`
 3. **Base WHERE clause**: Non-percentile filters produce the base clause, wrapped in `AND (...)`.
 4. **Percentile thresholds**: For each percentile filter, calls `_compute_percentile_threshold` with the base (non-percentile) filters. The threshold subquery runs NTILE(100) on the filtered dataset and returns the minimum score at the target bucket. Adds `db_col >= threshold` as a literal comparison.
 5. **Sort, Limit, Offset**: Appends `ORDER BY w.{col}`, `LIMIT`, `OFFSET`.
@@ -102,11 +102,11 @@ The main entry point for all searches. Accepts filters as a list of dicts with k
 
 ### `subscribed_overlay_clause` (database)
 
-Builds the single overlay predicate from the same `SUBSCRIBED_FILTERS` table. The
+Builds the single overlay predicate from the same `SUBSCRIBED_VALUE_SPECS` table. The
 overlay is always a positive selection (`is`), which is why it has no operator;
 the field's own builder rows carry `is`/`is_not`.
 
-### `_build_filter_clause` (database)
+### `_build_single_filter_clause` (database)
 
 Converts a single operator-value pair into a SQL clause and parameter list. Supports:
 
@@ -127,7 +127,7 @@ Unrecognized operators return `("", [])` and are silently skipped.
 
 A `db_col` of `subscribed_state` is handed to `_build_subscribed_clause` before
 the operator table below is consulted; the enum's `is`/`is_not` are answered from
-`SUBSCRIBED_FILTERS`, not by the generic `col = ?` / `col != ?` cases.
+`SUBSCRIBED_VALUE_SPECS`, not by the generic `col = ?` / `col != ?` cases.
 
 ### `_build_tag_clause` (database)
 
@@ -230,7 +230,7 @@ When `tags` is present in the item data dict, the function:
 
 Given a column name, a percentile value (0-99, clamped), and a set of base (non-percentile) filters: computes the minimum value in the top (100-P)% bucket using NTILE(100). P=0 returns None (no filter — all items pass).
 
-The function builds a filtered WHERE clause from the base filters (using the same `_build_filter_clause` and `_build_tag_clause` routing as `search_items`), then runs:
+The function builds a filtered WHERE clause from the base filters (using the same `_build_single_filter_clause` and `_build_tag_clause` routing as `search_items`), then runs:
 
 ```sql
 SELECT COALESCE(MIN(col), 0) FROM (
@@ -263,11 +263,11 @@ four, so its rows carry what the predicate reads.
 
 ### `_evaluate_single_filter` (database)
 
-Checks a single filter criterion against an in-memory item dict. Mirrors `_build_filter_clause` semantics but operates on Python values. Handles:
+Checks a single filter criterion against an in-memory item dict. Mirrors `_build_single_filter_clause` semantics but operates on Python values. Handles:
 - Text operators (`contains`, `does_not_contain`, `is`, `is_not`, `is_empty`, `is_not_empty`)
 - Numeric operators (`gt`, `lt`, `gte`, `lte`) with type coercion (item and value both cast to int)
 - Tags routing to `_evaluate_tag_filter`
-- The `Subscribed` field routing to `_evaluate_subscribed_filter`, which reads the same `SUBSCRIBED_FILTERS` table the SQL clause is built from
+- The `Subscribed` field routing to `_evaluate_subscribed_filter`, which reads the same `SUBSCRIBED_VALUE_SPECS` table the SQL clause is built from
 - Percentile operator (always returns True — percentile needs dataset context, not single-item evaluation)
 
 ### `_evaluate_tag_filter` (database)
