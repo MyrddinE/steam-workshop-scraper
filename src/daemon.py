@@ -1318,7 +1318,7 @@ class Daemon:
                 if result.get("abandoned"):
                     logging.info("Abandoned discovery for AppID %s: the daemon is stopping.", appid)
                     break
-                if result.get("error"):
+                if result.get("failed"):
                     # Discovery requests are requests on the same key and the same
                     # budget, so a refusal here is evidence about the rate exactly
                     # as a refused details call is. Not recording it left the
@@ -1412,7 +1412,7 @@ class Daemon:
                 if result.get("abandoned"):
                     logging.info("Abandoned page discovery for AppID %s: the daemon is stopping.", appid)
                     break
-                if result.get("error"):
+                if result.get("failed"):
                     self._back_off_api_delay()
                     logging.error(f"Page discovery error for AppID {appid}.")
                     break
