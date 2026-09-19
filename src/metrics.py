@@ -410,8 +410,8 @@ def _status_counts(conn, params) -> list[dict]:
     ]
 
 
-@metric("stuck_work", 60, "Dead items still sitting in a work queue.")
-def _stuck_work(conn, params) -> dict:
+@metric("dead_items_by_queue", 60, "Dead items still sitting in a work queue.")
+def _dead_items_by_queue(conn, params) -> dict:
     """Work queued against items that are already known to be gone.
 
     An item marked dead should be in no queue, so this is expected to read zero.
@@ -455,7 +455,7 @@ def _dead_queued(conn, params) -> int:
 
     Zero is the healthy reading. A non-zero value is the number of dead items
     still encumbered by a queue, each item counted once however many flags it
-    holds. `stuck_work` answers the same question at the other resolution: this
+    holds. `dead_items_by_queue` answers the same question at the other resolution: this
     is the scalar that must read zero, and that metric is the per-queue breakdown
     that says where the flag was left set. Both are wanted -- the scalar is the
     invariant, the breakdown is the diagnosis -- so one is not a replacement for
@@ -997,7 +997,7 @@ def _priority_breakdowns(conn, params) -> dict:
     """Outstanding depth and priority mix, excluding items that cannot complete.
 
     Dead items used to be left flagged, so counting them here reported a backlog
-    that no worker could ever drain. They are counted by `stuck_work` instead,
+    that no worker could ever drain. They are counted by `dead_items_by_queue` instead,
     where the number means what it says.
     """
     out = {}

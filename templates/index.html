@@ -2091,7 +2091,7 @@ const STATS_LABELS = {
   app_discovery: 'App discovery',
   status_counts: 'Status counts',
   coverage: 'Coverage',
-  stuck_work: 'Stuck work',
+  dead_items_by_queue: 'Stuck work',
   dead_queued: 'Dead but queued',
   queued_nowhere: 'Queued nowhere',
   fetch_recency: 'Fetch recency',
@@ -2219,7 +2219,7 @@ function _renderCoverage(cov) {
   return html;
 }
 
-function _renderStuck(stuck) {
+function _renderDeadItemsByQueue(stuck) {
   const queues = [['web', 'Web scrape'], ['image', 'Image'], ['translation', 'Translation'], ['api', 'API fetch']];
   let total = 0;
   queues.forEach(function(q) { total += stuck[q[0]] || 0; });
@@ -2373,7 +2373,7 @@ function _renderMetricBody(name, value) {
   if (name === 'item_counts') return _renderItemCounts(value);
   if (name === 'high_water') return '<p>' + _fmtTimestamp(value) + '</p>';
   if (name === 'coverage') return _renderCoverage(value);
-  if (name === 'stuck_work') return _renderStuck(value);
+  if (name === 'dead_items_by_queue') return _renderDeadItemsByQueue(value);
   if (name === 'dead_queued') return _renderHandoffCount(
     value, 'No dead item is holding a queue flag.', 'dead item(s) still hold a queue flag.');
   if (name === 'queued_nowhere') return _renderHandoffCount(

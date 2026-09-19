@@ -68,7 +68,7 @@ classification, per-level priority counts, app tracking, and tag frequencies. Th
 not progress. The useful question is the state of the backlog: what is outstanding, how fast it is
 draining, and how long it will take. The presentation half of that has landed: the queue signals
 below that do not need new history are now metrics, and both front ends render them
-(`coverage`, `stuck_work`, `priority_breakdowns`, `item_counts`).
+(`coverage`, `dead_items_by_queue`, `priority_breakdowns`, `item_counts`).
 
 For each of the four work queues — API fetch, web scrape, image download, translation — the signals
 that answer that are:
@@ -313,7 +313,7 @@ issue 17 is the second — dead, yet still queued.
    not selected, and nothing stored — is the bug being looked for.
 4. **Add the invariant as a database-level check**, not only as a unit test: one query counting items
    that are queued nowhere and not complete, another counting items that are dead yet still queued.
-   Both should read zero, and both are cheap enough to sit in the statistics beside `stuck_work`. A
+   Both should read zero, and both are cheap enough to sit in the statistics beside `dead_items_by_queue`. A
    number that is meant to be zero is a better detector than a log line nobody reads.
 5. **Make the exit explicit at every call site.** Where a stage completes an item, pass every queue
    flag it intends to change instead of relying on a column default. Issue 20 existed only because a

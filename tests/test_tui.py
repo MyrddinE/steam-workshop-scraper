@@ -529,7 +529,7 @@ _FAKE_METRIC_VALUES = {
     "item_counts": {"total": 3, "alive": 2, "dead": 1},
     "app_discovery": [{"appid": 294100, "last_cursor": "abc"}],
     "status_counts": [{"status": 200, "count": 2}, {"status": -1, "count": 1}],
-    "stuck_work": {"web": 1, "image": 0, "translation": 0, "api": 0},
+    "dead_items_by_queue": {"web": 1, "image": 0, "translation": 0, "api": 0},
     "dead_queued": 1,
     "queued_nowhere": 2,
     "fetch_recency": {"fresh": 1, "stale": 0, "blank": 1},
@@ -691,7 +691,7 @@ async def test_stats_screen_puts_every_metric_in_its_own_chunk(mock_config):
             coverage = str(screen.query_one("#coverage-content", Static).render())
             assert "API Data" in coverage and "100.0%" in coverage
             assert "Extended Web" in coverage
-            stuck = str(screen.query_one("#stuck-content", Static).render())
+            stuck = str(screen.query_one("#dead-items-by-queue-content", Static).render())
             assert "dead item(s) are still flagged" in stuck
             assert "Web scrape" in stuck
             translation = str(screen.query_one("#translation-stats-content", Static).render())

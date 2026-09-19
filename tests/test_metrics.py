@@ -378,7 +378,7 @@ def test_dead_items_are_not_counted_as_outstanding_work(db_path):
     assert breakdowns["needs_web_scrape"] == [{"prio": 5, "cnt": 1}]
 
 
-def test_stuck_work_surfaces_dead_items_still_queued(db_path):
+def test_dead_items_by_queue_surfaces_dead_items_still_queued(db_path):
     """The number the backlog deliberately leaves out must still be reported.
 
     The dead item is shaped the way `src/daemon.py` actually leaves one: the API
@@ -393,7 +393,7 @@ def test_stuck_work_surfaces_dead_items_still_queued(db_path):
         "workshop_id": 2, "title": "live", "status": 200, "needs_web_scrape": 5,
     })
 
-    stuck = metrics.values(metrics.compute(db_path, ["stuck_work"]))["stuck_work"]
+    stuck = metrics.values(metrics.compute(db_path, ["dead_items_by_queue"]))["dead_items_by_queue"]
     assert stuck == {"web": 1, "image": 1, "translation": 1, "api": 0}
 
 

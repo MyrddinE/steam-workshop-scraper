@@ -422,7 +422,7 @@ This is not an ongoing leak — `_settle_api_failure` clears `api_priority` when
 marks an item dead — it is the rows that were already dead when that line was
 added. They matter because `api_priority > 0` is what every count of "queued for
 a fetch" reads, and the statistics screen reports dead items still holding a
-queue flag as `stuck_work`. Leaving ten thousand of them there would peg a
+queue flag as `dead_items_by_queue`. Leaving ten thousand of them there would peg a
 detector whose whole value is that it reads zero unless something has regressed.
 Only `api_priority` is touched: the other queue flags were cleared by 16→17, and
 `status` is what makes an item dead in the first place.

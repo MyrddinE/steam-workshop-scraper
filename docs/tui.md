@@ -252,7 +252,7 @@ metrics and what each section renders:
 | `app_discovery` | the per-AppID discovery table |
 | `status_counts` | the status distribution |
 | `dead_queued` | the dead-items-still-queued counter, with an all-clear at zero |
-| `stuck_work` | the stuck-work callout |
+| `dead_items_by_queue` | the dead-items-by-queue callout |
 | `queued_nowhere` | the items-in-no-queue counter, with an all-clear at zero |
 | `fetch_recency` | fresh / stale / never-attempted counts |
 | `coverage` | seven coverage bars (API Data, Translations, Extended Web, Extended Web Translation, Images, Creator, Creator Translation) over live items, at two scopes: the whole library, and the target AppIDs' enrichment filters |
@@ -322,14 +322,14 @@ from it and the API inflow subtracted. The metric's docstring and
 [data-pipeline.md](data-pipeline.md#queue-state-outstanding-rate-and-time-to-drain)
 own the active-time and net/gross detail.
 
-`stuck_work`
-(`_format_stuck`, `src/tui.py:418`) names any dead items still flagged in a queue and says
+`dead_items_by_queue`
+(`_format_dead_items_by_queue`, `src/tui.py:720`) names any dead items still flagged in a queue and says
 the queues will not drain until they are cleared; a zero value shows an all-clear. The two
 handoff counters share `_format_handoff_metric`: `dead_queued` names any dead items still
 holding a flag, and `queued_nowhere` any live items in no queue the pipeline never completed,
-each drawn as a green sentence when it reads the healthy zero. `stuck_work` and `dead_queued`
+each drawn as a green sentence when it reads the healthy zero. `dead_items_by_queue` and `dead_queued`
 are not duplicates: the scalar `dead_queued` is the invariant that must read zero, and the
-`stuck_work` breakdown says which queue still holds the dead rows, so a non-zero scalar sends
+`dead_items_by_queue` breakdown says which queue still holds the dead rows, so a non-zero scalar sends
 the reader to the breakdown for the diagnosis. The
 priority section (`_format_priority`, `src/tui.py:439`) reads as queue state — "Translation
 queue: N waiting" followed by the priority mix — rather than a raw column dump. `high_water`

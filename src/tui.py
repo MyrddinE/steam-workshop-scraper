@@ -203,7 +203,7 @@ class StatsScreen(Screen):
         "item_counts": "Totals",
         "app_discovery": "App discovery",
         "status_counts": "Status counts",
-        "stuck_work": "Stuck work",
+        "dead_items_by_queue": "Stuck work",
         "dead_queued": "Dead but queued",
         "queued_nowhere": "Queued nowhere",
         "fetch_recency": "Fetch recency",
@@ -223,7 +223,7 @@ class StatsScreen(Screen):
         "high_water": "high-water-content",
         "item_counts": "item-counts-content",
         "status_counts": "status-content",
-        "stuck_work": "stuck-content",
+        "dead_items_by_queue": "dead-items-by-queue-content",
         "dead_queued": "dead-queued-content",
         "queued_nowhere": "queued-nowhere-content",
         "fetch_recency": "recency-content",
@@ -459,8 +459,8 @@ class StatsScreen(Screen):
                 name,
                 "[b]Record count by status[/b]\n" + ("\n".join(lines) or "  (none)"),
             )
-        elif name == "stuck_work":
-            self._set_text(name, self._format_stuck(value))
+        elif name == "dead_items_by_queue":
+            self._set_text(name, self._format_dead_items_by_queue(value))
         elif name == "dead_queued":
             self._set_text(name, self._format_handoff_metric(
                 value,
@@ -717,7 +717,7 @@ class StatsScreen(Screen):
         return "\n".join(lines)
 
     @staticmethod
-    def _format_stuck(stuck: dict) -> str:
+    def _format_dead_items_by_queue(stuck: dict) -> str:
         """Dead items still sitting in a queue, called out rather than hidden."""
         labels = (
             ("web", "Web scrape"),

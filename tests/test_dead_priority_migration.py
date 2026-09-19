@@ -4,7 +4,7 @@ The permanent-failure path clears `api_priority` when it marks an item dead, so
 this is not an ongoing leak — it is the rows that were already dead before that
 line existed. They matter because `api_priority > 0` is what every count of
 "queued for a fetch" looks at, and the statistics screen reports dead items still
-holding a queue flag as `stuck_work`: a few thousand of them would peg a detector
+holding a queue flag as `dead_items_by_queue`: a few thousand of them would peg a detector
 whose entire value is that it reads zero unless something has regressed.
 """
 
