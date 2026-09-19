@@ -52,7 +52,7 @@ def test_daemon_pipeline_mocked(db_path):
     config = {
         "database": {"path": db_path},
         "api": {"key": "TEST_KEY"},
-        "daemon": {"batch_size": 1, "request_delay_seconds": 0, "target_appids": [294100]}
+        "daemon": {"api_batch_size": 1, "request_delay_seconds": 0, "target_appids": [294100]}
     }
 
     insert_or_update_item(db_path, {"workshop_id": 555})

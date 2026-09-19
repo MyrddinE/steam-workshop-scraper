@@ -7,7 +7,7 @@ database:
   path: "workshop.db"
 
 daemon:
-  batch_size: 10
+  api_batch_size: 10
   api_delay_seconds: 1.5
   target_appids:
     - 294100 # RimWorld

@@ -21,7 +21,7 @@ def _daemon(db_path):
     return Daemon({
         "database": {"path": db_path},
         "api": {"key": "TEST_KEY"},
-        "daemon": {"target_appids": [1], "batch_size": 1, "request_delay_seconds": 0},
+        "daemon": {"target_appids": [1], "api_batch_size": 1, "request_delay_seconds": 0},
     })
 
 

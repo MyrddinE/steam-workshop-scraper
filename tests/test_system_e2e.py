@@ -27,7 +27,7 @@ def system_config(tmp_path):
         "database": {"path": db_path},
         "api": {"key": os.environ.get("STEAM_API_KEY")},
         "daemon": {
-            "batch_size": 1, 
+            "api_batch_size": 1, 
             "api_delay_seconds": 0.5,
             "target_appids": [294100]
         }

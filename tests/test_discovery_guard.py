@@ -23,7 +23,7 @@ def _config(db_path):
     return {
         "database": {"path": db_path},
         "api": {"key": "test_key"},
-        "daemon": {"target_appids": [1062090], "batch_size": 10, "request_delay_seconds": 0},
+        "daemon": {"target_appids": [1062090], "api_batch_size": 10, "request_delay_seconds": 0},
     }
 
 

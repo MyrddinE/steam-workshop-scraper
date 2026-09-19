@@ -36,7 +36,7 @@ from src.steam_api import (
     STEAM_API_MAX_IDS_PER_REQUEST,
 )
 from src.translator import TranslatorThread, is_ascii
-from src.config import login_secure_value, save_config
+from src.config import config_value_with_legacy, login_secure_value, save_config
 from src.database import raise_web_scrape_priority, queue_field_for_translation, raise_image_priority, translation_is_current
 from src.firefox_cookies import steam_login_secure
 from src.web_worker import WebScraperThread
@@ -328,8 +328,10 @@ class Daemon:
         # Implement default fallbacks
         self.db_path = config.get("database", {}).get("path", "workshop.db")
         self.api_key = config.get("api", {}).get("key", "")
-        self.batch_size = config.get("daemon", {}).get("batch_size", 10)
         daemon_config = config.get("daemon", {})
+        self.api_batch_size = config_value_with_legacy(
+            daemon_config, "api_batch_size", "batch_size", 10, section_name="daemon"
+        )
         if daemon_config.get("api_delay_seconds") is None and daemon_config.get("request_delay_seconds") is not None:
             logging.warning(
                 "Config key 'request_delay_seconds' is deprecated and still honoured; "
@@ -337,16 +339,21 @@ class Daemon:
             )
         self.api_delay = daemon_config.get("api_delay_seconds") or daemon_config.get("request_delay_seconds", 1.5)
         self.item_staleness_days = int(daemon_config.get("item_staleness_days") or 30)
-        self.user_staleness_days = int(daemon_config.get("user_staleness_days") or 90)
+        self.creator_staleness_days = int(
+            config_value_with_legacy(
+                daemon_config, "creator_staleness_days", "user_staleness_days",
+                section_name="daemon",
+            ) or 90
+        )
         set_api_delay(self.api_delay)
-        logging.info(f"API delay={self.api_delay}s, Staleness: item={self.item_staleness_days}d, user={self.user_staleness_days}d")
+        logging.info(f"API delay={self.api_delay}s, Staleness: item={self.item_staleness_days}d, creator={self.creator_staleness_days}d")
 
         # Write default config keys if absent
         changed = False
         if "daemon" not in self.config:
             self.config["daemon"] = {}
         for key, val in [("item_staleness_days", self.item_staleness_days),
-                          ("user_staleness_days", self.user_staleness_days)]:
+                          ("creator_staleness_days", self.creator_staleness_days)]:
             if key not in self.config["daemon"]:
                 self.config["daemon"][key] = val
                 changed = True
@@ -601,7 +608,7 @@ class Daemon:
             return
 
         # One bulk details request for the whole batch (chunked only if the
-        # configured batch_size exceeds the endpoint ceiling). Each request's
+        # configured api_batch_size exceeds the endpoint ceiling). Each request's
         # outcome drives the backoff; the per-item results below only decide
         # each item's state.
         api_data_by_id = self._fetch_details(items_to_fetch)
@@ -806,7 +813,7 @@ class Daemon:
     def _read_batch(self, failure_context: str = "Database error in process_batch"):
         """Read one batch from the database. Returns None on database error."""
         try:
-            return get_next_items_to_fetch(self.db_path, limit=self.batch_size)
+            return get_next_items_to_fetch(self.db_path, limit=self.api_batch_size)
         except Exception as e:
             logging.error(f"{failure_context}: {e}")
             time.sleep(5)
@@ -1122,7 +1129,7 @@ class Daemon:
         """Refresh a batch's creator personas in one API call.
 
         The rules are unchanged from the per-item version -- only enriched items
-        propose creators, a user row younger than `user_staleness_days` is left
+        propose creators, a user row younger than `creator_staleness_days` is left
         alone, and a creator the API does not return is left for a later cycle --
         but the request count drops from one per item to one per batch.
         """
@@ -1130,7 +1137,7 @@ class Daemon:
             return
 
         now = int(time.time())
-        stale_after = self.user_staleness_days * 86400
+        stale_after = self.creator_staleness_days * 86400
         to_fetch: list[int] = []
         seen: set[int] = set()
         for creator_id in creator_ids:
