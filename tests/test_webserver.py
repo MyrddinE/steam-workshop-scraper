@@ -1714,7 +1714,9 @@ const values = {
   'subscribed-overlay': {value: 'never'},
 };
 global.document = {getElementById: (id) => values[id]};
-const SUBSCRIBED_VALUES = ['any', 'never', 'currently', 'previously', 'queued', 'downloaded'];
+const SUBSCRIBED_VALUES = ['any', 'never', 'subscribed', 'previously', 'queued', 'downloaded'];
+const LEGACY_SUBSCRIBED_VALUES = __LEGACY__;
+const _normaliseSubscribedValue = (__NORM__);
 const _subscribedOverlayEl = () => values['subscribed-overlay'];
 const out = {};
 saveFn();
@@ -1736,6 +1738,11 @@ store[key] = JSON.stringify({
   sort_by: 'title', sort_order: 'ASC', selected: 7, scroll: -3,
 });
 out.filtered = loadFn();
+
+// A view saved before the marker vocabulary was unified names `currently`; it
+// must load as the current spelling rather than widen to `any`.
+store[key] = JSON.stringify({v: version, filters: [], subscribed: 'currently'});
+out.legacySubscribed = loadFn();
 
 // While the page is restoring, nothing may write the state back early.
 delete store[key];
@@ -1770,6 +1777,8 @@ def test_view_state_round_trips_and_rejects_stale_or_malformed_entries(web_clien
     driver = (VIEW_STATE_DRIVER
               .replace("__LOAD__", _extract_function(script, "_loadViewState"))
               .replace("__SAVE__", _extract_function(script, "_saveViewState"))
+              .replace("__LEGACY__", _extract_const(script, "LEGACY_SUBSCRIBED_VALUES"))
+              .replace("__NORM__", _extract_function(script, "_normaliseSubscribedValue"))
               .replace("__KEY__", _extract_const(script, "VIEW_STATE_KEY"))
               .replace("__VER__", _extract_const(script, "VIEW_STATE_VERSION")))
     out = _run_node(driver, tmp_path)
@@ -1802,6 +1811,8 @@ def test_view_state_round_trips_and_rejects_stale_or_malformed_entries(web_clien
     # does not know, reads back as the no-constraint default rather than hiding
     # rows.
     assert out["filtered"]["subscribed"] == "any"
+    assert out["legacySubscribed"]["subscribed"] == "subscribed", \
+        "a view saved with `currently` must load as the current value"
     assert out["wroteWhileRestoring"] is False, \
         "a restore in progress must not overwrite the state it is reading"
     assert out["wroteInAuthorMode"] is False, \

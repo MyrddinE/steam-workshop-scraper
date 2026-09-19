@@ -13,7 +13,7 @@ from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, L
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.worker import Worker, WorkerState
-from src.database import search_items, get_all_creator_ids, initialize_database, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, raise_api_priority_for_list, raise_api_priority_for_detail, get_subscription_states, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES
+from src.database import search_items, get_all_creator_ids, initialize_database, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, raise_api_priority_for_list, raise_api_priority_for_detail, get_subscription_states, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES, normalise_subscribed_value
 from src.analysis import view_window_analysis
 from src import metrics
 from src import db_poll
@@ -2425,7 +2425,8 @@ class ScraperApp(App):
                     self.query_one("#sort-by", Select).value = self._initial_state["sort_by"]
                 if "sort_order" in self._initial_state:
                     self.query_one("#sort-order", Select).value = self._initial_state["sort_order"]
-                overlay_value = self._initial_state.get("subscribed_overlay")
+                overlay_value = normalise_subscribed_value(
+                    self._initial_state.get("subscribed_overlay"))
                 if overlay_value in SUBSCRIBED_VALUES:
                     self.query_one("#subscribed-overlay", Select).value = overlay_value
                 if "filters" in self._initial_state:

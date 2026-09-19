@@ -88,12 +88,25 @@ SUBSCRIBED_FIELD = "Subscribed"
 # A virtual column name: no workshop_items column is called this. It exists so
 # the schema entry can carry one db_col like every other field while its
 # predicate spans the four real columns in SUBSCRIBED_FILTER_COLUMNS.
-SUBSCRIBED_DB_COL = "subscribed_state"
-SUBSCRIBED_VALUES = ["any", "never", "currently", "previously", "queued", "downloaded"]
+SUBSCRIBED_VIRTUAL_COLUMN = "subscription_state"
+SUBSCRIBED_VALUES = ["any", "never", "subscribed", "previously", "queued", "downloaded"]
 SUBSCRIBED_FILTER_COLUMNS = (
     "own_subscribed", "own_first_subscribed_at",
     "is_queued_for_subscription", "downloaded_at",
 )
+
+# The marker vocabulary unified two values a saved view or a saved filter may
+# still carry: the overlay's `currently` is now the `subscribed` value, and the
+# marker's `pending` is now `queued`. They are read and mapped onto the current
+# table rather than migrated, because an unknown value constrains nothing and a
+# stale saved view would otherwise silently widen to `any`.
+LEGACY_SUBSCRIBED_VALUES = {"currently": "subscribed", "pending": "queued"}
+
+
+def normalise_subscribed_value(value) -> str:
+    """``value`` in the current value table's spelling, mapping legacy words."""
+    text = str(value)
+    return LEGACY_SUBSCRIBED_VALUES.get(text, text)
 
 
 def _bool_column(item: dict, column: str) -> int:
@@ -123,13 +136,13 @@ SUBSCRIBED_VALUE_SPECS = {
         "columns": ("own_first_subscribed_at",),
         "matches": lambda item: item.get("own_first_subscribed_at") is None,
     },
-    "currently": {
+    "subscribed": {
         "sql": "COALESCE(own_subscribed, 0) = 1",
         "columns": ("own_subscribed",),
         "matches": lambda item: _bool_column(item, "own_subscribed") == 1,
     },
-    # `previously` is the complement of `never OR currently`, so its negation is
-    # exactly `never OR currently` -- see _build_subscribed_clause.
+    # `previously` is the complement of `never OR subscribed`, so its negation is
+    # exactly `never OR subscribed` -- see _build_subscribed_clause.
     "previously": {
         "sql": "(own_first_subscribed_at IS NOT NULL AND COALESCE(own_subscribed, 0) = 0)",
         "columns": ("own_subscribed", "own_first_subscribed_at"),
@@ -164,7 +177,7 @@ SEARCH_FILTER_SCHEMA = [
     {"field": "Favs",             "db_col": "favorited",                 "type": "number", "ops": ["gt", "lt", "gte", "lte", "percentile"]},
     {"field": "Views",            "db_col": "views",                     "type": "number", "ops": ["gt", "lt", "gte", "lte", "percentile"]},
     {"field": "File Size",        "db_col": "file_size",                  "type": "number", "ops": ["gt", "lt", "gte", "lte"]},
-    {"field": SUBSCRIBED_FIELD,   "db_col": SUBSCRIBED_DB_COL,           "type": "enum",   "values": SUBSCRIBED_VALUES, "ops": ["is", "is_not"]},
+    {"field": SUBSCRIBED_FIELD,   "db_col": SUBSCRIBED_VIRTUAL_COLUMN,    "type": "enum",   "values": SUBSCRIBED_VALUES, "ops": ["is", "is_not"]},
 ]
 
 # Build FILTER_FIELD_TO_COLUMN and ALL_FILTER_FIELDS from the schema
@@ -237,7 +250,7 @@ def _build_subscribed_clause(op: str, val) -> tuple[str, list]:
     """
     if op not in ("is", "is_not"):
         return ("", [])
-    spec = SUBSCRIBED_VALUE_SPECS.get(str(val))
+    spec = SUBSCRIBED_VALUE_SPECS.get(normalise_subscribed_value(val))
     if spec is None:
         return ("0 = 1", []) if op == "is" else ("1 = 1", [])
     clause = spec["sql"]
@@ -257,7 +270,7 @@ def subscribed_overlay_clause(value) -> tuple[str, list]:
     """
     if value is None or value == "any":
         return ("", [])
-    spec = SUBSCRIBED_VALUE_SPECS.get(str(value))
+    spec = SUBSCRIBED_VALUE_SPECS.get(normalise_subscribed_value(value))
     if spec is None:
         return ("", [])
     return (spec["sql"], [])
@@ -265,7 +278,7 @@ def subscribed_overlay_clause(value) -> tuple[str, list]:
 
 def _build_single_filter_clause(db_col: str, op: str, val) -> tuple[str, list]:
     """Converts an operator and value into a SQL clause string and param list."""
-    if db_col == SUBSCRIBED_DB_COL:
+    if db_col == SUBSCRIBED_VIRTUAL_COLUMN:
         return _build_subscribed_clause(op, val)
     op_map = {
         "contains": (f"{db_col} LIKE ?", [f"%{val}%"]),
@@ -539,14 +552,14 @@ def _evaluate_subscribed_filter(item: dict, op: str, val) -> bool:
     """
     if op not in ("is", "is_not"):
         return True
-    spec = SUBSCRIBED_VALUE_SPECS.get(str(val))
+    spec = SUBSCRIBED_VALUE_SPECS.get(normalise_subscribed_value(val))
     matched = spec["matches"](item) if spec is not None else False
     return not matched if op == "is_not" else matched
 
 
 def _evaluate_single_filter(item: dict, db_col: str, op: str, val) -> bool:
     """Checks whether an in-memory item dict matches a single filter criterion."""
-    if db_col == SUBSCRIBED_DB_COL:
+    if db_col == SUBSCRIBED_VIRTUAL_COLUMN:
         return _evaluate_subscribed_filter(item, op, val)
     is_tags = db_col == "tags"
     if is_tags:
@@ -781,8 +794,8 @@ def _demote_filtered_out_queue_priorities(conn) -> tuple[int, int]:
         # must carry every one the chosen value reads, or _evaluate_single_filter
         # would read missing keys and answer from their NULLs -- `never`, a false
         # `queued`, a false `downloaded` -- instead of the stored state.
-        if SUBSCRIBED_DB_COL in referenced:
-            referenced.discard(SUBSCRIBED_DB_COL)
+        if SUBSCRIBED_VIRTUAL_COLUMN in referenced:
+            referenced.discard(SUBSCRIBED_VIRTUAL_COLUMN)
             referenced.update(SUBSCRIBED_FILTER_COLUMNS)
         selected = sorted(c for c in referenced
                           if c and c.isidentifier() and c in columns)

@@ -168,7 +168,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
         <select id="subscribed-overlay" style="flex:1">
           <option value="any">any</option>
           <option value="never">never</option>
-          <option value="currently">currently</option>
+          <option value="subscribed">subscribed</option>
           <option value="previously">previously</option>
           <option value="queued">queued</option>
           <option value="downloaded">downloaded</option>
@@ -331,6 +331,15 @@ const TEXT_FIELDS = SEARCH_FILTER_SCHEMA.filter(f => f.type === 'string').map(f 
 // where every other field gets a free-text input.
 const SUBSCRIBED_FIELD = 'Subscribed';
 const SUBSCRIBED_VALUES = (SEARCH_FILTER_SCHEMA.find(f => f.field === SUBSCRIBED_FIELD) || {}).values || [];
+// A saved view or the TUI's state file may still carry a value from before the
+// marker vocabulary was unified: `currently` was the subscribed overlay's old
+// word and `pending` the queued marker's. Map it on read; an unknown value
+// constrains nothing, so an unmapped stale value would silently widen to `any`.
+const LEGACY_SUBSCRIBED_VALUES = {currently: 'subscribed', pending: 'queued'};
+function _normaliseSubscribedValue(value) {
+  const normalised = LEGACY_SUBSCRIBED_VALUES[value] || value;
+  return SUBSCRIBED_VALUES.indexOf(normalised) === -1 ? 'any' : normalised;
+}
 const ENUM_FIELDS = {};
 SEARCH_FILTER_SCHEMA.forEach(f => { if (f.type === 'enum') ENUM_FIELDS[f.field] = f.values || []; });
 
@@ -435,7 +444,7 @@ function _overlayValue() {
 function _applySubscribedOverlay(value) {
   const el = _subscribedOverlayEl();
   if (!el) return;
-  el.value = SUBSCRIBED_VALUES.indexOf(value) === -1 ? 'any' : value;
+  el.value = _normaliseSubscribedValue(value);
 }
 
 function updateOps(row) {
@@ -1463,7 +1472,7 @@ function _loadViewState() {
       sort_order: typeof parsed.sort_order === 'string' ? parsed.sort_order : '',
       // The overlay is view state, so it lives here beside the sort. An unknown
       // value reads back as `any` (no constraint) rather than hiding rows.
-      subscribed: SUBSCRIBED_VALUES.indexOf(parsed.subscribed) === -1 ? 'any' : parsed.subscribed,
+      subscribed: _normaliseSubscribedValue(parsed.subscribed),
       selected: (typeof parsed.selected === 'number' && isFinite(parsed.selected)) ? parsed.selected : null,
       scroll: (typeof parsed.scroll === 'number' && isFinite(parsed.scroll) && parsed.scroll > 0) ? parsed.scroll : 0,
     };

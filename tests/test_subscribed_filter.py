@@ -29,17 +29,17 @@ from tests.conftest import ASYNC_PAUSE
 # collects against a checkout without the field and each test fails on its own
 # behaviour rather than as one collection error.
 SUBSCRIBED_FIELD = "Subscribed"
-SUBSCRIBED_VALUES = ["any", "never", "currently", "previously", "queued", "downloaded"]
+SUBSCRIBED_VALUES = ["any", "never", "subscribed", "previously", "queued", "downloaded"]
 
 
 # ── a database with one row per subscription state ───────────────────────────
 #
-# ids: 1 never | 2 currently | 3 previously | 4 queued (never) | 5 downloaded |
-#      6 currently | 7 previously + queued | 8 downloaded
+# ids: 1 never | 2 subscribed | 3 previously | 4 queued (never) | 5 downloaded |
+#      6 subscribed | 7 previously + queued | 8 downloaded
 _EXPECTED = {
     "any": {1, 2, 3, 4, 5, 6, 7, 8},
     "never": {1, 4},
-    "currently": {2, 5, 6, 8},
+    "subscribed": {2, 5, 6, 8},
     "previously": {3, 7},
     "queued": {4, 7},
     "downloaded": {5, 8},
@@ -133,8 +133,8 @@ def test_is_not_any_matches_nothing_in_both_evaluators(subscribed_db):
 
 def test_overlay_returns_the_intersection_with_the_builder_rows(subscribed_db):
     builder = [{"field": "Title", "op": "contains", "value": "Item"}]
-    got = _ids(search_items(subscribed_db, filters=builder, subscribed_overlay="currently"))
-    assert got == _EXPECTED["currently"]
+    got = _ids(search_items(subscribed_db, filters=builder, subscribed_overlay="subscribed"))
+    assert got == _EXPECTED["subscribed"]
 
     # A narrow builder row intersected with an overlay that excludes it is empty.
     narrow = [{"field": "Title", "op": "contains", "value": "Item 2"}]
@@ -154,20 +154,35 @@ def test_overlay_is_anded_outside_the_builder_group(subscribed_db):
 
     The overlay is applied as `AND (...)` after the builder's own parenthesised
     group. If it were appended as another row it would be ORed with the second
-    row and `Item 4` (never subscribed) would leak through a `currently` view.
+    row and `Item 4` (never subscribed) would leak through a `subscribed` view.
     """
     filters = [
         {"field": "Title", "op": "contains", "value": "Item 2"},
         {"logic": "OR", "field": "Title", "op": "contains", "value": "Item 4"},
     ]
     assert _ids(search_items(subscribed_db)) == _EXPECTED["any"]
-    got = _ids(search_items(subscribed_db, filters=filters, subscribed_overlay="currently"))
+    got = _ids(search_items(subscribed_db, filters=filters, subscribed_overlay="subscribed"))
     assert got == {2}
 
 
 def test_unknown_overlay_value_constrains_nothing(subscribed_db):
     got = _ids(search_items(subscribed_db, subscribed_overlay="from-a-newer-build"))
     assert got == _EXPECTED["any"]
+
+
+def test_a_legacy_overlay_value_is_normalised(subscribed_db):
+    """A saved view still naming `currently` must not silently widen to `any`."""
+    legacy = _ids(search_items(subscribed_db, subscribed_overlay="currently"))
+    assert legacy == _EXPECTED["subscribed"]
+
+
+def test_a_legacy_filter_value_is_normalised(subscribed_db):
+    """A saved builder row still naming `pending` must keep naming `queued`."""
+    legacy = _ids(search_items(
+        subscribed_db,
+        filters=[{"field": SUBSCRIBED_FIELD, "op": "is", "value": "pending"}]))
+    assert legacy == _EXPECTED["queued"]
+    assert _memory_ids(subscribed_db, "is", "pending") == _EXPECTED["queued"]
 
 
 # ── the sort ─────────────────────────────────────────────────────────────────
@@ -441,6 +456,28 @@ async def test_tui_overlay_is_restored_with_the_view_and_ignored_while_greyed_ou
             assert app._effective_subscribed_overlay() == "any"
 
 
+@pytest.mark.asyncio
+async def test_tui_restores_a_legacy_overlay_value_as_subscribed(mock_config):
+    """`.tui_state.yaml` may still hold `currently` from before the unification."""
+    from src.tui import ScraperApp
+    from textual.widgets import Select
+
+    state = {
+        "sort_by": "title",
+        "sort_order": "ASC",
+        "subscribed_overlay": "currently",
+    }
+    with patch('src.tui.load_config', return_value=mock_config), \
+         patch('src.tui.load_tui_state', return_value=state), \
+         patch('src.tui.save_tui_state'), \
+         patch('src.tui.search_items', return_value=[]):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE * 2)
+            assert app.query_one("#subscribed-overlay", Select).value == "subscribed"
+            assert app._effective_subscribed_overlay() == "subscribed"
+
+
 # ── the detail pane shows the date, on both sides ────────────────────────────
 
 @pytest.mark.asyncio
@@ -487,7 +524,7 @@ VALUE_CONTROL_DRIVER = """
 const updateFn = (__FN__);
 const _isEnumField = (__ISENUM__);
 const _enumValueOptions = (__OPTS__);
-const ENUM_FIELDS = {Subscribed: ['any', 'never', 'currently', 'previously', 'queued', 'downloaded']};
+const ENUM_FIELDS = {Subscribed: ['any', 'never', 'subscribed', 'previously', 'queued', 'downloaded']};
 
 function makeRow(field, op) {
   const parent = {replaceChild: function(next) { row._value = next; next.parentNode = parent; }};
@@ -552,7 +589,7 @@ const _syncSubscribedOverlay = (__SYNC__);
 const _overlayValue = (__VALUE__);
 const _subscribedOverlayEl = (__EL__);
 const SUBSCRIBED_FIELD = 'Subscribed';
-const SUBSCRIBED_VALUES = ['any', 'never', 'currently', 'previously', 'queued', 'downloaded'];
+const SUBSCRIBED_VALUES = ['any', 'never', 'subscribed', 'previously', 'queued', 'downloaded'];
 const overlay = {disabled: false, title: '', value: 'queued'};
 let rows = [{querySelector: () => ({value: 'Title'})}];
 global.document = {
