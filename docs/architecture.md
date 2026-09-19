@@ -146,10 +146,16 @@ The database is designed for high-concurrency and complex querying. See
 The translation system runs as a separate background thread, in parallel with the daemon and TUI.
 
 * **Workflow**: The thread continuously polls `translation_queue` for fields to translate. It
-  fetches the highest-priority batch, sends the non-ASCII text fields to an external API, and
-  writes the English results back to the corresponding `_en` columns.
-* **OpenAI integration**: Uses the OpenAI API by default (`gpt-4o-mini`). The prompt requests a
-  JSON object as output to make parsing reliable.
+  fetches the highest-priority candidates, packs them into a request by size, sends the non-ASCII
+  text fields to an external API, and writes the English results back to the corresponding `_en`
+  columns. A reply covering only part of its request is a partial success: the fields it answered
+  are written and the rest stay queued.
+* **OpenAI integration**: Uses an OpenAI-compatible API by default (`gpt-4o-mini`). The request is
+  written as boundary blocks in the same shape as the reply it asks for — each opening with a phrase
+  of four words drawn fresh for that request — so the model copies a structure rather than building
+  one and never has to escape the translated text. (It previously asked for a JSON object "to make
+  parsing reliable"; the escaping that required turned out to be the least reliable part of it — see
+  [data-pipeline.md](data-pipeline.md#translation-phase).)
 * **Configuration**: Configured via the `openai` section in `config.yaml`, with the API key
   supplied through the `OPENAI_API_KEY` environment variable.
 

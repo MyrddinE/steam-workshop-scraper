@@ -63,7 +63,7 @@ Independent daemon thread. Picks up items with highest `needs_image` priority. D
 
 ### Translation Thread (`TranslatorThread`)
 
-Independent daemon thread. Batch-fetches fields from `translation_queue` (up to 20), sends to OpenAI API, writes translated fields to `_en` columns. Handles both `workshop_items` (title_en, short_description_en, extended_description_en) and `users` (personaname_en).
+Independent daemon thread. Fetches a request's worth of fields from `translation_queue` — packed by source length (`openai.batch_char_cap`) and capped at `openai.batch` fields — and sends them to an OpenAI-compatible API as boundary blocks: a boundary line carrying a per-request phrase of four words, the queue row's `item_id` and its field label, then the source text beneath it. Writes translated fields to `_en` columns. Handles both `workshop_items` (title_en, short_description_en, extended_description_en) and `users` (personaname_en).
 
 **Shared state**: Reads `translation_queue`. Writes `_en` columns on `workshop_items` and `users`, stamps `translate_version` on items and `translated_at` on users, deletes from `translation_queue`, resets `translation_priority` to 0 when the queue is empty for an item. In that same last-field statement it stamps the item's `translated_at` with our clock — the completion time of the item as a whole. A per-field write while another field is still queued does not stamp it.
 
@@ -72,6 +72,12 @@ request fails, the way the daemon's dynamic `api_delay` does — see [data-pipel
 Retrying a failed batch at the normal inter-batch interval turns a transient outage into a tight loop
 against a third-party API, and buries the real message in the log. A failed batch leaves its
 `translation_queue` rows in place, so a backoff costs nothing but time.
+
+A reply covering only part of its request is **partial success**, not a failure: the fields it
+resolved are written, the ones it missed keep their rows for a later pass, and the backoff is not
+grown — the model answered, so backing off would slow work it did return. A reply with **no usable
+block at all** is a failure and does back off, which is what stops an unparseable answer being
+re-sent in a tight loop.
 
 The translator's delay doubles from a base and caps, in one of two shapes, chosen because the failures
 differ in kind. A **service** failure — a transport error, a rate limit, a 5xx — starts at 2 s and caps
