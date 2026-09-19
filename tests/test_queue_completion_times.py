@@ -48,6 +48,7 @@ from src.database import (
     initialize_database,
     insert_or_update_item,
 )
+from tests.conftest import restore_pre_rename_table_names
 
 COMPLETION_COLUMNS = ("web_scraped_at", "image_fetched_at", "translated_at")
 COMPLETION_INDEXES = tuple(f"idx_{column}" for column in COMPLETION_COLUMNS)
@@ -131,6 +132,7 @@ def _regress_to_v26(db_path):
         conn.execute(f"DROP INDEX IF EXISTS {name}")
     for column in COMPLETION_COLUMNS:
         conn.execute(f"ALTER TABLE workshop_items DROP COLUMN {column}")
+    restore_pre_rename_table_names(conn)
     conn.execute("PRAGMA user_version = 26")
     conn.commit()
     conn.close()

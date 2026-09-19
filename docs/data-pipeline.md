@@ -23,7 +23,7 @@ fetch while its scraper, image and discovery threads are already working. Each i
 6. Evaluates enrichment filters via `_should_enrich`. Checks the stored `enrichment_filters` for each AppID against the item using `_evaluate_filters` (an in-memory filter evaluator that mirrors the SQL builder's semantics). If no filters are configured, all items are enriched.
 7. If enrichment is approved, calls `raise_web_scrape_priority` at `max(3, requested)` -- and `raise_image_priority` at the same priority if `preview_url` is present -- where `requested` is the part of the item's pre-fetch `api_priority` a *user* asked for (`user_requested_priority`; `5` and `10` only). An item the filters exclude is still scraped, but at `max(1, requested)`: the filters choose priority, not membership, and an excluded item must not outrank a selected one ([data-model.md](data-model.md#queue-priorities)). Sets `status = 200`. Calls `insert_or_update_item` to persist. The merge sets `api_fetched_at = now_ts` and `api_priority = 0`; `last_fetch_attempted_at` was already stamped on entry.
 8. For enriched items, flags `title` and `short_description` for translation via `queue_field_for_translation` at `max(3, requested)`. That function inserts into `translation_queue` and also raises the parent row's `translation_priority` (using `MAX`, so it never downgrades); the translator clears it to 0 when the item has no queue entries left. Users with non-ASCII names get `translation_priority = 1` set via `_build_user_record`.
-9. After the batch, refreshes the batch's creator profiles in **one** `get_player_summaries` call: the distinct creators proposed by enriched items whose `users` row is missing or older than `creator_staleness_days`. This was one request per item; the "only for enriched items" and staleness rules are unchanged.
+9. After the batch, refreshes the batch's creator profiles in **one** `get_player_summaries` call: the distinct creators proposed by enriched items whose `creators` row is missing or older than `creator_staleness_days`. This was one request per item; the "only for enriched items" and staleness rules are unchanged.
 
 **Missing ids**: `get_workshop_details_batch` keys results by each entry's `publishedfileid`, never by position, and ignores duplicate or unrequested ids. A requested id the response omits is reported as a synthetic `500`, not a `404`: the response not covering an id is a different claim from Steam having deleted the item, and a `404` would mark it permanently dead. It is therefore settled as a temporary failure and retried, rather than being silently skipped at the front of the queue.
 
@@ -96,7 +96,7 @@ scrapes and previews throughout and no API fetch until the walk finished.
 
 Cursor-based discovery using `IPublishedFileService/QueryFiles` with `query_type=1` (rank by publication date, newest first). For each target AppID:
 
-- Resumes from the last stored cursor (`app_tracking.last_cursor`), or `*` for the first page.
+- Resumes from the last stored cursor (`app_discovery.last_cursor`), or `*` for the first page.
 - Fetches `numperpage=100` items per request. Each item's `publishedfileid` is inserted into `workshop_items` as a bare row at `api_priority = 3`, the documented new-item priority (status NULL, no metadata). The priority is passed explicitly rather than left to the column default, because that default is not stable across database histories: `CREATE TABLE` declares `DEFAULT 3` while the `ALTER TABLE` in migration 11→12 gives an existing database `DEFAULT 0`, so leaning on it queues discovered items on a fresh database and strands them on a migrated one (the fetch queue selects `api_priority > 0`). `_run_page_discovery` uses `5` because it handles new *and changed* items that should refresh as if visible; cursor discovery finds genuinely new items, so it uses the documented `3`.
 - Stops when `fill_target` unscraped items are accumulated, or when the cursor returns empty (no more pages).
 - Persists the cursor after each page via `update_app_tracking_cursor`.
@@ -150,7 +150,7 @@ The queue-owned columns are dropped rather than carried because the merge is a r
 
 ### `_should_enrich` (daemon)
 
-Checks whether an item passes the enrichment filter for its AppID. Reads `enrichment_filters` from `app_tracking` (a JSON array of filter dicts in the same format as the TUI search builder). Feeds the item dict through `_evaluate_filters`, which uses `_evaluate_single_filter` for each criterion and `_evaluate_tag_filter` for tag-based filters. Returns True if no filters are configured for the AppID (enrich everything).
+Checks whether an item passes the enrichment filter for its AppID. Reads `enrichment_filters` from `app_discovery` (a JSON array of filter dicts in the same format as the TUI search builder). Feeds the item dict through `_evaluate_filters`, which uses `_evaluate_single_filter` for each criterion and `_evaluate_tag_filter` for tag-based filters. Returns True if no filters are configured for the AppID (enrich everything).
 
 **The daemon's in-memory check and the search's SQL translation are not the same predicate, and that is deliberate.** `_evaluate_filters` reads the original columns, while `build_filters_sql` — the one builder `search_items` uses — also searches each text field's `_en` counterpart, so an item whose stored translation matches a `Title`/`Description` filter but whose original text does not is selected in SQL and rejected in Python. A `percentile` filter has no fixed predicate in either: it is relative to the result set it is computed over, so the in-memory check treats it as matching everything and the builder skips it. A saved `Subscribed` filter is evaluated in memory against the shared value table, not against the raw flag columns. The daemon therefore keeps using `_evaluate_filters` wherever the answer must match the fetch path, including migration 21→22's demotion walk; the coverage metric's scoped figure and its Translations bar's population are explicitly *the search builder's translation* of the filters, and say so where they are shown. See [tui.md](tui.md) and [web-ui.md](web-ui.md).
 
@@ -441,15 +441,15 @@ It replaced a JSON envelope (`[{id, field, text}]` in, `[{id, translated}]` out)
 1. Builds the boundary blocks described above, one per field, in queue order.
 2. Sends to the OpenAI API at `openai.temperature` (default 0.0) and **without `max_tokens`**: a truncated translation is a corrupt one, so the reply is not bounded by a token budget.
 3. Parses the reply into blocks. **Positional first**: when the reply yields exactly as many blocks as were sent, they are assigned in order and the boundaries are corroboration only — which is what keeps a reply usable when the model translates correctly but mangles a boundary. A reply whose phrase was mangled is then retried against a tolerant boundary pattern (some short words, then an id and a field label) before any alignment is attempted. When the counts differ under both, the boundaries become an alignment guide matched on `(item_id, field label)`; a row that gets no block is left out, and a block matching no row is ignored. Blank lines at a block's edges are the boundary rather than content; internal newlines and spacing are preserved.
-4. For each resolved field, updates the corresponding `_en` column on `workshop_items` or `users`, stamps `translate_version` (or `translated_at` on `users`), and deletes the queue entry.
-5. After the batch, for each translated id — a `(item_type, item_id)` pair, so a creator's steamid can never be counted or completed against `workshop_items` — checks whether any queue entry for that id remains. For an **item** with none left, it sets `translation_priority = 0` and stamps the item's `translated_at` — our clock for the completion of the item as a whole — in the same statement and transaction; a field write while another field is still queued is a partial stage and does not stamp. For a **creator** with none left, it clears `users.translation_priority`: the per-field write in step 4 already stamped `users.translated_at`, and a creator has no version key to stamp.
+4. For each resolved field, updates the corresponding `_en` column on `workshop_items` or `creators`, stamps `translate_version` (or `translated_at` on `creators`), and deletes the queue entry.
+5. After the batch, for each translated id — a `(item_type, item_id)` pair, so a creator's steamid can never be counted or completed against `workshop_items` — checks whether any queue entry for that id remains. For an **item** with none left, it sets `translation_priority = 0` and stamps the item's `translated_at` — our clock for the completion of the item as a whole — in the same statement and transaction; a field write while another field is still queued is a partial stage and does not stamp. For a **creator** with none left, it clears `creators.translation_priority`: the per-field write in step 4 already stamped `creators.translated_at`, and a creator has no version key to stamp.
 
 **Partial replies and failures**: a reply covering only part of the batch is a **partial success**. The fields it resolved are committed, the fields it missed keep their `translation_queue` rows for a later pass, and the failure streak behind the backoff is not grown — the model did answer, so backing off would slow work it did return. A reply yielding **no usable block at all** is a failure instead: it raises, which is what puts the backoff in charge rather than re-sending the same request in a tight loop. API failures log an error and retry on the next cycle.
 
 ### The superseded flag-as-queue producer (removed)
 
 The mirror was once the queue itself. `flag_for_translation` set
-`translation_priority` on a `workshop_items` or `users` row and nothing else, and
+`translation_priority` on a `workshop_items` or `creators` row and nothing else, and
 `get_next_translation_item` scanned both tables by that flag, so raising the flag
 was a complete producer and `_build_user_record` calling it directly was correct.
 The per-field `translation_queue` replaced that scan, and once nothing in `src/`
@@ -462,7 +462,7 @@ producer unported is why migration 27→28 exists; see
 
 ### `queue_field_for_translation` (database)
 
-Inserts or bumps an entry in `translation_queue`, and also raises the parent row's `translation_priority` via `MAX`. Checks if the field already exists in the queue; if so, bumps its priority (never downgrades). If new, inserts with the given priority and `queued_at = now`. This is the **only** producer: it queues item fields and, since issue 45, a creator's `personaname_en` as well, called by `_store_user_record` after the profile upsert (the mirror needs the `users` row to exist).
+Inserts or bumps an entry in `translation_queue`, and also raises the parent row's `translation_priority` via `MAX`. Checks if the field already exists in the queue; if so, bumps its priority (never downgrades). If new, inserts with the given priority and `queued_at = now`. This is the **only** producer: it queues item fields and, since issue 45, a creator's `personaname_en` as well, called by `_store_user_record` after the profile upsert (the mirror needs the `creators` row to exist).
 
 **Both writes happen in one transaction on one connection.** They used to run on two connections, and the translator drains the queue on its own thread: a drain landing between them deleted the row and zeroed the mirror, after which the second write raised the mirror again with nothing queued behind it. The item then read as permanently pending, because every producer skips a translation that is already current, so nothing ever re-queued the field to clear it. Migration 22→23 repairs the rows the old helper stranded.
 
@@ -505,7 +505,7 @@ very refresh that calls the producer. Skipping there would leave the Creator
 Translation bar counting a name as untranslated with nothing queued behind it, so
 `_store_user_record` queues every non-ASCII name it is handed, right after the
 profile upsert (`queue_field_for_translation` raises the mirror in the same
-transaction as the queue row, so the `users` row must exist first). The cost is at
+transaction as the queue row, so the `creators` row must exist first). The cost is at
 most one re-translation per creator per refresh cycle, and a profile is only
 refreshed when an enriched item proposes its creator and the profile's
 `api_fetched_at` is older than `creator_staleness_days` (default 90).
@@ -616,7 +616,7 @@ population is what stops a bar promising work that cannot exist.
 | Extended Web Translation (subsidiary) | live items whose non-ASCII `extended_description` has a current `extended_description_en` | any **scraped** item with a non-ASCII description, not only the filter-selected ones: `WebScraperThread` flags the description regardless of enrichment. A non-ASCII description is a description, so this bar can never be longer than Extended Web above it |
 | Images | live items with a recorded `image_extension` | every live item; a recorded answer settles the stage even when the preview does not exist |
 | Creator | live items with a creator | every live item |
-| Creator Translation (subsidiary) | **items** attributed to a creator whose `users.personaname` is non-ASCII and whose `personaname_en` is current | the name lives per user and is shared by every item that creator made, so the bar counts items to stay comparable with the per-item bars around it. Currency compares our clocks, `translated_at >= api_fetched_at`, because a user has no `steam_updated_at` |
+| Creator Translation (subsidiary) | **items** attributed to a creator whose `creators.personaname` is non-ASCII and whose `personaname_en` is current | the name lives per creator and is shared by every item that creator made, so the bar counts items to stay comparable with the per-item bars around it. Currency compares our clocks, `translated_at >= api_fetched_at`, because a creator has no `steam_updated_at` |
 
 The three translation bars have **three different scopes** deliberately, because the code that feeds
 them does. Each population is the flagging rule written in SQL — non-empty and non-ASCII
@@ -632,7 +632,7 @@ exactly that set, so only its denominator changes between the two blocks — it 
 scope, it *is* the scope. The whole-library view is the one whose Translations bar shows the
 stage's reachable share of the entire library.
 
-**Cost.** Each scope is one pass over its live items (`_coverage_scan`), with a `LEFT JOIN users` on
+**Cost.** Each scope is one pass over its live items (`_coverage_scan`), with a `LEFT JOIN creators` on
 the primary key for the creator bars and the non-ASCII tests evaluated in SQL. No index was added:
 the filtered scope still reaches its rows through the `consumer_appid` index, and the join is a
 primary-key lookup per item.

@@ -25,8 +25,9 @@ from src.database import (
     get_connection,
     initialize_database,
     insert_or_update_item,
-    insert_or_update_user,
+    insert_or_update_creator,
 )
+from tests.conftest import restore_pre_rename_table_names
 
 
 def _queue_count(db_path, item_id):
@@ -165,6 +166,7 @@ def test_api_merge_does_not_carry_translation_priority(db_path):
 
 def _age_to_v22(db_path):
     conn = get_connection(db_path)
+    restore_pre_rename_table_names(conn)
     conn.execute("PRAGMA user_version = 22")
     conn.commit()
     conn.close()
@@ -225,7 +227,7 @@ def test_migration_queues_a_creator_name_and_keeps_its_mirror(db_path):
     the queue row it was owed.
     """
     steamid = 76561198000000000
-    insert_or_update_user(db_path, {
+    insert_or_update_creator(db_path, {
         "steamid": steamid, "personaname": "テスト", "translation_priority": 1,
     })
     _age_to_v22(db_path)
@@ -234,7 +236,7 @@ def test_migration_queues_a_creator_name_and_keeps_its_mirror(db_path):
 
     conn = get_connection(db_path)
     priority = conn.execute(
-        "SELECT translation_priority FROM users WHERE steamid=?",
+        "SELECT translation_priority FROM creators WHERE steamid=?",
         (steamid,),
     ).fetchone()[0]
     queued = conn.execute(

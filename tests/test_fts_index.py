@@ -8,6 +8,7 @@ triggers. These tests pin both halves: the repair, and the maintenance.
 import pytest
 
 from src.database import get_connection, initialize_database, insert_or_update_item, EXPECTED_VERSION
+from tests.conftest import restore_pre_rename_table_names
 
 INDEXED_COLUMNS = (
     "title", "title_en", "short_description", "short_description_en",
@@ -104,6 +105,7 @@ def test_migration_15_repairs_rows_missing_from_the_index(db_path):
     # Rewind the version marker and re-run the initializer, which is what deploy does.
     conn = get_connection(db_path)
     try:
+        restore_pre_rename_table_names(conn)
         conn.execute("PRAGMA user_version = 14")
         conn.commit()
     finally:

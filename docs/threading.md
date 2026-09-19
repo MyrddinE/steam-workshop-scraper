@@ -63,9 +63,9 @@ Independent daemon thread. Picks up items with highest `needs_image` priority. D
 
 ### Translation Thread (`TranslatorThread`)
 
-Independent daemon thread. Fetches a request's worth of fields from `translation_queue` — packed by source length (`openai.batch_char_cap`) and capped at `openai.batch_items` fields — and sends them to an OpenAI-compatible API as boundary blocks: a boundary line carrying a per-request phrase of four words, the queue row's `item_id` and its field label, then the source text beneath it. Writes translated fields to `_en` columns. Handles both `workshop_items` (title_en, short_description_en, extended_description_en) and `users` (personaname_en).
+Independent daemon thread. Fetches a request's worth of fields from `translation_queue` — packed by source length (`openai.batch_char_cap`) and capped at `openai.batch_items` fields — and sends them to an OpenAI-compatible API as boundary blocks: a boundary line carrying a per-request phrase of four words, the queue row's `item_id` and its field label, then the source text beneath it. Writes translated fields to `_en` columns. Handles both `workshop_items` (title_en, short_description_en, extended_description_en) and `creators` (personaname_en).
 
-**Shared state**: Reads `translation_queue`. Writes `_en` columns on `workshop_items` and `users`, stamps `translate_version` on items and `translated_at` on users, deletes from `translation_queue`, resets `translation_priority` to 0 when the queue is empty for an item. In that same last-field statement it stamps the item's `translated_at` with our clock — the completion time of the item as a whole. A per-field write while another field is still queued does not stamp it.
+**Shared state**: Reads `translation_queue`. Writes `_en` columns on `workshop_items` and `creators`, stamps `translate_version` on items and `translated_at` on creators, deletes from `translation_queue`, resets `translation_priority` to 0 when the queue is empty for an item. In that same last-field statement it stamps the item's `translated_at` with our clock — the completion time of the item as a whole. A per-field write while another field is still queued does not stamp it.
 
 **Pacing and failure**: Every API-calling thread is expected to pace itself and to back off when a
 request fails, the way the daemon's dynamic `api_delay` does — see [data-pipeline.md](data-pipeline.md).
@@ -138,7 +138,7 @@ No formal locking protocol exists, but columns have clear ownership:
 - **Discovery thread**: nothing beyond the bare row it creates — `workshop_id` and `api_priority` — so every other column on a discovered item is the main loop's
 - **Web scraper**: extended_description, needs_web_scrape, `web_scraped_at` (our completion time, success only)
 - **Image thread**: image_extension, needs_image, `image_fetched_at` (our completion time, success only)
-- **Translator**: title_en, short_description_en, extended_description_en, personaname_en, translate_version, `translated_at` on both tables (on an item it is written when the last queued field completes; for a creator the per-field write stamps `users.translated_at`, and completion only clears `users.translation_priority`, because a creator has no version key)
+- **Translator**: title_en, short_description_en, extended_description_en, personaname_en, translate_version, `translated_at` on both tables (on an item it is written when the last queued field completes; for a creator the per-field write stamps `creators.translated_at`, and completion only clears `creators.translation_priority`, because a creator has no version key)
 - **Web scraper**: scrape_version, the revision the *page* was scraped at. The image thread used to write it too, which made an unscraped item claim a scrape; it no longer touches the column
 
 ### Priority Bumping

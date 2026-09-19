@@ -31,7 +31,7 @@ WORKSHOP_ITEM_COLUMNS = frozenset({
 # ``users.dt_translated`` was renamed to ``translated_at`` (not
 # ``translate_version``) because it holds our wall-clock time for users, not a
 # Steam ``steam_updated_at`` version key: users have no ``steam_updated_at``.
-USER_COLUMNS = frozenset({
+CREATOR_COLUMNS = frozenset({
     "steamid", "personaname", "personaname_en",
     "api_fetched_at", "translated_at", "translation_priority",
 })
@@ -223,7 +223,7 @@ USER_PRIORITY_FLOOR = 5
 # than local to `initialize_database` because the migration tests assert that
 # the chain reaches it, and a magic number repeated in nine test files is a
 # number that will be wrong after the next migration.
-EXPECTED_VERSION = 29
+EXPECTED_VERSION = 30
 
 def _build_text_search_clauses(sql: str, params: list, query_string: str, cols: list[str]) -> tuple[str, list]:
     """Applies positive/negative text search tokens to SQL via LIKE clauses."""
@@ -739,6 +739,26 @@ def get_image_path(base_dir: str, workshop_id, ext: str) -> str:
     bucket1, bucket2, bucket3 = get_image_subdirs(workshop_id)
     return os.path.join(base_dir, bucket1, bucket2, bucket3, f"{workshop_id}.{ext}")
 
+def _current_table_name(cursor, new_name: str, old_name: str) -> str:
+    """Resolve a table's current name across the Batch 6 rename.
+
+    ``_create_schema`` runs on every startup, before the versioned migrations,
+    so it sees a database on both sides of migration 29->30. It has to keep
+    building a *fresh* database with the historical name -- the chain it is
+    about to replay names these tables at earlier versions (13->14, 22->23,
+    27->28) -- and it must not resurrect that name once the table has been
+    renamed. Prefer the new name when it exists, then the old one, and default
+    to the old name so a brand-new file gets the shape the chain expects.
+    """
+    names = {row[0] for row in cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
+    if new_name in names:
+        return new_name
+    if old_name in names:
+        return old_name
+    return old_name
+
+
 def _demote_filtered_out_queue_priorities(conn) -> tuple[int, int]:
     """Move filter-excluded items back to backlog priority. Returns (web, image).
 
@@ -771,8 +791,12 @@ def _demote_filtered_out_queue_priorities(conn) -> tuple[int, int]:
     """
     cursor = conn.cursor()
 
+    # Resolved, not hard-coded: this helper runs inside migration 21->22, when
+    # the table still carries its historical name, and is also called directly
+    # by a test against a current-schema database, where it does not.
+    table = _current_table_name(cursor, "app_discovery", "app_tracking")
     rules = []
-    for row in cursor.execute("SELECT * FROM app_tracking"):
+    for row in cursor.execute(f"SELECT * FROM {table}"):
         tracking = dict(row)
         filters = get_enrichment_filters(tracking)
         if tracking.get("appid") is not None and filters:
@@ -879,8 +903,8 @@ def _create_schema(cursor, conn):
         last_fetch_attempted_at INTEGER,
         status INTEGER,
         title TEXT,
-        creator INTEGER, -- FK to users.steamid (LEFT JOIN used; FK omitted
-                        --   because items are discovered before users are fetched)
+        creator INTEGER, -- FK to creators.steamid (LEFT JOIN used; FK omitted
+                        --   because items are discovered before creators are fetched)
         creator_appid INTEGER,
         consumer_appid INTEGER,
         filename TEXT,
@@ -944,15 +968,21 @@ def _create_schema(cursor, conn):
         -- successfully (v27).
         image_fetched_at INTEGER DEFAULT NULL,
         -- Our clock: when the translator finished the last queued field for
-        -- this item (v27). The users table's translated_at has the same
+        -- this item (v27). The creators table's translated_at has the same
         -- meaning; this is the item-row equivalent.
         translated_at INTEGER DEFAULT NULL
     )
     """)
 
-    # Create users table
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS users (
+    # The creator table. Its name is resolved rather than hard-coded because
+    # this runs on both sides of migration 29->30: a fresh database must start
+    # with `users` so the chain's earlier steps (6->7's timestamp conversion,
+    # 13->14's column renames and 27->28's translation mirror repair) still
+    # find it, and an already-renamed one must not get an empty `users`
+    # resurrected beside `creators`.
+    _creators_table = _current_table_name(cursor, "creators", "users")
+    cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS {_creators_table} (
         steamid INTEGER PRIMARY KEY,
         personaname TEXT,
         personaname_en TEXT,
@@ -1024,9 +1054,13 @@ def _create_schema(cursor, conn):
     if "dt_translated" not in _item_cols_now and "translate_version" not in _item_cols_now:
         cursor.execute("ALTER TABLE workshop_items ADD COLUMN dt_translated TEXT")
 
-    # Create app_tracking table for historical scraping and filter storage
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS app_tracking (
+    # The AppID discovery table. Resolved for the same reason as the creator
+    # table above: fresh databases must build it as `app_tracking` for
+    # migration 21->22, and a renamed database must not gain an empty
+    # `app_tracking` beside `app_discovery`.
+    _app_discovery_table = _current_table_name(cursor, "app_discovery", "app_tracking")
+    cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS {_app_discovery_table} (
         appid INTEGER PRIMARY KEY,
         last_historical_date_scanned INTEGER,
         filter_text TEXT DEFAULT '',
@@ -1039,7 +1073,7 @@ def _create_schema(cursor, conn):
     """)
 
     # Safe migrations for existing databases to add new filter columns
-    _safe_add_columns(cursor, "app_tracking", [
+    _safe_add_columns(cursor, _app_discovery_table, [
         ("filter_text", "TEXT DEFAULT ''"),
         ("required_tags", "TEXT DEFAULT '[]'"),
         ("excluded_tags", "TEXT DEFAULT '[]'"),
@@ -1048,19 +1082,19 @@ def _create_schema(cursor, conn):
         ("last_cursor", "TEXT DEFAULT ''"),
     ])
 
-    # Data Migration: Populate app_tracking from existing workshop_items if empty, 
-    # and drop the obsolete app_state table.
-    cursor.execute("SELECT COUNT(*) FROM app_tracking")
+    # Data Migration: Populate the discovery table from existing workshop_items
+    # if empty, and drop the obsolete app_state table.
+    cursor.execute(f"SELECT COUNT(*) FROM {_app_discovery_table}")
     if cursor.fetchone()[0] == 0:
         # The Steam-side "last updated" column is named time_updated before
         # migration 13->14 and steam_updated_at after it. This block runs before
         # the migrations, so on an already-migrated database it must use the new
         # name (otherwise re-initializing a v14 database with an empty
-        # app_tracking table would reference a column that no longer exists).
+        # discovery table would reference a column that no longer exists).
         _cols_now = {r[1] for r in cursor.execute("PRAGMA table_info(workshop_items)").fetchall()}
         _steam_updated = "time_updated" if "time_updated" in _cols_now else "steam_updated_at"
         cursor.execute(f"""
-            INSERT INTO app_tracking (appid, last_historical_date_scanned)
+            INSERT INTO {_app_discovery_table} (appid, last_historical_date_scanned)
             SELECT consumer_appid, MAX({_steam_updated})
             FROM workshop_items
             WHERE consumer_appid IS NOT NULL AND {_steam_updated} IS NOT NULL
@@ -1070,9 +1104,9 @@ def _create_schema(cursor, conn):
     cursor.execute("DROP TABLE IF EXISTS app_state")
 
     # Legacy filter migration: convert old filter columns to unified enrichment_filters JSON
-    cursor.execute("""
+    cursor.execute(f"""
         SELECT appid, filter_text, required_tags, excluded_tags, enrichment_filters
-        FROM app_tracking
+        FROM {_app_discovery_table}
         WHERE (enrichment_filters IS NULL OR enrichment_filters = '' OR enrichment_filters = '[]')
     """)
     for row in cursor.fetchall():
@@ -1093,7 +1127,7 @@ def _create_schema(cursor, conn):
         for tag in excluded_tags:
             filters.append({"field": "Tags", "op": "does_not_contain", "value": tag})
         cursor.execute(
-            "UPDATE app_tracking SET enrichment_filters = ? WHERE appid = ?",
+            f"UPDATE {_app_discovery_table} SET enrichment_filters = ? WHERE appid = ?",
             (json.dumps(filters), row["appid"])
         )
         conn.commit()
@@ -2259,6 +2293,50 @@ def _migration_28_to_29(cursor, conn, db_path):
     conn.commit()
     logging.info("Migration 28->29 complete.")
 
+def _migration_29_to_30(cursor, conn, db_path):
+    logging.info("Running migration 29->30: renaming the creator and discovery tables...")
+
+    # The `users` table holds Steam creators and there are no application
+    # users, so it becomes `creators`; its `steamid` primary key already says
+    # which id it is. `app_tracking`'s live columns are the discovery cursor
+    # and the enrichment filters, not "tracking", so it becomes
+    # `app_discovery`.
+    #
+    # The rename satisfies three constraints that pull in opposite directions,
+    # all handled by `_create_schema`'s `_current_table_name` probe:
+    #   * a fresh database still builds `users`/`app_tracking`, because the
+    #     chain this file replays from 0 names them at earlier versions
+    #     (6->7, 13->14, 21->22, 27->28);
+    #   * an already-renamed database does not get the old names resurrected
+    #     by `CREATE TABLE IF NOT EXISTS`;
+    #   * `_safe_add_columns` re-raises anything that is not a duplicate-column
+    #     error, so it too is routed through the resolved name.
+    #
+    # Neither table carries an index or a trigger, so `ALTER TABLE ... RENAME
+    # TO` is the whole change; the index names Batch 6b's column renames must
+    # recreate do not include any from these two tables.
+    #
+    # Guarded on "old exists and new does not" so a re-run is harmless: a
+    # crash between the DDL commit and the version bump leaves the tables
+    # renamed under the old marker, and this step must then be a no-op rather
+    # than raise "no such table: users".
+    for old_name, new_name in (("users", "creators"), ("app_tracking", "app_discovery")):
+        tables = {row[0] for row in cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
+        if new_name in tables:
+            logging.info("  %s already renamed to %s; nothing to do", old_name, new_name)
+        elif old_name in tables:
+            cursor.execute(f"ALTER TABLE {old_name} RENAME TO {new_name}")
+            logging.info("  renamed %s -> %s", old_name, new_name)
+        else:
+            logging.info("  neither %s nor %s exists; nothing to rename",
+                         old_name, new_name)
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 30")
+    conn.commit()
+    logging.info("Migration 29->30 complete.")
+
 def _ensure_indexes(cursor):
     """Create the query indexes, after the column renames migrations perform.
 
@@ -2343,6 +2421,7 @@ MIGRATIONS = [
     (27, _migration_26_to_27),
     (28, _migration_27_to_28),
     (29, _migration_28_to_29),
+    (30, _migration_29_to_30),
 ]
 
 def initialize_database(db_path: str):
@@ -2833,15 +2912,15 @@ def count_fetchable_items(db_path: str) -> int:
     conn.close()
     return row["count"] if row else 0
 
-def insert_or_update_user(db_path: str, user_data: dict):
-    """Inserts or updates a user in the users table."""
+def insert_or_update_creator(db_path: str, user_data: dict):
+    """Inserts or updates a creator in the creators table."""
     conn = get_connection(db_path)
-    columns = [col for col in user_data.keys() if col in USER_COLUMNS]
+    columns = [col for col in user_data.keys() if col in CREATOR_COLUMNS]
     placeholders = ",".join(["?"] * len(columns))
     updates = ",".join([f"{col}=excluded.{col}" for col in columns if col != "steamid"])
     
     sql = f"""
-        INSERT INTO users ({",".join(columns)})
+        INSERT INTO creators ({",".join(columns)})
         VALUES ({placeholders})
         ON CONFLICT(steamid) DO UPDATE SET {updates}
     """
@@ -2849,10 +2928,10 @@ def insert_or_update_user(db_path: str, user_data: dict):
     conn.commit()
     conn.close()
 
-def get_user(db_path: str, steamid: int) -> dict | None:
-    """Fetches a user by steamid."""
+def get_creator(db_path: str, steamid: int) -> dict | None:
+    """Fetches a creator by steamid."""
     conn = get_connection(db_path)
-    cursor = conn.execute("SELECT * FROM users WHERE steamid = ?", (steamid,))
+    cursor = conn.execute("SELECT * FROM creators WHERE steamid = ?", (steamid,))
     row = cursor.fetchone()
     conn.close()
     return dict(row) if row else None
@@ -2899,7 +2978,7 @@ def get_item_details(db_path: str, workshop_id: int) -> dict | None:
         SELECT w.*, u.personaname, u.personaname_en, u.translated_at as user_translated_at,
                (SELECT GROUP_CONCAT(t.tag_name, ', ') FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id = w.workshop_id) as tags
         FROM workshop_items w
-        LEFT JOIN users u ON w.creator = u.steamid
+        LEFT JOIN creators u ON w.creator = u.steamid
         WHERE w.workshop_id = ?
     """
     cursor = conn.execute(sql, (workshop_id,))
@@ -2917,7 +2996,7 @@ def search_items(db_path: str, query: str = "", appid: int = None,
                  subscribed_overlay: str = None) -> list[dict]:
     """
     Searches the database for items matching the criteria.
-    Joins with users table to provide names.
+    Joins with the creators table to provide names.
     If summary_only is True, returns only essential columns for list view display.
 
     ``subscribed_overlay`` is the view control's value, ANDed onto the builder's
@@ -2946,7 +3025,7 @@ def search_items(db_path: str, query: str = "", appid: int = None,
         cols = ("w.*, u.personaname, u.personaname_en,"
                 "(SELECT GROUP_CONCAT(t.tag_name, ', ') FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id = w.workshop_id) as tags")
         
-    sql = f"SELECT {cols} FROM workshop_items w LEFT JOIN users u ON w.creator = u.steamid WHERE 1=1"
+    sql = f"SELECT {cols} FROM workshop_items w LEFT JOIN creators u ON w.creator = u.steamid WHERE 1=1"
     params = []
 
     if query:
@@ -3168,11 +3247,11 @@ def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None,
 
 def get_app_tracking(db_path: str, appid: int) -> dict | None:
     """
-    Returns the app tracking data for a given appid, including scan date and filters.
+    Returns the AppID discovery data for a given appid, including scan date and filters.
     Returns a dictionary of all columns if found, otherwise None.
     """
     conn = get_connection(db_path)
-    cursor = conn.execute("SELECT * FROM app_tracking WHERE appid = ?", (appid,))
+    cursor = conn.execute("SELECT * FROM app_discovery WHERE appid = ?", (appid,))
     row = cursor.fetchone()
     conn.close()
     return dict(row) if row else None
@@ -3342,7 +3421,7 @@ def queue_field_for_translation(db_path: str, item_type: str, item_id: int, fiel
         )
     # Sync translation_priority on the parent — use MAX so multiple fields
     # each set their priority without downgrading
-    table = "users" if item_type == "user" else "workshop_items"
+    table = "creators" if item_type == "user" else "workshop_items"
     id_col = "workshop_id" if table == "workshop_items" else "steamid"
     conn.execute(
         f"UPDATE {table} SET translation_priority = MAX(translation_priority, ?) WHERE {id_col} = ?",
@@ -3418,7 +3497,7 @@ def get_next_batch_for_translation(db_path: str, limit: int = 20) -> list[dict]:
 def save_enrichment_filters(db_path: str, appid: int, filter_text: str = "", required_tags: list[str] = None,
                      excluded_tags: list[str] = None, enrichment_filters: str = None) -> None:
     """
-    Saves the filter settings for a given appid in the app_tracking table.
+    Saves the filter settings for a given appid in the app_discovery table.
     If enrichment_filters is provided (JSON string), it is used as the canonical filter spec.
     Legacy columns (filter_text, required_tags, excluded_tags) are kept for backward compat.
     """
@@ -3428,7 +3507,7 @@ def save_enrichment_filters(db_path: str, appid: int, filter_text: str = "", req
     enrichment = enrichment_filters if enrichment_filters is not None else '[]'
 
     conn.execute(
-        "INSERT INTO app_tracking (appid, filter_text, required_tags, excluded_tags, enrichment_filters) "
+        "INSERT INTO app_discovery (appid, filter_text, required_tags, excluded_tags, enrichment_filters) "
         "VALUES (?, ?, ?, ?, ?) "
         "ON CONFLICT(appid) DO UPDATE SET "
         "filter_text = excluded.filter_text, "
@@ -3444,7 +3523,7 @@ def update_app_tracking(db_path: str, appid: int, last_date: int, window_size: i
     """Updates the last_historical_date_scanned for a given appid."""
     conn = get_connection(db_path)
     conn.execute(
-        "INSERT INTO app_tracking (appid, last_historical_date_scanned, window_size) VALUES (?, ?, ?) "
+        "INSERT INTO app_discovery (appid, last_historical_date_scanned, window_size) VALUES (?, ?, ?) "
         "ON CONFLICT(appid) DO UPDATE SET last_historical_date_scanned = excluded.last_historical_date_scanned, window_size = excluded.window_size",
         (appid, last_date, window_size)
     )
@@ -3455,7 +3534,7 @@ def update_app_tracking_cursor(db_path: str, appid: int, cursor: str) -> None:
     """Updates the last_cursor for a given appid."""
     conn = get_connection(db_path)
     conn.execute(
-        "INSERT INTO app_tracking (appid, last_cursor) VALUES (?, ?) "
+        "INSERT INTO app_discovery (appid, last_cursor) VALUES (?, ?) "
         "ON CONFLICT(appid) DO UPDATE SET last_cursor = excluded.last_cursor",
         (appid, cursor)
     )

@@ -366,7 +366,7 @@ def api_items():
                w.own_subscribed, w.own_first_subscribed_at, w.downloaded_at,
                w.api_priority,
                u.personaname, u.personaname_en
-        FROM workshop_items w LEFT JOIN users u ON w.creator = u.steamid
+        FROM workshop_items w LEFT JOIN creators u ON w.creator = u.steamid
         WHERE w.workshop_id IN ({placeholders})
     """
     results = [_attach_subscription(row) for row in
@@ -524,7 +524,7 @@ def api_metric(name):
         return jsonify({"error": f"unknown metric {name!r}"}), 404
     # The configured target AppIDs travel with the request so the coverage
     # metric can restrict its second figure to what the owner cares about; a
-    # config with none lets the metric fall back to every `app_tracking` row.
+    # config with none lets the metric fall back to every `app_discovery` row.
     params = {"target_appids": (_config.get("daemon", {}) or {}).get("target_appids")}
     entry = metrics.compute(_db_path, [name], params)[name]
     return jsonify({

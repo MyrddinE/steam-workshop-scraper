@@ -18,7 +18,7 @@ Every bar's population is the same test that decides whether the field is
 flagged, so the tests check the flagging rules rather than a rendering: non-empty
 and non-ASCII, translated and current (``translation_is_current``). The three
 translation bars deliberately have three different scopes, and the tests name
-each one. The creator's name lives on ``users`` and is shared by every item that
+each one. The creator's name lives on ``creators`` and is shared by every item that
 creator made, so its bar counts *items*, which is what makes it comparable with
 the per-item bars around it.
 
@@ -45,7 +45,7 @@ from pathlib import Path
 import pytest
 
 from src import metrics
-from src.database import get_connection, insert_or_update_item, insert_or_update_user
+from src.database import get_connection, insert_or_update_item, insert_or_update_creator
 from src.tui import StatsScreen
 
 TEMPLATE = Path(__file__).resolve().parents[1] / "templates" / "index.html"
@@ -69,7 +69,7 @@ def _item(db_path, workshop_id, appid=294100, tags=(), **over):
 def _set_filters(db_path, appid, filters):
     conn = get_connection(db_path)
     conn.execute(
-        "INSERT OR REPLACE INTO app_tracking (appid, enrichment_filters) VALUES (?, ?)",
+        "INSERT OR REPLACE INTO app_discovery (appid, enrichment_filters) VALUES (?, ?)",
         (appid, json.dumps(filters)),
     )
     conn.commit()
@@ -99,11 +99,11 @@ def _full_library(db_path):
     current; the other is not.
     """
     _mature(db_path)
-    insert_or_update_user(db_path, {
+    insert_or_update_creator(db_path, {
         "steamid": 42, "personaname": "作者", "personaname_en": "Author",
         "api_fetched_at": 10, "translated_at": 20,
     })
-    insert_or_update_user(db_path, {
+    insert_or_update_creator(db_path, {
         "steamid": 43, "personaname": "作家", "api_fetched_at": 10,
     })
     _item(db_path, 1, tags=["Mature"], title="テスト", title_en="Test",
@@ -252,7 +252,7 @@ def test_a_fully_blank_web_library_has_a_zero_length_bar_at_both_levels(db_path)
 
 
 # --------------------------------------------------------------------------
-# the creator: per item, from the users table
+# the creator: per item, from the creators table
 # --------------------------------------------------------------------------
 
 
@@ -263,21 +263,21 @@ def test_creator_translation_counts_items_by_their_creators_name(db_path):
     ASCII name one and the unknown creator one. Two of the three items behind a
     non-ASCII name are done -- an item count of two, not a user count of one.
     """
-    insert_or_update_user(db_path, {
+    insert_or_update_creator(db_path, {
         "steamid": 42, "personaname": "作者", "personaname_en": "Author",
         "api_fetched_at": 10, "translated_at": 20,
     })
-    insert_or_update_user(db_path, {
+    insert_or_update_creator(db_path, {
         "steamid": 43, "personaname": "作家", "api_fetched_at": 10,
     })
-    insert_or_update_user(db_path, {
+    insert_or_update_creator(db_path, {
         "steamid": 44, "personaname": "Bob", "api_fetched_at": 10,
     })
     _item(db_path, 1, creator=42)
     _item(db_path, 2, creator=42)
     _item(db_path, 3, creator=43)
     _item(db_path, 4, creator=44)
-    _item(db_path, 5, creator=99)   # no users row
+    _item(db_path, 5, creator=99)   # no creators row
 
     bar = _bars(_coverage(db_path, []))["creator_translated"]
 
@@ -289,7 +289,7 @@ def test_creator_translation_counts_items_by_their_creators_name(db_path):
 
 def test_a_creator_translation_is_stale_after_a_newer_persona_fetch(db_path):
     """`translated_at` is our clock, and the persona fetch moves the other one."""
-    insert_or_update_user(db_path, {
+    insert_or_update_creator(db_path, {
         "steamid": 42, "personaname": "作者", "personaname_en": "Author",
         "api_fetched_at": 30, "translated_at": 20,   # name fetched after it was translated
     })

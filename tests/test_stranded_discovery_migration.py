@@ -16,6 +16,7 @@ The migration is an API-fetch queue repair only: it must not disturb dead rows
 import logging
 
 from src.database import get_connection, initialize_database, insert_or_update_item, EXPECTED_VERSION
+from tests.conftest import restore_pre_rename_table_names
 
 STRANDED_WORK = {
     "needs_web_scrape": 5,
@@ -32,6 +33,7 @@ def _age_to_v17(db_path):
     build a pre-migration database.
     """
     conn = get_connection(db_path)
+    restore_pre_rename_table_names(conn)
     conn.execute("PRAGMA user_version = 17")
     conn.commit()
     conn.close()

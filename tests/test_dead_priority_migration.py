@@ -11,6 +11,7 @@ whose entire value is that it reads zero unless something has regressed.
 import logging
 
 from src.database import get_connection, initialize_database, insert_or_update_item, EXPECTED_VERSION
+from tests.conftest import restore_pre_rename_table_names
 
 
 def _age_to_v19(db_path):
@@ -21,6 +22,7 @@ def _age_to_v19(db_path):
     build a pre-migration database.
     """
     conn = get_connection(db_path)
+    restore_pre_rename_table_names(conn)
     conn.execute("PRAGMA user_version = 19")
     conn.commit()
     conn.close()

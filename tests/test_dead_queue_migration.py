@@ -11,6 +11,7 @@ change stops new ones being created.
 import logging
 
 from src.database import get_connection, initialize_database, insert_or_update_item, EXPECTED_VERSION
+from tests.conftest import restore_pre_rename_table_names
 
 DEAD_FLAGS = {
     "needs_web_scrape": 5,
@@ -27,6 +28,7 @@ def _age_to_v16(db_path):
     pre-migration database.
     """
     conn = get_connection(db_path)
+    restore_pre_rename_table_names(conn)
     conn.execute("PRAGMA user_version = 16")
     conn.commit()
     conn.close()

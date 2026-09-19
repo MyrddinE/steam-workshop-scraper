@@ -27,9 +27,10 @@ from src.database import (
     get_connection,
     initialize_database,
     insert_or_update_item,
-    insert_or_update_user,
+    insert_or_update_creator,
 )
 from src.translator import TranslatorThread
+from tests.conftest import restore_pre_rename_table_names
 
 CREATOR = 111
 
@@ -52,7 +53,7 @@ def _rows(db_path, sql, params=()):
 
 
 def _user(db_path, steamid):
-    rows = _rows(db_path, "SELECT * FROM users WHERE steamid=?", (steamid,))
+    rows = _rows(db_path, "SELECT * FROM creators WHERE steamid=?", (steamid,))
     return dict(rows[0]) if rows else None
 
 
@@ -70,6 +71,7 @@ def _user_queue_rows(db_path, steamid):
 
 def _age_to_v27(db_path):
     conn = get_connection(db_path)
+    restore_pre_rename_table_names(conn)
     conn.execute("PRAGMA user_version = 27")
     conn.commit()
     conn.close()
@@ -131,7 +133,7 @@ def test_an_ascii_creator_is_not_queued(db_path, tmp_path):
     assert _user_queue_rows(db_path, 444) == []
 
 
-# ── the consumer: a creator completes on `users`, never on `workshop_items` ──
+# ── the consumer: a creator completes on `creators`, never on `workshop_items` ──
 
 def _seed_creator_with_a_namesake_item(db_path):
     """A creator and an item sharing the id 111, plus the creator's queue row.
@@ -144,7 +146,7 @@ def _seed_creator_with_a_namesake_item(db_path):
     insert_or_update_item(db_path, {
         "workshop_id": CREATOR, "status": 200, "translation_priority": 5,
     })
-    insert_or_update_user(db_path, {
+    insert_or_update_creator(db_path, {
         "steamid": CREATOR, "personaname": "作者", "translation_priority": 1,
     })
     queue_field_for_translation(db_path, "user", CREATOR, "personaname_en", "作者", 1)
@@ -175,7 +177,7 @@ def test_a_creator_never_completes_against_workshop_items(db_path):
     assert _user(db_path, CREATOR)["personaname_en"] == "Author"
 
 
-def test_a_creator_completion_clears_the_users_mirror(db_path):
+def test_a_creator_completion_clears_the_creator_mirror(db_path):
     """The per-field write stamps `translated_at`; only the mirror is left."""
     _seed_creator_with_a_namesake_item(db_path)
 
@@ -227,7 +229,7 @@ def test_the_item_completion_path_is_unchanged(db_path):
 # ── the repair: flags raised with no queue row behind them ───────────────────
 
 def test_migration_queues_a_creator_name_whose_flag_had_no_work(db_path):
-    insert_or_update_user(db_path, {
+    insert_or_update_creator(db_path, {
         "steamid": 555, "personaname": "作者", "translation_priority": 1,
     })
     _age_to_v27(db_path)
@@ -241,7 +243,7 @@ def test_migration_queues_a_creator_name_whose_flag_had_no_work(db_path):
 
 def test_migration_clears_a_creator_flag_with_nothing_to_translate(db_path):
     """A name that is ASCII now can never be re-queued, so its flag must go."""
-    insert_or_update_user(db_path, {
+    insert_or_update_creator(db_path, {
         "steamid": 666, "personaname": "Plain", "translation_priority": 1,
     })
     _age_to_v27(db_path)
@@ -254,7 +256,7 @@ def test_migration_clears_a_creator_flag_with_nothing_to_translate(db_path):
 
 def test_migration_leaves_a_current_creator_translation_alone(db_path):
     """Translated since the profile was last fetched means there is no work."""
-    insert_or_update_user(db_path, {
+    insert_or_update_creator(db_path, {
         "steamid": 777, "personaname": "作者", "personaname_en": "Author",
         "translated_at": 2000, "api_fetched_at": 1000, "translation_priority": 1,
     })
@@ -281,7 +283,7 @@ def test_migration_does_not_touch_an_item_mirror(db_path):
 
 
 def test_the_creator_migration_is_idempotent(db_path):
-    insert_or_update_user(db_path, {
+    insert_or_update_creator(db_path, {
         "steamid": 888, "personaname": "作者", "translation_priority": 1,
     })
     _age_to_v27(db_path)

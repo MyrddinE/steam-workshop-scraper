@@ -200,7 +200,7 @@ def _app_discovery(conn, params) -> list[dict]:
     return [
         dict(r)
         for r in conn.execute(
-            "SELECT appid, last_cursor FROM app_tracking"
+            "SELECT appid, last_cursor FROM app_discovery"
         )
     ]
 
@@ -595,7 +595,7 @@ def _field_current_sql(en_column: str) -> str:
 def _creator_current_sql() -> str:
     """SQL for :func:`translation_is_current` on a creator's name.
 
-    The name lives on ``users`` and has no Steam revision, so the pair of clocks
+    The name lives on ``creators`` and has no Steam revision, so the pair of clocks
     that decide currency are both ours: ``translated_at`` (stamped when the name
     was translated) against ``api_fetched_at`` (stamped when the persona was
     last fetched). With no fetch time the stored name cannot be stale, so a
@@ -615,7 +615,7 @@ def _coverage_scan(conn, where_sql: str, params: list) -> dict:
     queue it: non-empty and non-ASCII (``queue_field_for_translation`` returns
     early on an empty or ASCII field), and a stored translation counts only when
     :func:`translation_is_current` says it is current. The creator's name is the
-    same test read through ``users``, counted per item so the bar is comparable
+    same test read through ``creators``, counted per item so the bar is comparable
     with the per-item bars around it.
 
     ``blank_answers`` is the scrape's legitimate-blank ceiling: a page that was
@@ -663,7 +663,7 @@ def _coverage_scan(conn, where_sql: str, params: list) -> dict:
                                   AND (COALESCE(w.short_description, '') = '' OR ({short}))
                                  THEN 1 ELSE 0 END), 0) AS api_needs_none
         FROM workshop_items w
-        LEFT JOIN users u ON w.creator = u.steamid
+        LEFT JOIN creators u ON w.creator = u.steamid
         WHERE {where_sql}
         """,
         params,
@@ -732,7 +732,7 @@ def _enrichment_scope_predicate(conn, target_appids) -> tuple[str, list, dict]:
     if target_appids is None:
         target_appids = [
             row["appid"]
-            for row in conn.execute("SELECT appid FROM app_tracking ORDER BY appid")
+            for row in conn.execute("SELECT appid FROM app_discovery ORDER BY appid")
             if row["appid"] is not None
         ]
     appids: list[int] = []
@@ -752,7 +752,7 @@ def _enrichment_scope_predicate(conn, target_appids) -> tuple[str, list, dict]:
     unreadable: list[int] = []
     for appid in appids:
         row = conn.execute(
-            "SELECT * FROM app_tracking WHERE appid = ?", (appid,)
+            "SELECT * FROM app_discovery WHERE appid = ?", (appid,)
         ).fetchone()
         tracking = dict(row) if row is not None else None
         filters = get_enrichment_filters(tracking) if tracking else []
@@ -847,7 +847,7 @@ def _coverage(conn, params) -> dict:
     together, so with more than one target the figure is the **union** of what
     any target's filters select. The AppIDs come from the ``target_appids``
     parameter when a front end can supply the configured list, and otherwise
-    from every row in ``app_tracking``.
+    from every row in ``app_discovery``.
 
     **The bars' populations are the flagging rules, in SQL**, so a bar and the
     work it measures cannot disagree. Each field is counted exactly when the code
@@ -867,8 +867,8 @@ def _coverage(conn, params) -> dict:
       population is **any scraped item** with a non-ASCII description -- not only
       the filter-selected ones. Its maximum is at most the Extended Web bar's,
       because a non-ASCII description is a description.
-    * **Creator Translation** is over ``users.personaname``. Only enriched items
-      refresh a persona, but the name lives per user and is shared by every item
+    * **Creator Translation** is over ``creators.personaname``. Only enriched items
+      refresh a persona, but the name lives per creator and is shared by every item
       that creator made, so the bar counts **items attributed to a creator whose
       name is non-ASCII**, which keeps it comparable with the per-item bars.
 

@@ -6,7 +6,7 @@ several of them used to share one name and were read as if they all meant the sa
 | Clock | Convention | Columns |
 |---|---|---|
 | Steam's clock | `steam_*` | `steam_created_at`, `steam_updated_at` (`workshop_items`) |
-| Our clock | `*_at` | `first_seen_at`, `api_fetched_at`, `last_fetch_attempted_at`, `web_scraped_at`, `image_fetched_at`, `translated_at` (`workshop_items`); `api_fetched_at`, `translated_at` (`users`); `queued_at` (`translation_queue`) |
+| Our clock | `*_at` | `first_seen_at`, `api_fetched_at`, `last_fetch_attempted_at`, `web_scraped_at`, `image_fetched_at`, `translated_at` (`workshop_items`); `api_fetched_at`, `translated_at` (`creators`); `queued_at` (`translation_queue`) |
 | A stored Steam value used as a version key | `*_version` | `scrape_version`, `translate_version` (`workshop_items`) |
 
 All of them are Unix epoch integers (seconds), except where noted. There are no ISO 8601 strings
@@ -26,8 +26,8 @@ in the current schema.
 | `web_scraped_at` | `workshop_items` | web worker, on a successful scrape only | Our clock: when this item's page was last scraped successfully. |
 | `image_fetched_at` | `workshop_items` | image worker, on a successful download only | Our clock: when this item's preview image was last fetched successfully. |
 | `translated_at` | `workshop_items` | translator, when the item's last queued field is translated | Our clock: when this item's translation last completed. One stamp per item, not per field. |
-| `api_fetched_at` | `users` | daemon | Our clock: when the creator profile was last refreshed. |
-| `translated_at` | `users` | translator | Our wall-clock time of the translation. Users have no `steam_updated_at`, so this is not a version key. |
+| `api_fetched_at` | `creators` | daemon | Our clock: when the creator profile was last refreshed. |
+| `translated_at` | `creators` | translator | Our wall-clock time of the translation. Creators have no `steam_updated_at`, so this is not a version key. |
 | `queued_at` | `translation_queue` | `queue_field_for_translation`, new rows only | Our clock: when the queue entry was created. NULL on rows that predate migration 13→14, because their queue time is unknown. |
 
 ## Write Rules

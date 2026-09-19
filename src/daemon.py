@@ -12,8 +12,8 @@ from src.database import (
     insert_or_update_item, 
     count_never_fetched_items, 
     count_fetchable_items, 
-    insert_or_update_user, 
-    get_user, 
+    insert_or_update_creator, 
+    get_creator, 
     get_app_tracking,
     update_app_tracking_cursor,
     save_enrichment_filters,
@@ -504,8 +504,8 @@ class Daemon:
 
         The write comes **before** the queue call on purpose.
         `queue_field_for_translation` inserts the `translation_queue` row and
-        raises `users.translation_priority` in one transaction, so it needs the
-        `users` row to exist: on a creator's first sighting there is nothing for
+        raises `creators.translation_priority` in one transaction, so it needs the
+        `creators` row to exist: on a creator's first sighting there is nothing for
         the mirror to land on, and queueing first would leave a queue row whose
         mirror reads 0. Both helpers open their own connection and commit, so
         neither may be called from inside another open write transaction -- no
@@ -513,11 +513,11 @@ class Daemon:
 
         This is the producer issue 45 restored: before the per-field queue was
         introduced, the (since removed) `get_next_translation_item` scanned
-        `users` by `translation_priority`, so raising the mirror in the record was
+        `creators` by `translation_priority`, so raising the mirror in the record was
         the whole producer. The drain reads `translation_queue` now, so the name
         has to be queued as a field like any other.
         """
-        insert_or_update_user(self.db_path, self._build_user_record(steamid, personaname))
+        insert_or_update_creator(self.db_path, self._build_user_record(steamid, personaname))
         if not is_ascii(personaname):
             queue_field_for_translation(
                 self.db_path, "user", steamid, "personaname_en", personaname, 1)
@@ -1112,7 +1112,7 @@ class Daemon:
         """Return the creator id this item proposes for a persona refresh.
 
         The staleness test deliberately lives in `_refresh_creators`, not here:
-        it needs a `users` read, so the batch collects the distinct candidates
+        it needs a `creators` read, so the batch collects the distinct candidates
         first and asks about each one once.
         """
         creator_id = merged_data.get("creator")
@@ -1145,7 +1145,7 @@ class Daemon:
                 continue
             seen.add(creator_id)
             try:
-                existing_user = get_user(self.db_path, creator_id)
+                existing_user = get_creator(self.db_path, creator_id)
                 if existing_user and existing_user.get("api_fetched_at"):
                     if now - existing_user["api_fetched_at"] < stale_after:
                         continue

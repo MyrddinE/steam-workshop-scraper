@@ -253,7 +253,7 @@ def test_daemon_runs_batch_normally_with_backup_config_absent(tmp_path):
                return_value={1: {"title": "T", "status": 200, "publishedfileid": 1}}) as mock_api, \
          patch("src.daemon.raise_web_scrape_priority"), \
          patch("src.daemon.raise_image_priority"), \
-         patch("src.daemon.get_user", return_value=None):
+         patch("src.daemon.get_creator", return_value=None):
         daemon.process_batch()
 
     mock_batch.assert_called_once()

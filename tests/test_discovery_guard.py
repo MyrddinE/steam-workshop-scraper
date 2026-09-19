@@ -17,6 +17,7 @@ from src.database import (
     count_never_fetched_items,
     EXPECTED_VERSION,
 )
+from tests.conftest import restore_pre_rename_table_names
 
 
 def _config(db_path):
@@ -137,6 +138,7 @@ def test_default_target_still_discovers_a_queue_above_the_old_buffer(mock_sleep,
 
 def _age_to_v15(db_path):
     conn = get_connection(db_path)
+    restore_pre_rename_table_names(conn)
     conn.execute("PRAGMA user_version = 15")
     conn.commit()
     conn.close()
@@ -189,6 +191,7 @@ def test_migration_16_is_idempotent(db_path):
 
     conn = get_connection(db_path)
     first = conn.execute("SELECT api_priority FROM workshop_items WHERE workshop_id = 1").fetchone()[0]
+    restore_pre_rename_table_names(conn)
     conn.execute("PRAGMA user_version = 15")
     conn.commit()
     conn.close()

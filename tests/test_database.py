@@ -128,27 +128,27 @@ def test_delete_never_fetched_items(db_path):
     
     assert ids == [3, 4, 5]
 
-def test_user_table_operations(db_path):
-    """Tests basic CRUD for the users table."""
-    from src.database import insert_or_update_user, get_user
+def test_creator_table_operations(db_path):
+    """Tests basic CRUD for the creators table."""
+    from src.database import insert_or_update_creator, get_creator
     user_data = {"steamid": 12345, "personaname": "Test User"}
-    insert_or_update_user(db_path, user_data)
+    insert_or_update_creator(db_path, user_data)
     
-    user = get_user(db_path, 12345)
+    user = get_creator(db_path, 12345)
     assert user["personaname"] == "Test User"
     
     # Update
     user_data["personaname"] = "Updated Name"
-    insert_or_update_user(db_path, user_data)
-    user = get_user(db_path, 12345)
+    insert_or_update_creator(db_path, user_data)
+    user = get_creator(db_path, 12345)
     assert user["personaname"] == "Updated Name"
 
-def test_user_join_in_queries(db_path):
-    """Verifies that queries return joined user information."""
-    from src.database import insert_or_update_user, insert_or_update_item, search_items, get_item_details
+def test_creator_join_in_queries(db_path):
+    """Verifies that queries return joined creator information."""
+    from src.database import insert_or_update_creator, insert_or_update_item, search_items, get_item_details
     
     steamid = 76561198000000000
-    insert_or_update_user(db_path, {
+    insert_or_update_creator(db_path, {
         "steamid": steamid, 
         "personaname": "ModderOne",
         "personaname_en": "TranslatedModder"
@@ -352,9 +352,9 @@ def test_get_next_items_to_fetch_priority(db_path):
     assert item_ids[2:5] == [7, 1, 3]   # oldest api_fetched_at
     assert item_ids[5:7] == [4, 2]      # newer
 
-def test_get_user_not_found(db_path):
-    from src.database import get_user
-    assert get_user(db_path, 99999) is None
+def test_get_creator_not_found(db_path):
+    from src.database import get_creator
+    assert get_creator(db_path, 99999) is None
 
 def test_get_item_details_missing_user(db_path):
     from src.database import insert_or_update_item, get_item_details

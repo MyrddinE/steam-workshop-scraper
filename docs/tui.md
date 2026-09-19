@@ -297,7 +297,7 @@ count and ceiling are printed with the bar, so a low figure does not read as a d
 **Extended Web Translation** hangs off it, is filled by the completed share, and can never be
 longer, because a non-ASCII description is a description; its population is **any scraped
 item**, not only the filter-selected ones. **Creator Translation** counts items attributed to
-a creator whose name is non-ASCII — the name lives on `users` and is shared by every item
+a creator whose name is non-ASCII — the name lives on `creators` and is shared by every item
 that creator made — and is filled by the share whose stored translation is current.
 
 The three translation bars are **subsidiary** to their parent, and the terminal says so with

@@ -23,6 +23,7 @@ import logging
 
 from src.database import (EXPECTED_VERSION, get_connection, initialize_database,
                           insert_or_update_item)
+from tests.conftest import restore_pre_rename_table_names
 
 
 def _age_to_v21(db_path):
@@ -33,6 +34,7 @@ def _age_to_v21(db_path):
     build a pre-migration database.
     """
     conn = get_connection(db_path)
+    restore_pre_rename_table_names(conn)
     conn.execute("PRAGMA user_version = 21")
     conn.commit()
     conn.close()
@@ -77,9 +79,9 @@ def _item(db_path, workshop_id, **over):
 
 
 def test_an_excluded_item_at_discovery_priority_goes_back_to_backlog(db_path):
+    _age_to_v21(db_path)
     _filters_for(db_path, 294100, "Mature")
     _item(db_path, 1, needs_web_scrape=3, needs_image=3)   # matches nothing: no tags
-    _age_to_v21(db_path)
 
     initialize_database(db_path)
 
@@ -88,10 +90,10 @@ def test_an_excluded_item_at_discovery_priority_goes_back_to_backlog(db_path):
 
 def test_an_item_the_filters_select_keeps_its_priority(db_path):
     """The whole point is the ordering between the two, not a blanket reset."""
+    _age_to_v21(db_path)
     _filters_for(db_path, 294100, "Mature")
     _item(db_path, 1, needs_web_scrape=3, needs_image=3)
     _tag(db_path, 1, "Mature")
-    _age_to_v21(db_path)
 
     initialize_database(db_path)
 
@@ -100,9 +102,9 @@ def test_an_item_the_filters_select_keeps_its_priority(db_path):
 
 def test_backlog_and_idle_entries_are_left_alone(db_path):
     """`MIN(column, 1)` means 1 stays 1 and 0 (not queued) stays 0."""
+    _age_to_v21(db_path)
     _filters_for(db_path, 294100, "Mature")
     _item(db_path, 1, needs_web_scrape=1, needs_image=0)
-    _age_to_v21(db_path)
 
     initialize_database(db_path)
 
@@ -117,9 +119,9 @@ def test_a_user_requested_priority_is_kept(db_path):
     tidy up after the daemon. The migration undoes the daemon's own priorities
     and nothing else.
     """
+    _age_to_v21(db_path)
     _filters_for(db_path, 294100, "Mature")
     _item(db_path, 1, needs_web_scrape=10, needs_image=5)
-    _age_to_v21(db_path)
 
     initialize_database(db_path)
 
@@ -138,13 +140,13 @@ def test_an_appid_without_filters_is_not_touched(db_path):
 
 def test_an_unreadable_filter_set_enriches_rather_than_excludes(db_path):
     """A malformed filter list must not be read as "excludes everything"."""
+    _age_to_v21(db_path)
     conn = get_connection(db_path)
     conn.execute("INSERT OR REPLACE INTO app_tracking (appid, enrichment_filters) "
                  "VALUES (?, ?)", (294100, "{not json"))
     conn.commit()
     conn.close()
     _item(db_path, 1, needs_web_scrape=3, needs_image=3)
-    _age_to_v21(db_path)
 
     initialize_database(db_path)
 
@@ -152,10 +154,10 @@ def test_an_unreadable_filter_set_enriches_rather_than_excludes(db_path):
 
 
 def test_the_migration_reports_what_it_returned(db_path, caplog):
+    _age_to_v21(db_path)
     _filters_for(db_path, 294100, "Mature")
     _item(db_path, 1, needs_web_scrape=3, needs_image=3)
     _item(db_path, 2, needs_web_scrape=3, needs_image=0)
-    _age_to_v21(db_path)
 
     with caplog.at_level(logging.INFO):
         initialize_database(db_path)
@@ -165,9 +167,9 @@ def test_the_migration_reports_what_it_returned(db_path, caplog):
 
 def test_the_migration_runs_once_and_leaves_no_rows_behind(db_path):
     """A second call has nothing left to do, which is what makes it idempotent."""
+    _age_to_v21(db_path)
     _filters_for(db_path, 294100, "Mature")
     _item(db_path, 1, needs_web_scrape=3, needs_image=3)
-    _age_to_v21(db_path)
     initialize_database(db_path)
 
     # Nothing is above backlog for an excluded item now, so re-running the

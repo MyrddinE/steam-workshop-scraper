@@ -4,7 +4,7 @@ The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_
 
 ---
 
-## Current Schema (v29)
+## Current Schema (v30)
 
 The application-level reference for every table and column is
 [data-model.md](data-model.md); the timestamp conventions are in
@@ -18,7 +18,7 @@ Primary key: `workshop_id INTEGER PRIMARY KEY` (aliased from rowid). Columns:
 |---|---|---|
 | workshop_id | INTEGER PK | Steam published file ID |
 | title, title_en | TEXT | Original and English-translated title |
-| creator | INTEGER | Reference to `users.steamid` (no FK constraint; joined with `LEFT JOIN`) |
+| creator | INTEGER | Reference to `creators.steamid` (no FK constraint; joined with `LEFT JOIN`) |
 | creator_appid, consumer_appid | INTEGER | App that created/uses the item |
 | filename, file_size | TEXT, INTEGER | File metadata |
 | preview_url | TEXT | Preview image URL from Steam API |
@@ -48,7 +48,7 @@ database starts at `user_version = 0` and runs the entire migration chain, whose
 those names, so the statement is deliberately historical; after the chain runs, the table has the
 v14 columns above.
 
-### `users` — creator profiles
+### `creators` — creator profiles
 
 | Column | Type | Purpose |
 |---|---|---|
@@ -95,7 +95,7 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 
 **The index is kept in sync by triggers.** Added in v5, where it is populated once with an FTS5 `'rebuild'`; v15 rebuilds it again and installs `workshop_items_fts_insert`, `workshop_items_fts_delete` and `workshop_items_fts_update`, so the index tracks every write to the six indexed columns. Before v15 it drifted: it held 640,471 documents against 1,725,544 items. See [search-filter.md](search-filter.md) for how matches are built from it.
 
-### `app_tracking` — per-AppID discovery state
+### `app_discovery` — per-AppID discovery state
 
 | Column | Type | Purpose |
 |---|---|---|
@@ -162,7 +162,7 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 4. calls `_ensure_indexes(cursor)`, then commits and closes.
 
 `MIGRATIONS` is an ordered list of `(target version, function)` pairs, from
-`(1, _migration_0_to_1)` to `(29, _migration_28_to_29)`. The functions are
+`(1, _migration_0_to_1)` to `(30, _migration_29_to_30)`. The functions are
 defined in `src/database.py` immediately above the table, in that same ascending
 order, so the file still reads as the schema's history top to bottom; each
 function body is the migration exactly as it stood at its version.
@@ -184,15 +184,15 @@ independently, allowing crash recovery on a per-migration basis.
 from 1 to `EXPECTED_VERSION`, that each entry names the function for its own
 version, and that a fresh database reaches `EXPECTED_VERSION`.
 
-**Adding the next migration (target v30):**
+**Adding the next migration (target v31):**
 
-1. bump `EXPECTED_VERSION` in `src/database.py` to `30`;
-2. append `def _migration_29_to_30(cursor, conn, db_path): ...` immediately
-   after `_migration_28_to_29`, keeping the body self-contained and preserving
-   what the step meant at v30 (no tidying an older step, no changing a
+1. bump `EXPECTED_VERSION` in `src/database.py` to `31`;
+2. append `def _migration_30_to_31(cursor, conn, db_path): ...` immediately
+   after `_migration_29_to_30`, keeping the body self-contained and preserving
+   what the step meant at v31 (no tidying an older step, no changing a
    `PRAGMA user_version = N` target);
-3. append `(30, _migration_29_to_30)` as the last entry of `MIGRATIONS`;
-4. add a `### v29 → v30: ...` entry below, in the same shape as the others;
+3. append `(31, _migration_30_to_31)` as the last entry of `MIGRATIONS`;
+4. add a `### v30 → v31: ...` entry below, in the same shape as the others;
 5. if the step adds a column or table that a fresh database must also start
    with, add it to `_create_schema` too — a fresh database begins at
    `user_version = 0` and runs the whole table, so the two paths must agree on
@@ -859,6 +859,44 @@ fresh-database case and the idempotent re-run.
 
 ---
 
+### v29 → v30: `users` → `creators`, `app_tracking` → `app_discovery`
+
+The `users` table holds Steam creators — there are no application users anywhere in the
+project — so it becomes `creators`; its `steamid` primary key already says whose id it is.
+`app_tracking`'s live columns are the discovery cursor and the enrichment filters, not
+"tracking", so it becomes `app_discovery`. Both are pure table renames: the columns, the
+`item_type = 'user'` queue value and the `creator` foreign-key column deliberately keep their
+names (the column rename `creator` → `creator_steamid` is a separate step).
+
+```sql
+ALTER TABLE users RENAME TO creators;
+ALTER TABLE app_tracking RENAME TO app_discovery;
+```
+
+Each statement is guarded on "the old table exists and the new one does not", so the step is
+idempotent and a re-run is a no-op — which also covers the crash window where SQLite has
+committed the renaming DDL but not the version bump. Neither table carries an index or a
+trigger, so the rename needs nothing recreated (measured with `PRAGMA index_list` against the
+real v22 and v29 schemas).
+
+The unusual part is `_create_schema`, which runs on **every** startup before the versioned
+migrations and therefore sees both sides of this step. It must keep building a *fresh*
+database with the historical names, because the chain it is about to replay names them at
+6→7, 13→14, 21→22 and 27→28; it must not run `CREATE TABLE IF NOT EXISTS users` once the table has
+become `creators`, or every startup would grow an empty `users`; and `_safe_add_columns`
+re-raises anything that is not a duplicate-column error, so an `ALTER TABLE app_tracking`
+against a renamed database would break startup. `_create_schema` therefore resolves each name
+with `_current_table_name(cursor, new, old)` and routes the `CREATE TABLE`, the
+`_safe_add_columns` call, the populate step and the legacy-filter conversion through the
+resolved name. `_demote_filtered_out_queue_priorities`, which migration 21→22 calls and a test
+also calls against a current database, resolves the name the same way. Every migration before
+this one keeps its historical SQL byte-identical, so the chain still means what it meant at
+its version. `tests/test_table_rename_migration.py` pins the fresh path, the v29 upgrade, the
+re-initialisation (including the resurrection trap of initialising twice) and the
+already-renamed-under-the-old-marker case.
+
+---
+
 ## Database Utility Functions
 
 ### `get_connection` (database)
@@ -871,7 +909,7 @@ The driver described under [Migration system](#migration-system-initialize_datab
 
 ### `_create_schema`, `_ensure_indexes`, `MIGRATIONS` (database)
 
-`_create_schema(cursor, conn)` creates the tables (`IF NOT EXISTS`) and the baseline columns, and runs the legacy data conversions every database history shares. It is the unversioned part of the schema, run before the versioned steps.
+`_create_schema(cursor, conn)` creates the tables (`IF NOT EXISTS`) and the baseline columns, and runs the legacy data conversions every database history shares. It is the unversioned part of the schema, run before the versioned steps. Because it runs on every startup, it also runs on both sides of migration 29→30: it resolves the creator and discovery table names once with `_current_table_name` (new name if it exists, else the historical one, else the historical one for a brand-new file) and routes its `CREATE TABLE`, `_safe_add_columns`, populate step and legacy-filter conversion through the resolved name.
 
 `_ensure_indexes(cursor)` creates the query indexes. It is separate from `_create_schema` because several index columns (`api_fetched_at`, `scrape_version`) only exist after migration 13→14's renames, so it must run last; every statement is `IF NOT EXISTS`. One queue index is the exception and lives in `_create_schema` instead: `idx_translation_queue_lookup` on `translation_queue (item_type, item_id, field)`, because migration 22→23's repair runs *inside* the `MIGRATIONS` loop and an index created here would be too late to serve it. Its columns have existed since the table was created, so it is safe at every version.
 
@@ -885,13 +923,13 @@ Adds columns to an existing table, catching `OperationalError` for duplicates. U
 
 Upserts an item row using `INSERT ... ON CONFLICT(workshop_id) DO UPDATE SET`. Filters keys against `WORKSHOP_ITEM_COLUMNS` frozenset before building the SQL. Handles tags via junction table (parses JSON, calls `_ensure_tag_ids`, updates `workshop_tags`). Tags are excluded from the INSERT column list since they're no longer a workshop_items column.
 
-### `insert_or_update_user` (database)
+### `insert_or_update_creator` (database)
 
-Same upsert pattern for `users` table, using `USER_COLUMNS` frozenset for filtering.
+Same upsert pattern for the `creators` table, using `CREATOR_COLUMNS` frozenset for filtering.
 
 ### `get_item_details` (database)
 
-Returns all columns for a single workshop_id, joined with users table. Tags are returned as comma-separated via a correlated `GROUP_CONCAT` subquery against the junction table.
+Returns all columns for a single workshop_id, joined with the creators table. Tags are returned as comma-separated via a correlated `GROUP_CONCAT` subquery against the junction table.
 
 ### `count_never_fetched_items` (database)
 
