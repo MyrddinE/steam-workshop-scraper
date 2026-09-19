@@ -3,7 +3,7 @@ import json
 import sqlite3
 from src.database import (
     _evaluate_single_filter, _evaluate_filters, _evaluate_tag_filter,
-    initialize_database, insert_or_update_item, save_app_filter, get_app_tracking,
+    initialize_database, insert_or_update_item, save_enrichment_filters, get_app_tracking,
     get_connection
 )
 
@@ -142,7 +142,7 @@ def test_evaluate_filters_is_not_operator():
         {"field": "Author ID", "op": "is_not", "value": "999"},
     ]) is True
 
-# ── save_app_filter / get_app_tracking roundtrip ─────────────────────────────
+# ── save_enrichment_filters / get_app_tracking roundtrip ─────────────────────────────
 
 def test_save_and_load_enrichment_filters(db_path):
     filters = [
@@ -150,19 +150,19 @@ def test_save_and_load_enrichment_filters(db_path):
         {"field": "Tags", "op": "contains", "value": "Translation"},
         {"field": "Subs", "op": "gte", "value": 100},
     ]
-    save_app_filter(db_path, 294100, enrichment_filters=json.dumps(filters))
+    save_enrichment_filters(db_path, 294100, enrichment_filters=json.dumps(filters))
     tracking = get_app_tracking(db_path, 294100)
     assert tracking is not None
     loaded = json.loads(tracking["enrichment_filters"])
     assert loaded == filters
 
 def test_save_and_load_empty_filters(db_path):
-    save_app_filter(db_path, 294100, enrichment_filters=json.dumps([]))
+    save_enrichment_filters(db_path, 294100, enrichment_filters=json.dumps([]))
     tracking = get_app_tracking(db_path, 294100)
     assert tracking["enrichment_filters"] == '[]'
 
 def test_save_still_sets_legacy_columns(db_path):
-    save_app_filter(db_path, 294100, filter_text="test", required_tags=["mod"], excluded_tags=["broken"])
+    save_enrichment_filters(db_path, 294100, filter_text="test", required_tags=["mod"], excluded_tags=["broken"])
     tracking = get_app_tracking(db_path, 294100)
     assert tracking["filter_text"] == "test"
     assert tracking["required_tags"] == json.dumps(["mod"])
@@ -200,7 +200,7 @@ def test_legacy_filter_migration(tmp_path):
 
 def test_legacy_filter_migration_no_legacy_data(db_path):
     """Migration should not create enrichment_filters if there are no legacy filters."""
-    save_app_filter(db_path, 294100)
+    save_enrichment_filters(db_path, 294100)
     tracking = get_app_tracking(db_path, 294100)
     assert tracking["enrichment_filters"] == '[]'
 
@@ -254,7 +254,7 @@ def test_an_item_that_fails_the_filters_is_queued_at_backlog(db_path):
     not inherited: the scrape is queued at the branch's own floor. Before the fix
     this asserted 3, which is the same band as an item the filters selected.
     """
-    save_app_filter(db_path, 294100, enrichment_filters=json.dumps(
+    save_enrichment_filters(db_path, 294100, enrichment_filters=json.dumps(
         [{"field": "Tags", "op": "contains", "value": "Mature"}]))
     daemon = _daemon_for(db_path)
 
@@ -265,7 +265,7 @@ def test_an_item_that_fails_the_filters_is_queued_at_backlog(db_path):
 
 
 def test_an_item_that_passes_the_filters_is_queued_at_new_item_priority(db_path):
-    save_app_filter(db_path, 294100, enrichment_filters=json.dumps(
+    save_enrichment_filters(db_path, 294100, enrichment_filters=json.dumps(
         [{"field": "Tags", "op": "contains", "value": "Mature"}]))
     daemon = _daemon_for(db_path)
 
@@ -277,7 +277,7 @@ def test_an_item_that_passes_the_filters_is_queued_at_new_item_priority(db_path)
 
 def test_a_user_request_still_lifts_an_item_the_filters_exclude(db_path):
     """Opening a filtered-out item is a request to fetch it now, not a bug."""
-    save_app_filter(db_path, 294100, enrichment_filters=json.dumps(
+    save_enrichment_filters(db_path, 294100, enrichment_filters=json.dumps(
         [{"field": "Tags", "op": "contains", "value": "Mature"}]))
     daemon = _daemon_for(db_path)
 

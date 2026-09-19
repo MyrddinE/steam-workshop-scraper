@@ -6,7 +6,7 @@ The search and filter system translates user-facing field names, operators, and 
 
 ## Field Name Mapping
 
-### `FIELD_NAME_MAP` (database)
+### `FILTER_FIELD_TO_COLUMN` (database)
 
 Maps user-facing field names (shown in TUI and Web UI dropdowns) to database column names. The mapping is used by `search_items`, `compute_wilson_cutoffs`, `_evaluate_filters`, and the web API. Key mappings:
 

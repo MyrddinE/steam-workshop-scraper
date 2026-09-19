@@ -31,7 +31,7 @@ async def test_tui_advanced_search_flow(mock_config, mock_results):
     with patch('src.tui.load_config', return_value=mock_config), \
          patch('src.tui.search_items', return_value=mock_results), \
          patch('src.tui.get_item_details', side_effect=get_details_mock), \
-         patch('src.tui.get_all_authors', return_value=["Author A", "Author B"]):
+         patch('src.tui.get_all_creator_ids', return_value=["Author A", "Author B"]):
         
         app = ScraperApp()
         async with app.run_test() as pilot:
@@ -66,7 +66,7 @@ async def test_tui_advanced_search_flow(mock_config, mock_results):
 async def test_tui_jump_to_author(mock_config, mock_results):
     with patch('src.tui.load_config', return_value=mock_config), \
          patch('src.tui.search_items', return_value=mock_results), \
-         patch('src.tui.get_all_authors', return_value=["Author A"]):
+         patch('src.tui.get_all_creator_ids', return_value=["Author A"]):
         
         app = ScraperApp()
         async with app.run_test() as pilot:
@@ -211,7 +211,7 @@ async def test_tui_jump_to_author_clears_multiple_rows(mock_config, mock_results
 
     with patch('src.tui.load_config', return_value=mock_config), \
          patch('src.tui.search_items', return_value=mock_results), \
-         patch('src.tui.get_all_authors', return_value=["Author A"]):
+         patch('src.tui.get_all_creator_ids', return_value=["Author A"]):
         app = ScraperApp()
         async with app.run_test() as pilot:
             await pilot.pause(ASYNC_PAUSE)
@@ -446,7 +446,7 @@ async def test_tui_detail_priority_applied_once_per_pane_load(mock_config, mock_
     with patch('src.tui.load_config', return_value=mock_config), \
          patch('src.tui.search_items', return_value=mock_results), \
          patch('src.tui.get_item_details', side_effect=get_details_mock), \
-         patch('src.tui.get_all_authors', return_value=["Author A"]), \
+         patch('src.tui.get_all_creator_ids', return_value=["Author A"]), \
          patch('src.tui.bump_api_priority_for_detail') as mock_api_bump, \
          patch('src.tui.bump_web_priority_for_detail'), \
          patch('src.tui.bump_image_priority_for_detail'), \

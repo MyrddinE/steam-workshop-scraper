@@ -1565,7 +1565,7 @@ def test_header_port_display_is_filled_from_the_pages_own_location(web_client, t
 
 # ── clear pending database ───────────────────────────────────────────────────
 #
-# The route is a thin wrapper over clear_pending_items, so the predicate is the
+# The route is a thin wrapper over delete_never_fetched_items, so the predicate is the
 # contract worth pinning: the rows it removes and, just as importantly, the rows
 # it leaves alone.
 

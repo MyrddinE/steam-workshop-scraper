@@ -13,7 +13,7 @@ async def test_tui_toggle_subscription_queue(mock_config):
 
     with patch('src.tui.load_config', return_value=mock_config), \
          patch('src.tui.search_items', return_value=mock_results), \
-         patch('src.tui.toggle_subscription_queue_status') as mock_toggle_db:
+         patch('src.tui.toggle_subscription_queue') as mock_toggle_db:
         
         app = ScraperApp()
         async with app.run_test() as pilot:
@@ -58,13 +58,13 @@ async def test_tui_show_subscription_queue(mock_config, tmp_path):
 @pytest.mark.asyncio
 async def test_queue_lists_items_without_urls(mock_config, tmp_path):
     """The screen subscribes through the engine; it no longer hands out links."""
-    from src.database import initialize_database, toggle_subscription_queue_status, insert_or_update_item
+    from src.database import initialize_database, toggle_subscription_queue, insert_or_update_item
     db_path = str(tmp_path / "queue_render.db")
     initialize_database(db_path)
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "[b]Bold Title[/b]", "status": 200})
     insert_or_update_item(db_path, {"workshop_id": 2, "title": "Plain Title", "status": 200})
-    toggle_subscription_queue_status(db_path, 1)
-    toggle_subscription_queue_status(db_path, 2)
+    toggle_subscription_queue(db_path, 1)
+    toggle_subscription_queue(db_path, 2)
 
     config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
     with patch('src.tui.load_config', return_value=config):
@@ -89,11 +89,11 @@ async def test_queue_lists_items_without_urls(mock_config, tmp_path):
 @pytest.mark.asyncio
 async def test_the_queue_button_runs_the_engine_and_shows_progress(mock_config, tmp_path):
     from src import subscribe_engine
-    from src.database import initialize_database, toggle_subscription_queue_status, insert_or_update_item
+    from src.database import initialize_database, toggle_subscription_queue, insert_or_update_item
     db_path = str(tmp_path / "queue_run.db")
     initialize_database(db_path)
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "Item One", "status": 200})
-    toggle_subscription_queue_status(db_path, 1)
+    toggle_subscription_queue(db_path, 1)
     config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
 
     def fake_pass(items, **kwargs):

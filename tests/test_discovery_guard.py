@@ -3,7 +3,7 @@
 Regression cover for a defect that stopped discovery permanently on production:
 the guard compared against items that had never been fetched successfully, a
 population disjoint from the fetch queue. Production read 890 "unscraped" while
-`get_next_items_to_scrape` could return exactly 1 item, so every discovery pass
+`get_next_items_to_fetch` could return exactly 1 item, so every discovery pass
 was skipped and the queue could never refill.
 """
 
@@ -14,7 +14,7 @@ from src.database import (
     get_connection,
     initialize_database,
     count_fetchable_items,
-    count_unscraped_items,
+    count_never_fetched_items,
     EXPECTED_VERSION,
 )
 
@@ -55,17 +55,17 @@ def test_count_fetchable_items_matches_the_fetch_query(db_path):
 def test_count_fetchable_items_is_disjoint_from_unscraped(db_path):
     """The two populations can be completely disjoint -- that was the whole bug."""
     _insert(db_path, [(i, 500, 0, None) for i in range(1, 51)])
-    assert count_unscraped_items(db_path) == 50
+    assert count_never_fetched_items(db_path) == 50
     assert count_fetchable_items(db_path) == 0
 
 
-def test_count_unscraped_items_keeps_its_meaning(db_path):
+def test_count_never_fetched_items_keeps_its_meaning(db_path):
     """Pinned: this still means 'never successfully fetched', not 'queued'."""
     _insert(db_path, [
         (1, 200, 5, 100),   # fetched -> not unscraped
         (2, 500, 0, None),  # never succeeded -> unscraped
     ])
-    assert count_unscraped_items(db_path) == 1
+    assert count_never_fetched_items(db_path) == 1
 
 
 # --- the guard -------------------------------------------------------------
@@ -75,7 +75,7 @@ def test_count_unscraped_items_keeps_its_meaning(db_path):
 def test_guard_runs_discovery_when_unscraped_backlog_is_unfetchable(mock_sleep, mock_query, db_path):
     """The regression: a large never-fetched, unqueued backlog must not suppress discovery."""
     _insert(db_path, [(i, 500, 0, None) for i in range(1, 151)])
-    assert count_unscraped_items(db_path) == 150
+    assert count_never_fetched_items(db_path) == 150
     assert count_fetchable_items(db_path) == 0
 
     mock_query.return_value = {"total": 10, "items": [{"publishedfileid": "999"}], "next_cursor": ""}

@@ -98,7 +98,7 @@ Queue composition at the time of measurement: `title_en` 87,658 · `short_descri
 * **1,016 rows** where the version key disagreed with `steam_updated_at` (all failed fetches; now
   resolved by the migration, as described above).
 * **148 rows** with `status IS NULL` but `first_seen_at` set and `api_fetched_at` NULL —
-  discovered but never fetched. These match the `clear_pending_items` deletion criteria.
+  discovered but never fetched. These match the `delete_never_fetched_items` deletion criteria.
 * **One row** (`workshop_id 2804549163`, status 200, title present) had `first_seen_at` NULL. The
   insert path is supposed to set it unconditionally; migration 13→14 repaired the row from
   `api_fetched_at`.

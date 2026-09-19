@@ -34,8 +34,8 @@ from src import activity
 from src import db_poll
 from src.database import (
     api_fetch_queue_predicate,
-    build_filter_clause_sql,
-    enrichment_filters_for,
+    build_filters_sql,
+    get_enrichment_filters,
     get_connection,
     image_queue_predicate,
     queued_anywhere_predicate,
@@ -715,7 +715,7 @@ def _enrichment_scope_predicate(conn, target_appids) -> tuple[str, list, dict]:
     the AppIDs are joined with OR, so the figure is the **union** of whatever any
     target's filters select. An AppID with no stored filters, or one whose stored
     set could not be read, contributes its AppID alone and therefore everything
-    it owns -- the same contract as :func:`enrichment_filters_for` (``None`` and
+    it owns -- the same contract as :func:`get_enrichment_filters` (``None`` and
     ``[]`` both mean "no exclusion").
 
     Returns ``(predicate, params, detail)``. ``predicate`` is empty when there is
@@ -755,14 +755,14 @@ def _enrichment_scope_predicate(conn, target_appids) -> tuple[str, list, dict]:
             "SELECT * FROM app_tracking WHERE appid = ?", (appid,)
         ).fetchone()
         tracking = dict(row) if row is not None else None
-        filters = enrichment_filters_for(tracking) if tracking else []
+        filters = get_enrichment_filters(tracking) if tracking else []
         if tracking is not None and filters is None:
             unreadable.append(appid)
         parts = ["w.consumer_appid = ?"]
         app_params: list = [appid]
         if filters:
             with_filters.append(appid)
-            group, group_params = build_filter_clause_sql(filters)
+            group, group_params = build_filters_sql(filters)
             if group:
                 restricting.append(appid)
                 parts.append(f"({group})")
@@ -884,7 +884,7 @@ def _coverage(conn, params) -> dict:
     says so.
 
     **The scoped figure is a translation, not a re-derivation of the daemon's
-    per-item decision.** It is built by :func:`src.database.build_filter_clause_sql`,
+    per-item decision.** It is built by :func:`src.database.build_filters_sql`,
     the same SQL builder a search uses, while the daemon's in-memory
     :func:`src.database._evaluate_filters` reads the original columns alone. The
     builder also searches each text field's ``_en`` counterpart, so the two can
@@ -900,7 +900,7 @@ def _coverage(conn, params) -> dict:
     :func:`_creator_current_sql`.
 
     An unreadable or empty filter set means *everything* for that AppID
-    (:func:`enrichment_filters_for`'s contract: ``None`` and ``[]`` both mean no
+    (:func:`get_enrichment_filters`'s contract: ``None`` and ``[]`` both mean no
     exclusion), so the two figures then coincide. ``filtered.with_filters`` and
     ``filtered.unreadable`` say which AppIDs actually restricted anything, so the
     coincidence reads as the contract it is.

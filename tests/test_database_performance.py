@@ -1,8 +1,8 @@
 import pytest
 import time
-from src.database import initialize_database, insert_or_update_item, clear_pending_items
+from src.database import initialize_database, insert_or_update_item, delete_never_fetched_items
 
-def test_clear_pending_items_performance(tmp_path):
+def test_delete_never_fetched_items_performance(tmp_path):
     db_path = str(tmp_path / "perf.db")
     initialize_database(db_path)
     
@@ -26,7 +26,7 @@ def test_clear_pending_items_performance(tmp_path):
     conn.close()
     
     start_time = time.time()
-    deleted_count = clear_pending_items(db_path)
+    deleted_count = delete_never_fetched_items(db_path)
     end_time = time.time()
     
     duration = end_time - start_time

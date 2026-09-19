@@ -8,20 +8,20 @@ import threading
 from datetime import datetime, timezone
 from typing import NamedTuple
 from src.database import (
-    get_next_items_to_scrape, 
+    get_next_items_to_fetch, 
     insert_or_update_item, 
-    count_unscraped_items, 
+    count_never_fetched_items, 
     count_fetchable_items, 
     insert_or_update_user, 
     get_user, 
     get_app_tracking,
     update_app_tracking_cursor,
-    save_app_filter,
+    save_enrichment_filters,
     get_connection,
     get_item_details,
     normalize_tags,
     _evaluate_filters,
-    enrichment_filters_for,
+    get_enrichment_filters,
     USER_PRIORITY_FLOOR,
     WORKSHOP_ITEM_COLUMNS,
 )
@@ -560,7 +560,7 @@ class Daemon:
         app_tracking = get_app_tracking(self.db_path, appid)
         if app_tracking is None:
             return True
-        filters = enrichment_filters_for(app_tracking)
+        filters = get_enrichment_filters(app_tracking)
         if not filters:
             # Either the AppID has no filters -- so everything matches -- or the
             # stored set could not be read, which must not be taken as "excludes
@@ -806,7 +806,7 @@ class Daemon:
     def _fetch_batch(self, failure_context: str = "Database error in process_batch"):
         """Read one batch from the database. Returns None on database error."""
         try:
-            return get_next_items_to_scrape(self.db_path, limit=self.batch_size)
+            return get_next_items_to_fetch(self.db_path, limit=self.batch_size)
         except Exception as e:
             logging.error(f"{failure_context}: {e}")
             time.sleep(5)
@@ -872,7 +872,7 @@ class Daemon:
         merged_data = stored_item.copy()
         # Attempt clock: set unconditionally, before the status branches, so a
         # 404, a 500 and a success all persist it. This is not optional
-        # bookkeeping: get_next_items_to_scrape orders by api_fetched_at ASC,
+        # bookkeeping: get_next_items_to_fetch orders by api_fetched_at ASC,
         # and api_fetched_at now only moves on success, so without the attempt
         # clock a just-failed item keeps its stale api_fetched_at and is retried
         # at the front of its priority band in a tight loop. get_db_stats also
@@ -1291,7 +1291,7 @@ class Daemon:
         discovered_total = 0
         for appid in self.target_appids:
             # The guard must measure work the fetch queue can actually hand out.
-            # It used to test count_unscraped_items -- items never successfully
+            # It used to test count_never_fetched_items -- items never successfully
             # fetched -- which is a disjoint population: on production this read
             # 890 while the fetch queue held 1, so discovery was suppressed
             # permanently and the queue could never refill.
@@ -1300,7 +1300,7 @@ class Daemon:
                 logging.info(
                     "Queue appropriately filled (%d fetchable, >= %d) for AppID %s. "
                     "Skipping discovery. (%d items have never been fetched but are not queued.)",
-                    fetchable, fill_target, appid, count_unscraped_items(self.db_path),
+                    fetchable, fill_target, appid, count_never_fetched_items(self.db_path),
                 )
                 continue
 

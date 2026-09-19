@@ -65,7 +65,7 @@ def test_it_runs_on_the_first_batch_after_startup(daemon):
     """A daemon that has just come up must not sit on last week's markers."""
     assert daemon._last_subscription_reconcile is None
     with patch('src.daemon.reconcile_own_subscriptions') as reconcile, \
-         patch('src.daemon.get_next_items_to_scrape', return_value=[]), \
+         patch('src.daemon.get_next_items_to_fetch', return_value=[]), \
          patch.object(Daemon, '_wait_for_work'):
         daemon.process_batch()
     assert reconcile.called
@@ -75,7 +75,7 @@ def test_a_failing_reconcile_never_reaches_the_scrape_loop(daemon):
     """A Steam page that did not load must not stop scraping."""
     with patch('src.daemon.reconcile_own_subscriptions',
                side_effect=RuntimeError("steam is down")) as reconcile, \
-         patch('src.daemon.get_next_items_to_scrape', return_value=[]), \
+         patch('src.daemon.get_next_items_to_fetch', return_value=[]), \
          patch.object(Daemon, '_wait_for_work'):
         # The exception is swallowed per appid, so process_batch still returns.
         daemon.process_batch()
@@ -203,7 +203,7 @@ def test_the_downloaded_scan_runs_on_the_first_batch_after_startup(daemon):
     assert daemon._last_download_scan is None
     with patch.object(daemon.workshop_folders, "scan") as scan, \
          patch('src.daemon.reconcile_own_subscriptions'), \
-         patch('src.daemon.get_next_items_to_scrape', return_value=[]), \
+         patch('src.daemon.get_next_items_to_fetch', return_value=[]), \
          patch.object(Daemon, '_wait_for_work'):
         daemon.process_batch()
 
@@ -232,7 +232,7 @@ def test_a_failing_downloaded_scan_never_reaches_the_scrape_loop(daemon):
     with patch.object(daemon.workshop_folders, "scan",
                       side_effect=RuntimeError("drive went away")) as scan, \
          patch('src.daemon.reconcile_own_subscriptions'), \
-         patch('src.daemon.get_next_items_to_scrape', return_value=[]), \
+         patch('src.daemon.get_next_items_to_fetch', return_value=[]), \
          patch.object(Daemon, '_wait_for_work'):
         daemon.process_batch()
 

@@ -83,7 +83,7 @@ Each row contains:
 
 **Operator categories** mirror the web UI: text operators for Title/Description/Filename/Full Text, numeric operators (including `percentile`) for File Size/Subs/Favs/Views/Subscriber Score/Favorite Score, id operators for Author ID/Workshop ID/AppID, and `is`/`is_not` for the `Subscribed` enum.
 
-**Field type determination** in `compose()` and `on_select_changed()` reads the type from the central `FILTER_SCHEMA` (`_FIELD_TYPES`), so a field added there gets the right control without a second field list here.
+**Field type determination** in `compose()` and `on_select_changed()` reads the type from the central `SEARCH_FILTER_SCHEMA` (`_FIELD_TYPES`), so a field added there gets the right control without a second field list here.
 
 **The enum value control** offers the schema's `values`, with `any` dropped while
 the operator is `is_not` (a NOT over "everything" matches nothing, so it is not a
@@ -136,7 +136,7 @@ Every value that comes from Steam goes through `escape_markup` in `src/tui.py`, 
 
 The row's second line shows the owner's subscription marker next to the pending spinner, and the detail pane shows the same marker immediately before the title — the convention the web pane uses too. `_subscription_marker` and `DetailsPane.update_content` both read `src/subscription.py`, which owns the five states (`downloaded`, `subscribed`, `pending`, `previously`, `never`), their precedence, and the glyph/colour for each, so the TUI and the web grid cannot disagree about why the same row looks the way it does. The marker replaces the old leading `*` prefix on the title line for `is_queued_for_subscription`; there is only one indicator. `downloaded` is a solid `★` in a deeper green than `pending`'s outline, and it requires both `own_subscribed` and the local `downloaded_at` latch, so a stray timestamp cannot claim it.
 
-**The subscription queue screen draws the same five states** — `SubscriptionQueueScreen._row_text` reads the shared table from the row `get_queued_items` returns, so a completed subscribe moves that row's glyph too.
+**The subscription queue screen draws the same five states** — `SubscriptionQueueScreen._row_text` reads the shared table from the row `get_subscription_queue_items` returns, so a completed subscribe moves that row's glyph too.
 
 **The downloaded marker (and opening the folder).** Windows only. On its own
 `DOWNLOAD_SCAN_INTERVAL_SECONDS` (60 s) timer the TUI runs
@@ -276,7 +276,7 @@ block is the same bars over *what the owner cares about*: the live items the tar
 stored `enrichment_filters` select, which is the population the daemon calls enriched. The
 two are separately headed, and a scope note under the second says which AppIDs were used and
 why the two figures may coincide: an AppID with no readable filter set (including a
-malformed one) excludes nothing, so its items are all counted (`enrichment_filters_for`'s
+malformed one) excludes nothing, so its items are all counted (`get_enrichment_filters`'s
 contract: `None` and `[]` both mean no exclusion). The second figure is the **search
 builder's SQL translation** of the filters, not a re-derivation of the daemon's per-item
 check: the builder also searches each text field's `_en` counterpart while
@@ -452,11 +452,11 @@ The `btn-return` button leaves single-creator mode: it clears the flag, shows th
 The Web UI now has the same mode (`jumpToAuthor`, `returnFromAuthor`, `#author-mode-bar`,
 `#btn-return-author`), and its Return additionally re-opens the item and scroll position the jump
 interrupted. **The TUI has no creator list**, and that asymmetry is one-sided in the web UI's favour:
-`src.tui` imports `get_all_authors` and never calls it, so the TUI reaches a creator only by typing an
+`src.tui` imports `get_all_creator_ids` and never calls it, so the TUI reaches a creator only by typing an
 `Author ID` or jumping from one of their items. The web picker
 ([web-ui.md](web-ui.md#the-creator-list)) is a third route to the same end, not a control the TUI
 lacks the action for, so no TUI change is needed for parity; if a TUI creator picker is ever wanted it
-would call the same `get_all_authors`.
+would call the same `get_all_creator_ids`.
 
 ### Subscription Queue (s/l keys)
 
@@ -485,7 +485,7 @@ use. Before that the row changed only its status word and the final tally: every
 `pending` outline whatever happened, including a row whose subscribe had just been confirmed. A
 confirmed subscribe moves that row to the yellow ★; an outcome that leaves the item queued (throttled,
 refused, a disagreement) leaves it on the green ☆, which is what `mark_own_subscribed` not being called
-means. `get_queued_items` now carries the three subscription columns so the screen can draw that state
+means. `get_subscription_queue_items` now carries the three subscription columns so the screen can draw that state
 rather than assuming it.
 
 **Watching the queue drain.** While the pass runs, the screen ticks four times a second (the web

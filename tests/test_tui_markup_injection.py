@@ -111,7 +111,7 @@ async def test_the_subscription_queue_renders_a_hostile_title_literally(tmp_path
     )
     app = App()
     with patch(
-        "src.tui.get_queued_items",
+        "src.tui.get_subscription_queue_items",
         return_value=[{"workshop_id": 3700100995, "title": title}],
     ):
         async with app.run_test() as pilot:

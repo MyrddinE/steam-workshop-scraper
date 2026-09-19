@@ -179,7 +179,7 @@ def test_image_poll_reads_the_image_queue_index(db_path):
 def test_api_fetch_poll_reads_the_api_queue_index(db_path):
     _seed(db_path)
     with _capture_sql() as seen:
-        database.get_next_items_to_scrape(db_path, limit=5)
+        database.get_next_items_to_fetch(db_path, limit=5)
     sql = [s for s in seen if "FROM workshop_items" in s][-1]
 
     assert "ORDER BY api_priority DESC, api_fetched_at ASC" in " ".join(sql.split())

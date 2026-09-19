@@ -150,7 +150,7 @@ SUBSCRIBED_VALUE_SPECS = {
     },
 }
 
-FILTER_SCHEMA = [
+SEARCH_FILTER_SCHEMA = [
     {"field": "Full Text",        "db_col": "full_text",                 "type": "string", "ops": ["contains", "does_not_contain"]},
     {"field": "Title",            "db_col": "title",                     "type": "string", "ops": ["contains", "does_not_contain", "is", "is_not"]},
     {"field": "Description",      "db_col": "short_description",          "type": "string", "ops": ["contains", "does_not_contain", "is", "is_not"]},
@@ -167,12 +167,12 @@ FILTER_SCHEMA = [
     {"field": SUBSCRIBED_FIELD,   "db_col": SUBSCRIBED_DB_COL,           "type": "enum",   "values": SUBSCRIBED_VALUES, "ops": ["is", "is_not"]},
 ]
 
-# Build FIELD_NAME_MAP and ALL_FILTER_FIELDS from the schema
-ALL_FILTER_FIELDS = [f["field"] for f in FILTER_SCHEMA]
-FIELD_NAME_MAP = {f["field"]: f["db_col"] for f in FILTER_SCHEMA}
+# Build FILTER_FIELD_TO_COLUMN and ALL_FILTER_FIELDS from the schema
+ALL_FILTER_FIELDS = [f["field"] for f in SEARCH_FILTER_SCHEMA]
+FILTER_FIELD_TO_COLUMN = {f["field"]: f["db_col"] for f in SEARCH_FILTER_SCHEMA}
 # AppID backwards-compat alias
-FIELD_NAME_MAP["AppID"] = "consumer_appid"
-FIELD_NAME_MAP["Filename"] = "filename"
+FILTER_FIELD_TO_COLUMN["AppID"] = "consumer_appid"
+FILTER_FIELD_TO_COLUMN["Filename"] = "filename"
 
 # Fields that have a translated _en counterpart; these are dual-searched
 # when the operator is a text-matching one (contains, is, etc.)
@@ -329,7 +329,7 @@ def _compute_percentile_threshold(db_path: str, db_col: str, percentile, base_fi
             val = f.get("value")
             if not field or not op:
                 continue
-            filter_db_col = FIELD_NAME_MAP.get(field, field)
+            filter_db_col = FILTER_FIELD_TO_COLUMN.get(field, field)
             if filter_db_col == "tags":
                 if op in ("is", "is_not"):
                     continue
@@ -373,7 +373,7 @@ def _build_tag_clause(op: str, val) -> tuple[str, list]:
     return ("", [])
 
 
-def build_filter_clause_sql(filters: list[dict]) -> tuple[str, list]:
+def build_filters_sql(filters: list[dict]) -> tuple[str, list]:
     """Translate a filter list into one SQL predicate, exactly as search does.
 
     This is the one filter-to-SQL builder. ``search_items`` calls it for its
@@ -410,8 +410,8 @@ def build_filter_clause_sql(filters: list[dict]) -> tuple[str, list]:
         val = f.get("value")
         if not field or not op:
             continue
-        db_col = FIELD_NAME_MAP.get(field, field)
-        if db_col not in FIELD_NAME_MAP.values() and db_col not in ("tags", "full_text"):
+        db_col = FILTER_FIELD_TO_COLUMN.get(field, field)
+        if db_col not in FILTER_FIELD_TO_COLUMN.values() and db_col not in ("tags", "full_text"):
             continue
         if db_col == "tags":
             if op in ("is", "is_not"):
@@ -612,7 +612,7 @@ def _evaluate_tag_filter(item: dict, op: str, val) -> bool:
         return len(tag_set) > 0
     return True
 
-def enrichment_filters_for(tracking: dict) -> list[dict] | None:
+def get_enrichment_filters(tracking: dict) -> list[dict] | None:
     """The enrichment filters stored for an AppID, or ``None`` when unreadable.
 
     One reader, because two things now have to agree: the daemon's per-item
@@ -671,7 +671,7 @@ def _evaluate_filters(item: dict, filters: list[dict]) -> bool:
         val = f.get("value")
         if not field or not op:
             continue
-        db_col = FIELD_NAME_MAP.get(field, field)
+        db_col = FILTER_FIELD_TO_COLUMN.get(field, field)
         if not _evaluate_single_filter(item, db_col, op, val):
             return False
     return True
@@ -761,7 +761,7 @@ def _demote_filtered_out_queue_priorities(conn) -> tuple[int, int]:
     rules = []
     for row in cursor.execute("SELECT * FROM app_tracking"):
         tracking = dict(row)
-        filters = enrichment_filters_for(tracking)
+        filters = get_enrichment_filters(tracking)
         if tracking.get("appid") is not None and filters:
             rules.append((tracking["appid"], filters))
     if not rules:
@@ -774,7 +774,7 @@ def _demote_filtered_out_queue_priorities(conn) -> tuple[int, int]:
     for appid, filters in rules:
         # Only the columns these filters actually read, plus the two priorities:
         # the candidate set is large and the rows carry long text.
-        referenced = {FIELD_NAME_MAP.get(f.get("field"), f.get("field"))
+        referenced = {FILTER_FIELD_TO_COLUMN.get(f.get("field"), f.get("field"))
                       for f in filters if isinstance(f, dict) and f.get("field")}
         referenced.discard("tags")
         # The Subscribed field's virtual column spans four real ones. The row
@@ -2331,7 +2331,7 @@ def initialize_database(db_path: str):
     conn.close()
 
 
-def toggle_subscription_queue_status(db_path: str, workshop_id: int):
+def toggle_subscription_queue(db_path: str, workshop_id: int):
     """Toggles the subscription queue status for a workshop item."""
     conn = get_connection(db_path)
     cursor = conn.cursor()
@@ -2343,7 +2343,7 @@ def toggle_subscription_queue_status(db_path: str, workshop_id: int):
     conn.commit()
     conn.close()
 
-def clear_subscription_queue_status(db_path: str, workshop_id: int):
+def clear_subscription_queue(db_path: str, workshop_id: int):
     """Explicitly clears the subscription queue flag for a workshop item."""
     conn = get_connection(db_path)
     conn.execute(
@@ -2517,7 +2517,7 @@ def apply_own_subscriptions(db_path: str, appid: int, subscribed_ids,
     }
 
 
-def get_queued_items(db_path: str) -> list[dict]:
+def get_subscription_queue_items(db_path: str) -> list[dict]:
     """Retrieves all items currently queued for subscription.
 
     The subscription columns travel with the row so each front end can render
@@ -2735,7 +2735,7 @@ def queued_anywhere_predicate() -> str:
     )
 
 
-def get_next_items_to_scrape(db_path: str, limit: int = 10) -> list[dict]:
+def get_next_items_to_fetch(db_path: str, limit: int = 10) -> list[dict]:
     """
     Retrieves the next batch of workshop items to be scraped.
     Prioritizes by api_priority (higher = more urgent), then oldest api_fetched_at
@@ -2756,7 +2756,7 @@ def get_next_items_to_scrape(db_path: str, limit: int = 10) -> list[dict]:
     conn.close()
     return items
 
-def count_unscraped_items(db_path: str) -> int:
+def count_never_fetched_items(db_path: str) -> int:
     """Returns the number of items that have never been fetched via API (api_fetched_at is NULL)."""
     conn = get_connection(db_path)
     cursor = conn.execute("SELECT COUNT(workshop_id) as count FROM workshop_items WHERE api_fetched_at IS NULL")
@@ -2768,8 +2768,8 @@ def count_unscraped_items(db_path: str) -> int:
 def count_fetchable_items(db_path: str) -> int:
     """Returns how many items the API fetch queue can actually hand out.
 
-    This is the population ``get_next_items_to_scrape`` selects: queued and not
-    dead. It is deliberately distinct from ``count_unscraped_items``, which
+    This is the population ``get_next_items_to_fetch`` selects: queued and not
+    dead. It is deliberately distinct from ``count_never_fetched_items``, which
     counts items never successfully fetched regardless of whether they are
     queued. Those two populations do not overlap, and treating the second as a
     measure of the first is how discovery came to be suppressed permanently
@@ -2931,9 +2931,9 @@ def search_items(db_path: str, query: str = "", appid: int = None,
         pct_filters = [f for f in filters if f.get("op") == "percentile"]
         regular_filters = [f for f in filters if f.get("op") != "percentile"]
 
-        # One shared translation (see `build_filter_clause_sql`), so the SQL the
+        # One shared translation (see `build_filters_sql`), so the SQL the
         # search runs and the SQL the coverage metric runs cannot drift apart.
-        group_sql, group_params = build_filter_clause_sql(regular_filters)
+        group_sql, group_params = build_filters_sql(regular_filters)
         if group_sql:
             sql += f" AND ({group_sql})"
             params.extend(group_params)
@@ -2943,7 +2943,7 @@ def search_items(db_path: str, query: str = "", appid: int = None,
             val = f.get("value")
             if not field or not val:
                 continue
-            db_col = FIELD_NAME_MAP.get(field, field)
+            db_col = FILTER_FIELD_TO_COLUMN.get(field, field)
             if db_col == "tags":
                 continue
             threshold = _compute_percentile_threshold(db_path, db_col, val, regular_filters)
@@ -2968,7 +2968,7 @@ def search_items(db_path: str, query: str = "", appid: int = None,
     conn.close()
     return results
 
-def get_all_authors(db_path: str) -> list[str]:
+def get_all_creator_ids(db_path: str) -> list[str]:
     """Returns a list of all unique creator IDs currently in the database."""
     conn = get_connection(db_path)
     cursor = conn.execute("SELECT DISTINCT creator FROM workshop_items WHERE creator IS NOT NULL ORDER BY creator")
@@ -3040,14 +3040,14 @@ def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None,
         for f in filters:
             if f.get("op") == "percentile":
                 continue
-            if FIELD_NAME_MAP.get(f.get("field", "")) == "full_text":
+            if FILTER_FIELD_TO_COLUMN.get(f.get("field", "")) == "full_text":
                 continue  # FTS5 MATCH can't be applied to Wilson score computation
             field = f.get("field")
             op = f.get("op")
             val = f.get("value")
             if not field or not op:
                 continue
-            db_col = FIELD_NAME_MAP.get(field, field)
+            db_col = FILTER_FIELD_TO_COLUMN.get(field, field)
             if db_col == "tags":
                 if op in ("is", "is_not"):
                     continue
@@ -3364,7 +3364,7 @@ def get_next_batch_for_translation(db_path: str, limit: int = 20) -> list[dict]:
     return rows
 
 
-def save_app_filter(db_path: str, appid: int, filter_text: str = "", required_tags: list[str] = None,
+def save_enrichment_filters(db_path: str, appid: int, filter_text: str = "", required_tags: list[str] = None,
                      excluded_tags: list[str] = None, enrichment_filters: str = None) -> None:
     """
     Saves the filter settings for a given appid in the app_tracking table.
@@ -3411,7 +3411,7 @@ def update_app_tracking_cursor(db_path: str, appid: int, cursor: str) -> None:
     conn.commit()
     conn.close()
 
-def clear_pending_items(db_path: str) -> int:
+def delete_never_fetched_items(db_path: str) -> int:
     """
     Removes all workshop items that are 'pending' (never successfully scraped).
     Criteria: (status IS NULL OR status = 404) AND api_fetched_at IS NULL.
