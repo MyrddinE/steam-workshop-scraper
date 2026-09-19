@@ -53,8 +53,8 @@ def _item(db_path, workshop_id, **over):
 #: needs a non-empty queue to have a time to drain at all.
 _FLAG_FOR = {
     "api_fetched_at": ("api_priority", 3),
-    "web_scraped_at": ("needs_web_scrape", 5),
-    "image_fetched_at": ("needs_image", 5),
+    "web_scraped_at": ("web_scrape_priority", 5),
+    "image_fetched_at": ("image_priority", 5),
     "translated_at": ("translation_priority", 5),
 }
 
@@ -80,7 +80,7 @@ def _pause(db_path, lock_path, start, end):
 
 def test_a_queue_with_no_completions_does_not_invent_a_rate(db_path):
     """Outstanding depth is real; the rate is honestly absent."""
-    _item(db_path, 1, needs_web_scrape=5)
+    _item(db_path, 1, web_scrape_priority=5)
 
     web = _eta(db_path)["queues"]["web"]
 
@@ -93,7 +93,7 @@ def test_a_queue_with_no_completions_does_not_invent_a_rate(db_path):
 
 
 def test_an_empty_queue_is_drained_not_unmeasurable(db_path):
-    _item(db_path, 1, needs_web_scrape=0)
+    _item(db_path, 1, web_scrape_priority=0)
 
     web = _eta(db_path)["queues"]["web"]
 
@@ -103,8 +103,8 @@ def test_an_empty_queue_is_drained_not_unmeasurable(db_path):
 
 def test_outstanding_depth_excludes_dead_items(db_path):
     """A dead item can never complete, so it must not promise a drain."""
-    _item(db_path, 1, needs_web_scrape=5)
-    _item(db_path, 2, needs_web_scrape=5, fetch_status=-1)
+    _item(db_path, 1, web_scrape_priority=5)
+    _item(db_path, 2, web_scrape_priority=5, fetch_status=-1)
 
     assert _eta(db_path)["queues"]["web"]["outstanding"] == 1
 

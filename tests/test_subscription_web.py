@@ -68,7 +68,7 @@ def test_the_item_payload_carries_the_whole_marker(web_client):
 
 
 @pytest.mark.parametrize("columns,state", [
-    ({"own_subscribed": 1, "downloaded_at": 1000}, subscription.DOWNLOADED),
+    ({"own_subscribed": 1, "steam_download_seen_at": 1000}, subscription.DOWNLOADED),
     ({"own_subscribed": 1, "own_first_subscribed_at": 1000}, subscription.SUBSCRIBED),
     ({"is_queued_for_subscription": 1}, subscription.QUEUED),
     ({"own_first_subscribed_at": 1000}, subscription.PREVIOUSLY),
@@ -122,11 +122,11 @@ def test_the_items_payload_carries_the_downloaded_latch(web_client):
     """Without the latch on the payload a subscribed cell could only ever be yellow."""
     client, db_path = web_client
     insert_or_update_item(db_path, {"workshop_id": 3, "title": "C", "fetch_status": 200,
-                                    "own_subscribed": 1, "downloaded_at": 1000})
+                                    "own_subscribed": 1, "steam_download_seen_at": 1000})
 
     rows = client.post('/api/items', json={"ids": [3]}).get_json()
 
-    assert rows[0]["downloaded_at"] == 1000
+    assert rows[0]["steam_download_seen_at"] == 1000
     assert rows[0]["subscription_state"] == subscription.DOWNLOADED
     assert rows[0]["subscription_glyph"] == subscription.glyph(subscription.DOWNLOADED)
 
@@ -136,7 +136,7 @@ def test_the_queued_payload_carries_the_whole_marker(web_client):
     client, db_path = web_client
     insert_or_update_item(db_path, {"workshop_id": 4, "title": "D", "fetch_status": 200,
                                     "is_queued_for_subscription": 1,
-                                    "own_subscribed": 1, "downloaded_at": 1000})
+                                    "own_subscribed": 1, "steam_download_seen_at": 1000})
 
     rows = client.get('/api/queued').get_json()
 
@@ -165,7 +165,7 @@ def _enable_open_folder(monkeypatch, db_path, content_dir, launcher):
 def _green_item(db_path, wid=7, *, content_dir, make_folder=True):
     insert_or_update_item(db_path, {
         "workshop_id": wid, "title": "T", "fetch_status": 200, "consumer_appid": 294100,
-        "own_subscribed": 1, "downloaded_at": 1000,
+        "own_subscribed": 1, "steam_download_seen_at": 1000,
     })
     if make_folder:
         (content_dir / "294100" / str(wid)).mkdir(parents=True)
@@ -174,7 +174,7 @@ def _green_item(db_path, wid=7, *, content_dir, make_folder=True):
 def test_open_folder_refuses_off_windows(web_client):
     client, db_path = web_client
     insert_or_update_item(db_path, {"workshop_id": 7, "title": "T", "fetch_status": 200,
-                                    "own_subscribed": 1, "downloaded_at": 1000})
+                                    "own_subscribed": 1, "steam_download_seen_at": 1000})
 
     resp = client.post('/api/open_folder/7')
 
@@ -214,7 +214,7 @@ def test_open_folder_warns_and_changes_nothing_when_the_folder_is_gone(
     assert body["ok"] is False
     assert str(content) in body["message"], "the warning names where it looked"
     assert launched == [], "nothing may be launched into an error"
-    assert _row(db_path, 7)["downloaded_at"] == 1000, "the refusal changes no state"
+    assert _row(db_path, 7)["steam_download_seen_at"] == 1000, "the refusal changes no state"
 
 
 def test_open_folder_launches_the_folder_on_the_server_host(web_client, monkeypatch,
@@ -231,7 +231,7 @@ def test_open_folder_launches_the_folder_on_the_server_host(web_client, monkeypa
     assert resp.status_code == 200
     assert body["ok"] is True
     assert launched == [str(content / "294100" / "7")]
-    assert _row(db_path, 7)["downloaded_at"] == 1000
+    assert _row(db_path, 7)["steam_download_seen_at"] == 1000
 
 
 def test_open_folder_reports_an_unknown_item(web_client, monkeypatch, tmp_path):
@@ -395,10 +395,10 @@ POLL_NEEDS_DRIVER = """
 const _pendingStage = (__STAGE__);
 const listNeedsPoll = (__LIST__);
 const item = (over) => Object.assign(
-  {needs_image: 0, image_extension: 'jpg', translation_priority: 0, needs_web_scrape: 0},
+  {image_priority: 0, image_answer: 'jpg', translation_priority: 0, web_scrape_priority: 0},
   over);
 console.log(JSON.stringify({
-  stage: listNeedsPoll([item({needs_web_scrape: 5})]),
+  stage: listNeedsPoll([item({web_scrape_priority: 5})]),
   subscription: listNeedsPoll([item({subscription_state: 'queued'})]),
   subscribed: listNeedsPoll([item({subscription_state: 'subscribed'})]),
   never: listNeedsPoll([item({subscription_state: 'never'})]),

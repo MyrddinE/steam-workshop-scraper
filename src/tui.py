@@ -758,8 +758,8 @@ class StatsScreen(Screen):
         """Outstanding work per queue, read as queue state rather than a column dump."""
         labels = {
             "translation_priority": "Translation",
-            "needs_image": "Image",
-            "needs_web_scrape": "Web scrape",
+            "image_priority": "Image",
+            "web_scrape_priority": "Web scrape",
         }
         lines = []
         for key, label in labels.items():
@@ -2574,7 +2574,7 @@ class ScraperApp(App):
                 continue
             moved = False
             for column in ("own_subscribed", "is_queued_for_subscription",
-                           "own_first_subscribed_at", "downloaded_at"):
+                           "own_first_subscribed_at", "steam_download_seen_at"):
                 value = fresh.get(column)
                 if data.get(column) != value:
                     data[column] = value
@@ -2753,10 +2753,10 @@ class ScraperApp(App):
         self._start_subscription_poll()
 
         for item in results:
-            if item.get("needs_web_scrape", 0) > 0:
+            if item.get("web_scrape_priority", 0) > 0:
                 raise_web_scrape_priority_for_list(self.db_path, item["workshop_id"])
                 raise_translation_priority_for_list(self.db_path, item["workshop_id"])
-            if item.get("needs_image", 0) > 0:
+            if item.get("image_priority", 0) > 0:
                 raise_image_priority_for_list(self.db_path, item["workshop_id"])
             raise_api_priority_for_list(self.db_path, item["workshop_id"])
             

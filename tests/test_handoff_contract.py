@@ -199,7 +199,7 @@ def test_the_fetch_hands_a_changed_item_to_the_web_scrape_queue(db_path, tmp_pat
         existing={"steam_updated_at": 1000},
     )
 
-    assert _row_value(db_path, workshop_id, "needs_web_scrape") > 0
+    assert _row_value(db_path, workshop_id, "web_scrape_priority") > 0
     _assert_web_handoff(db_path, workshop_id)
 
 
@@ -211,7 +211,7 @@ def test_a_current_item_is_settled_by_the_web_stage(db_path, tmp_path):
         existing={"steam_updated_at": 1000, "extended_description": "stored"},
     )
 
-    assert _row_value(db_path, workshop_id, "needs_web_scrape") == 0
+    assert _row_value(db_path, workshop_id, "web_scrape_priority") == 0
     _assert_web_handoff(db_path, workshop_id)
 
 
@@ -223,7 +223,7 @@ def test_the_web_contract_catches_issue_19s_shape(db_path):
     """
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "fetched", "fetch_status": 200, "api_fetched_at": 1000,
-        "api_priority": 0, "needs_web_scrape": 0,
+        "api_priority": 0, "web_scrape_priority": 0,
     })
 
     with pytest.raises(AssertionError, match="API fetch -> web scrape"):
@@ -234,11 +234,11 @@ def test_a_flipped_web_predicate_is_caught(db_path):
     """A predicate the producer's write no longer satisfies must be reported."""
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "queued", "fetch_status": 200, "api_fetched_at": 1000,
-        "needs_web_scrape": 3,
+        "web_scrape_priority": 3,
     })
 
     with mock.patch.object(database, "web_scrape_queue_predicate",
-                           return_value="needs_web_scrape > 100"):
+                           return_value="web_scrape_priority > 100"):
         with pytest.raises(AssertionError, match="API fetch -> web scrape"):
             _assert_web_handoff(db_path, 1)
 
@@ -248,7 +248,7 @@ def test_a_flipped_web_predicate_is_caught(db_path):
 
 def _assert_image_handoff(db_path, workshop_id: int) -> None:
     selected = _selected(db_path, database.image_queue_predicate(), workshop_id)
-    stored = _row_value(db_path, workshop_id, "image_extension") is not None
+    stored = _row_value(db_path, workshop_id, "image_answer") is not None
     _assert_handoff(selected, stored, "API fetch -> image")
 
 
@@ -259,19 +259,19 @@ def test_the_fetch_hands_a_preview_to_the_image_queue(db_path, tmp_path):
         existing={"steam_updated_at": 1000},
     )
 
-    assert _row_value(db_path, workshop_id, "needs_image") > 0
+    assert _row_value(db_path, workshop_id, "image_priority") > 0
     _assert_image_handoff(db_path, workshop_id)
 
 
-def test_a_served_image_extension_settles_the_image_handoff(db_path, tmp_path):
+def test_a_served_image_answer_settles_the_image_handoff(db_path, tmp_path):
     """Not selected, and the answer the stage records is stored."""
     workshop_id = _fetch(
         db_path, tmp_path,
         api_data={"time_updated": 2000, "preview_url": "https://example.invalid/p.png"},
-        existing={"steam_updated_at": 2000, "image_extension": "png"},
+        existing={"steam_updated_at": 2000, "image_answer": "png"},
     )
 
-    assert _row_value(db_path, workshop_id, "needs_image") == 0
+    assert _row_value(db_path, workshop_id, "image_priority") == 0
     _assert_image_handoff(db_path, workshop_id)
 
 
@@ -279,7 +279,7 @@ def test_the_image_contract_catches_a_preview_queued_nowhere(db_path):
     """A preview the API reported, no image queued, and no answer recorded."""
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "with preview", "fetch_status": 200, "api_fetched_at": 1000,
-        "api_priority": 0, "needs_image": 0, "image_extension": None,
+        "api_priority": 0, "image_priority": 0, "image_answer": None,
         "preview_url": "https://example.invalid/p.png",
     })
 
@@ -290,11 +290,11 @@ def test_the_image_contract_catches_a_preview_queued_nowhere(db_path):
 def test_a_flipped_image_predicate_is_caught(db_path):
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "queued", "fetch_status": 200, "api_fetched_at": 1000,
-        "needs_image": 3,
+        "image_priority": 3,
     })
 
     with mock.patch.object(database, "image_queue_predicate",
-                           return_value="needs_image > 100"):
+                           return_value="image_priority > 100"):
         with pytest.raises(AssertionError, match="API fetch -> image"):
             _assert_image_handoff(db_path, 1)
 
@@ -371,7 +371,7 @@ def _assert_dead_handoff(db_path, workshop_id: int) -> None:
 def test_a_missing_item_is_settled_dead_and_in_no_queue(db_path, tmp_path):
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "gone", "fetch_status": 200, "api_priority": 5,
-        "needs_web_scrape": 5, "needs_image": 5, "translation_priority": 5,
+        "web_scrape_priority": 5, "image_priority": 5, "translation_priority": 5,
     })
 
     _settle_dead(db_path, tmp_path)
@@ -383,7 +383,7 @@ def test_the_dead_contract_catches_issue_17s_shape(db_path):
     """Dead, yet still holding a queue flag -- the third outcome for this handoff."""
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "gone", "fetch_status": -1, "api_priority": 0,
-        "needs_image": 5,
+        "image_priority": 5,
     })
 
     with pytest.raises(AssertionError, match="any stage -> dead"):
@@ -429,7 +429,7 @@ def test_each_worker_poll_builds_its_query_from_the_named_predicate(db_path):
     """
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "queued", "fetch_status": 200, "api_fetched_at": 1000,
-        "api_priority": 1, "needs_web_scrape": 1, "needs_image": 1,
+        "api_priority": 1, "web_scrape_priority": 1, "image_priority": 1,
         "translation_priority": 1,
     })
     queue_field_for_translation(db_path, "item", 1, "title_en", "Caf\u00e9", 3)

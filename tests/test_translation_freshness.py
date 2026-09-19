@@ -146,7 +146,7 @@ def _run_web_worker_once(db_path, item, scrape_data):
 
 
 def test_web_worker_queues_an_untranslated_description(db_path):
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
 
     _run_web_worker_once(
         db_path,
@@ -160,7 +160,7 @@ def test_web_worker_queues_an_untranslated_description(db_path):
 
 
 def test_web_worker_does_not_requeue_a_current_translation(db_path):
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
 
     _run_web_worker_once(
         db_path,
@@ -173,7 +173,7 @@ def test_web_worker_does_not_requeue_a_current_translation(db_path):
 
 
 def test_web_worker_requeues_when_the_description_changed(db_path):
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
 
     _run_web_worker_once(
         db_path,

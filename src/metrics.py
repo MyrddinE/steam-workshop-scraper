@@ -427,8 +427,8 @@ def _dead_items_by_queue(conn, params) -> dict:
     """
     row = conn.execute(
         """
-        SELECT COALESCE(SUM(CASE WHEN needs_web_scrape > 0 THEN 1 ELSE 0 END), 0) AS web,
-               COALESCE(SUM(CASE WHEN needs_image > 0 THEN 1 ELSE 0 END), 0) AS image,
+        SELECT COALESCE(SUM(CASE WHEN web_scrape_priority > 0 THEN 1 ELSE 0 END), 0) AS web,
+               COALESCE(SUM(CASE WHEN image_priority > 0 THEN 1 ELSE 0 END), 0) AS image,
                COALESCE(SUM(CASE WHEN translation_priority > 0 THEN 1 ELSE 0 END), 0) AS translation,
                COALESCE(SUM(CASE WHEN api_priority > 0 THEN 1 ELSE 0 END), 0) AS api
         FROM workshop_items
@@ -443,8 +443,8 @@ def _dead_queued(conn, params) -> int:
     """Dead items a work queue would still select -- the shape of issue 17.
 
     The handoff invariant is that every item is in exactly one state: queued for
-    the API fetch (``api_priority > 0``), a web scrape (``needs_web_scrape > 0``),
-    an image (``needs_image > 0``) or a translation (``translation_priority > 0``);
+    the API fetch (``api_priority > 0``), a web scrape (``web_scrape_priority > 0``),
+    an image (``image_priority > 0``) or a translation (``translation_priority > 0``);
     complete for the stage that owns it; or deliberately dead (``fetch_status = -1``)
     and therefore in **no** queue.
 
@@ -488,8 +488,8 @@ def _queued_nowhere(conn, params) -> int:
     """Items in no queue that the pipeline never completed -- issues 19 and 20.
 
     The handoff invariant is that every item is in exactly one state: queued for
-    the API fetch (``api_priority > 0``), a web scrape (``needs_web_scrape > 0``),
-    an image (``needs_image > 0``) or a translation (``translation_priority > 0``);
+    the API fetch (``api_priority > 0``), a web scrape (``web_scrape_priority > 0``),
+    an image (``image_priority > 0``) or a translation (``translation_priority > 0``);
     complete for the stage that owns it; or deliberately dead (``fetch_status = -1``) in
     no queue. This counts the first kind of violation -- an item that fell out of
     the pipeline without being finished:
@@ -637,7 +637,7 @@ def _coverage_scan(conn, where_sql: str, params: list) -> dict:
                COALESCE(SUM(CASE WHEN w.web_scraped_at IS NOT NULL
                                   AND COALESCE(w.extended_description, '') = ''
                                  THEN 1 ELSE 0 END), 0) AS blank_answers,
-               COALESCE(SUM(CASE WHEN COALESCE(w.image_extension, '') <> '' THEN 1 ELSE 0 END), 0) AS imaged,
+               COALESCE(SUM(CASE WHEN COALESCE(w.image_answer, '') <> '' THEN 1 ELSE 0 END), 0) AS imaged,
                COALESCE(SUM(CASE WHEN COALESCE(w.creator_steamid, '') <> '' THEN 1 ELSE 0 END), 0) AS attributed,
                COALESCE(SUM(CASE WHEN COALESCE(w.title, '') <> '' AND NOT ({title})
                                  THEN 1 ELSE 0 END), 0) AS title_need,
@@ -906,7 +906,7 @@ def _coverage(conn, params) -> dict:
     coincidence reads as the contract it is.
 
     The image stage counts a *recorded answer*, not only a stored file.
-    ``image_extension`` holds the server's reply as well as a file type, so an
+    ``image_answer`` holds the server's reply as well as a file type, so an
     item whose preview is permanently missing has been dealt with -- the
     question about it is settled -- and counting it as outstanding would leave
     the bar permanently short of the truth. What is still outstanding is an item
@@ -1001,7 +1001,7 @@ def _priority_breakdowns(conn, params) -> dict:
     where the number means what it says.
     """
     out = {}
-    for column in ("translation_priority", "needs_image", "needs_web_scrape"):
+    for column in ("translation_priority", "image_priority", "web_scrape_priority"):
         out[column] = [
             dict(r)
             for r in conn.execute(

@@ -1,4 +1,4 @@
-"""What ``workshop_items.image_extension`` holds, and what may be built from it.
+"""What ``workshop_items.image_answer`` holds, and what may be built from it.
 
 The column started as a file extension and nothing else: a non-empty value
 meant an image had been written to ``images/<bucket>/<id>.<ext>``, and the only

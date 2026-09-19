@@ -332,7 +332,7 @@ def test_coverage_counts_each_stage(db_path):
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "full", "fetch_status": 200,
         "api_fetched_at": 1000, "extended_description": "desc",
-        "image_extension": "jpg", "translate_version": 5, "creator_steamid": 42,
+        "image_answer": "jpg", "translate_version": 5, "creator_steamid": 42,
     })
     insert_or_update_item(db_path, {"workshop_id": 2, "title": "bare", "fetch_status": 200})
 
@@ -366,16 +366,16 @@ def test_coverage_ignores_dead_items(db_path):
 def test_dead_items_are_not_counted_as_outstanding_work(db_path):
     """Regression: the backlog used to include items that could never complete."""
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "live", "fetch_status": 200, "needs_web_scrape": 5,
+        "workshop_id": 1, "title": "live", "fetch_status": 200, "web_scrape_priority": 5,
     })
     insert_or_update_item(db_path, {
-        "workshop_id": 2, "title": "gone", "fetch_status": -1, "needs_web_scrape": 5,
+        "workshop_id": 2, "title": "gone", "fetch_status": -1, "web_scrape_priority": 5,
     })
 
     breakdowns = metrics.values(
         metrics.compute(db_path, ["priority_breakdowns"])
     )["priority_breakdowns"]
-    assert breakdowns["needs_web_scrape"] == [{"prio": 5, "cnt": 1}]
+    assert breakdowns["web_scrape_priority"] == [{"prio": 5, "cnt": 1}]
 
 
 def test_dead_items_by_queue_surfaces_dead_items_still_queued(db_path):
@@ -387,10 +387,10 @@ def test_dead_items_by_queue_surfaces_dead_items_still_queued(db_path):
     """
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "gone", "fetch_status": -1, "api_priority": 0,
-        "needs_web_scrape": 1, "needs_image": 1, "translation_priority": 1,
+        "web_scrape_priority": 1, "image_priority": 1, "translation_priority": 1,
     })
     insert_or_update_item(db_path, {
-        "workshop_id": 2, "title": "live", "fetch_status": 200, "needs_web_scrape": 5,
+        "workshop_id": 2, "title": "live", "fetch_status": 200, "web_scrape_priority": 5,
     })
 
     stuck = metrics.values(metrics.compute(db_path, ["dead_items_by_queue"]))["dead_items_by_queue"]
@@ -412,7 +412,7 @@ def test_queued_nowhere_finds_a_fetched_item_with_no_description(db_path):
     """Issue 19: dequeued as scraped while the description was never stored."""
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "fetched", "fetch_status": 200,
-        "api_fetched_at": 1000, "api_priority": 0, "needs_web_scrape": 0,
+        "api_fetched_at": 1000, "api_priority": 0, "web_scrape_priority": 0,
     })
 
     assert metrics.values(metrics.compute(db_path, ["queued_nowhere"]))["queued_nowhere"] == 1
@@ -426,7 +426,7 @@ def test_dead_queued_counts_a_dead_item_holding_a_flag(db_path):
     """
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "gone", "fetch_status": -1, "api_priority": 0,
-        "needs_web_scrape": 1, "needs_image": 1, "translation_priority": 1,
+        "web_scrape_priority": 1, "image_priority": 1, "translation_priority": 1,
     })
 
     values = metrics.values(metrics.compute(db_path, ["dead_queued", "queued_nowhere"]))
@@ -443,18 +443,18 @@ def test_handoff_counters_read_zero_on_a_healthy_database(db_path):
     # Complete: fetched, description stored, image answered, nothing queued.
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "complete", "fetch_status": 200, "api_fetched_at": 1000,
-        "extended_description": "the full page text", "image_extension": "jpg",
+        "extended_description": "the full page text", "image_answer": "jpg",
         "api_priority": 0,
     })
     # Queued for each stage in turn: legal, not stranded.
     insert_or_update_item(db_path, {"workshop_id": 2, "title": "fetch", "api_priority": 3})
     insert_or_update_item(db_path, {
         "workshop_id": 3, "title": "scrape", "fetch_status": 200, "api_fetched_at": 1000,
-        "api_priority": 0, "needs_web_scrape": 3,
+        "api_priority": 0, "web_scrape_priority": 3,
     })
     insert_or_update_item(db_path, {
         "workshop_id": 4, "title": "image", "fetch_status": 200, "api_fetched_at": 1000,
-        "api_priority": 0, "needs_image": 3,
+        "api_priority": 0, "image_priority": 3,
     })
     insert_or_update_item(db_path, {
         "workshop_id": 5, "title": "translate", "fetch_status": 200, "api_fetched_at": 1000,
@@ -472,7 +472,7 @@ def test_handoff_counters_count_without_changing_the_rows(db_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "discovered", "api_priority": 0})
     insert_or_update_item(db_path, {
         "workshop_id": 2, "title": "gone", "fetch_status": -1, "api_priority": 0,
-        "needs_web_scrape": 1,
+        "web_scrape_priority": 1,
     })
 
     conn = get_connection(db_path)
@@ -505,14 +505,14 @@ def test_tag_counts_reads_the_junction_table(db_path):
 def test_priority_breakdowns_report_each_queue(db_path):
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "x", "fetch_status": 200,
-        "needs_web_scrape": 5, "needs_image": 10, "translation_priority": 3,
+        "web_scrape_priority": 5, "image_priority": 10, "translation_priority": 3,
     })
 
     breakdowns = metrics.values(
         metrics.compute(db_path, ["priority_breakdowns"])
     )["priority_breakdowns"]
-    assert breakdowns["needs_web_scrape"] == [{"prio": 5, "cnt": 1}]
-    assert breakdowns["needs_image"] == [{"prio": 10, "cnt": 1}]
+    assert breakdowns["web_scrape_priority"] == [{"prio": 5, "cnt": 1}]
+    assert breakdowns["image_priority"] == [{"prio": 10, "cnt": 1}]
     assert breakdowns["translation_priority"] == [{"prio": 3, "cnt": 1}]
 
 

@@ -76,7 +76,7 @@ class ImageDownloadThread(threading.Thread):
             if not url:
                 # No URL — clear the flag
                 conn = self._get_conn()
-                conn.execute("UPDATE workshop_items SET needs_image=0 WHERE workshop_id=?", (wid,))
+                conn.execute("UPDATE workshop_items SET image_priority=0 WHERE workshop_id=?", (wid,))
                 conn.commit()
                 conn.close()
                 continue
@@ -123,7 +123,7 @@ class ImageDownloadThread(threading.Thread):
                         error_type="UnknownMimeType")
                     conn = self._get_conn()
                     conn.execute(
-                        "UPDATE workshop_items SET needs_image=0, image_extension=? WHERE workshop_id=?",
+                        "UPDATE workshop_items SET image_priority=0, image_answer=? WHERE workshop_id=?",
                         (images.served_type_marker(content_type), wid))
                     conn.commit()
                     conn.close()
@@ -143,8 +143,8 @@ class ImageDownloadThread(threading.Thread):
 
                 insert_or_update_item(self.db_path, {
                     "workshop_id": wid,
-                    "image_extension": ext,
-                    "needs_image": 0,
+                    "image_answer": ext,
+                    "image_priority": 0,
                     # Our clock, taken now that the bytes are on disk. Not a
                     # Steam value: the API supplies no image time, and the
                     # completion timestamp is what a throughput is measured
@@ -190,7 +190,7 @@ class ImageDownloadThread(threading.Thread):
                 if marker is not None:
                     # The server answered that the picture is not there, and
                     # asking again cannot change a fact about the item. Record
-                    # the answer in image_extension, which is what BOTH the
+                    # the answer in image_answer, which is what BOTH the
                     # re-fetch gate and the URL guard read, and take the item out
                     # of the queue.
                     #
@@ -200,7 +200,7 @@ class ImageDownloadThread(threading.Thread):
                     # 3731736934 twenty-five times in one day for a preview that
                     # never existed.
                     conn.execute(
-                        "UPDATE workshop_items SET image_extension=?, needs_image=0 "
+                        "UPDATE workshop_items SET image_answer=?, image_priority=0 "
                         "WHERE workshop_id=?", (marker, wid))
                     conn.commit()
                     conn.close()
@@ -209,9 +209,9 @@ class ImageDownloadThread(threading.Thread):
                     # alone had pinned this thread at its ceiling) and it does not
                     # break a run of successes either.
                 else:
-                    new_pri = max(0, (item.get("needs_image") or 1) - 1)
+                    new_pri = max(0, (item.get("image_priority") or 1) - 1)
                     conn.execute(
-                        "UPDATE workshop_items SET needs_image=?, api_priority = CASE WHEN api_priority < 2 THEN 2 ELSE api_priority END WHERE workshop_id=?",
+                        "UPDATE workshop_items SET image_priority=?, api_priority = CASE WHEN api_priority < 2 THEN 2 ELSE api_priority END WHERE workshop_id=?",
                         (new_pri, wid)
                     )
                     conn.commit()

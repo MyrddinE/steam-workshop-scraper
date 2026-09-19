@@ -538,8 +538,8 @@ _FAKE_METRIC_VALUES = {
     "tag_counts": {"Alpha": 2, "Beta": 1},
     "priority_breakdowns": {
         "translation_priority": [{"prio": 5, "cnt": 2}],
-        "needs_image": [],
-        "needs_web_scrape": [{"prio": 10, "cnt": 1}],
+        "image_priority": [],
+        "web_scrape_priority": [{"prio": 10, "cnt": 1}],
     },
     "web_throughput": {"last_hour": 2, "last_day": 5, "last_success": 1_700_000_000},
     "image_throughput": {"last_hour": 1, "last_day": 3, "last_success": 1_700_000_000},

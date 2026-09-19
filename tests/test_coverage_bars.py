@@ -109,13 +109,13 @@ def _full_library(db_path):
     _item(db_path, 1, tags=["Mature"], title="テスト", title_en="Test",
           short_description="説明", short_description_en="Desc",
           extended_description="説明", extended_description_en="Desc",
-          api_fetched_at=1, image_extension="jpg", creator_steamid=42,
+          api_fetched_at=1, image_answer="jpg", creator_steamid=42,
           steam_updated_at=100, translate_version=100)
     _item(db_path, 2, tags=["Mature"], title="テスト2", short_description="説明2",
           extended_description="説明2", api_fetched_at=1, creator_steamid=43,
           steam_updated_at=100)
     _item(db_path, 3, tags=["Mature"], title="plain", short_description="plain",
-          extended_description="plain", api_fetched_at=1, image_extension="jpg",
+          extended_description="plain", api_fetched_at=1, image_answer="jpg",
           creator_steamid=7)
     _item(db_path, 4, tags=["Mature"], title="blank page", web_scraped_at=5)
     _item(db_path, 5, tags=["Mature"], title="bare")

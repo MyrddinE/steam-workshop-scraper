@@ -711,7 +711,7 @@ function _placeSentinel() {
 // become a URL even if a payload somehow predates the field.
 function _imageState(item) {
   if (item.image_state) return item.image_state;
-  const ext = item.image_extension;
+  const ext = item.image_answer;
   if (!ext) return 'absent';
   return /^\d+$/.test(ext) ? 'permanent' : 'present';
 }
@@ -719,15 +719,15 @@ function _imageState(item) {
 function _imageCellHtml(item) {
   const state = _imageState(item);
   if (state === 'present') {
-    return `<img class="grid-img" src="/images/${item.workshop_id}.${item.image_extension}" loading="lazy" alt="">`;
+    return `<img class="grid-img" src="/images/${item.workshop_id}.${item.image_answer}" loading="lazy" alt="">`;
   }
   if (state !== 'absent') {
     // Answered: draw the answer instead of asking the browser for a file that
     // was never written.
     return `<div class="grid-img-placeholder grid-img-failed" title="Image unavailable">`
-      + `<span class="grid-img-failed-mark">${_escapeHtml(item.image_extension)}</span></div>`;
+      + `<span class="grid-img-failed-mark">${_escapeHtml(item.image_answer)}</span></div>`;
   }
-  const label = (item.needs_image > 0) ? 'pending' : 'no image';
+  const label = (item.image_priority > 0) ? 'pending' : 'no image';
   return `<div class="grid-img-placeholder">${label}</div>`;
 }
 
@@ -737,9 +737,9 @@ function _imageCellHtml(item) {
 // api_priority is deliberately absent: a list only shows items the API has
 // already returned, so a pending refresh is not content anyone is waiting on.
 function _pendingStage(item) {
-  if (item.needs_image >= 5 && !item.image_resolved) return 'image';
+  if (item.image_priority >= 5 && !item.image_resolved) return 'image';
   if (item.translation_priority >= 5) return 'translation';
-  if (item.needs_web_scrape >= 5) return 'web';
+  if (item.web_scrape_priority >= 5) return 'web';
   return null;
 }
 
@@ -1162,8 +1162,8 @@ function renderDetail(item) {
     `Banned: ${item.banned ? 'Yes' + (item.ban_reason ? ' — ' + item.ban_reason : '') : 'No'}`,
     `Status: ${item.fetch_status ?? 'N/A'}`,
     `Translation Priority: ${item.translation_priority || 0}`,
-    `Needs Web Scrape: ${item.needs_web_scrape || 0}`,
-    `Needs Image: ${item.needs_image || 0}`,
+    `Needs Web Scrape: ${item.web_scrape_priority || 0}`,
+    `Needs Image: ${item.image_priority || 0}`,
     `first_seen_at: ${fmtTs(item.first_seen_at)}`,
     `api_fetched_at: ${fmtTs(item.api_fetched_at)}`,
     `scrape_version: ${fmtTs(item.scrape_version)}`,
@@ -1343,7 +1343,7 @@ async function doUpdateVisible() {
   const items = [];
   document.querySelectorAll('.grid-cell[data-wid]').forEach(el => {
     const wid = parseInt(el.getAttribute('data-wid'), 10);
-    items.push({workshop_id: wid, translation_priority: 0, needs_image: 0, needs_web_scrape: 0, api_priority: 10});
+    items.push({workshop_id: wid, translation_priority: 0, image_priority: 0, web_scrape_priority: 0, api_priority: 10});
   });
   _startListPoll([], '', '');
 }
@@ -2247,7 +2247,7 @@ function _renderHandoffCount(value, zeroText, badText) {
 }
 
 function _renderPriority(b) {
-  const queues = [['translation_priority', 'Translation'], ['needs_image', 'Image'], ['needs_web_scrape', 'Web scrape']];
+  const queues = [['translation_priority', 'Translation'], ['image_priority', 'Image'], ['web_scrape_priority', 'Web scrape']];
   return queues.map(function(q) {
     const rows = b[q[0]] || [];
     let total = 0;

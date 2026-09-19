@@ -1,7 +1,7 @@
 """Migration 16->17: a dead item must not stay in any work queue.
 
 The permanent-failure path used to clear only ``api_priority`` when it marked an
-item dead. ``needs_web_scrape``, ``needs_image`` and ``translation_priority``
+item dead. ``web_scrape_priority``, ``image_priority`` and ``translation_priority``
 were left set, and those queues select on their flag alone with no dead-item
 guard, so the rows were retried forever and the queues could never drain. The
 migration clears those flags on the rows already in the database; the daemon
@@ -14,8 +14,8 @@ from src.database import get_connection, initialize_database, insert_or_update_i
 from tests.conftest import restore_pre_rename_table_names
 
 DEAD_FLAGS = {
-    "needs_web_scrape": 5,
-    "needs_image": 10,
+    "web_scrape_priority": 5,
+    "image_priority": 10,
     "translation_priority": 3,
 }
 
@@ -37,7 +37,7 @@ def _age_to_v16(db_path):
 def _queue_flags(db_path, workshop_id):
     conn = get_connection(db_path)
     row = conn.execute(
-        "SELECT needs_web_scrape, needs_image, translation_priority "
+        "SELECT web_scrape_priority, image_priority, translation_priority "
         "FROM workshop_items WHERE workshop_id = ?",
         (workshop_id,),
     ).fetchone()
@@ -75,7 +75,7 @@ def test_migration_17_clears_queue_flags_on_dead_rows(db_path):
     conn.close()
     assert version == EXPECTED_VERSION
     assert _queue_flags(db_path, 1) == {
-        "needs_web_scrape": 0, "needs_image": 0, "translation_priority": 0,
+        "web_scrape_priority": 0, "image_priority": 0, "translation_priority": 0,
     }
 
 
@@ -123,5 +123,5 @@ def test_migration_17_is_idempotent(db_path):
     initialize_database(db_path)
 
     assert _queue_flags(db_path, 1) == {
-        "needs_web_scrape": 0, "needs_image": 0, "translation_priority": 0,
+        "web_scrape_priority": 0, "image_priority": 0, "translation_priority": 0,
     }

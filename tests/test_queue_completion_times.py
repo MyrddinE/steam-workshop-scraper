@@ -318,7 +318,7 @@ def _run_web_stage(db_path, item, response, on_request=None):
 
 
 def test_a_web_scrape_success_stamps_our_clock_not_the_steam_version(db_path):
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5,
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5,
                                     "steam_updated_at": 123456})
 
     before = int(time.time())
@@ -333,7 +333,7 @@ def test_a_web_scrape_success_stamps_our_clock_not_the_steam_version(db_path):
 
 
 def test_the_web_stamp_is_taken_when_the_scrape_completes_not_when_it_started(db_path, monkeypatch):
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5,
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5,
                                     "steam_updated_at": 1})
     clock = {"now": 1000.0}
     monkeypatch.setattr(time, "time", lambda: clock["now"])
@@ -348,7 +348,7 @@ def test_the_web_stamp_is_taken_when_the_scrape_completes_not_when_it_started(db
                                       MISSING_ITEM_PAGE, None])
 def test_a_web_scrape_that_is_not_a_success_leaves_the_stamp_alone(db_path, response):
     """A miss, a wall and a transport failure all keep the previous completion."""
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5,
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5,
                                     "steam_updated_at": 1, "web_scraped_at": 777})
 
     _run_web_stage(db_path, {"workshop_id": 1, "steam_updated_at": 1}, response)
@@ -382,7 +382,7 @@ def _run_image_stage(db_path, response=None, error=None, images_root=None,
 
     worker = ImageDownloadThread(db_path, ".pauselock")
     item = {"workshop_id": 5, "preview_url": "http://example.com/img.jpg",
-            "needs_image": 1, "steam_updated_at": 1}
+            "image_priority": 1, "steam_updated_at": 1}
     served = [0]
 
     def next_item(*args, **kwargs):
@@ -446,7 +446,7 @@ def test_the_image_stamp_is_taken_after_the_bytes_are_fetched(db_path, tmp_path,
 
 def test_a_served_answer_that_is_not_a_picture_does_not_stamp(db_path, tmp_path):
     """An unclassifiable content type clears the queue but is not a completion."""
-    insert_or_update_item(db_path, {"workshop_id": 5, "needs_image": 1,
+    insert_or_update_item(db_path, {"workshop_id": 5, "image_priority": 1,
                                     "preview_url": "http://example.com/img.jpg",
                                     "image_fetched_at": 777})
     response = _FakeImageResponse(headers={"Content-Type": "text/html"},
@@ -455,12 +455,12 @@ def test_a_served_answer_that_is_not_a_picture_does_not_stamp(db_path, tmp_path)
     _run_image_stage(db_path, response=response,
                      images_root=str(tmp_path / "images"))
 
-    assert _stored(db_path, 5, "needs_image") == 0, "the item still leaves the queue"
+    assert _stored(db_path, 5, "image_priority") == 0, "the item still leaves the queue"
     assert _stored(db_path, 5, "image_fetched_at") == 777
 
 
 def test_a_permanent_image_failure_does_not_stamp(db_path, tmp_path):
-    insert_or_update_item(db_path, {"workshop_id": 5, "needs_image": 1,
+    insert_or_update_item(db_path, {"workshop_id": 5, "image_priority": 1,
                                     "preview_url": "http://example.com/img.jpg",
                                     "image_fetched_at": 777})
     response = _FakeImageResponse(status_code=404, body=b"")
@@ -472,7 +472,7 @@ def test_a_permanent_image_failure_does_not_stamp(db_path, tmp_path):
 
 
 def test_a_transport_failure_does_not_stamp(db_path, tmp_path):
-    insert_or_update_item(db_path, {"workshop_id": 5, "needs_image": 1,
+    insert_or_update_item(db_path, {"workshop_id": 5, "image_priority": 1,
                                     "preview_url": "http://example.com/img.jpg",
                                     "image_fetched_at": 777})
 

@@ -11,7 +11,7 @@ worse than either being wrong alone.
 The five states, and the precedence between them:
 
 * ``downloaded`` -- the owner is subscribed *and* Steam has the item on disk
-  (``own_subscribed`` and the local ``downloaded_at`` latch both set).
+  (``own_subscribed`` and the local ``steam_download_seen_at`` latch both set).
 * ``subscribed`` -- the owner is subscribed right now (``own_subscribed``).
 * ``queued``    -- queued to subscribe (``is_queued_for_subscription``).
 * ``previously`` -- we have *seen* this account subscribed, and are not now
@@ -24,11 +24,11 @@ table can make, a confirmed subscription beats a queue entry for the same item
 (there is nothing left to queue), and the sticky first-seen timestamp outranks
 never having seen anything.
 
-**``downloaded`` requires both flags.** ``downloaded_at`` is a local latch --
+**``downloaded`` requires both flags.** ``steam_download_seen_at`` is a local latch --
 only ``src.workshop_folders`` writes it and only the subscription walk clears it
 -- and a stray timestamp beside a cleared ``own_subscribed`` must not claim the
 green star. The state derivation therefore tests ``own_subscribed`` *and*
-``downloaded_at``; either alone is not enough. See
+``steam_download_seen_at``; either alone is not enough. See
 [data-model.md](data-model.md) for the column's one-setter/one-clearer rule.
 
 **The honesty constraint.** Steam exposes no endpoint that returns an account's
@@ -117,7 +117,7 @@ def subscription_state(item: dict) -> str:
     is what makes the difference between ``previously`` and ``never`` --
     including when ``own_subscribed`` has since been cleared.
     """
-    if item.get("own_subscribed") and item.get("downloaded_at"):
+    if item.get("own_subscribed") and item.get("steam_download_seen_at"):
         return DOWNLOADED
     if item.get("own_subscribed"):
         return SUBSCRIBED

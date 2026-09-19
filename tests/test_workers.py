@@ -25,7 +25,7 @@ def test_web_worker_failure_sets_api_priority(db_path):
     from src.web_worker import WebScraperThread
     from src.database import insert_or_update_item, get_connection
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5, "api_priority": 0})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5, "api_priority": 0})
 
     worker = WebScraperThread(db_path, '.pauselock')
 
@@ -76,7 +76,7 @@ def test_the_web_delay_floor_is_honoured_during_decay(db_path):
     from src.database import insert_or_update_item
     from src.web_worker import WEB_DELAY_FLOOR, WebScraperThread
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
 
     # Just above the floor: one step lands under it unless it is clamped.
     worker = WebScraperThread(db_path, ".pauselock")
@@ -114,7 +114,7 @@ def test_image_worker_failure_sets_api_priority(db_path):
     from src.database import insert_or_update_item, get_connection
 
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "needs_image": 5, "api_priority": 0,
+        "workshop_id": 1, "image_priority": 5, "api_priority": 0,
         "preview_url": "http://example.com/img.jpg"
     })
 
@@ -130,7 +130,7 @@ def test_image_worker_failure_sets_api_priority(db_path):
          patch('src.image_worker.time.sleep'):  # don't actually sleep
         mock_next.return_value = {
             "workshop_id": 1, "preview_url": "http://example.com/img.jpg",
-            "needs_image": 5, "steam_updated_at": 123456,
+            "image_priority": 5, "steam_updated_at": 123456,
         }
         worker.start()
         import time as _time
@@ -182,7 +182,7 @@ def _run_image_worker(db_path, response=None, error=None, images_root=None):
 
     worker = ImageDownloadThread(db_path, ".pauselock")
     item = {"workshop_id": 5, "preview_url": "http://example.com/img.jpg",
-            "needs_image": 1, "steam_updated_at": 1}
+            "image_priority": 1, "steam_updated_at": 1}
     served = [0]
 
     def next_item(*args, **kwargs):
@@ -234,7 +234,7 @@ def test_an_image_failure_is_captured_with_status_and_headers(db_path, tmp_path)
     outbox = tmp_path / "outbox"
     capture.configure(str(outbox))
     try:
-        insert_or_update_item(db_path, {"workshop_id": 5, "needs_image": 1,
+        insert_or_update_item(db_path, {"workshop_id": 5, "image_priority": 1,
                                         "preview_url": "http://example.com/img.jpg"})
         _run_image_worker(db_path, response=_FakeImageResponse(
             status_code=404,
@@ -261,7 +261,7 @@ def test_an_image_transport_failure_is_captured_with_the_exception(db_path, tmp_
     outbox = tmp_path / "outbox"
     capture.configure(str(outbox))
     try:
-        insert_or_update_item(db_path, {"workshop_id": 5, "needs_image": 1,
+        insert_or_update_item(db_path, {"workshop_id": 5, "image_priority": 1,
                                         "preview_url": "http://example.com/img.jpg"})
         _run_image_worker(db_path, error=Exception("Connection refused"))
     finally:
@@ -283,7 +283,7 @@ def test_an_image_success_is_captured_only_when_the_switch_is_on(db_path, tmp_pa
     image_bytes = b"\xff\xd8\xff\xe0" + b"jpeg-payload" * 8
     images_root = tmp_path / "images"
     outbox = tmp_path / "outbox"
-    insert_or_update_item(db_path, {"workshop_id": 5, "needs_image": 1,
+    insert_or_update_item(db_path, {"workshop_id": 5, "image_priority": 1,
                                     "preview_url": "http://example.com/img.jpg"})
     response = _FakeImageResponse(headers={"Content-Type": "image/jpeg"},
                                   body=image_bytes)
@@ -324,7 +324,7 @@ def test_no_image_capture_writes_the_bytes_into_the_outbox(db_path, tmp_path):
 
     image_bytes = b"\x89PNG\r\n\x1a\n" + b"UNIQUE-IMAGE-PAYLOAD" * 64
     outbox = tmp_path / "outbox"
-    insert_or_update_item(db_path, {"workshop_id": 5, "needs_image": 1,
+    insert_or_update_item(db_path, {"workshop_id": 5, "image_priority": 1,
                                     "preview_url": "http://example.com/img.jpg"})
 
     capture.configure(str(outbox), capture_image_downloads=True)
@@ -356,7 +356,7 @@ def test_puremagic_detection_is_logged_at_debug_not_info(db_path, tmp_path, capl
     from src.database import insert_or_update_item
 
     image_bytes = b"\x89PNG\r\n\x1a\n" + b"PNG-PAYLOAD" * 16
-    insert_or_update_item(db_path, {"workshop_id": 5, "needs_image": 1,
+    insert_or_update_item(db_path, {"workshop_id": 5, "image_priority": 1,
                                     "preview_url": "http://example.com/img.jpg"})
 
     caplog.set_level(logging.DEBUG)
@@ -377,7 +377,7 @@ def test_puremagic_detection_is_logged_at_debug_not_info(db_path, tmp_path, capl
 # ── Web worker: selector miss ────────────────────────────────────────────────
 # A selector miss returns {"description": None, "tags": []}, which is truthy. It
 # used to be taken as success, writing extended_description = NULL and
-# needs_web_scrape = 0, so the item was recorded as permanently scraped with
+# web_scrape_priority = 0, so the item was recorded as permanently scraped with
 # nothing to show for it and was never retried. A miss now distinguishes a page
 # that was never the item's (left queued) from the item page with no description
 # (a permanent absence, so the item leaves the queue).
@@ -435,7 +435,7 @@ def _web_scrape_priority(db_path, workshop_id=1):
     conn = get_connection(db_path)
     try:
         return conn.execute(
-            "SELECT needs_web_scrape FROM workshop_items WHERE workshop_id=?",
+            "SELECT web_scrape_priority FROM workshop_items WHERE workshop_id=?",
             (workshop_id,)).fetchone()[0]
     finally:
         conn.close()
@@ -492,7 +492,7 @@ def test_selector_miss_without_the_item_page_leaves_the_item_queued(db_path):
     its place in the queue rather than decaying out of it."""
     from src.database import insert_or_update_item
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
 
     _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1}, MISS)
 
@@ -505,7 +505,7 @@ def test_selector_miss_on_the_item_page_clears_the_queue(db_path):
     so the item leaves the queue, which is what lets the queue drain."""
     from src.database import insert_or_update_item
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
 
     _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
                     ITEM_PAGE_WITHOUT_DESCRIPTION)
@@ -518,7 +518,7 @@ def test_selector_miss_leaves_existing_description_untouched(db_path):
     from src.database import insert_or_update_item, get_connection
 
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "needs_web_scrape": 3,
+        "workshop_id": 1, "web_scrape_priority": 3,
         "extended_description": "previously scraped text"})
 
     _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
@@ -538,7 +538,7 @@ def test_selector_miss_does_not_touch_api_priority(db_path):
     """The request succeeded, so this is not a network failure."""
     from src.database import insert_or_update_item, get_connection
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 2, "api_priority": 0})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 2, "api_priority": 0})
 
     _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1}, MISS)
 
@@ -557,7 +557,7 @@ def test_repeated_walls_grow_the_web_delay(db_path):
     from src.database import insert_or_update_item
     from src.web_worker import WEB_DELAY_DEFAULT
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
 
     # A healthy run first: the delay rule compounds off a streak, and the walls
     # are what should end it.
@@ -576,7 +576,7 @@ def test_a_descriptionless_item_is_neutral_for_pacing(db_path):
     from src.database import insert_or_update_item
     from src.web_worker import WEB_DELAY_DEFAULT, WebScraperThread
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
 
     # A streak is in progress: one wall has just landed and the next wall would
     # grow the delay. The description-less page must leave all of that alone.
@@ -596,7 +596,7 @@ def test_a_descriptionless_item_is_neutral_for_pacing(db_path):
 def test_a_found_description_resets_the_failure_streak(db_path):
     from src.database import insert_or_update_item
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
 
     worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
                              [MISS] * 7 + [FOUND])
@@ -644,7 +644,7 @@ def test_a_404_does_not_grow_the_delay_and_clears_the_queue(db_path):
     from src.database import insert_or_update_item
     from src.web_worker import WebScraperThread
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
 
     worker = WebScraperThread(db_path, ".pauselock")
     worker.web_had_success_streak = True
@@ -663,7 +663,7 @@ def test_steams_missing_item_page_clears_the_queue_despite_http_200(db_path):
     from src.database import insert_or_update_item
     from src.web_worker import WebScraperThread
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
 
     worker = WebScraperThread(db_path, ".pauselock")
     worker.web_had_success_streak = True
@@ -681,7 +681,7 @@ def test_a_transport_failure_still_grows_the_delay(db_path):
     """The one unattributable outcome keeps the back-off it always had."""
     from src.database import insert_or_update_item
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
 
     worker = _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
                              [FOUND] * 5 + [None] * 2)
@@ -703,7 +703,7 @@ def test_a_rate_limit_halves_the_request_rate(db_path):
     from src.database import insert_or_update_item
     from src.web_worker import WebScraperThread
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
 
     worker = WebScraperThread(db_path, ".pauselock")
     before = worker.web_delay
@@ -723,7 +723,7 @@ def test_a_gate_does_not_grow_the_delay(db_path):
     from src.database import insert_or_update_item
     from src.web_worker import WebScraperThread
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
 
     worker = WebScraperThread(db_path, ".pauselock")
     worker.web_had_success_streak = True
@@ -751,7 +751,7 @@ def test_a_gated_attempt_makes_exactly_one_request_and_keeps_the_item_queued(db_
     from src.database import insert_or_update_item
     from src.web_worker import WebScraperThread
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
 
     refreshed = []
     worker = WebScraperThread(db_path, ".pauselock", {}, None,
@@ -772,7 +772,7 @@ def test_the_missing_item_log_quotes_the_status_and_the_wording(db_path, caplog)
     import logging
     from src.database import insert_or_update_item
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
 
     with caplog.at_level(logging.WARNING):
         _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1},
@@ -788,7 +788,7 @@ def test_the_transport_failure_log_is_distinguishable_from_a_missing_item(db_pat
     import logging
     from src.database import insert_or_update_item
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
 
     with caplog.at_level(logging.WARNING):
         _run_web_worker(db_path, {"workshop_id": 1, "steam_updated_at": 1}, None)
@@ -807,7 +807,7 @@ def test_a_missing_item_is_captured_as_its_own_kind(db_path, tmp_path):
     outbox = tmp_path / "outbox"
     capture.configure(str(outbox))
     try:
-        insert_or_update_item(db_path, {"workshop_id": 9, "needs_web_scrape": 5})
+        insert_or_update_item(db_path, {"workshop_id": 9, "web_scrape_priority": 5})
         _run_web_worker(db_path, {"workshop_id": 9, "steam_updated_at": 1},
                         MISSING_ITEM_PAGE)
     finally:
@@ -844,7 +844,7 @@ def test_a_descriptionless_item_page_is_captured_under_its_own_kind(db_path, tmp
     outbox = tmp_path / "outbox"
     capture.configure(str(outbox))
     try:
-        insert_or_update_item(db_path, {"workshop_id": 21, "needs_web_scrape": 5})
+        insert_or_update_item(db_path, {"workshop_id": 21, "web_scrape_priority": 5})
         _run_web_worker(db_path, {"workshop_id": 21, "steam_updated_at": 1},
                         ITEM_PAGE_WITHOUT_DESCRIPTION)
     finally:
@@ -862,7 +862,7 @@ def test_a_gated_page_is_captured_under_its_own_kind(db_path, tmp_path):
     outbox = tmp_path / "outbox"
     capture.configure(str(outbox))
     try:
-        insert_or_update_item(db_path, {"workshop_id": 22, "needs_web_scrape": 5})
+        insert_or_update_item(db_path, {"workshop_id": 22, "web_scrape_priority": 5})
         gated = dict(MISS, body='<title>Steam Community :: Error</title>'
                                 '<div id="AgeCheck">age check</div>')
         _run_web_worker(db_path, {"workshop_id": 22, "steam_updated_at": 1}, gated)
@@ -881,7 +881,7 @@ def test_an_unattributable_page_is_captured_as_unknown(db_path, tmp_path):
     outbox = tmp_path / "outbox"
     capture.configure(str(outbox))
     try:
-        insert_or_update_item(db_path, {"workshop_id": 23, "needs_web_scrape": 5})
+        insert_or_update_item(db_path, {"workshop_id": 23, "web_scrape_priority": 5})
         _run_web_worker(db_path, {"workshop_id": 23, "steam_updated_at": 1}, MISS)
     finally:
         capture.configure(None)
@@ -899,7 +899,7 @@ def test_no_miss_is_still_filed_under_the_retired_selector_kind(db_path, tmp_pat
     outbox = tmp_path / "outbox"
     capture.configure(str(outbox))
     try:
-        insert_or_update_item(db_path, {"workshop_id": 24, "needs_web_scrape": 5})
+        insert_or_update_item(db_path, {"workshop_id": 24, "web_scrape_priority": 5})
         _run_web_worker(db_path, {"workshop_id": 24, "steam_updated_at": 1}, MISS)
     finally:
         capture.configure(None)
@@ -918,7 +918,7 @@ def test_an_unattributable_page_records_the_page_shape(db_path, tmp_path):
     outbox = tmp_path / "outbox"
     capture.configure(str(outbox))
     try:
-        insert_or_update_item(db_path, {"workshop_id": 7, "needs_web_scrape": 5})
+        insert_or_update_item(db_path, {"workshop_id": 7, "web_scrape_priority": 5})
         _run_web_worker(db_path, {"workshop_id": 7, "steam_updated_at": 1},
                         dict(MISS, body='<html><head><title>Workshop Error</title></head>'
                                         '<body><div class="errorPageBlock">x</div></body></html>'))
@@ -964,7 +964,7 @@ def test_a_downloaded_image_does_not_rewrite_the_scrape_version(db_path, tmp_pat
 
     # Already scraped, at a revision older than the one the worker will see.
     insert_or_update_item(db_path, {
-        "workshop_id": 5, "scrape_version": 999, "needs_image": 1,
+        "workshop_id": 5, "scrape_version": 999, "image_priority": 1,
         "preview_url": "http://example.com/img.jpg", "steam_updated_at": 1,
     })
 
@@ -977,12 +977,12 @@ def test_a_downloaded_image_does_not_rewrite_the_scrape_version(db_path, tmp_pat
     conn = get_connection(db_path)
     try:
         row = conn.execute(
-            "SELECT scrape_version, image_extension FROM workshop_items WHERE workshop_id = 5"
+            "SELECT scrape_version, image_answer FROM workshop_items WHERE workshop_id = 5"
         ).fetchone()
     finally:
         conn.close()
 
-    assert row["image_extension"], "the download itself still succeeded"
+    assert row["image_answer"], "the download itself still succeeded"
     assert row["scrape_version"] == 999, \
         "an image download must leave the page's scrape revision alone"
 
@@ -1000,7 +1000,7 @@ def test_the_item_page_pull_is_captured_as_a_full_exchange(db_path, tmp_path):
     from src.database import insert_or_update_item
 
     secret = "ITEM-PAGE-LOGIN-SECRET-0123456789"
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_web_scrape": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
     page = {
         "description": "scraped text",
         "tags": [],

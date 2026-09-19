@@ -71,7 +71,7 @@ For every identified `workshop_id`, the daemon executes a multi-stage enrichment
   recorded, the item is marked dead (`-1`) and it leaves the queue; anything else — `500`, a
   transport exception, or a status no branch handles — is recorded and the item is re-queued one
   priority level lower, floored at `1`, so it is retried behind current work rather than dropped. A
-  failed web scrape leaves the item's `needs_web_scrape` priority in place so it is retried, while
+  failed web scrape leaves the item's `web_scrape_priority` priority in place so it is retried, while
   the metadata already fetched stays usable; a selector miss leaves priority alone when the page was
   not the item's, and clears it only when the item page genuinely carries no description.
 * **Error handling**: A failure is either recovered from or reported. A handler that recovers logs

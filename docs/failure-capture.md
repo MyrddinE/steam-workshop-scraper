@@ -278,7 +278,7 @@ collects exactly them.
 
 `scrape_extended_details` returns `{"description": None, "tags": []}` when the
 description selector does not match — a truthy value. That used to be taken as
-success, writing `extended_description = NULL` and `needs_web_scrape = 0`, so the
+success, writing `extended_description = NULL` and `web_scrape_priority = 0`, so the
 item was recorded as permanently scraped with nothing to show for it and was never
 retried.
 
@@ -286,14 +286,14 @@ A miss is now a failure. The artefact is captured, and the item is stepped down 
 queue by one, floored at one:
 
 ```sql
-UPDATE workshop_items SET needs_web_scrape = MAX(1, needs_web_scrape - 1)
+UPDATE workshop_items SET web_scrape_priority = MAX(1, web_scrape_priority - 1)
 ```
 
 so the item stays queued, sinks below current work, and is never zeroed.
 
-This follows the *shape* of the `needs_image` decay in `image_worker.py` — a direct
+This follows the *shape* of the `image_priority` decay in `image_worker.py` — a direct
 arithmetic update rather than a `MAX(current, new)` priority bump — but differs from
-it in two deliberate ways. `needs_image` floors at 0, which takes the item out of
+it in two deliberate ways. `image_priority` floors at 0, which takes the item out of
 its queue; a web-scrape item must stay queued, so this floors at 1. And the image
 worker also raises `api_priority` to 2 on failure, which the web worker does not do
 here: the request succeeded, so this is not a network failure, and slowing down

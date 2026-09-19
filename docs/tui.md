@@ -134,13 +134,13 @@ Every value that comes from Steam goes through `escape_markup` in `src/tui.py`, 
 
 ### The subscription marker
 
-The row's second line shows the owner's subscription marker next to the pending spinner, and the detail pane shows the same marker immediately before the title — the convention the web pane uses too. `_subscription_marker` and `DetailsPane.update_content` both read `src/subscription.py`, which owns the five states (`downloaded`, `subscribed`, `queued`, `previously`, `never`), their precedence, and the glyph/colour for each, so the TUI and the web grid cannot disagree about why the same row looks the way it does. The marker replaces the old leading `*` prefix on the title line for `is_queued_for_subscription`; there is only one indicator. `downloaded` is a solid `★` in a deeper green than `queued`'s outline, and it requires both `own_subscribed` and the local `downloaded_at` latch, so a stray timestamp cannot claim it.
+The row's second line shows the owner's subscription marker next to the pending spinner, and the detail pane shows the same marker immediately before the title — the convention the web pane uses too. `_subscription_marker` and `DetailsPane.update_content` both read `src/subscription.py`, which owns the five states (`downloaded`, `subscribed`, `queued`, `previously`, `never`), their precedence, and the glyph/colour for each, so the TUI and the web grid cannot disagree about why the same row looks the way it does. The marker replaces the old leading `*` prefix on the title line for `is_queued_for_subscription`; there is only one indicator. `downloaded` is a solid `★` in a deeper green than `queued`'s outline, and it requires both `own_subscribed` and the local `steam_download_seen_at` latch, so a stray timestamp cannot claim it.
 
 **The subscription queue screen draws the same five states** — `SubscriptionQueueScreen._row_text` reads the shared table from the row `get_subscription_queue_items` returns, so a completed subscribe moves that row's glyph too.
 
 **The downloaded marker (and opening the folder).** Windows only. On its own
 `DOWNLOADED_ITEM_SCAN_INTERVAL_SECONDS` (60 s) timer the TUI runs
-`src/workshop_folders.scan`, which stamps `downloaded_at` for subscribed,
+`src/workshop_folders.scan`, which stamps `steam_download_seen_at` for subscribed,
 unconfirmed items whose folder Steam has on disk; the marker turns green on the
 next render. The timer skips the scan entirely while `self._daemon_controller`
 can see a daemon running, because the daemon runs the same scan and two of them
@@ -173,7 +173,7 @@ A watcher on `list_view.scroll_y` checks if the user is within 5 pixels of the b
 
 ### Item Bumping
 
-When items appear in the list, the TUI bumps their priority for web scraping, translation, and image download at list-level priority (5). This ensures viewed items get processed promptly. The bumps only *upgrade* an item that is already queued (`AND needs_web_scrape > 0` and its siblings), so viewing an item cannot create work that the daemon had decided was unnecessary.
+When items appear in the list, the TUI bumps their priority for web scraping, translation, and image download at list-level priority (5). This ensures viewed items get processed promptly. The bumps only *upgrade* an item that is already queued (`AND web_scrape_priority > 0` and its siblings), so viewing an item cannot create work that the daemon had decided was unnecessary.
 
 ### The pending marker
 

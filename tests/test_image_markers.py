@@ -1,4 +1,4 @@
-"""What `workshop_items.image_extension` holds, and what may be built from it.
+"""What `workshop_items.image_answer` holds, and what may be built from it.
 
 The column carries two kinds of value. A real image extension means a file was
 written and a URL may be built. A wholly numeric value is an HTTP status: the
@@ -103,7 +103,7 @@ def test_case_and_padding_do_not_hide_a_real_picture():
     assert image_state(" jpg ") == PRESENT
 
 
-def test_a_marker_is_not_mistaken_for_an_image_extension():
+def test_a_marker_is_not_mistaken_for_an_image_answer():
     """Wholly numeric and a real extension must not be confusable."""
     for ext in IMAGE_EXTENSIONS:
         assert not is_status_marker(ext)

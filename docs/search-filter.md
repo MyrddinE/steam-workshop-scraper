@@ -26,7 +26,7 @@ Maps user-facing field names (shown in TUI and Web UI dropdowns) to database col
 | Subscriber Score | wilson_subscription_score |
 | Favorite Score | wilson_favorite_score |
 | Full Text | full_text |
-| Subscribed | subscription_state (virtual: the predicate spans `own_subscribed`, `own_first_subscribed_at`, `is_queued_for_subscription`, `downloaded_at`) |
+| Subscribed | subscription_state (virtual: the predicate spans `own_subscribed`, `own_first_subscribed_at`, `is_queued_for_subscription`, `steam_download_seen_at`) |
 
 Fields not in the map fall through to the raw name (used by tests that pass DB column names directly).
 
@@ -51,7 +51,7 @@ the daemon's in-memory decision would drift apart.
 | `subscribed` | `COALESCE(own_subscribed, 0) = 1` |
 | `previously` | `own_first_subscribed_at IS NOT NULL AND COALESCE(own_subscribed, 0) = 0` |
 | `queued` | `COALESCE(is_queued_for_subscription, 0) = 1` |
-| `downloaded` | `downloaded_at IS NOT NULL` — the latch added with the green star |
+| `downloaded` | `steam_download_seen_at IS NOT NULL` — the latch added with the green star |
 
 `is_not` is the exact complement of `is`, applied in one place
 (`_build_subscribed_clause` / `_evaluate_subscribed_filter`) rather than spelled

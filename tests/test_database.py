@@ -612,21 +612,21 @@ def test_get_next_items_to_fetch_excludes_dead(db_path):
 
 
 def test_raise_web_scrape_priority_sets_priority(db_path):
-    """raise_web_scrape_priority updates the needs_web_scrape column."""
+    """raise_web_scrape_priority updates the web_scrape_priority column."""
     insert_or_update_item(db_path, {"workshop_id": 1})
     raise_web_scrape_priority(db_path, 1, 7)
     conn = get_connection(db_path)
-    val = conn.execute("SELECT needs_web_scrape FROM workshop_items WHERE workshop_id=1").fetchone()[0]
+    val = conn.execute("SELECT web_scrape_priority FROM workshop_items WHERE workshop_id=1").fetchone()[0]
     conn.close()
     assert val == 7
 
 
 def test_raise_image_priority_max_semantics(db_path):
     """raise_image_priority uses MAX — never downgrades."""
-    insert_or_update_item(db_path, {"workshop_id": 1, "needs_image": 10})
+    insert_or_update_item(db_path, {"workshop_id": 1, "image_priority": 10})
     raise_image_priority(db_path, 1, 3)
     conn = get_connection(db_path)
-    val = conn.execute("SELECT needs_image FROM workshop_items WHERE workshop_id=1").fetchone()[0]
+    val = conn.execute("SELECT image_priority FROM workshop_items WHERE workshop_id=1").fetchone()[0]
     conn.close()
     assert val == 10  # not downgraded to 3
 

@@ -283,7 +283,7 @@ class WebScraperThread(threading.Thread):
         """Take an item out of the web queue without touching any other flag."""
         conn = get_connection(self.db_path)
         conn.execute(
-            "UPDATE workshop_items SET needs_web_scrape = 0 WHERE workshop_id = ?",
+            "UPDATE workshop_items SET web_scrape_priority = 0 WHERE workshop_id = ?",
             (workshop_id,)
         )
         conn.commit()
@@ -315,11 +315,11 @@ class WebScraperThread(threading.Thread):
 
         ``scrape_extended_details`` returns ``{"description": None, "tags": []}``
         on a miss, which is truthy. The previous code took that as success and
-        wrote ``extended_description = NULL`` with ``needs_web_scrape = 0``, so
+        wrote ``extended_description = NULL`` with ``web_scrape_priority = 0``, so
         the item was recorded as permanently scraped with nothing to show for it.
         The markup now decides: the template is present and the description
         element is not, so the page really is the item's and the absence is
-        permanent. Clearing ``needs_web_scrape`` is what lets the queue drain
+        permanent. Clearing ``web_scrape_priority`` is what lets the queue drain
         instead of retrying a page that will never carry a description.
 
         Neutral for pacing: the request succeeded, so there is nothing to back
@@ -329,7 +329,7 @@ class WebScraperThread(threading.Thread):
         self._capture_scrape_failure(item, url, scrape_result,
                                      failure_kind="web_description_absent")
         logging.warning(
-            "[W:%s] Item page has no extended description; clearing needs_web_scrape",
+            "[W:%s] Item page has no extended description; clearing web_scrape_priority",
             item["workshop_id"])
         self._clear_web_scrape_flag(item["workshop_id"])
 
@@ -343,7 +343,7 @@ class WebScraperThread(threading.Thread):
         distinguished a missing item and a timeout read identically.
 
         The row is deliberately **not** marked dead: existence is the API's call,
-        and the API makes it on its own 404. Clearing ``needs_web_scrape`` is the
+        and the API makes it on its own 404. Clearing ``web_scrape_priority`` is the
         conservative move -- the API re-flags the item while its description is
         still missing if Steam ever serves it again -- and it is what stops a
         gone item spinning in the queue at full pace now that a missing item no
@@ -357,7 +357,7 @@ class WebScraperThread(threading.Thread):
         evidence = f"; page said {reason!r}" if reason else ""
         logging.warning(
             "[W:%s] Workshop item is not available (%s%s); clearing "
-            "needs_web_scrape and not backing off -- the API remains the "
+            "web_scrape_priority and not backing off -- the API remains the "
             "authority on whether the item exists.",
             workshop_id, status_text, evidence)
         self._clear_web_scrape_flag(workshop_id)
@@ -403,7 +403,7 @@ class WebScraperThread(threading.Thread):
             self._capture_scrape_failure(item, url, scrape_result, failure_kind="web_unknown")
             logging.warning(
                 "[W:%s] Page was not the item's and matched no known condition "
-                "(HTTP %s); leaving needs_web_scrape unchanged and backing off.",
+                "(HTTP %s); leaving web_scrape_priority unchanged and backing off.",
                 workshop_id, scrape_result.get("http_status"))
         self._record_web_failure()
 
@@ -441,7 +441,7 @@ class WebScraperThread(threading.Thread):
                 item_update = {
                     "workshop_id": workshop_id,
                     "extended_description": scrape_result.get("description"),
-                    "needs_web_scrape": 0,
+                    "web_scrape_priority": 0,
                     "scrape_version": item.get("steam_updated_at", 0),
                     # Our clock, taken now that the page is in hand -- not the
                     # Steam revision scrape_version records. Only this success

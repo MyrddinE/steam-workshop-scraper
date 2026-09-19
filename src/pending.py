@@ -52,14 +52,14 @@ STAGE_NAMES = tuple(stage for stage, _multiplier, _colour, _label in STAGES)
 
 def _is_pending(stage: str, item: dict) -> bool:
     if stage == "image":
-        # A non-empty image_extension is not proof of a picture: it may hold the
+        # A non-empty image_answer is not proof of a picture: it may hold the
         # status that said there is none, which is settled, not pending.
-        return (item.get("needs_image", 0) >= 5
-                and not images.is_resolved(item.get("image_extension")))
+        return (item.get("image_priority", 0) >= 5
+                and not images.is_resolved(item.get("image_answer")))
     if stage == "translation":
         return item.get("translation_priority", 0) >= 5
     if stage == "web":
-        return item.get("needs_web_scrape", 0) >= 5
+        return item.get("web_scrape_priority", 0) >= 5
     raise ValueError(f"unknown stage {stage!r}")
 
 

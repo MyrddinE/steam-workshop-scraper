@@ -27,10 +27,10 @@ TEMPLATE = Path("templates/index.html")
 
 def _item(**over) -> dict:
     item = {
-        "needs_image": 0,
-        "image_extension": "jpg",
+        "image_priority": 0,
+        "image_answer": "jpg",
         "translation_priority": 0,
-        "needs_web_scrape": 0,
+        "web_scrape_priority": 0,
         "api_priority": 0,
     }
     item.update(over)
@@ -44,9 +44,9 @@ def test_a_settled_item_shows_nothing():
 
 
 @pytest.mark.parametrize("stage,over", [
-    ("image", {"needs_image": 5, "image_extension": None}),
+    ("image", {"image_priority": 5, "image_answer": None}),
     ("translation", {"translation_priority": 5}),
-    ("web", {"needs_web_scrape": 5}),
+    ("web", {"web_scrape_priority": 5}),
 ])
 def test_each_stage_is_recognised(stage, over):
     assert pending.pending_stage(_item(**over)) == stage
@@ -55,44 +55,44 @@ def test_each_stage_is_recognised(stage, over):
 @pytest.mark.parametrize("level", [1, 3, 4])
 def test_below_the_threshold_is_not_pending(level):
     """The levels below 5 are background work, not something to draw."""
-    assert pending.pending_stage(_item(needs_web_scrape=level)) is None
+    assert pending.pending_stage(_item(web_scrape_priority=level)) is None
     assert pending.pending_stage(_item(translation_priority=level)) is None
-    assert pending.pending_stage(_item(needs_image=level, image_extension=None)) is None
+    assert pending.pending_stage(_item(image_priority=level, image_answer=None)) is None
 
 
 def test_an_image_that_is_settled_is_not_pending():
     """A recorded answer is settled even though no picture exists.
 
-    `image_extension` may hold the 404 that said there is none; that is an
+    `image_answer` may hold the 404 that said there is none; that is an
     answer, and the item is not waiting on anything.
     """
-    assert pending.pending_stage(_item(needs_image=10, image_extension="404")) is None
-    assert pending.pending_stage(_item(needs_image=10, image_extension="jpg")) is None
+    assert pending.pending_stage(_item(image_priority=10, image_answer="404")) is None
+    assert pending.pending_stage(_item(image_priority=10, image_answer="jpg")) is None
 
 
 def test_a_pending_image_with_a_real_file_is_not_pending():
     """A re-flagged image that is already on disk has nothing to wait for."""
-    assert pending.pending_stage(_item(needs_image=10, image_extension="png")) is None
+    assert pending.pending_stage(_item(image_priority=10, image_answer="png")) is None
 
 
 # --- the precedence --------------------------------------------------------
 
 def test_the_fastest_pending_stage_wins():
     """All three at once shows the image: it is the one about to clear."""
-    everything = _item(needs_image=5, image_extension=None,
-                       translation_priority=5, needs_web_scrape=5)
+    everything = _item(image_priority=5, image_answer=None,
+                       translation_priority=5, web_scrape_priority=5)
     assert pending.pending_stage(everything) == "image"
 
 
 def test_translation_beats_the_web_scrape():
-    assert pending.pending_stage(_item(translation_priority=5, needs_web_scrape=5)) == "translation"
+    assert pending.pending_stage(_item(translation_priority=5, web_scrape_priority=5)) == "translation"
 
 
 def test_a_settled_image_lets_the_next_stage_through():
     """The precedence must be over *pending* stages, not merely present ones."""
-    item = _item(needs_image=5, image_extension="404", translation_priority=5, needs_web_scrape=5)
+    item = _item(image_priority=5, image_answer="404", translation_priority=5, web_scrape_priority=5)
     assert pending.pending_stage(item) == "translation"
-    item = _item(needs_image=5, image_extension="404", needs_web_scrape=5)
+    item = _item(image_priority=5, image_answer="404", web_scrape_priority=5)
     assert pending.pending_stage(item) == "web"
 
 

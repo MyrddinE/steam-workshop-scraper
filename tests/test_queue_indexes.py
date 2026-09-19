@@ -59,8 +59,8 @@ def _seed(db_path, count: int = 400):
     conn = database.get_connection(db_path)
     conn.executemany(
         "INSERT INTO workshop_items "
-        "(workshop_id, title, fetch_status, api_priority, needs_web_scrape, "
-        " needs_image, translation_priority, api_fetched_at) "
+        "(workshop_id, title, fetch_status, api_priority, web_scrape_priority, "
+        " image_priority, translation_priority, api_fetched_at) "
         "VALUES (?, ?, 200, ?, ?, ?, ?, ?)",
         [
             (i, f"item {i}", i % 4, i % 5, i % 3, i % 2, 1000 + i)
@@ -123,10 +123,10 @@ def test_fresh_database_carries_the_three_queue_indexes(db_path):
 def test_indexes_have_the_measured_partial_composite_shape(db_path):
     """The predicate and column order are what the queries need, not incidental."""
     info = _index_sql(db_path)
-    assert "needs_web_scrape DESC, api_fetched_at ASC" in info[WEB_INDEX]
-    assert "WHERE needs_web_scrape > 0" in info[WEB_INDEX]
-    assert "needs_image DESC, api_fetched_at ASC" in info[IMAGE_INDEX]
-    assert "WHERE needs_image > 0" in info[IMAGE_INDEX]
+    assert "web_scrape_priority DESC, api_fetched_at ASC" in info[WEB_INDEX]
+    assert "WHERE web_scrape_priority > 0" in info[WEB_INDEX]
+    assert "image_priority DESC, api_fetched_at ASC" in info[IMAGE_INDEX]
+    assert "WHERE image_priority > 0" in info[IMAGE_INDEX]
     assert "api_priority DESC, api_fetched_at ASC" in info[API_INDEX]
     assert "WHERE api_priority > 0" in info[API_INDEX]
 
@@ -162,7 +162,7 @@ def test_web_scrape_poll_reads_the_web_queue_index(db_path):
     sql = [s for s in seen if "FROM workshop_items" in s][-1]
 
     # The index column order has to match this ORDER BY, or the poll sorts.
-    assert "ORDER BY needs_web_scrape DESC, api_fetched_at ASC" in " ".join(sql.split())
+    assert "ORDER BY web_scrape_priority DESC, api_fetched_at ASC" in " ".join(sql.split())
     plan = _assert_served_by(db_path, sql, WEB_INDEX, why="web scrape poll")
     assert "TEMP B-TREE" not in plan, "the ORDER BY must come from the index"
 
@@ -173,7 +173,7 @@ def test_image_poll_reads_the_image_queue_index(db_path):
         database.get_next_image_item(db_path)
     sql = [s for s in seen if "FROM workshop_items" in s][-1]
 
-    assert "ORDER BY needs_image DESC, api_fetched_at ASC" in " ".join(sql.split())
+    assert "ORDER BY image_priority DESC, api_fetched_at ASC" in " ".join(sql.split())
     plan = _assert_served_by(db_path, sql, IMAGE_INDEX, why="image poll")
     assert "TEMP B-TREE" not in plan, "the ORDER BY must come from the index"
 
@@ -217,20 +217,20 @@ def _breakdown_queries(db_path) -> dict[str, str]:
     assert len(queries) == 3, queries
     return {
         column: next(s for s in queries if f"{column} AS prio" in s)
-        for column in ("translation_priority", "needs_image", "needs_web_scrape")
+        for column in ("translation_priority", "image_priority", "web_scrape_priority")
     }
 
 
 def test_web_queue_breakdown_reads_the_web_queue_index(db_path):
     _seed(db_path)
-    sql = _breakdown_queries(db_path)["needs_web_scrape"]
+    sql = _breakdown_queries(db_path)["web_scrape_priority"]
     plan = _assert_served_by(db_path, sql, WEB_INDEX, why="web queue breakdown")
     assert "TEMP B-TREE" not in plan, "the GROUP BY must come from the index"
 
 
 def test_image_queue_breakdown_reads_the_image_queue_index(db_path):
     _seed(db_path)
-    sql = _breakdown_queries(db_path)["needs_image"]
+    sql = _breakdown_queries(db_path)["image_priority"]
     plan = _assert_served_by(db_path, sql, IMAGE_INDEX, why="image queue breakdown")
     assert "TEMP B-TREE" not in plan, "the GROUP BY must come from the index"
 

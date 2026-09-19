@@ -36,7 +36,7 @@ def _attach_image_state(rows):
     what counts as a picture is the bug this exists to prevent.
     """
     for row in rows:
-        stored = row.get("image_extension")
+        stored = row.get("image_answer")
         row["image_state"] = images.image_state(stored)
         # Sent alongside so the page never has to know which states count as
         # settled; only src/images.py decides that, and this calls its predicate
@@ -239,7 +239,7 @@ def api_search():
             conn = get_connection(_db_path)
             placeholders = ','.join('?' * len(ids))
             flag_rows = conn.execute(
-                f"SELECT workshop_id, needs_web_scrape, needs_image, translation_priority FROM workshop_items WHERE workshop_id IN ({placeholders})",
+                f"SELECT workshop_id, web_scrape_priority, image_priority, translation_priority FROM workshop_items WHERE workshop_id IN ({placeholders})",
                 ids
             ).fetchall()
             conn.close()
@@ -247,12 +247,12 @@ def api_search():
             for row in results:
                 if row['workshop_id'] in flag_map:
                     flag_row = flag_map[row['workshop_id']]
-                    row['needs_web_scrape'] = flag_row['needs_web_scrape']
-                    row['needs_image'] = flag_row['needs_image']
+                    row['web_scrape_priority'] = flag_row['web_scrape_priority']
+                    row['image_priority'] = flag_row['image_priority']
                     row['translation_priority'] = flag_row['translation_priority']
 
             sample = results[0] if results else {}
-            logging.info(f"[Search] returned {len(results)} items, flagged {image_flagged_count} for image, sample needs_image={sample.get('needs_image')} image_extension={sample.get('image_extension')!r}")
+            logging.info(f"[Search] returned {len(results)} items, flagged {image_flagged_count} for image, sample image_priority={sample.get('image_priority')} image_answer={sample.get('image_answer')!r}")
 
         return jsonify([_attach_subscription(row) for row in _attach_image_state(results)])
     except Exception as e:
@@ -360,10 +360,10 @@ def api_items():
     placeholders = ','.join('?' * len(ids))
     sql = f"""
         SELECT w.workshop_id, w.title, w.title_en, w.creator_steamid, w.consumer_appid,
-               w.translate_version, w.is_queued_for_subscription, w.needs_web_scrape,
-               w.needs_image, w.translation_priority, w.file_size, w.image_extension,
+               w.translate_version, w.is_queued_for_subscription, w.web_scrape_priority,
+               w.image_priority, w.translation_priority, w.file_size, w.image_answer,
                w.wilson_subscription_score, w.wilson_favorite_score,
-               w.own_subscribed, w.own_first_subscribed_at, w.downloaded_at,
+               w.own_subscribed, w.own_first_subscribed_at, w.steam_download_seen_at,
                w.api_priority,
                u.personaname, u.personaname_en
         FROM workshop_items w LEFT JOIN creators u ON w.creator_steamid = u.steamid
@@ -568,12 +568,12 @@ def _ensure_image_flagged(workshop_id, priority):
     """
     conn = get_connection(_db_path)
     row = conn.execute(
-        "SELECT preview_url, image_extension, needs_image FROM workshop_items WHERE workshop_id=?",
+        "SELECT preview_url, image_answer, image_priority FROM workshop_items WHERE workshop_id=?",
         (workshop_id,)
     ).fetchone()
     conn.close()
-    if row and row["preview_url"] and not images.is_resolved(row["image_extension"]):
-        raise_image_priority(_db_path, workshop_id, max(row["needs_image"] or 1, priority))
+    if row and row["preview_url"] and not images.is_resolved(row["image_answer"]):
+        raise_image_priority(_db_path, workshop_id, max(row["image_priority"] or 1, priority))
         return True
     return False
 

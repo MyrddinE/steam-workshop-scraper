@@ -192,7 +192,7 @@ def test_item_detail_is_read_only(web_client):
     client, db_path = web_client
     insert_or_update_item(db_path, {
         "workshop_id": 99, "title": "Detail Mod", "creator_steamid": 111, "fetch_status": 200,
-        "api_priority": 0, "needs_web_scrape": 0, "needs_image": 0,
+        "api_priority": 0, "web_scrape_priority": 0, "image_priority": 0,
         "translation_priority": 0,
     })
 
@@ -201,12 +201,12 @@ def test_item_detail_is_read_only(web_client):
 
     conn = get_connection(db_path)
     row = conn.execute(
-        "SELECT api_priority, needs_web_scrape, needs_image, translation_priority "
+        "SELECT api_priority, web_scrape_priority, image_priority, translation_priority "
         "FROM workshop_items WHERE workshop_id = 99").fetchone()
     conn.close()
     assert row["api_priority"] == 0, "polling must not re-queue the API fetch"
-    assert row["needs_web_scrape"] == 0
-    assert row["needs_image"] == 0
+    assert row["web_scrape_priority"] == 0
+    assert row["image_priority"] == 0
     assert row["translation_priority"] == 0
 
 
@@ -215,7 +215,7 @@ def test_open_item_applies_detail_priority(web_client):
     client, db_path = web_client
     insert_or_update_item(db_path, {
         "workshop_id": 99, "title": "Detail Mod", "creator_steamid": 111, "fetch_status": 200,
-        "api_priority": 0, "needs_web_scrape": 1, "needs_image": 0,
+        "api_priority": 0, "web_scrape_priority": 1, "image_priority": 0,
         "translation_priority": 0,
     })
 
@@ -225,10 +225,10 @@ def test_open_item_applies_detail_priority(web_client):
 
     conn = get_connection(db_path)
     row = conn.execute(
-        "SELECT api_priority, needs_web_scrape FROM workshop_items WHERE workshop_id = 99").fetchone()
+        "SELECT api_priority, web_scrape_priority FROM workshop_items WHERE workshop_id = 99").fetchone()
     conn.close()
     assert row["api_priority"] == 10, "opening must queue the item for refresh"
-    assert row["needs_web_scrape"] == 10
+    assert row["web_scrape_priority"] == 10
 
 
 def test_open_item_not_found(web_client):
@@ -529,7 +529,7 @@ def test_image_serve_missing(web_client):
 def test_image_serve_flat_id_resolves_to_bucket(web_client):
     """A flat GET /images/<id>.<ext> serves the file from its nested bucket path.
 
-    This replaces a source-text check for `image_extension` / `grid-img` in the
+    This replaces a source-text check for `image_answer` / `grid-img` in the
     served HTML: the detail markup is generated client-side, so there was no
     server-side behaviour to assert there. The real server contract is the image
     route, which transparently resolves a flat filename into the 3-level bucket
@@ -572,7 +572,7 @@ def test_api_items_empty_list(web_client):
 def test_api_items_reports_the_image_state_the_page_branches_on(web_client):
     """The page is told which cells may be fetched and which must be drawn.
 
-    `image_extension` now holds an answer as well as a file type, so the raw
+    `image_answer` now holds an answer as well as a file type, so the raw
     column cannot be used as a truthiness test in the browser: '404' is truthy
     and would become a request for /images/<id>.404. The classification is made
     once, server-side, and sent alongside the value it describes.
@@ -582,7 +582,7 @@ def test_api_items_reports_the_image_state_the_page_branches_on(web_client):
     for wid, ext in ((11, "jpg"), (12, "404"), (13, "html"), (14, None), (15, "503")):
         row = {"workshop_id": wid, "title": f"item {wid}", "fetch_status": 200}
         if ext is not None:
-            row["image_extension"] = ext
+            row["image_answer"] = ext
         insert_or_update_item(db_path, row)
 
     items = {it["workshop_id"]: it
@@ -606,7 +606,7 @@ def test_the_api_image_resolved_agrees_with_the_shared_predicate(web_client):
     for wid, ext in stored:
         row = {"workshop_id": wid, "title": f"item {wid}", "fetch_status": 200}
         if ext is not None:
-            row["image_extension"] = ext
+            row["image_answer"] = ext
         insert_or_update_item(db_path, row)
 
     items = {it["workshop_id"]: it
@@ -625,7 +625,7 @@ def test_the_api_image_resolved_is_decided_by_images_py(web_client, monkeypatch)
 
     client, db_path = web_client
     insert_or_update_item(db_path, {"workshop_id": 31, "title": "x", "fetch_status": 200,
-                                    "image_extension": "jpg"})
+                                    "image_answer": "jpg"})
 
     calls = []
 
@@ -661,7 +661,7 @@ def test_the_grid_builds_an_image_url_only_for_a_real_extension():
     assert js.index("state === 'present'") < js.index("/images/"), \
         "the URL must sit behind the state guard"
     assert "grid-img-failed" in js, "a final answer must render as the failure cell"
-    assert "_escapeHtml(item.image_extension)" in js, \
+    assert "_escapeHtml(item.image_answer)" in js, \
         "the drawn value is interpolated into markup, so it must be escaped"
 
 

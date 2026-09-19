@@ -19,8 +19,8 @@ from src.database import get_connection, initialize_database, insert_or_update_i
 from tests.conftest import restore_pre_rename_table_names
 
 STRANDED_WORK = {
-    "needs_web_scrape": 5,
-    "needs_image": 3,
+    "web_scrape_priority": 5,
+    "image_priority": 3,
     "translation_priority": 7,
 }
 
@@ -42,7 +42,7 @@ def _age_to_v17(db_path):
 def _row(db_path, workshop_id):
     conn = get_connection(db_path)
     row = conn.execute(
-        "SELECT api_priority, needs_web_scrape, needs_image, translation_priority "
+        "SELECT api_priority, web_scrape_priority, image_priority, translation_priority "
         "FROM workshop_items WHERE workshop_id = ?",
         (workshop_id,),
     ).fetchone()

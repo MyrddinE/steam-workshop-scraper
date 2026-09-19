@@ -201,7 +201,7 @@ class ScrapeImageOutcome(NamedTuple):
 # was in flight would be undone and leave a priority with no queue row behind
 # it. Excluding it leaves the column to the code that owns it.
 #
-# downloaded_at is local state, not an API field: only src.workshop_folders
+# steam_download_seen_at is local state, not an API field: only src.workshop_folders
 # writes it and only the subscription walk clears it. Excluding it keeps the
 # merge from carrying it at all -- the column is simply not in the statement --
 # so a stray API key under that name can never set the green star.
@@ -213,11 +213,11 @@ class ScrapeImageOutcome(NamedTuple):
 # that they record when *we* did the work, not what Steam said.
 MERGE_EXCLUDED_KEYS = frozenset({
     "is_queued_for_subscription",
-    "needs_web_scrape",
-    "image_extension",
-    "needs_image",
+    "web_scrape_priority",
+    "image_answer",
+    "image_priority",
     "translation_priority",
-    "downloaded_at",
+    "steam_download_seen_at",
     "web_scraped_at",
     "image_fetched_at",
     "translated_at",
@@ -970,8 +970,8 @@ class Daemon:
             # these columns alone and have no dead-item guard, so a flag left
             # set here keeps the item at the front of a queue that can never
             # drain and spends requests on a page that no longer exists.
-            merged_data["needs_web_scrape"] = 0
-            merged_data["needs_image"] = 0
+            merged_data["web_scrape_priority"] = 0
+            merged_data["image_priority"] = 0
             merged_data["translation_priority"] = 0
             insert_or_update_item(self.db_path, merged_data)
             return
@@ -1081,7 +1081,7 @@ class Daemon:
         # re-flagging it is exactly how a preview that never existed came to be
         # fetched forever. A real image is still re-fetched when the item is
         # revised, because the preview may have been replaced.
-        existing_ext = stored_item.get("image_extension")
+        existing_ext = stored_item.get("image_answer")
         if merged_data.get("preview_url") and not (
                 images.blocks_retry(existing_ext)
                 or (revision_unchanged and images.can_render_image(existing_ext))):
