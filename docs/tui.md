@@ -288,7 +288,7 @@ the reference for the translation's edges.
 
 Each bar's population is the flagging rule, mirrored in SQL, so the bar and the work cannot
 disagree. **Translations** is per *field*, not per item, over `title` and `short_description`;
-`_flag_translations` returns early unless the item was enriched, so its population is the
+`_queue_translations` returns early unless the item was enriched, so its population is the
 non-ASCII API fields of the **filter-selected** items. **Extended Web** is the scrape's
 coverage — live items with a non-empty `extended_description` — renamed from the old
 Description bar so the name is about the stage rather than the one field it carries today;

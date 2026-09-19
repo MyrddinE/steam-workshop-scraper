@@ -5,7 +5,7 @@ enrichment filters and nothing at all when it passed, so the marker sat on the
 uninteresting 99% of lines (*measured live* 2026-09-17 over the last 6 MB of
 `scraper.log`: 53,523 of 54,057) and the item about to have its page and preview
 fetched was the unmarked one. The line was inverted: `enriching` is appended in
-green when `_flag_scrape_and_image` returns an enriched item.
+green when `_raise_scrape_and_image_priorities` returns an enriched item.
 
 That first form still claimed work that was not always queued. An item can match
 its AppID's enrichment filters and have nothing to do -- its description is
@@ -46,7 +46,7 @@ _CURRENT_ESCAPE = "\033[90mcurrent\033[0m"
 
 # An item whose stored record is already at the fetched revision: same
 # `steam_updated_at`/`time_updated`, a stored description, and a renderable
-# image, so `_flag_scrape_and_image` has nothing to queue for it.
+# image, so `_raise_scrape_and_image_priorities` has nothing to queue for it.
 _CURRENT_ITEM = {
     "steam_updated_at": 1000,
     "extended_description": "Stored description",

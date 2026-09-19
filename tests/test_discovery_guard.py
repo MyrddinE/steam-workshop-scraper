@@ -80,7 +80,7 @@ def test_guard_runs_discovery_when_unscraped_backlog_is_unfetchable(mock_sleep, 
 
     mock_query.return_value = {"total": 10, "items": [{"publishedfileid": "999"}], "next_cursor": ""}
 
-    Daemon(_config(db_path)).seed_database(target_new=100)
+    Daemon(_config(db_path)).seed_database(fill_target=100)
 
     assert mock_query.called, "discovery must run when the fetch queue cannot supply work"
 
@@ -94,7 +94,7 @@ def test_guard_skips_discovery_when_fetchable_queue_is_deep(mock_sleep, mock_que
 
     mock_query.return_value = {"total": 10, "items": [{"publishedfileid": "999"}], "next_cursor": ""}
 
-    Daemon(_config(db_path)).seed_database(target_new=100)
+    Daemon(_config(db_path)).seed_database(fill_target=100)
 
     assert not mock_query.called, "discovery should be skipped when the queue is genuinely full"
 
@@ -107,7 +107,7 @@ def test_guard_ignores_dead_items_holding_priority(mock_sleep, mock_query, db_pa
 
     mock_query.return_value = {"total": 10, "items": [{"publishedfileid": "999"}], "next_cursor": ""}
 
-    Daemon(_config(db_path)).seed_database(target_new=100)
+    Daemon(_config(db_path)).seed_database(fill_target=100)
 
     assert mock_query.called, "dead items must not be counted as outstanding work"
 
@@ -118,7 +118,7 @@ def test_default_target_still_discovers_a_queue_above_the_old_buffer(mock_sleep,
     """Pins the default: 150 fetchable items must leave it below the threshold.
 
     `seed_database` is called with no argument, so this exercises the default
-    `DISCOVERY_TARGET_NEW` rather than a value the caller passed. Under the old
+    `DISCOVERY_FILL_TARGET` rather than a value the caller passed. Under the old
     default of 100 this queue was already "full" and the pass returned without a
     request; the raised default has to keep the same queue below the threshold
     so the pass fetches.

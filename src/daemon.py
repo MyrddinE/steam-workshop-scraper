@@ -127,7 +127,7 @@ STALE_SWEEP_INTERVAL_SECONDS = 3600
 # leading it: the buffer was a level the drain kept crossing, not headroom above
 # it. 200 sits clear of that crossing, and at the request page size of 100 it is
 # two pages of fresh items per pass.
-DISCOVERY_TARGET_NEW = 200
+DISCOVERY_FILL_TARGET = 200
 
 # How long the discovery thread waits between passes. It is a check interval, not
 # a rate: `seed_database` returns at once while the fetchable queue is already at
@@ -154,7 +154,7 @@ SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS = 86400
 SUBSCRIPTION_RECONCILE_RETRY_SECONDS = 900
 
 
-def user_requested_priority(inherited_prio: int) -> int:
+def user_requested_priority(inherited_priority: int) -> int:
     """The part of a pre-fetch ``api_priority`` a person asked for, else 0.
 
     Dependent stages inherit *this* rather than the whole value. Inheriting the
@@ -167,11 +167,11 @@ def user_requested_priority(inherited_prio: int) -> int:
     The boundary itself is :data:`src.database.USER_PRIORITY_FLOOR`, because the
     migration that repairs the rows this wrote has to draw the same line.
     """
-    return inherited_prio if inherited_prio >= USER_PRIORITY_FLOOR else 0
+    return inherited_priority if inherited_priority >= USER_PRIORITY_FLOOR else 0
 
 
 class ScrapeImageOutcome(NamedTuple):
-    """What `_flag_scrape_and_image` did with one item's dependent work.
+    """What `_raise_scrape_and_image_priorities` did with one item's dependent work.
 
     Two facts, because they are not the same question:
 
@@ -195,7 +195,7 @@ class ScrapeImageOutcome(NamedTuple):
 #
 # flag_for_web_scrape / flag_for_image set their columns explicitly between the
 # merge and the insert. translation_priority is different only in timing: it is
-# written by flag_field_for_translation, which _flag_translations calls after
+# written by flag_field_for_translation, which _queue_translations calls after
 # the insert. Carrying the pre-fetch snapshot through the merge would write that
 # snapshot back over it, so a translator drain that landed while the API fetch
 # was in flight would be undone and leave a priority with no queue row behind
@@ -274,9 +274,9 @@ class DiscoveryThread(threading.Thread):
     # count is taken every twentieth pass, or at once when a cheap signal fires.
     PAGE_ELIGIBILITY_EVERY = 20
 
-    def __init__(self, owner: "Daemon", interval: float = DISCOVERY_IDLE_SECONDS):
+    def __init__(self, daemon: "Daemon", interval: float = DISCOVERY_IDLE_SECONDS):
         super().__init__(daemon=True)
-        self.owner = owner
+        self.owner = daemon
         self.interval = interval
         self.running = True
         self._passes = 0
@@ -515,9 +515,9 @@ class Daemon:
             flag_field_for_translation(
                 self.db_path, "user", steamid, "personaname_en", personaname, 1)
 
-    def _merge_and_clean_api_data(self, api_data: dict, existing_data: dict, item_id: int, now_ts: int) -> dict:
+    def _merge_and_clean_api_data(self, api_data: dict, stored_item: dict, item_id: int, now_ts: int) -> dict:
         """Merges API response into existing data, remaps column names, and filters to allowed keys."""
-        merged = existing_data.copy()
+        merged = stored_item.copy()
         api_data.pop("publishedfileid", None)
         api_data.pop("status", None)
         merged.update(api_data)
@@ -540,9 +540,9 @@ class Daemon:
             if k in MERGE_ITEM_KEYS:
                 clean[k] = v
             elif k not in MERGE_IGNORED_KEYS:
-                val_preview = str(v)[:20] + "..." if len(str(v)) > 20 else str(v)
+                value_preview = str(v)[:20] + "..." if len(str(v)) > 20 else str(v)
                 logger = logging.info if v is not None and str(v).strip() != "" else logging.debug
-                logger(f"Discarding unknown API column: '{k}' with value '{val_preview}' for item {item_id}")
+                logger(f"Discarding unknown API column: '{k}' with value '{value_preview}' for item {item_id}")
 
         # Success path only: this helper is called after a usable API payload has
         # arrived, so api_fetched_at means "last SUCCESSFUL content pull".
@@ -590,10 +590,10 @@ class Daemon:
         self._maybe_reconcile_subscriptions()
         self._maybe_scan_downloaded_items()
 
-        items_to_scrape = self._acquire_batch()
-        if items_to_scrape is None:
+        items_to_fetch = self._acquire_batch()
+        if items_to_fetch is None:
             return  # database error, already logged
-        if not items_to_scrape:
+        if not items_to_fetch:
             self._wait_for_work()
             return
 
@@ -604,17 +604,17 @@ class Daemon:
         # configured batch_size exceeds the endpoint ceiling). Each request's
         # outcome drives the backoff; the per-item results below only decide
         # each item's state.
-        api_data_by_id = self._fetch_details(items_to_scrape)
+        api_data_by_id = self._fetch_details(items_to_fetch)
 
         creators_to_refresh = []
-        for existing_data in items_to_scrape:
+        for stored_item in items_to_fetch:
             if not self.running or self._pid_file_removed():
                 break
             # Items are still processed in the order the queue returned them;
             # each is matched to its own result by id.
             creator_id = self._process_item(
-                existing_data,
-                api_data=api_data_by_id.get(existing_data["workshop_id"]),
+                stored_item,
+                api_data=api_data_by_id.get(stored_item["workshop_id"]),
             )
             if creator_id is not None:
                 creators_to_refresh.append(creator_id)
@@ -803,12 +803,12 @@ class Daemon:
         # time, so the refill moved off this path entirely.
         return self._fetch_batch()
 
-    def _fetch_batch(self, error_message: str = "Database error in process_batch"):
+    def _fetch_batch(self, failure_context: str = "Database error in process_batch"):
         """Read one batch from the database. Returns None on database error."""
         try:
             return get_next_items_to_scrape(self.db_path, limit=self.batch_size)
         except Exception as e:
-            logging.error(f"{error_message}: {e}")
+            logging.error(f"{failure_context}: {e}")
             time.sleep(5)
             return None
 
@@ -836,7 +836,7 @@ class Daemon:
                 return
             time.sleep(1)
 
-    def _process_item(self, existing_data: dict, api_data: dict | None = None) -> int | None:
+    def _process_item(self, stored_item: dict, api_data: dict | None = None) -> int | None:
         """Fetch, merge, score, flag and persist a single workshop item.
 
         ``api_data`` is this item's result from the batch fetch. When it is
@@ -848,7 +848,7 @@ class Daemon:
         itself is deferred to the batch so several creators share one request.
         """
         now_ts = int(time.time())
-        item_id = existing_data['workshop_id']
+        item_id = stored_item['workshop_id']
 
         # Step 1: Query API
         if api_data is None:
@@ -869,7 +869,7 @@ class Daemon:
                 context={"handled_statuses": sorted(HANDLED_API_STATUSES)},
             )
 
-        merged_data = existing_data.copy()
+        merged_data = stored_item.copy()
         # Attempt clock: set unconditionally, before the status branches, so a
         # 404, a 500 and a success all persist it. This is not optional
         # bookkeeping: get_next_items_to_scrape orders by api_fetched_at ASC,
@@ -880,7 +880,7 @@ class Daemon:
         merged_data["last_fetch_attempted_at"] = now_ts
         # The pre-fetch priority is what a temporary failure steps down from, so
         # take it before the queue fields are rewritten below.
-        previous_priority = existing_data.get("api_priority") or 0
+        previous_priority = stored_item.get("api_priority") or 0
         merged_data["api_priority"] = 0
         merged_data["status"] = api_status
 
@@ -896,15 +896,15 @@ class Daemon:
         # the part a user asked for -- see user_requested_priority -- so the
         # daemon's own bookkeeping priorities (backlog, retry, discovery) cannot
         # promote an item the enrichment filters excluded above one they selected.
-        inherited_prio = existing_data.get("api_priority", 0)
+        inherited_priority = stored_item.get("api_priority", 0)
 
         self._score_wilson(merged_data)
-        outcome = self._flag_scrape_and_image(merged_data, existing_data, item_id, inherited_prio)
+        outcome = self._raise_scrape_and_image_priorities(merged_data, stored_item, item_id, inherited_priority)
 
         merged_data["status"] = 200
         insert_or_update_item(self.db_path, merged_data)
 
-        self._flag_translations(merged_data, item_id, outcome.enriched, inherited_prio)
+        self._queue_translations(merged_data, item_id, outcome.enriched, inherited_priority)
 
         # Mark what happened, not what the filters decided: the marker answers
         # "was anything queued for this item". Three states:
@@ -985,8 +985,8 @@ class Daemon:
             merged_data.get("subscriptions", 0) or 0,
             merged_data.get("lifetime_subscriptions", 0) or 0)
 
-    def _flag_scrape_and_image(self, merged_data: dict, existing_data: dict,
-                               item_id: int, inherited_prio: int) -> ScrapeImageOutcome:
+    def _raise_scrape_and_image_priorities(self, merged_data: dict, stored_item: dict,
+                               item_id: int, inherited_priority: int) -> ScrapeImageOutcome:
         """Queue web-scrape and image work for this item.
 
         Returns a :class:`ScrapeImageOutcome`: whether the item matched its
@@ -1004,7 +1004,7 @@ class Daemon:
         Note the mixed sources: the revision comparison is between the pre-fetch
         record and the merged one, so both must be passed.
 
-        ``inherited_prio`` is the item's `api_priority` before the fetch. Only the
+        ``inherited_priority`` is the item's `api_priority` before the fetch. Only the
         part of it a person asked for is carried into these queues -- see
         `user_requested_priority` -- so the item's priority here is
         `max(default_for_this_branch, requested)`.
@@ -1012,9 +1012,9 @@ class Daemon:
         # The priority a person asked for, or 0. Applied here rather than by the
         # caller so that every use below shares one answer and a new call site
         # cannot reintroduce the bug this replaced.
-        requested_prio = user_requested_priority(inherited_prio)
+        requested_priority = user_requested_priority(inherited_priority)
 
-        old_steam_updated = existing_data.get("steam_updated_at")
+        old_steam_updated = stored_item.get("steam_updated_at")
         new_steam_updated = merged_data.get("steam_updated_at")
         revision_unchanged = (old_steam_updated is not None
                               and old_steam_updated == new_steam_updated)
@@ -1029,7 +1029,7 @@ class Daemon:
         # priority, so merely opening a detail pane (api_priority 10) queued a
         # high-priority scrape that could not change anything.
         description_is_current = (
-            revision_unchanged and existing_data.get("extended_description") is not None)
+            revision_unchanged and stored_item.get("extended_description") is not None)
 
         enriched = False
         queued = False
@@ -1040,26 +1040,26 @@ class Daemon:
         # `queued`, a false `downloaded`. Evaluate against the merged record with
         # the pre-fetch values overlaid for exactly those columns, as a copy: the
         # stored record must not carry them back through the merge.
-        filter_item = dict(merged_data)
+        item_for_filters = dict(merged_data)
         for column in MERGE_EXCLUDED_KEYS:
-            filter_item.setdefault(column, existing_data.get(column))
+            item_for_filters.setdefault(column, stored_item.get(column))
 
-        if self._should_enrich(appid, filter_item):
+        if self._should_enrich(appid, item_for_filters):
             if description_is_current:
-                merged_data["extended_description"] = existing_data["extended_description"]
+                merged_data["extended_description"] = stored_item["extended_description"]
             else:
-                flag_for_web_scrape(self.db_path, item_id, max(3, requested_prio))
+                flag_for_web_scrape(self.db_path, item_id, max(3, requested_priority))
                 queued = True
             enriched = True
         elif not description_is_current:
             # Does not match the AppID's enrichment filters, so it is not
             # prioritised -- but it is still scraped for anything the page can
             # change, which the test above decides. It sits at backlog priority,
-            # which is what this branch always meant: `requested_prio` is zero
+            # which is what this branch always meant: `requested_priority` is zero
             # unless a person asked for the item, so a newly discovered one is
             # queued at 1 rather than carrying its discovery priority (3) into
             # this queue and outranking an item the filters did select.
-            flag_for_web_scrape(self.db_path, item_id, max(1, requested_prio))
+            flag_for_web_scrape(self.db_path, item_id, max(1, requested_priority))
             queued = True
 
         # Image work, on the same revision test. Without it every API fetch
@@ -1069,17 +1069,17 @@ class Daemon:
         # re-flagging it is exactly how a preview that never existed came to be
         # fetched forever. A real image is still re-fetched when the item is
         # revised, because the preview may have been replaced.
-        existing_ext = existing_data.get("image_extension")
+        existing_ext = stored_item.get("image_extension")
         if merged_data.get("preview_url") and not (
                 images.blocks_retry(existing_ext)
                 or (revision_unchanged and images.can_render_image(existing_ext))):
             flag_for_image(self.db_path, item_id,
-                           max(3, requested_prio) if enriched else max(1, requested_prio))
+                           max(3, requested_priority) if enriched else max(1, requested_priority))
             queued = True
         return ScrapeImageOutcome(enriched=enriched, queued=queued)
 
-    def _flag_translations(self, merged_data: dict, item_id: int,
-                           enriched: bool, inherited_prio: int) -> None:
+    def _queue_translations(self, merged_data: dict, item_id: int,
+                           enriched: bool, inherited_priority: int) -> None:
         """Flag title and short description for translation.
 
         The non-ASCII test lives in flag_field_for_translation. What this adds is
@@ -1090,16 +1090,16 @@ class Daemon:
         """
         if not enriched:
             return
-        t_prio = max(3, user_requested_priority(inherited_prio))
-        version = merged_data.get("translate_version")
-        steam_updated = merged_data.get("steam_updated_at")
+        translation_priority = max(3, user_requested_priority(inherited_priority))
+        translate_version = merged_data.get("translate_version")
+        steam_updated_at = merged_data.get("steam_updated_at")
         for field, text, translated in [
             ("title_en", merged_data.get("title"), merged_data.get("title_en")),
             ("short_description_en", merged_data.get("short_description"),
              merged_data.get("short_description_en")),
         ]:
-            if text and not translation_is_current(translated, version, steam_updated):
-                flag_field_for_translation(self.db_path, "item", item_id, field, text, t_prio)
+            if text and not translation_is_current(translated, translate_version, steam_updated_at):
+                flag_field_for_translation(self.db_path, "item", item_id, field, text, translation_priority)
 
     def _creator_to_refresh(self, merged_data: dict, enriched: bool) -> int | None:
         """Return the creator id this item proposes for a persona refresh.
@@ -1278,7 +1278,7 @@ class Daemon:
         except Exception as e:
             logging.error(f"Final failure-capture flush failed: {e}")
 
-    def seed_database(self, target_new: int = DISCOVERY_TARGET_NEW):
+    def seed_database(self, fill_target: int = DISCOVERY_FILL_TARGET):
         """
         Discovers workshop items via IPublishedFileService/QueryFiles API
         using cursor-based pagination (unlimited depth).
@@ -1296,11 +1296,11 @@ class Daemon:
             # 890 while the fetch queue held 1, so discovery was suppressed
             # permanently and the queue could never refill.
             fetchable = count_fetchable_items(self.db_path)
-            if fetchable >= target_new:
+            if fetchable >= fill_target:
                 logging.info(
                     "Queue appropriately filled (%d fetchable, >= %d) for AppID %s. "
                     "Skipping discovery. (%d items have never been fetched but are not queued.)",
-                    fetchable, target_new, appid, count_unscraped_items(self.db_path),
+                    fetchable, fill_target, appid, count_unscraped_items(self.db_path),
                 )
                 continue
 
@@ -1356,7 +1356,7 @@ class Daemon:
                     update_app_tracking_cursor(self.db_path, appid, cursor)
                 pacing.wait(self.api_delay, lambda: self.running)
 
-                if new_discovered_count >= target_new:
+                if new_discovered_count >= fill_target:
                     logging.info(f"Discovered {new_discovered_count} new items for AppID {appid}, enough for now.")
                     break
 

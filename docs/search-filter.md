@@ -255,7 +255,7 @@ Used by the daemon's `_should_enrich` to check whether an in-memory item dict pa
 
 **A saved enrichment filter can now be a `Subscribed` row**, so both in-memory
 sites read the four columns that field needs. The daemon's merged record drops
-the queue-owned columns by design (`MERGE_EXCLUDED_KEYS`), so `_flag_scrape_and_image`
+the queue-owned columns by design (`MERGE_EXCLUDED_KEYS`), so `_raise_scrape_and_image_priorities`
 overlays the pre-fetch record's values for exactly those columns on a copy before
 evaluating — never back onto the record it stores. The demotion walk selects only
 the columns a filter references and expands the virtual `subscribed_state` to all

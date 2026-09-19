@@ -25,7 +25,7 @@ def test_seed_database_fetches_multiple_cursors(mock_sleep, mock_query, tmp_path
          "next_cursor": ""},
     ]
 
-    daemon.seed_database(target_new=100)
+    daemon.seed_database(fill_target=100)
 
     assert mock_query.call_count == 2
     assert count_unscraped_items(db_path) == 120
@@ -34,7 +34,7 @@ def test_seed_database_fetches_multiple_cursors(mock_sleep, mock_query, tmp_path
 @patch('src.daemon.query_workshop_files')
 @patch('src.daemon.time.sleep')
 def test_seed_database_stops_after_enough_items(mock_sleep, mock_query, tmp_path):
-    """Test that seed_database stops after discovering >= target_new items."""
+    """Test that seed_database stops after discovering >= fill_target items."""
     db_path = str(tmp_path / "enough.db")
     initialize_database(db_path)
 
@@ -51,7 +51,7 @@ def test_seed_database_stops_after_enough_items(mock_sleep, mock_query, tmp_path
         "next_cursor": "cur1",
     }
 
-    daemon.seed_database(target_new=100)
+    daemon.seed_database(fill_target=100)
 
     assert mock_query.call_count == 1
     assert count_unscraped_items(db_path) == 110
@@ -79,7 +79,7 @@ def test_seed_database_resumes_from_cursor(mock_sleep, mock_query, tmp_path):
         "next_cursor": "",
     }
 
-    daemon.seed_database(target_new=100)
+    daemon.seed_database(fill_target=100)
 
     mock_query.assert_called_once_with(1062090, cursor="saved_cursor", api_key="test_key",
                                        keep_running=daemon._discovery_alive)
@@ -106,7 +106,7 @@ def test_seed_database_starts_from_star(mock_sleep, mock_query, tmp_path):
         "next_cursor": "",
     }
 
-    daemon.seed_database(target_new=100)
+    daemon.seed_database(fill_target=100)
 
     mock_query.assert_called_once_with(1062090, cursor="*", api_key="test_key",
                                        keep_running=daemon._discovery_alive)

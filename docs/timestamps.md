@@ -156,6 +156,6 @@ stale and re-queues them together. That is the granularity of the only version s
 `steam_updated_at`, so it records Steam's revision rather than our clock. The image worker used to
 write the same value into it on every download, which made an item whose page had never been scraped
 claim a scrape at its current revision; it no longer touches the column (issue 7). The daemon's
-`_flag_scrape_and_image` does not read it either: it decides whether to re-queue the HTML scrape by
+`_raise_scrape_and_image_priorities` does not read it either: it decides whether to re-queue the HTML scrape by
 comparing `steam_updated_at` against the pre-fetch record. The column therefore has no consumer —
 when our own scrape time is wanted, it is `web_scraped_at`.

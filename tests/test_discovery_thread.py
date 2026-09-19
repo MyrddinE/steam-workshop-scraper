@@ -133,7 +133,7 @@ def test_a_refused_discovery_page_slows_the_api_delay(db):
     daemon.api_delay = 1.0
     with patch("src.daemon.query_workshop_files", return_value={"error": "refused"}), \
          patch("src.daemon.time.sleep"), patch("src.pacing.wait"):
-        daemon.seed_database(target_new=100)
+        daemon.seed_database(fill_target=100)
     assert daemon.api_delay == 2.0
 
 
@@ -144,7 +144,7 @@ def test_a_healthy_discovery_page_decays_the_api_delay(db):
     with patch("src.daemon.query_workshop_files",
                return_value={"total": 0, "items": [], "next_cursor": ""}), \
          patch("src.daemon.time.sleep"), patch("src.pacing.wait"):
-        daemon.seed_database(target_new=100)
+        daemon.seed_database(fill_target=100)
     assert daemon.api_delay == pytest.approx(0.5, rel=1e-4)
 
 
@@ -154,7 +154,7 @@ def test_an_abandoned_page_is_not_counted_as_a_refusal(db):
     daemon.api_delay = 1.0
     with patch("src.daemon.query_workshop_files", return_value={"abandoned": True}), \
          patch("src.daemon.time.sleep"), patch("src.pacing.wait"):
-        daemon.seed_database(target_new=100)
+        daemon.seed_database(fill_target=100)
     assert daemon.api_delay == 1.0, "abandoning a wait must not move the delay"
 
 
@@ -165,5 +165,5 @@ def test_the_discovery_walk_reports_how_much_it_found(db):
     with patch("src.daemon.query_workshop_files",
                return_value={"total": 3, "items": items, "next_cursor": ""}), \
          patch("src.daemon.time.sleep"), patch("src.pacing.wait"):
-        found = daemon.seed_database(target_new=100)
+        found = daemon.seed_database(fill_target=100)
     assert found == 3
