@@ -134,7 +134,7 @@ A failed session push now backs off from five seconds, doubling to a one-minute 
 
 ### Dead items stayed in the scrape and image queues forever
 
-Marking an item dead now clears `needs_web_scrape`, `needs_image` and `translation_priority` along with `api_priority` (`src/daemon.py`), so a dead item is in no queue; migration 16→17 cleared the rows already stranded that way. `dead_items_by_queue` in the statistics reports any that reappear — [data-pipeline.md](data-pipeline.md)
+Marking an item dead now clears `web_scrape_priority`, `image_priority` and `translation_priority` along with `api_priority` (`src/daemon.py`), so a dead item is in no queue; migration 16→17 cleared the rows already stranded that way. `dead_items_by_queue` in the statistics reports any that reappear — [data-pipeline.md](data-pipeline.md)
 
 ### Items found by cursor discovery were never queued for an API fetch
 
@@ -250,11 +250,11 @@ The selector-miss handler touched neither `web_successes` nor `web_failures`, so
 
 ### The image back-off treated a missing image as rate limiting
 
-`image_extension` now records the server's *answer* as well as a file type, and a permanent answer is neutral for pacing: it neither grows `image_delay` nor breaks a run of successes. The captures settled the question the old entry said had never been looked at. A 404 is an nginx `text/html` body of 92 bytes carrying no rate signal at all — no 429, no `Retry-After`, no throttle page — while a read timeout has no status and no headers; a real preview arrives as `Content-Type: image/jpeg` with a real length. Over one 80 MB window the split was 6,517 404s to 163 timeouts, so 97.4% of image failures belonged to the class that says nothing about our request rate, and the delay had been moved almost entirely by the wrong signal — [data-pipeline.md](data-pipeline.md#image-download-phase), [failure-capture.md](failure-capture.md)
+`image_answer` now records the server's *answer* as well as a file type, and a permanent answer is neutral for pacing: it neither grows `image_delay` nor breaks a run of successes. The captures settled the question the old entry said had never been looked at. A 404 is an nginx `text/html` body of 92 bytes carrying no rate signal at all — no 429, no `Retry-After`, no throttle page — while a read timeout has no status and no headers; a real preview arrives as `Content-Type: image/jpeg` with a real length. Over one 80 MB window the split was 6,517 404s to 163 timeouts, so 97.4% of image failures belonged to the class that says nothing about our request rate, and the delay had been moved almost entirely by the wrong signal — [data-pipeline.md](data-pipeline.md#image-download-phase), [failure-capture.md](failure-capture.md)
 
 ### A 404'd image was re-queued forever, taking an API fetch with it
 
-The status is written into `image_extension`, `needs_image` is cleared, and `api_priority` is no longer raised — that raise was what asked for the API refresh that re-flagged the image, so the cycle is broken at its cause rather than its symptom. Both re-flag gates treat a permanent answer as settled: the daemon's `_raise_scrape_and_image_priorities` and the web server's `_ensure_image_flagged`. A transient status stays retryable, a non-image content type is final, and a revised item still re-fetches a *real* image, because the preview may legitimately have been replaced. One item had been fetched twenty-five times in a single day for a preview that never existed — [data-pipeline.md](data-pipeline.md#image-download-phase), [data-model.md](data-model.md)
+The status is written into `image_answer`, `image_priority` is cleared, and `api_priority` is no longer raised — that raise was what asked for the API refresh that re-flagged the image, so the cycle is broken at its cause rather than its symptom. Both re-flag gates treat a permanent answer as settled: the daemon's `_raise_scrape_and_image_priorities` and the web server's `_ensure_image_flagged`. A transient status stays retryable, a non-image content type is final, and a revised item still re-fetches a *real* image, because the preview may legitimately have been replaced. One item had been fetched twenty-five times in a single day for a preview that never existed — [data-pipeline.md](data-pipeline.md#image-download-phase), [data-model.md](data-model.md)
 
 ### A valid snapshot was discarded for being a few rows old
 
