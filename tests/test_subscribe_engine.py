@@ -214,7 +214,7 @@ def engine_env(tmp_path, monkeypatch):
     insert_or_update_item(db_path, {"workshop_id": 7, "title": "T", "status": 200,
                                     "consumer_appid": 294100})
     toggle_subscription_queue(db_path, 7)
-    config = {"database": {"path": db_path}, "session": {"id": "TOK"}}
+    config = {"database": {"path": db_path}, "session": {"csrf_token": "TOK"}}
     monkeypatch.setattr(
         web_scraper, "_build_workshop_cookies",
         lambda config: {"sessionid": "TOK",

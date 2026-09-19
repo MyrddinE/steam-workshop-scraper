@@ -629,6 +629,10 @@ def _config_secrets(config):
     values = []
     session = config.get("session")
     if isinstance(session, dict):
+        # Register both spellings: this collector's job is to know every secret
+        # the process holds, and a value under either name must be elided. The
+        # alias reader elsewhere picks one; a scrubber must not drop the other.
+        _add_secret_value(values, session.get("csrf_token"))
         _add_secret_value(values, session.get("id"))
         _add_login_secure(values, session.get("login_secure"))
         try:

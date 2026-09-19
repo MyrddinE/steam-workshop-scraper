@@ -787,7 +787,7 @@ def test_subscribe_token_comes_from_the_built_cookie_set(subscribe_env, monkeypa
     state["cookies"] = {"sessionid": "FROM_COOKIES",
                         "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
     monkeypatch.setattr(webserver, "_pushed_sessionid", "PUSHED_GLOBAL")
-    webserver._config.setdefault("session", {})["id"] = "CONFIG_ID"
+    webserver._config.setdefault("session", {})["csrf_token"] = "CONFIG_ID"
     client = app.test_client()
 
     resp = _post_subscribe(client)
