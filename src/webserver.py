@@ -27,7 +27,7 @@ app = Flask(__name__, template_folder='../templates')
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 
 
-def _with_image_state(rows):
+def _attach_image_state(rows):
     """Attach the image classification the grid branches on.
 
     Computed here from `src/images.py` rather than left to the browser: if the
@@ -110,7 +110,7 @@ def _get_daemon_controller() -> DaemonController:
     return _daemon_controller
 
 
-def _bbcode_to_html(text):
+def bbcode_to_html(text):
     """Converts Steam BBCode to HTML for web display."""
     if not text:
         return ""
@@ -175,7 +175,7 @@ def index():
     return render_template('index.html', web_delay=web_delay,
                            filter_schema_json=_json.dumps(SEARCH_FILTER_SCHEMA),
                            open_folder_enabled=bool(
-                               _workshop_folders and _workshop_folders.enabled()))
+                               _workshop_folders and _workshop_folders.is_supported()))
 
 
 @app.route('/userscript/<path:filename>')
@@ -254,7 +254,7 @@ def api_search():
             sample = results[0] if results else {}
             logging.info(f"[Search] returned {len(results)} items, flagged {image_flagged_count} for image, sample needs_image={sample.get('needs_image')} image_extension={sample.get('image_extension')!r}")
 
-        return jsonify([_attach_subscription(row) for row in _with_image_state(results)])
+        return jsonify([_attach_subscription(row) for row in _attach_image_state(results)])
     except Exception as e:
         logging.exception(f"[Search] Error processing search request")
         return jsonify({"error": str(e)}), 500
@@ -269,9 +269,9 @@ def _detail_payload(workshop_id):
     # Both language variants travel together so the client can switch between
     # them without another request. The TUI's toggle is a local re-render, and
     # shipping the pair keeps the web equivalent off the network as well.
-    item["description_html"] = _bbcode_to_html(
+    item["description_html"] = bbcode_to_html(
         item.get("extended_description_en") or item.get("extended_description") or "")
-    item["description_html_original"] = _bbcode_to_html(item.get("extended_description") or "")
+    item["description_html_original"] = bbcode_to_html(item.get("extended_description") or "")
     item["display_title"] = item.get("title_en") or item.get("title") or "N/A"
     item["display_title_original"] = item.get("title") or item.get("title_en") or "N/A"
     # The TUI offers the toggle only once a translation has been stored, so the
@@ -370,7 +370,7 @@ def api_items():
         WHERE w.workshop_id IN ({placeholders})
     """
     results = [_attach_subscription(row) for row in
-               _with_image_state([dict(row) for row in conn.execute(sql, ids).fetchall()])]
+               _attach_image_state([dict(row) for row in conn.execute(sql, ids).fetchall()])]
     conn.close()
     return jsonify(results)
 
@@ -855,7 +855,7 @@ def api_open_folder(workshop_id):
     if helper is None:
         return jsonify({"ok": False, "folder": None,
                         "message": "The folder helper is not initialised on this server."}), 400
-    result = helper.open(workshop_id)
+    result = helper.open_folder(workshop_id)
     status = 200 if result["ok"] else 400
     return jsonify(result), status
 
@@ -904,5 +904,5 @@ def api_daemon_restart():
 
 @app.route('/api/daemon/log')
 def api_daemon_log():
-    since = request.args.get('since', 0, type=int) or 0
-    return jsonify(_get_daemon_controller().tail_log(since))
+    since_offset = request.args.get('since', 0, type=int) or 0
+    return jsonify(_get_daemon_controller().tail_log(since_offset))

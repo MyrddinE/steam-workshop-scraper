@@ -50,7 +50,7 @@ from src import capture
 from src import crash
 from src import session_health
 from src.subscription_sync import reconcile_own_subscriptions
-from src.workshop_folders import WorkshopFolders, DOWNLOAD_SCAN_INTERVAL_SECONDS
+from src.workshop_folders import WorkshopFolders, DOWNLOADED_ITEM_SCAN_INTERVAL_SECONDS
 
 # API statuses the fetch path has an explicit branch for. Anything else is
 # captured as evidence and then treated as temporary by _settle_api_failure; it
@@ -431,7 +431,7 @@ class Daemon:
         # is on disk, so its marker can turn solid green. The locator resolves
         # the Steam libraries once per process and only re-resolves on a miss,
         # and the scan itself is on a monotonic clock (see
-        # DOWNLOAD_SCAN_INTERVAL_SECONDS) because the per-batch path runs every
+        # DOWNLOADED_ITEM_SCAN_INTERVAL_SECONDS) because the per-batch path runs every
         # few seconds. One startup line says why it is off when it cannot work.
         self.workshop_folders = WorkshopFolders(self.db_path, self.config)
         self.workshop_folders.log_status()
@@ -750,11 +750,11 @@ class Daemon:
         """
         now = time.monotonic()
         if (self._last_download_scan is not None
-                and now - self._last_download_scan < DOWNLOAD_SCAN_INTERVAL_SECONDS):
+                and now - self._last_download_scan < DOWNLOADED_ITEM_SCAN_INTERVAL_SECONDS):
             return
         self._last_download_scan = now
         try:
-            self.workshop_folders.scan()
+            self.workshop_folders.scan_downloads()
         except Exception as exc:
             logging.warning(
                 "Downloaded-item scan failed; housekeeping skipped this pass: %s", exc)
@@ -1266,7 +1266,7 @@ class Daemon:
             # has been joined so no writer can be mid-transaction. Backup
             # failures are logged and swallowed: shutdown must still complete.
             try:
-                self._backup_worker.run_now()
+                self._backup_worker.snapshot_now()
             except Exception as e:
                 logging.error(f"Final database backup failed: {e}")
 

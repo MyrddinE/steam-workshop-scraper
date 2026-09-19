@@ -139,7 +139,7 @@ The row's second line shows the owner's subscription marker next to the pending 
 **The subscription queue screen draws the same five states** — `SubscriptionQueueScreen._row_text` reads the shared table from the row `get_subscription_queue_items` returns, so a completed subscribe moves that row's glyph too.
 
 **The downloaded marker (and opening the folder).** Windows only. On its own
-`DOWNLOAD_SCAN_INTERVAL_SECONDS` (60 s) timer the TUI runs
+`DOWNLOADED_ITEM_SCAN_INTERVAL_SECONDS` (60 s) timer the TUI runs
 `src/workshop_folders.scan`, which stamps `downloaded_at` for subscribed,
 unconfirmed items whose folder Steam has on disk; the marker turns green on the
 next render. The timer skips the scan entirely while `self._daemon_controller`

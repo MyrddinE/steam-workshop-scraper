@@ -256,15 +256,15 @@ class DaemonController:
         self.stop()
         return self.start()
 
-    def tail_log(self, since: int = 0, max_bytes: int = TAIL_BYTES,
+    def tail_log(self, since_offset: int = 0, max_bytes: int = TAIL_BYTES,
                  max_lines: int = TAIL_LINES) -> dict:
         """Return a bounded preview of the log, and the offset to resume from.
 
-        Reads in binary so ``since`` and the returned ``offset`` are real byte
+        Reads in binary so ``since_offset`` and the returned ``offset`` are real byte
         positions, and stops at the last newline so a half-written line is
         returned once rather than duplicated on the next poll.
 
-        No read is ever larger than ``max_bytes``. On a first call (``since`` at
+        No read is ever larger than ``max_bytes``. On a first call (``since_offset`` at
         or below zero) that means the *tail* of the file rather than the whole of
         it: this is a preview pane, and the production log is hundreds of
         megabytes, so returning all of it would cost more memory than the process
@@ -273,7 +273,7 @@ class DaemonController:
         told ``reset``, so it knows its view has a gap in it rather than silently
         believing it saw everything.
         """
-        floor = max(0, since)
+        floor = max(0, since_offset)
         log_file = self.log_file()
         if not log_file:
             return {"lines": [], "offset": floor, "reset": False}
@@ -283,20 +283,20 @@ class DaemonController:
         except OSError:
             return {"lines": [], "offset": floor, "reset": False}
 
-        if since <= 0:
+        if since_offset <= 0:
             # First look: a preview of the end, not the whole archive.
             start = max(0, size - max_bytes)
             reset = start > 0
-        elif size < since:
+        elif size < since_offset:
             # Rotated or truncated under us.
             start = max(0, size - max_bytes)
             reset = True
-        elif size - since > max_bytes:
+        elif size - since_offset > max_bytes:
             # The caller fell further behind than we are willing to send.
             start = max(0, size - max_bytes)
             reset = True
         else:
-            start = since
+            start = since_offset
             reset = False
 
         try:
@@ -313,7 +313,7 @@ class DaemonController:
             return {"lines": [], "offset": start, "reset": reset}
 
         lines = data[:last_newline].decode("utf-8", errors="replace").splitlines()
-        if start > 0 and start != since:
+        if start > 0 and start != since_offset:
             # We jumped backwards to the tail, so the first line is the tail end
             # of a line whose beginning we never read. Resuming from a real
             # offset always lands on a line boundary, so it is only dropped here.

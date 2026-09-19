@@ -214,7 +214,7 @@ def test_backup_thread_run_now_swallows_failure(tmp_path):
     worker = BackupThread(str(tmp_path / "test.db"), str(tmp_path / "outbox"), 60)
 
     with patch("src.backup.snapshot_database", side_effect=RuntimeError("boom")):
-        assert worker.run_now() is None  # logged and swallowed, no exception
+        assert worker.snapshot_now() is None  # logged and swallowed, no exception
 
 
 def test_backup_thread_run_now_publishes_snapshot_and_manifest(db_path, tmp_path):
@@ -222,7 +222,7 @@ def test_backup_thread_run_now_publishes_snapshot_and_manifest(db_path, tmp_path
     outbox = str(tmp_path / "outbox")
     worker = BackupThread(db_path, outbox, 60)
 
-    meta = worker.run_now()
+    meta = worker.snapshot_now()
 
     assert meta is not None
     assert os.path.isfile(os.path.join(outbox, "db", "workshop-backup.db"))

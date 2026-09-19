@@ -35,7 +35,7 @@ is what lets a second drive that appeared later be found on the next check.
 
 **Degrade to nothing, quietly.** Not Windows, no Steam, an unreadable
 ``libraryfolders.vdf``: every function here becomes a no-op, every item stays
-without a ``downloaded`` marker, and ``scan`` logs nothing per check.
+without a ``downloaded`` marker, and ``scan_downloads`` logs nothing per check.
 :meth:`WorkshopFolders.log_status` is the one startup line that says why it is
 off -- the daemon log is already hundreds of megabytes (issue 37), so a line per
 check would be the wrong shape.
@@ -58,7 +58,7 @@ from src.database import get_connection
 #: directory per subscribed item that is not yet confirmed, so a minute bounds
 #: the lag between Steam finishing a download and the star turning green while
 #: keeping the per-batch path free of it.
-DOWNLOAD_SCAN_INTERVAL_SECONDS = 60
+DOWNLOADED_ITEM_SCAN_INTERVAL_SECONDS = 60
 
 #: Where the config override lives. Entries are workshop *content* roots
 #: (``<library>/steamapps/workshop/content``), added to discovery's own list.
@@ -254,7 +254,7 @@ class WorkshopFolders:
 
     # --- platform and resolution -------------------------------------------
 
-    def enabled(self) -> bool:
+    def is_supported(self) -> bool:
         """Whether this platform can have the feature at all."""
         return is_windows(self._platform)
 
@@ -315,7 +315,7 @@ class WorkshopFolders:
         and neither does a miss with no candidate root at all (there is nothing
         to re-resolve toward until Steam is installed).
         """
-        if not self.enabled():
+        if not self.is_supported():
             return None
         dirs = self.content_dirs()
         folder = self._find_folder_in(dirs, consumer_appid, workshop_id)
@@ -326,7 +326,7 @@ class WorkshopFolders:
 
     # --- the scan ----------------------------------------------------------
 
-    def scan(self, now: int | None = None) -> dict:
+    def scan_downloads(self, now: int | None = None) -> dict:
         """Stamp ``downloaded_at`` on subscribed, unconfirmed items on disk.
 
         The candidate set is exactly ``own_subscribed = 1 AND downloaded_at IS
@@ -336,7 +336,7 @@ class WorkshopFolders:
         counts; a changing scan logs one line, a scan that changed nothing logs
         nothing.
         """
-        if not self.enabled():
+        if not self.is_supported():
             return {"checked": 0, "stamped": 0}
         stamp = int(time.time()) if now is None else int(now)
         dirs = self.content_dirs()
@@ -384,7 +384,7 @@ class WorkshopFolders:
 
     # --- the open action ---------------------------------------------------
 
-    def open(self, workshop_id: int) -> dict:
+    def open_folder(self, workshop_id: int) -> dict:
         """Open the item's folder in Explorer, if it is green and still there.
 
         Refuses off Windows, for an unknown item, and for one that is not in the
@@ -394,7 +394,7 @@ class WorkshopFolders:
         left exactly as it was. Never raises for a missing folder; a launcher
         failure is reported in the result.
         """
-        if not self.enabled():
+        if not self.is_supported():
             return {
                 "ok": False, "folder": None,
                 "message": "Opening the workshop folder is only available on Windows.",
@@ -457,7 +457,7 @@ class WorkshopFolders:
         without a ``downloaded`` marker and are stated once at startup rather
         than on every check.
         """
-        if not self.enabled():
+        if not self.is_supported():
             return ("Downloaded-item markers are off: opening Steam workshop folders "
                     "is only supported on Windows.")
         if not self.content_dirs():

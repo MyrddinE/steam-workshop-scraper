@@ -58,7 +58,7 @@ the install's `libraryfolders.vdf`, in both the current `<steam>/steamapps/` and
 `<steam>/config/` locations, with `steam.workshop_content_dirs` added on top — and re-resolved only
 when a lookup finds nothing, so a second drive that appears later is picked up without re-reading the
 registry on every check. `_maybe_scan_downloaded_items` guards the scan on a monotonic
-`DOWNLOAD_SCAN_INTERVAL_SECONDS` (60 s) clock, like the staleness sweep, because the per-batch path runs
+`DOWNLOADED_ITEM_SCAN_INTERVAL_SECONDS` (60 s) clock, like the staleness sweep, because the per-batch path runs
 every few seconds; the scan changed nothing logs nothing, and a changing scan logs one line with its
 counts. The TUI runs the same scan on the same interval but skips it while its daemon controller can see
 a daemon, so the two processes never scan in parallel. On a machine where the feature cannot work (not

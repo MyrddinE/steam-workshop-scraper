@@ -1428,7 +1428,7 @@ class DetailsPane(VerticalScroll):
                 # Windows-only, like the `o` binding it duplicates. It is present
                 # but disabled while the item is not green, so the affordance is
                 # discoverable with the reason rather than invisible.
-                if self._folder_service() is not None and self._folder_service().enabled():
+                if self._folder_service() is not None and self._folder_service().is_supported():
                     yield Button("Open Folder", id="btn-open-folder",
                                  classes="details-button", disabled=True)
             yield Button("jump", id="btn-jump-author", variant="primary")
@@ -2281,7 +2281,7 @@ class ScraperApp(App):
         self._daemon_controller = DaemonController(self.config_path, config=self.config)
         # The downloaded-star folder helper: one locator for this process, shared
         # with the embedded web server through module-level discovery caching. The
-        # detail pane reads `enabled()` to decide whether to draw its button, and
+        # detail pane reads `is_supported()` to decide whether to draw its button, and
         # the periodic scan below uses it. One startup line says why it is off.
         self.workshop_folders = workshop_folders.WorkshopFolders(self.db_path, self.config)
         self.workshop_folders.log_status()
@@ -2451,7 +2451,7 @@ class ScraperApp(App):
         # while this process can see a daemon running, because the daemon runs
         # the same scan and two of them would check the same folders in
         # parallel. Off Windows the scan is a no-op and reads nothing.
-        self.set_interval(workshop_folders.DOWNLOAD_SCAN_INTERVAL_SECONDS,
+        self.set_interval(workshop_folders.DOWNLOADED_ITEM_SCAN_INTERVAL_SECONDS,
                           self._maybe_scan_downloaded_items)
 
     def _check_scroll_bottom(self, scroll_y: float) -> None:
@@ -2584,7 +2584,7 @@ class ScraperApp(App):
         The daemon runs the same scan, so this TUI's copy is skipped while the
         controller can see a daemon: two scans would stat the same folders in
         parallel for one answer. The interval is the daemon's
-        (``DOWNLOAD_SCAN_INTERVAL_SECONDS``), because it is the same work.
+        (``DOWNLOADED_ITEM_SCAN_INTERVAL_SECONDS``), because it is the same work.
 
         The read/write is guarded like every unattended database callback: a
         transient lock skips this tick, and the next one is the retry. Off
@@ -2592,7 +2592,7 @@ class ScraperApp(App):
         """
         if self._daemon_controller.is_running():
             return
-        self.workshop_folders.scan()
+        self.workshop_folders.scan_downloads()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -3007,7 +3007,7 @@ class ScraperApp(App):
         if not workshop_id:
             self.notify("No item selected to open.", severity="warning")
             return
-        result = self.workshop_folders.open(workshop_id)
+        result = self.workshop_folders.open_folder(workshop_id)
         severity = "information" if result["ok"] else "warning"
         self.notify(result["message"], severity=severity)
 

@@ -1212,8 +1212,8 @@ class _FakeDaemonController:
         self.calls.append("restart")
         return True, "Daemon started (PID: 123)"
 
-    def tail_log(self, since=0):
-        self.calls.append(("log", since))
+    def tail_log(self, since_offset=0):
+        self.calls.append(("log", since_offset))
         return dict(self._tail)
 
 

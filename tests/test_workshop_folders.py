@@ -217,7 +217,7 @@ def test_scan_stamps_a_subscribed_item_whose_folder_exists(tmp_path):
     _seed(db, 5)
     svc, _ = _service(db, [str(content)])
 
-    result = svc.scan(now=1234)
+    result = svc.scan_downloads(now=1234)
 
     assert result == {"checked": 1, "stamped": 1}
     assert _row(db, 5)["downloaded_at"] == 1234
@@ -230,7 +230,7 @@ def test_scan_leaves_an_item_that_is_not_subscribed_alone(tmp_path):
     _seed(db, 5, own_subscribed=0)
     svc, _ = _service(db, [str(content)])
 
-    assert svc.scan() == {"checked": 0, "stamped": 0}
+    assert svc.scan_downloads() == {"checked": 0, "stamped": 0}
     assert _row(db, 5)["downloaded_at"] is None
 
 
@@ -239,7 +239,7 @@ def test_scan_leaves_an_item_whose_folder_is_missing_unstamped(tmp_path):
     _seed(db, 5)
     svc, _ = _service(db, [str(tmp_path / "content")])
 
-    assert svc.scan() == {"checked": 1, "stamped": 0}
+    assert svc.scan_downloads() == {"checked": 1, "stamped": 0}
     assert _row(db, 5)["downloaded_at"] is None
 
 
@@ -250,7 +250,7 @@ def test_scan_checks_every_candidate_directory(tmp_path):
     _seed(db, 5)
     svc, _ = _service(db, [str(first), str(second)])
 
-    assert svc.scan(now=9)["stamped"] == 1
+    assert svc.scan_downloads(now=9)["stamped"] == 1
     assert _row(db, 5)["downloaded_at"] == 9
 
 
@@ -261,7 +261,7 @@ def test_scan_never_revisits_a_confirmed_item(tmp_path):
     _seed(db, 5, downloaded_at=111)
     svc, _ = _service(db, [str(content)])
 
-    assert svc.scan() == {"checked": 0, "stamped": 0}
+    assert svc.scan_downloads() == {"checked": 0, "stamped": 0}
     assert _row(db, 5)["downloaded_at"] == 111, "the latch must not move"
 
 
@@ -272,13 +272,13 @@ def test_scan_never_clears_when_the_folder_disappears(tmp_path):
     folder.mkdir(parents=True)
     _seed(db, 5)
     svc, _ = _service(db, [str(content)])
-    svc.scan(now=42)
+    svc.scan_downloads(now=42)
     assert _row(db, 5)["downloaded_at"] == 42
 
     # The drive is unplugged / the library moved: the folder is gone.
     os.rmdir(folder)
 
-    assert svc.scan() == {"checked": 0, "stamped": 0}
+    assert svc.scan_downloads() == {"checked": 0, "stamped": 0}
     assert _row(db, 5)["downloaded_at"] == 42, \
         "a missing folder must never take the green star away"
 
@@ -288,7 +288,7 @@ def test_scan_never_clears_a_stray_latch_without_a_subscription(tmp_path):
     _seed(db, 5, own_subscribed=0, downloaded_at=7)
     svc, _ = _service(db, [])
 
-    svc.scan()
+    svc.scan_downloads()
 
     assert _row(db, 5)["downloaded_at"] == 7
 
@@ -301,8 +301,8 @@ def test_scan_off_windows_is_a_silent_noop(tmp_path, caplog):
     svc, _ = _service(db, [str(content)], platform="linux")
 
     with caplog.at_level(logging.INFO):
-        assert svc.scan() == {"checked": 0, "stamped": 0}
-        assert svc.scan() == {"checked": 0, "stamped": 0}
+        assert svc.scan_downloads() == {"checked": 0, "stamped": 0}
+        assert svc.scan_downloads() == {"checked": 0, "stamped": 0}
 
     assert _row(db, 5)["downloaded_at"] is None
     # `caplog` captures what reaches the root logger from *any* thread, so
@@ -323,8 +323,8 @@ def test_scan_logs_once_when_it_changed_something(tmp_path, caplog):
     svc, _ = _service(db, [str(content)])
 
     with caplog.at_level(logging.INFO):
-        svc.scan()
-        svc.scan()
+        svc.scan_downloads()
+        svc.scan_downloads()
 
     lines = [r for r in caplog.records if "Downloaded-item scan" in r.getMessage()]
     assert len(lines) == 1, "one line per changing scan, and nothing when unchanged"
@@ -360,7 +360,7 @@ def test_open_refuses_an_item_that_is_not_downloaded(tmp_path):
     _seed(db, 5, own_subscribed=1)
     svc, launched = _service(db, [str(tmp_path / "content")])
 
-    result = svc.open(5)
+    result = svc.open_folder(5)
 
     assert result["ok"] is False
     assert launched == []
@@ -376,7 +376,7 @@ def test_open_refuses_a_stray_latch_without_a_subscription(tmp_path):
     conn.close()
     svc, launched = _service(db, [str(content)])
 
-    result = svc.open(5)
+    result = svc.open_folder(5)
 
     assert result["ok"] is False
     assert launched == []
@@ -389,7 +389,7 @@ def test_open_warns_naming_the_missing_folder_without_changing_state(tmp_path):
     os.rmdir(folder)
     svc, launched = _service(db, [str(content)])
 
-    result = svc.open(5)
+    result = svc.open_folder(5)
 
     assert result["ok"] is False
     assert str(content) in result["message"], "the warning must name where it looked"
@@ -402,7 +402,7 @@ def test_open_launches_the_folder_when_the_item_is_green(tmp_path):
     content, folder = _green(db, tmp_path)
     svc, launched = _service(db, [str(content)])
 
-    result = svc.open(5)
+    result = svc.open_folder(5)
 
     assert result["ok"] is True
     assert launched == [str(folder)]
@@ -413,7 +413,7 @@ def test_open_never_launches_off_windows(tmp_path):
     content, folder = _green(db, tmp_path)
     svc, launched = _service(db, [str(content)], platform="linux")
 
-    result = svc.open(5)
+    result = svc.open_folder(5)
 
     assert result["ok"] is False
     assert "Windows" in result["message"]
@@ -423,7 +423,7 @@ def test_open_never_launches_off_windows(tmp_path):
 
 def test_open_reports_an_unknown_item(tmp_path):
     svc, launched = _service(_db(tmp_path), [])
-    result = svc.open(12345)
+    result = svc.open_folder(12345)
 
     assert result["ok"] is False
     assert launched == []
