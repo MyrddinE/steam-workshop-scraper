@@ -184,8 +184,8 @@ def serve_userscript(filename):
     if not os.path.isfile(script_path):
         return jsonify({"error": "not found"}), 404
 
-    with open(script_path, 'r', encoding='utf-8') as f:
-        content = f.read()
+    with open(script_path, 'r', encoding='utf-8') as handle:
+        content = handle.read()
 
     host = request.host
     if host and not host.startswith('127.') and not host.startswith('localhost'):
@@ -380,8 +380,8 @@ def api_state():
     state_path = os.path.join(os.path.dirname(_db_path), ".tui_state.yaml")
     try:
         import yaml
-        with open(state_path, 'r', encoding='utf-8') as f:
-            state = yaml.safe_load(f) or {}
+        with open(state_path, 'r', encoding='utf-8') as handle:
+            state = yaml.safe_load(handle) or {}
     except Exception:
         logging.info("No saved filter state found or failed to read")
         state = {}
@@ -808,8 +808,8 @@ def api_sub_failures():
 
 @app.route('/api/fetch_new', methods=['POST'])
 def api_fetch_new():
-    with open('.fetch_new', 'w') as f:
-        f.write('1')
+    with open('.fetch_new', 'w') as handle:
+        handle.write('1')
     return jsonify({"ok": True})
 
 

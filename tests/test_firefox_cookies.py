@@ -22,7 +22,7 @@ from src.firefox_cookies import (
     read_steam_cookies,
     steam_login_secure,
 )
-from src.web_scraper import _resolve_login_secure, _session_id
+from src.web_scraper import _resolve_login_secure, _csrf_token
 
 
 @pytest.fixture(autouse=True)
@@ -240,12 +240,12 @@ def test_the_session_id_comes_from_the_same_read():
     config = {"session": {"id": "CONFIG_SID", "read_firefox_cookies": True}}
     with patch("src.web_scraper.browser_cookies",
                return_value={"steamLoginSecure": "X", "sessionid": "BROWSER_SID"}):
-        assert _session_id(config) == "BROWSER_SID"
+        assert _csrf_token(config) == "BROWSER_SID"
 
 
 def test_the_session_id_falls_back_to_the_config():
     with patch("src.web_scraper.browser_cookies", return_value={}):
-        assert _session_id({"session": {"id": "CONFIG_SID", "read_firefox_cookies": True}}) == "CONFIG_SID"
+        assert _csrf_token({"session": {"id": "CONFIG_SID", "read_firefox_cookies": True}}) == "CONFIG_SID"
 
 
 @pytest.mark.parametrize("body,expected", [

@@ -1341,16 +1341,16 @@ def load_tui_state(path: str) -> dict:
     if not os.path.exists(path):
         return {}
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f) or {}
+        with open(path, 'r', encoding='utf-8') as handle:
+            return yaml.safe_load(handle) or {}
     except Exception:
         return {}
 
 def save_tui_state(path: str, state: dict) -> None:
     """Saves the TUI state to a YAML file."""
     try:
-        with open(path, 'w', encoding='utf-8') as f:
-            yaml.dump(state, f, default_flow_style=False)
+        with open(path, 'w', encoding='utf-8') as handle:
+            yaml.dump(state, handle, default_flow_style=False)
     except Exception:
         logging.debug("Failed to save TUI state")
         pass
@@ -2815,8 +2815,8 @@ class ScraperApp(App):
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses (e.g., Jump to Author, Translation, Search Builder buttons)."""
         if event.button.id == "btn-fetch-new":
-            with open('.fetch_new', 'w') as f:
-                f.write('1')
+            with open('.fetch_new', 'w') as handle:
+                handle.write('1')
             self.notify("Fetch-new triggered! The daemon will scan recently-updated items on its next cycle.")
         elif event.button.id == "btn-update-visible":
             await self.action_update_visible()

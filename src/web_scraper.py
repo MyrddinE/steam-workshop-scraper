@@ -275,7 +275,7 @@ def looks_like_missing_item(body: str) -> bool:
     return missing_item_reason(body) is not None
 
 
-def _session_id(config: dict) -> str:
+def _csrf_token(config: dict) -> str:
     """The CSRF token, from the browser when that source is enabled.
 
     Taken from the same read as the login cookie on purpose: a sessionid from a
@@ -341,7 +341,7 @@ def _build_workshop_cookies(config: dict) -> dict:
         # profile cookie is invented here.
     cookies = {
         'workshop_preferences_v2': '%7B%22bOptedIn%22%3Atrue%7D',
-        'sessionid': _session_id(config),
+        'sessionid': _csrf_token(config),
     }
     login_secure = _resolve_login_secure(config)
     if login_secure:
