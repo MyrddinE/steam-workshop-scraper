@@ -109,14 +109,14 @@ def _full_library(db_path):
     _item(db_path, 1, tags=["Mature"], title="テスト", title_en="Test",
           short_description="説明", short_description_en="Desc",
           extended_description="説明", extended_description_en="Desc",
-          api_fetched_at=1, image_extension="jpg", creator=42,
+          api_fetched_at=1, image_extension="jpg", creator_steamid=42,
           steam_updated_at=100, translate_version=100)
     _item(db_path, 2, tags=["Mature"], title="テスト2", short_description="説明2",
-          extended_description="説明2", api_fetched_at=1, creator=43,
+          extended_description="説明2", api_fetched_at=1, creator_steamid=43,
           steam_updated_at=100)
     _item(db_path, 3, tags=["Mature"], title="plain", short_description="plain",
           extended_description="plain", api_fetched_at=1, image_extension="jpg",
-          creator=7)
+          creator_steamid=7)
     _item(db_path, 4, tags=["Mature"], title="blank page", web_scraped_at=5)
     _item(db_path, 5, tags=["Mature"], title="bare")
 
@@ -273,11 +273,11 @@ def test_creator_translation_counts_items_by_their_creators_name(db_path):
     insert_or_update_creator(db_path, {
         "steamid": 44, "personaname": "Bob", "api_fetched_at": 10,
     })
-    _item(db_path, 1, creator=42)
-    _item(db_path, 2, creator=42)
-    _item(db_path, 3, creator=43)
-    _item(db_path, 4, creator=44)
-    _item(db_path, 5, creator=99)   # no creators row
+    _item(db_path, 1, creator_steamid=42)
+    _item(db_path, 2, creator_steamid=42)
+    _item(db_path, 3, creator_steamid=43)
+    _item(db_path, 4, creator_steamid=44)
+    _item(db_path, 5, creator_steamid=99)   # no creators row
 
     bar = _bars(_coverage(db_path, []))["creator_translated"]
 
@@ -293,7 +293,7 @@ def test_a_creator_translation_is_stale_after_a_newer_persona_fetch(db_path):
         "steamid": 42, "personaname": "作者", "personaname_en": "Author",
         "api_fetched_at": 30, "translated_at": 20,   # name fetched after it was translated
     })
-    _item(db_path, 1, creator=42)
+    _item(db_path, 1, creator_steamid=42)
 
     bar = _bars(_coverage(db_path, []))["creator_translated"]
 

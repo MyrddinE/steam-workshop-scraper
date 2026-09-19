@@ -138,7 +138,7 @@ def test_evaluate_filters_missing_field():
     ]) is False
 
 def test_evaluate_filters_is_not_operator():
-    assert _evaluate_filters({"creator": "111"}, [
+    assert _evaluate_filters({"creator_steamid": "111"}, [
         {"field": "Author ID", "op": "is_not", "value": "999"},
     ]) is True
 

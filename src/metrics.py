@@ -638,7 +638,7 @@ def _coverage_scan(conn, where_sql: str, params: list) -> dict:
                                   AND COALESCE(w.extended_description, '') = ''
                                  THEN 1 ELSE 0 END), 0) AS blank_answers,
                COALESCE(SUM(CASE WHEN COALESCE(w.image_extension, '') <> '' THEN 1 ELSE 0 END), 0) AS imaged,
-               COALESCE(SUM(CASE WHEN COALESCE(w.creator, '') <> '' THEN 1 ELSE 0 END), 0) AS attributed,
+               COALESCE(SUM(CASE WHEN COALESCE(w.creator_steamid, '') <> '' THEN 1 ELSE 0 END), 0) AS attributed,
                COALESCE(SUM(CASE WHEN COALESCE(w.title, '') <> '' AND NOT ({title})
                                  THEN 1 ELSE 0 END), 0) AS title_need,
                COALESCE(SUM(CASE WHEN COALESCE(w.title, '') <> '' AND NOT ({title})
@@ -663,7 +663,7 @@ def _coverage_scan(conn, where_sql: str, params: list) -> dict:
                                   AND (COALESCE(w.short_description, '') = '' OR ({short}))
                                  THEN 1 ELSE 0 END), 0) AS api_needs_none
         FROM workshop_items w
-        LEFT JOIN creators u ON w.creator = u.steamid
+        LEFT JOIN creators u ON w.creator_steamid = u.steamid
         WHERE {where_sql}
         """,
         params,

@@ -91,7 +91,7 @@ def test_both_figures_are_reported_with_the_same_stage_shape(db_path):
     _set_filters(db_path, 294100, _tag_filter("Mature"))
     _item(db_path, 1, 294100, tags=["Mature"], api_fetched_at=1000,
           extended_description="desc", image_extension="jpg",
-          translate_version=1, creator=7)
+          translate_version=1, creator_steamid=7)
     _item(db_path, 2, 294100)
 
     cov = _coverage(db_path, [294100])

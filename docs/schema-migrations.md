@@ -6,11 +6,11 @@ The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_
 - a fresh database built with `legacy_chain=True` takes the historical shape from `_create_legacy_schema` and runs every migration — this is how the chain stays exercised;
 - an **existing** database (`user_version > 0`) always takes `_create_legacy_schema` followed by its pending migrations, whatever the flag says, because the chain is the only thing that can carry it forward.
 
-The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v32) for what that means when you add one.
+The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v33) for what that means when you add one.
 
 ---
 
-## Current Schema (v31)
+## Current Schema (v32)
 
 The application-level reference for every table and column is
 [data-model.md](data-model.md); the timestamp conventions are in
@@ -24,7 +24,7 @@ Primary key: `workshop_id INTEGER PRIMARY KEY` (aliased from rowid). Columns:
 |---|---|---|
 | workshop_id | INTEGER PK | Steam published file ID |
 | title, title_en | TEXT | Original and English-translated title |
-| creator | INTEGER | Reference to `creators.steamid` (no FK constraint; joined with `LEFT JOIN`) |
+| creator_steamid | INTEGER | Reference to `creators.steamid` (no FK constraint; joined with `LEFT JOIN`) |
 | creator_appid, consumer_appid | INTEGER | App that created/uses the item |
 | filename, file_size | TEXT, INTEGER | File metadata |
 | preview_url | TEXT | Preview image URL from Steam API |
@@ -125,11 +125,11 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 | idx_api_fetched_at | api_fetched_at | "Fetched Time" sort, user staleness |
 | idx_scraped_version | scrape_version | Scrape staleness, priority ordering |
 | idx_fetch_status_scraped_version | (fetch_status, scrape_version) | Scrape item selection |
-| idx_creator_api_fetched_at | (creator, api_fetched_at) | Author filtering with staleness |
+| idx_creator_steamid_api_fetched_at | (creator_steamid, api_fetched_at) | Author filtering with staleness |
 | idx_appid_fetch_status | (consumer_appid, fetch_status) | AppID + status filtering |
 | idx_consumer_appid | consumer_appid | AppID filtering |
 | idx_fetch_status | fetch_status | Status filtering |
-| idx_creator | creator | Author ID search |
+| idx_creator_steamid | creator_steamid | Author ID search |
 | idx_title | title | Title search/sort |
 | idx_title_en | title_en | Translated title search |
 | idx_short_description | short_description | Description search |
@@ -199,15 +199,15 @@ independently, allowing crash recovery on a per-migration basis.
 from 1 to `EXPECTED_VERSION`, that each entry names the function for its own
 version, and that a fresh database reaches `EXPECTED_VERSION`.
 
-### Adding the next migration (target v32)
+### Adding the next migration (target v33)
 
-1. bump `EXPECTED_VERSION` in `src/database.py` to `32`;
-2. append `def _migration_31_to_32(cursor, conn, db_path): ...` immediately
-   after `_migration_30_to_31`, keeping the body self-contained and preserving
-   what the step meant at v31 (no tidying an older step, no changing a
+1. bump `EXPECTED_VERSION` in `src/database.py` to `33`;
+2. append `def _migration_32_to_33(cursor, conn, db_path): ...` immediately
+   after `_migration_31_to_32`, keeping the body self-contained and preserving
+   what the step meant at v32 (no tidying an older step, no changing a
    `PRAGMA user_version = N` target);
-3. append `(32, _migration_31_to_32)` as the last entry of `MIGRATIONS`;
-4. add a `### v31 → v32: ...` entry below, in the same shape as the others;
+3. append `(33, _migration_32_to_33)` as the last entry of `MIGRATIONS`;
+4. add a `### v32 → v33: ...` entry below, in the same shape as the others;
 5. **mirror the step in `_create_current_schema`.** It is the shape a fresh
    database is created at now, so a schema change that lands only in the chain
    moves the legacy endpoint and not the fresh one. Update the table, index or
@@ -890,9 +890,9 @@ fresh-database case and the idempotent re-run.
 The `users` table holds Steam creators — there are no application users anywhere in the
 project — so it becomes `creators`; its `steamid` primary key already says whose id it is.
 `app_tracking`'s live columns are the discovery cursor and the enrichment filters, not
-"tracking", so it becomes `app_discovery`. Both are pure table renames: the columns, the
-`item_type = 'user'` queue value and the `creator` foreign-key column deliberately keep their
-names (the column rename `creator` → `creator_steamid` is a separate step).
+"tracking", so it becomes `app_discovery`. Both are pure table renames: the columns and the
+`item_type = 'user'` queue value deliberately keep their names here. The `creator`
+foreign-key column is renamed to `creator_steamid` by migration 31→32 instead.
 
 ```sql
 ALTER TABLE users RENAME TO creators;
@@ -969,6 +969,52 @@ the re-initialisation and the already-renamed-under-the-old-marker case.
 
 ---
 
+### v31 → v32: `creator` → `creator_steamid`
+
+`creator` in `workshop_items` holds the author's SteamID64 and joins `creators.steamid`, but
+the bare name reads as a display name or an object rather than the id it is — the
+neighbouring `creator_appid` is a different column and `creators` is a different table — so
+it becomes `creator_steamid`. The stored **values are unchanged**; only the name moves. The
+unrelated `creator_appid` column, the `creators` table and the entity vocabulary
+(`CREATOR_COLUMNS`, `get_creator`, `insert_or_update_creator`, `creator_id`, and so on)
+deliberately keep their names, as do the metric keys and wire keys.
+
+```sql
+ALTER TABLE workshop_items RENAME COLUMN creator TO creator_steamid;
+
+DROP INDEX IF EXISTS idx_creator;
+CREATE INDEX IF NOT EXISTS idx_creator_steamid ON workshop_items (creator_steamid);
+
+DROP INDEX IF EXISTS idx_creator_api_fetched_at;
+CREATE INDEX IF NOT EXISTS idx_creator_steamid_api_fetched_at ON workshop_items (creator_steamid, api_fetched_at);
+```
+
+SQLite rewrites an index *definition* on `RENAME COLUMN` but keeps the index *name*, so the
+two indexes whose names embed the old column would otherwise be left named for a column that
+no longer exists. No other index on `workshop_items` embeds `creator` in its name.
+`_ensure_indexes` creates the two under their new names too, because it runs on every startup
+after the migration chain and would otherwise fail with "no such column: creator".
+
+The step is guarded on the column that is present, so a re-run is harmless: a crash between
+the DDL commit and the version bump leaves the column renamed under the old marker, and the
+step must then be a no-op rather than raise `no such column: creator`. The index drop/create
+pairs are idempotent for the same reason. Every migration before this one keeps its
+historical SQL byte-identical, including migrations 6→7 and 13→14, which build indexes on
+the historical `creator` column.
+
+The Steam API still sends the author under the field name `creator`, so
+`_merge_and_clean_api_data` remaps that wire key onto the `creator_steamid` column exactly as
+it remaps `creator_app_id` and `time_created`.
+
+`_create_current_schema` declares the column as `creator_steamid` and `_ensure_indexes`
+creates the two renamed indexes, so a fresh database is created at the new endpoint and
+`tests/test_fresh_schema_path.py::test_schema_equivalence` stays green.
+`tests/test_creator_column_migration.py` pins the fresh path, the v31 upgrade (row counts,
+NULL and distinct counts and a checksum over the column), the index names, the
+re-initialisation and the already-renamed-under-the-old-marker case.
+
+---
+
 ## Database Utility Functions
 
 ### `get_connection` (database)
@@ -981,7 +1027,7 @@ The driver described under [Migration system](#migration-system-initialize_datab
 
 ### `_create_current_schema`, `_create_legacy_schema`, `_ensure_indexes`, `MIGRATIONS` (database)
 
-`_create_current_schema(cursor, conn)` creates a brand-new database directly at `EXPECTED_VERSION`. Every table, index and trigger definition it holds was dumped from `sqlite_master` of a database the migration chain itself produced at v30 — not written from reading the migrations — so the index SQL it creates is the exact text SQLite stores. It deliberately does **not** repeat the query indexes `_ensure_indexes` owns, because that runs after it on both paths; those are the ones with historical names such as `idx_time_created`, whose definitions a `RENAME COLUMN` rewrote. It does create the indexes a *migration* owns, because no migration runs on this path.
+`_create_current_schema(cursor, conn)` creates a brand-new database directly at `EXPECTED_VERSION`. Every table, index and trigger definition it holds was dumped from `sqlite_master` of a database the migration chain itself produced at v32 — not written from reading the migrations — so the index SQL it creates is the exact text SQLite stores. It deliberately does **not** repeat the query indexes `_ensure_indexes` owns, because that runs after it on both paths; those are the ones with historical names such as `idx_time_created`, whose definitions a `RENAME COLUMN` rewrote. It does create the indexes a *migration* owns, because no migration runs on this path.
 
 `_create_legacy_schema(cursor, conn)` creates the tables (`IF NOT EXISTS`) and the baseline columns in their historical form, and runs the legacy data conversions every database history shares. It is the unversioned part of the schema, run before the versioned steps. Because it runs on every startup for an existing database, it also runs on both sides of migration 29→30: it resolves the creator and discovery table names once with `_current_table_name` (new name if it exists, else the historical one, else the historical one for a brand-new file) and routes its `CREATE TABLE`, `_safe_add_columns`, populate step and legacy-filter conversion through the resolved name.
 

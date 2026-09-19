@@ -109,15 +109,15 @@ def test_search_numeric_inequalities(deterministic_db):
 def test_search_by_author(deterministic_db):
     conn = get_connection(deterministic_db)
     author = conn.execute(
-        "SELECT creator, COUNT(*) as cnt FROM workshop_items GROUP BY creator ORDER BY cnt DESC LIMIT 1"
-    ).fetchone()["creator"]
+        "SELECT creator_steamid, COUNT(*) as cnt FROM workshop_items GROUP BY creator_steamid ORDER BY cnt DESC LIMIT 1"
+    ).fetchone()["creator_steamid"]
     conn.close()
     results = search_items(deterministic_db, filters=[
         {"field": "Author ID", "op": "is", "value": author}
     ])
     assert len(results) > 0
     for r in results:
-        assert r["creator"] == author
+        assert r["creator_steamid"] == author
 
 
 def test_get_all_creator_ids_advanced(deterministic_db):
@@ -125,7 +125,7 @@ def test_get_all_creator_ids_advanced(deterministic_db):
     assert len(authors) > 0
     conn = get_connection(deterministic_db)
     expected = conn.execute(
-        "SELECT COUNT(DISTINCT creator) FROM workshop_items WHERE creator IS NOT NULL"
+        "SELECT COUNT(DISTINCT creator_steamid) FROM workshop_items WHERE creator_steamid IS NOT NULL"
     ).fetchone()[0]
     conn.close()
     assert len(authors) == expected

@@ -19,7 +19,7 @@ names here are the current ones unless a passage is explicitly describing the mi
 * **96.7%** of them (1,667,817) have no `extended_description` — the web scraper has run on only a
   small fraction of the dataset.
 * **89%** (1,537,998) sit at `needs_web_scrape = 1`.
-* **1,273,020** items (73.8%) reference a `creator` that is absent from `creators`; only **24,566**
+* **1,273,020** items (73.8%) reference a `creator_steamid` that is absent from `creators`; only **24,566**
   creators exist.
 * Only **142,748** items have any translation.
 

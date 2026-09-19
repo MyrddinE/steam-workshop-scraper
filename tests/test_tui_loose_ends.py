@@ -19,7 +19,7 @@ def mock_results():
         {
             "workshop_id": 1,
             "title": "Amazing Mod",
-            "creator": "Author A",
+            "creator_steamid": "Author A",
             "consumer_appid": 294100,
             "extended_description": "This mod is truly amazing.",
             "tags": '["Graphic", "Utility"]',

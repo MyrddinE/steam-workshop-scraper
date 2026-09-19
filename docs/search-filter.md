@@ -16,7 +16,7 @@ Maps user-facing field names (shown in TUI and Web UI dropdowns) to database col
 | Description | short_description |
 | Filename | filename |
 | Tags | tags |
-| Author ID | creator |
+| Author ID | creator_steamid |
 | File Size | file_size |
 | Subs | subscriptions |
 | Favs | favorited |

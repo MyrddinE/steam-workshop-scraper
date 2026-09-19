@@ -121,8 +121,8 @@ def test_served_inline_script_is_valid_javascript(web_client, tmp_path):
 
 def test_search_returns_json(web_client):
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Test Mod", "creator": 100, "fetch_status": 200})
-    insert_or_update_item(db_path, {"workshop_id": 2, "title": "Other Mod", "creator": 200, "fetch_status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Test Mod", "creator_steamid": 100, "fetch_status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": "Other Mod", "creator_steamid": 200, "fetch_status": 200})
 
     resp = client.post('/api/search', json={"sort_by": "title", "sort_order": "ASC", "limit": 10})
     assert resp.status_code == 200
@@ -163,7 +163,7 @@ def test_search_pagination(web_client):
 def test_item_detail(web_client):
     client, db_path = web_client
     insert_or_update_item(db_path, {
-        "workshop_id": 99, "title": "Detail Mod", "creator": 111,
+        "workshop_id": 99, "title": "Detail Mod", "creator_steamid": 111,
         "subscriptions": 100, "views": 1000, "fetch_status": 200,
         "tags": normalize_tags(["Mod", "Test"]),
     })
@@ -191,7 +191,7 @@ def test_item_detail_is_read_only(web_client):
     """
     client, db_path = web_client
     insert_or_update_item(db_path, {
-        "workshop_id": 99, "title": "Detail Mod", "creator": 111, "fetch_status": 200,
+        "workshop_id": 99, "title": "Detail Mod", "creator_steamid": 111, "fetch_status": 200,
         "api_priority": 0, "needs_web_scrape": 0, "needs_image": 0,
         "translation_priority": 0,
     })
@@ -214,7 +214,7 @@ def test_open_item_applies_detail_priority(web_client):
     """Opening a pane is the one path that re-queues at detail priority."""
     client, db_path = web_client
     insert_or_update_item(db_path, {
-        "workshop_id": 99, "title": "Detail Mod", "creator": 111, "fetch_status": 200,
+        "workshop_id": 99, "title": "Detail Mod", "creator_steamid": 111, "fetch_status": 200,
         "api_priority": 0, "needs_web_scrape": 1, "needs_image": 0,
         "translation_priority": 0,
     })
@@ -238,8 +238,8 @@ def test_open_item_not_found(web_client):
 
 def test_authors(web_client):
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 1, "creator": 123, "title": "A", "fetch_status": 200})
-    insert_or_update_item(db_path, {"workshop_id": 2, "creator": 456, "title": "B", "fetch_status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "creator_steamid": 123, "title": "A", "fetch_status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 2, "creator_steamid": 456, "title": "B", "fetch_status": 200})
 
     resp = client.get('/api/authors')
     assert resp.status_code == 200
@@ -2908,18 +2908,18 @@ def test_detail_payload_ships_the_creator_id_as_an_exact_string(web_client):
     """A SteamID64 is seventeen digits, past what a JS number holds exactly.
 
     Jump-to-author puts the creator ID into an Author ID filter and posts it
-    back, so the payload has to carry it losslessly. `creator` stays the
+    back, so the payload has to carry it losslessly. `creator_steamid` stays the
     database integer; `creator_id` is the same value as a string the client can
     use without JSON.parse rounding it.
     """
     client, db_path = web_client
     steamid = 76561198765432109  # as a float64 this rounds to ...110
     insert_or_update_item(db_path, {
-        "workshop_id": 90, "title": "Big ID", "creator": steamid, "fetch_status": 200,
+        "workshop_id": 90, "title": "Big ID", "creator_steamid": steamid, "fetch_status": 200,
     })
 
     data = client.get('/api/item/90').get_json()
-    assert data["creator"] == steamid
+    assert data["creator_steamid"] == steamid
     assert data["creator_id"] == "76561198765432109"
     assert isinstance(data["creator_id"], str)
 
@@ -2930,7 +2930,7 @@ def test_detail_payload_omits_creator_id_without_a_creator(web_client):
     insert_or_update_item(db_path, {"workshop_id": 91, "title": "Anonymous", "fetch_status": 200})
 
     data = client.get('/api/item/91').get_json()
-    assert data["creator"] is None
+    assert data["creator_steamid"] is None
     assert "creator_id" not in data
 
 
@@ -3086,7 +3086,7 @@ global.showSubscriptionMarker = subFn;
 // HTML, so the helper is stubbed like the other collaborators above.
 global._refreshOpenFolderButton = () => {};
 const base = {
-  workshop_id: 77, creator: 'Alice', creator_id: '76561198765432109',
+  workshop_id: 77, creator_steamid: 'Alice', creator_id: '76561198765432109',
   personaname: 'Alice', has_translation: false,
   display_title_original: 'Mod', title: 'Mod',
   subscription_state: 'never', subscription_glyph: '\\u25cb',
@@ -3103,7 +3103,7 @@ fn(Object.assign({}, base, {
   subscription_clickable: false,
 }));
 const subscribed = html;
-fn(Object.assign({}, base, {creator: null, creator_id: null}));
+fn(Object.assign({}, base, {creator_steamid: null, creator_id: null}));
 const noCreator = html;
 console.log(JSON.stringify({never: never, subscribed: subscribed, noCreator: noCreator}));
 """

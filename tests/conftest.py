@@ -26,6 +26,11 @@ def restore_pre_rename_table_names(conn) -> None:
     because the replayed bodies of migrations 15->16 through 19->20 still name
     ``status``. Migration 30->31 itself is guarded on the column and renames it
     forward again, so the final shape is unchanged.
+
+    Migration 31->32 renamed ``creator`` to ``creator_steamid`` for the same
+    reason: migrations 6->7 and 13->14 build ``idx_creator_dt_updated`` and
+    ``idx_creator_api_fetched_at`` on the old column, so a rewound marker must
+    present it. Migration 31->32 renames it forward again.
     """
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
@@ -37,6 +42,8 @@ def restore_pre_rename_table_names(conn) -> None:
     columns = {row[1] for row in conn.execute("PRAGMA table_info(workshop_items)").fetchall()}
     if "fetch_status" in columns and "status" not in columns:
         conn.execute("ALTER TABLE workshop_items RENAME COLUMN fetch_status TO status")
+    if "creator_steamid" in columns and "creator" not in columns:
+        conn.execute("ALTER TABLE workshop_items RENAME COLUMN creator_steamid TO creator")
 
 # Deterministic test database constants
 _DET_SEED = 42
@@ -148,7 +155,7 @@ def deterministic_db(tmp_path_factory):
             "title": title,
             "short_description": short_desc,
             "extended_description": desc,
-            "creator": rng.choice(author_ids),
+            "creator_steamid": rng.choice(author_ids),
             "consumer_appid": rng.choice(app_ids),
             "file_size": file_size,
             "views": views,

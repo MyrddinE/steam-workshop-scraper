@@ -129,7 +129,7 @@ The database is designed for high-concurrency and complex querying. See
   could not read rather than ending the session; see [tui.md](tui.md).
 * **Schema**:
   * **`workshop_items`**: Item metadata. Key columns include `workshop_id` (PK), `fetch_status`
-    (HTTP-like status code), `title`, `creator`, `extended_description`, the three timestamp
+    (HTTP-like status code), `title`, `creator_steamid`, `extended_description`, the three timestamp
     clocks (`steam_created_at`, `steam_updated_at`, `first_seen_at`), and translation fields
     (`translation_priority`, `translate_version`, `title_en`, and so on). Lifetime stats live in
     `lifetime_subscriptions` and `lifetime_favorited`.

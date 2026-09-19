@@ -202,7 +202,7 @@ implementation.
 
 The route existed with no client before this. The item jump only reaches a creator whose item is
 already on screen; the list is the way to reach one that is not, and it needs only the IDs
-`/api/authors` already returns (`get_all_creator_ids`, `ORDER BY creator`) — no new endpoint and no new
+`/api/authors` already returns (`get_all_creator_ids`, `ORDER BY creator_steamid`) — no new endpoint and no new
 query.
 
 The TUI has no equivalent list, and this is recorded rather than glossed: `src.tui` imports
@@ -551,7 +551,7 @@ Re-reads `steamLoginSecure` from the browser's cookie store after the operator s
 
 ### `/api/stats`, `/api/tags`, `/api/authors`
 
-Read-only endpoints returning database statistics. `/api/stats` still returns the old flat payload; the statistics panel uses the per-metric endpoints below instead. `/api/authors` returns the distinct creator IDs in `ORDER BY creator` and is consumed by the creator picker ([The creator list](#the-creator-list)).
+Read-only endpoints returning database statistics. `/api/stats` still returns the old flat payload; the statistics panel uses the per-metric endpoints below instead. `/api/authors` returns the distinct creator IDs in `ORDER BY creator_steamid` and is consumed by the creator picker ([The creator list](#the-creator-list)).
 
 ### `/api/analysis` — GET
 
