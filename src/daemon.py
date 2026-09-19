@@ -626,7 +626,7 @@ class Daemon:
         """Fetch details for a batch in as few requests as the API allows.
 
         This is the only place request-level outcomes are counted: one call to
-        `_record_api_request_failure` or `_record_api_request_success` per POST.
+        `_back_off_api_delay` or `_decay_api_delay` per POST.
         A request that fails transports, times out, returns an HTTP error or an
         unparseable body settles every id it carried as a temporary 500; a
         request that returns and parses is a success whatever the individual
@@ -638,11 +638,11 @@ class Daemon:
             ids = [row["workshop_id"] for row in chunk]
             results = get_workshop_details_batch(ids, self.api_key)
             if results is None:
-                self._record_api_request_failure()
+                self._back_off_api_delay()
                 for item_id in ids:
                     api_data_by_id[item_id] = {"status": 500, "publishedfileid": item_id}
             else:
-                self._record_api_request_success()
+                self._decay_api_delay()
                 for item_id in ids:
                     # The batch helper fills omitted ids in as 404, so this
                     # fallback only covers an unanticipated response shape.
@@ -801,9 +801,9 @@ class Daemon:
         # items appeared, and then resumed. Batching the details calls made
         # fetching fast enough that the stall became a visible share of the
         # time, so the refill moved off this path entirely.
-        return self._fetch_batch()
+        return self._read_batch()
 
-    def _fetch_batch(self, failure_context: str = "Database error in process_batch"):
+    def _read_batch(self, failure_context: str = "Database error in process_batch"):
         """Read one batch from the database. Returns None on database error."""
         try:
             return get_next_items_to_fetch(self.db_path, limit=self.batch_size)
@@ -971,7 +971,7 @@ class Daemon:
             f"[A:{item_id}] API request failed ({api_status}). "
             f"Requeued at priority {retry_priority} to retry after the current queue."
         )
-        # Deliberately no `_record_api_request_failure()` here: this is one
+        # Deliberately no `_back_off_api_delay()` here: this is one
         # item's result, not the request's. A batch that returns and parses is a
         # success even when some of its items settle as temporary failures, so
         # only `_fetch_details` moves the delay.
@@ -1156,7 +1156,7 @@ class Daemon:
             if creator_id in summaries:
                 self._store_user_record(creator_id, summaries[creator_id].get("personaname"))
 
-    def _record_api_request_failure(self) -> None:
+    def _back_off_api_delay(self) -> None:
         """Multiply the delay once for a refused request and clear the streak.
 
         Called once per POST from `_fetch_details`, never from the per-item
@@ -1186,7 +1186,7 @@ class Daemon:
             self._save_config_value(
                 "api_delay_seconds", pacing.persistable(self.api_delay))
 
-    def _record_api_request_success(self) -> None:
+    def _decay_api_delay(self) -> None:
         """Shave one step off the delay for a healthy request.
 
         A success is a request that returned and parsed; the individual results
@@ -1325,10 +1325,10 @@ class Daemon:
                     # controller blind to half its traffic -- tolerable while it
                     # was serialised behind the fetch loop, not once it runs on
                     # its own thread.
-                    self._record_api_request_failure()
+                    self._back_off_api_delay()
                     logging.error(f"API error for AppID {appid}. Halting discovery.")
                     break
-                self._record_api_request_success()
+                self._decay_api_delay()
 
                 if pages == 0 and result["total"]:
                     logging.info(f"AppID {appid} has ~{result['total']} total items.")
@@ -1413,10 +1413,10 @@ class Daemon:
                     logging.info("Abandoned page discovery for AppID %s: the daemon is stopping.", appid)
                     break
                 if result.get("error"):
-                    self._record_api_request_failure()
+                    self._back_off_api_delay()
                     logging.error(f"Page discovery error for AppID {appid}.")
                     break
-                self._record_api_request_success()
+                self._decay_api_delay()
 
                 items = result.get("items", [])
                 if page == 0:

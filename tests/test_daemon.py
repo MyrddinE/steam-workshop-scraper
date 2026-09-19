@@ -207,14 +207,14 @@ def test_the_api_delay_doubles_past_the_old_ceiling_and_still_floors(db_path, tm
     daemon = _real_db_daemon(db_path, tmp_path)
 
     daemon.api_delay = 2.0
-    daemon._record_api_request_failure()
+    daemon._back_off_api_delay()
     assert daemon.api_delay == 4.0, "the delay doubles past the old 2 s ceiling"
 
     daemon.api_delay = 0.01
     ticks = iter(range(0, 100_000, 600))
     with patch("src.pacing.now", side_effect=lambda: next(ticks)):
         daemon._api_clock = pacing.Clock()
-        daemon._record_api_request_success()
+        daemon._decay_api_delay()
     assert daemon.api_delay == 0.01, "a zero delay is not a rate limit"
 
 
@@ -239,10 +239,10 @@ def test_the_delay_settles_around_a_refusal_threshold(db_path, tmp_path):
         for _ in range(6000):
             simulated["t"] += daemon.api_delay
             if daemon.api_delay < limit:
-                daemon._record_api_request_failure()
+                daemon._back_off_api_delay()
                 refusals += 1
             else:
-                daemon._record_api_request_success()
+                daemon._decay_api_delay()
 
     assert refusals > 0, "it must have probed into the limit at least once"
     assert refusals < 100, "and must back off rather than keep knocking"
@@ -292,13 +292,13 @@ def test_request_failure_multiplies_delay_and_success_decays_it(db_path, tmp_pat
     daemon = _real_db_daemon(db_path, tmp_path)
     daemon.api_delay = 0.25
 
-    daemon._record_api_request_failure()
+    daemon._back_off_api_delay()
     assert daemon.api_delay == 0.5
     assert daemon.api_failures == 1
 
     # A half-life of healthy operation is exactly what takes back one doubling.
     daemon._api_clock._at = pacing.now() - pacing.HALF_LIFE_SECONDS
-    daemon._record_api_request_success()
+    daemon._decay_api_delay()
     assert daemon.api_delay == pytest.approx(0.25, rel=1e-4), \
         "a half-life of healthy operation undoes a doubling"
     assert daemon.api_failures == 0, "a healthy request resets the failure streak"
