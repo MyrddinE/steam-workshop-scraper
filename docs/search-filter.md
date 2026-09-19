@@ -67,9 +67,9 @@ one side silently matching the whole table.
 
 Identifies columns with translated `_en` counterparts. When a text-matching operator is applied to a field in this set, the clause is expanded to search both the original and `_en` column. Currently: `title → title_en`, `short_description → short_description_en`, `extended_description → extended_description_en`.
 
-### `_FULL_TEXT_COLS` (database)
+### Full Text (database)
 
-The six text columns searched simultaneously when the user selects the "Full Text" field: `title, title_en, short_description, short_description_en, extended_description, extended_description_en`. Tags are NOT in this list (they use exact matching via the junction table, not free-text search).
+The "Full Text" field searches six text columns simultaneously: `title, title_en, short_description, short_description_en, extended_description, extended_description_en`. The set is expressed directly in the search builder rather than held in a named constant, so this page is the only place it is listed. Tags are NOT in it (they use exact matching via the junction table, not free-text search).
 
 ### `_TEXT_OPS` (database)
 

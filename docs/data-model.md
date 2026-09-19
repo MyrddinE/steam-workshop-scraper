@@ -1,6 +1,6 @@
 # Data Model
 
-The database is a single SQLite file in WAL mode. Its current schema version is 27
+The database is a single SQLite file in WAL mode. Its current schema version is 29
 (`EXPECTED_VERSION` in `src/database.py`). All application state lives in three tables —
 `workshop_items`, `users`, and `translation_queue` — plus two tables that hold tags,
 `tags` and `workshop_tags`.
