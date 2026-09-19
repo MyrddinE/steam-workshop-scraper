@@ -343,7 +343,7 @@ colour are pinned by `tests/test_discovery_marker.py`. The measured evidence tha
 motivated the change is kept below.
 
 A discovery line carries a red `ignored` marker when the item failed its enrichment filters, and
-nothing at all when it did not (`src/daemon.py:924`):
+nothing at all when it did not (`src/daemon.py:931`):
 
 ```
 [A:2063560223] "gwiezdny papiesz" — ignored
