@@ -18,7 +18,7 @@ Every bar's population is the same test that decides whether the field is
 flagged, so the tests check the flagging rules rather than a rendering: non-empty
 and non-ASCII, translated and current (``translation_is_current``). The three
 translation bars deliberately have three different scopes, and the tests name
-each one. The creator's name lives on ``users`` and is shared by every item that
+each one. The creator's name lives on ``creators`` and is shared by every item that
 creator made, so its bar counts *items*, which is what makes it comparable with
 the per-item bars around it.
 
@@ -69,7 +69,7 @@ def _item(db_path, workshop_id, appid=294100, tags=(), **over):
 def _set_filters(db_path, appid, filters):
     conn = get_connection(db_path)
     conn.execute(
-        "INSERT OR REPLACE INTO app_tracking (appid, enrichment_filters) VALUES (?, ?)",
+        "INSERT OR REPLACE INTO app_discovery (appid, enrichment_filters) VALUES (?, ?)",
         (appid, json.dumps(filters)),
     )
     conn.commit()
@@ -252,7 +252,7 @@ def test_a_fully_blank_web_library_has_a_zero_length_bar_at_both_levels(db_path)
 
 
 # --------------------------------------------------------------------------
-# the creator: per item, from the users table
+# the creator: per item, from the creators table
 # --------------------------------------------------------------------------
 
 
@@ -277,7 +277,7 @@ def test_creator_translation_counts_items_by_their_creators_name(db_path):
     _item(db_path, 2, creator=42)
     _item(db_path, 3, creator=43)
     _item(db_path, 4, creator=44)
-    _item(db_path, 5, creator=99)   # no users row
+    _item(db_path, 5, creator=99)   # no creators row
 
     bar = _bars(_coverage(db_path, []))["creator_translated"]
 

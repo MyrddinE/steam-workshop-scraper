@@ -19,8 +19,8 @@ names here are the current ones unless a passage is explicitly describing the mi
 * **96.7%** of them (1,667,817) have no `extended_description` — the web scraper has run on only a
   small fraction of the dataset.
 * **89%** (1,537,998) sit at `needs_web_scrape = 1`.
-* **1,273,020** items (73.8%) reference a `creator` that is absent from `users`; only **24,566**
-  users exist.
+* **1,273,020** items (73.8%) reference a `creator` that is absent from `creators`; only **24,566**
+  creators exist.
 * Only **142,748** items have any translation.
 
 The enrichment pipeline is operating on a dataset that is roughly 3% processed.
@@ -128,6 +128,6 @@ control characters anywhere.
 
 ## The live target
 
-`app_tracking` holds exactly one row: **appid 431960 (Wallpaper Engine)**, with `last_cursor`
+`app_discovery` holds exactly one row: **appid 431960 (Wallpaper Engine)**, with `last_cursor`
 `AoJckZidMXaL38lT` and enrichment filters
 `Tags contains Mature AND Tags contains Video AND File Size > 100000000`.

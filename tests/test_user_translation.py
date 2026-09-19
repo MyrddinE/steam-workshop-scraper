@@ -30,6 +30,7 @@ from src.database import (
     insert_or_update_creator,
 )
 from src.translator import TranslatorThread
+from tests.conftest import restore_pre_rename_table_names
 
 CREATOR = 111
 
@@ -52,7 +53,7 @@ def _rows(db_path, sql, params=()):
 
 
 def _user(db_path, steamid):
-    rows = _rows(db_path, "SELECT * FROM users WHERE steamid=?", (steamid,))
+    rows = _rows(db_path, "SELECT * FROM creators WHERE steamid=?", (steamid,))
     return dict(rows[0]) if rows else None
 
 
@@ -70,6 +71,7 @@ def _user_queue_rows(db_path, steamid):
 
 def _age_to_v27(db_path):
     conn = get_connection(db_path)
+    restore_pre_rename_table_names(conn)
     conn.execute("PRAGMA user_version = 27")
     conn.commit()
     conn.close()
@@ -131,7 +133,7 @@ def test_an_ascii_creator_is_not_queued(db_path, tmp_path):
     assert _user_queue_rows(db_path, 444) == []
 
 
-# ── the consumer: a creator completes on `users`, never on `workshop_items` ──
+# ── the consumer: a creator completes on `creators`, never on `workshop_items` ──
 
 def _seed_creator_with_a_namesake_item(db_path):
     """A creator and an item sharing the id 111, plus the creator's queue row.
@@ -175,7 +177,7 @@ def test_a_creator_never_completes_against_workshop_items(db_path):
     assert _user(db_path, CREATOR)["personaname_en"] == "Author"
 
 
-def test_a_creator_completion_clears_the_users_mirror(db_path):
+def test_a_creator_completion_clears_the_creator_mirror(db_path):
     """The per-field write stamps `translated_at`; only the mirror is left."""
     _seed_creator_with_a_namesake_item(db_path)
 

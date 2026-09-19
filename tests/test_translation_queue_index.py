@@ -26,6 +26,7 @@ from contextlib import contextmanager
 from unittest import mock
 
 from src import database
+from tests.conftest import restore_pre_rename_table_names
 
 INDEX = "idx_translation_queue_lookup"
 
@@ -113,12 +114,20 @@ def _age_to_v22_without_the_index(db_path):
     """
     conn = database.get_connection(db_path)
     conn.execute(f"DROP INDEX IF EXISTS {INDEX}")
+    restore_pre_rename_table_names(conn)
     conn.execute("PRAGMA user_version = 22")
     conn.commit()
     conn.close()
 
 
 def _row_counts(db_path) -> dict[str, int]:
+    """Count the preserved tables, under either side of the 29->30 rename.
+
+    ``before`` is read on the rewound v22 database (``users``/``app_tracking``)
+    and ``after`` on the upgraded one (``creators``/``app_discovery``), so the
+    keys stay the historical names and each is resolved to the table that
+    currently exists.
+    """
     tables = (
         "workshop_items",
         "translation_queue",
@@ -127,8 +136,18 @@ def _row_counts(db_path) -> dict[str, int]:
         "workshop_tags",
         "app_tracking",
     )
+    renamed = {"users": "creators", "app_tracking": "app_discovery"}
     conn = database.get_connection(db_path)
-    counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}
+    existing = {
+        row[0] for row in
+        conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    counts = {
+        t: conn.execute(
+            f"SELECT COUNT(*) FROM {renamed[t] if t not in existing else t}"
+        ).fetchone()[0]
+        for t in tables
+    }
     conn.close()
     return counts
 

@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from unittest import mock
 
 from src import database, metrics
+from tests.conftest import restore_pre_rename_table_names
 
 WEB_INDEX = "idx_web_scrape_queue"
 IMAGE_INDEX = "idx_image_queue"
@@ -47,6 +48,7 @@ def _regress_to_v24(db_path):
     conn = database.get_connection(db_path)
     for name in QUEUE_INDEXES:
         conn.execute(f"DROP INDEX IF EXISTS {name}")
+    restore_pre_rename_table_names(conn)
     conn.execute("PRAGMA user_version = 24")
     conn.commit()
     conn.close()

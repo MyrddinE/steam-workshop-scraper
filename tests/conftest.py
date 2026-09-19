@@ -9,6 +9,25 @@ from src.daemon import wilson_lower
 
 ASYNC_PAUSE = 0.25
 
+
+def restore_pre_rename_table_names(conn) -> None:
+    """Undo migration 29->30's table renames for a rewound version marker.
+
+    The migration tests age a current database by rewinding
+    ``PRAGMA user_version`` alone. Before 29->30 renamed the two tables that
+    was enough to reconstruct an older shape; now the marker can say 27 while
+    the tables are already ``creators``/``app_discovery``, and the replayed
+    chain's historical SQL (for example migration 27->28) still names
+    ``users``. Rename them back so the database actually matches the version
+    its marker claims.
+    """
+    tables = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
+    if "creators" in tables and "users" not in tables:
+        conn.execute("ALTER TABLE creators RENAME TO users")
+    if "app_discovery" in tables and "app_tracking" not in tables:
+        conn.execute("ALTER TABLE app_discovery RENAME TO app_tracking")
+
 # Deterministic test database constants
 _DET_SEED = 42
 _DET_NUM_ITEMS = 10000

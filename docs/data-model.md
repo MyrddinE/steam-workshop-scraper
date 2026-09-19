@@ -1,8 +1,8 @@
 # Data Model
 
-The database is a single SQLite file in WAL mode. Its current schema version is 29
+The database is a single SQLite file in WAL mode. Its current schema version is 30
 (`EXPECTED_VERSION` in `src/database.py`). All application state lives in three tables —
-`workshop_items`, `users`, and `translation_queue` — plus two tables that hold tags,
+`workshop_items`, `creators`, and `translation_queue` — plus two tables that hold tags,
 `tags` and `workshop_tags`.
 
 Column names follow two conventions, described in full in [timestamps.md](timestamps.md):
@@ -34,7 +34,7 @@ One row per Steam Workshop item, keyed by `workshop_id` (the Steam `publishedfil
 | Column | Source | Notes |
 |---|---|---|
 | `workshop_id` | `publishedfileid` | Primary key. The API key supplied alongside it is dropped before storage. |
-| `creator` | `creator` | SteamID of the author. No foreign key is declared: items are discovered before their creator is fetched, and the join to `users` is a `LEFT JOIN`. |
+| `creator` | `creator` | SteamID of the author. No foreign key is declared: items are discovered before their creator is fetched, and the join to `creators` is a `LEFT JOIN`. |
 | `creator_appid` | `creator_app_id` | Renamed in `_merge_and_clean_api_data`. |
 | `consumer_appid` | `consumer_app_id` | The game the item belongs to. |
 | `filename` | `filename` | |
@@ -86,7 +86,7 @@ Tags are not a column on `workshop_items`. They live in `tags(tag_id, tag_name)`
 | `translate_version` | STATE (Steam value) | `steam_updated_at` at the moment the translator ran. |
 | `web_scraped_at` | STATE (ours) | Our clock: when the web worker last scraped this item's page successfully. NULL means no success has been recorded since the column arrived in v27; unlike `scrape_version` it is not a Steam revision. |
 | `image_fetched_at` | STATE (ours) | Our clock: when the image worker last fetched this item's preview successfully. NULL means no success has been recorded since the column arrived in v27. |
-| `translated_at` | STATE (ours) | Our clock: when the translator finished the **last** queued field for this item. One stamp per item, moved on each later completion; NULL means no completion has been recorded since the column arrived in v27. The `users` table has a column of the same name meaning "when this profile's text was translated"; the item column is the completion time of the item as a whole, because a per-field stamp is what `translate_version` already carries. |
+| `translated_at` | STATE (ours) | Our clock: when the translator finished the **last** queued field for this item. One stamp per item, moved on each later completion; NULL means no completion has been recorded since the column arrived in v27. The `creators` table has a column of the same name meaning "when this profile's text was translated"; the item column is the completion time of the item as a whole, because a per-field stamp is what `translate_version` already carries. |
 | `image_extension` | STATE | The preview's **outcome**, not only its file type. A real extension (`jpg`, `png`, …) means the file exists at `images/<bucket>/<id>.<ext>` and a URL may be built from it. A **wholly numeric** value is an HTTP status the server answered with: `404`/`410` mean the preview is permanently missing and will not be retried, any other code is recorded but still retryable. Any other token (`html`, `svg+xml`) is a content type that was not a picture this downloader can store. NULL means nothing has been recorded yet. One rule follows from this: **a URL is only ever built from a known image extension**, which `src/images.py` owns so the writer and every reader agree. |
 | `is_queued_for_subscription` | QUEUE | Subscription queue flag. Set by the TUI (`s`) and by `POST /api/toggle_subscription_queue/<id>`; cleared whenever the owner's subscription is observed, so nothing is left pending for an item that is now subscribed: by `mark_own_subscribed` — which the subscribe engine calls on a confirmed subscribe and on its already-`toggled` short-circuit — by `POST /api/subscribed/<id>` and `POST /api/subscribe_failed/<id>` when the userscript reports an outcome, and by a subscription reconcile for any item it finds already subscribed. Transient working state — it reads `0` whenever nothing is queued, which is the normal resting state, not evidence of disuse. |
 | `own_subscribed` | STATE (ours) | Whether **the owner** — the account whose API key and cookies are configured — is subscribed to this item right now. Reconciled from the signed-in Workshop subscriptions page (`src/subscription_sync.py`), stamped immediately by `POST /api/subscribed/<id>` when the userscript confirms a subscribe, and stamped by `src/subscribe_engine.py` both when its confirmation read shows the item subscribed and when its pre-read already shows `toggled` (no request is sent in that case). Not to be confused with `subscriptions` / `lifetime_subscriptions`, which are item-wide counts that cannot be attributed to an account. |
@@ -102,7 +102,7 @@ Tags are not a column on `workshop_items`. They live in `tags(tag_id, tag_name)`
 | `needs_image` | Preview image download queue. |
 | `translation_priority` | Translation queue mirror. Raised together with the `translation_queue` row by `queue_field_for_translation` (which takes the `MAX` of the stored and new priority) **in one transaction**, and zeroed by the translator when the item's last queue row is deleted. A priority above `0` therefore means the item has at least one queued field; migration 22→23 cleared the rows that disagreed. |
 
-## `users`
+## `creators`
 
 One row per Steam creator whose profile has been fetched, keyed by `steamid`.
 
@@ -112,7 +112,7 @@ One row per Steam creator whose profile has been fetched, keyed by `steamid`.
 | `personaname` | STEAM | Display name. |
 | `personaname_en` | TRANSLATED | Translated display name, written by the translator when it drains the creator's `personaname_en` queue row. |
 | `api_fetched_at` | STATE (ours) | Our clock: when the profile was last refreshed. |
-| `translated_at` | TRANSLATED/STATE | Our wall-clock time of the last translation. This is **not** a Steam version key: users have no `steam_updated_at`. |
+| `translated_at` | TRANSLATED/STATE | Our wall-clock time of the last translation. This is **not** a Steam version key: creators have no `steam_updated_at`. |
 | `translation_priority` | QUEUE | Translation queue mirror, exactly as on `workshop_items`: raised by `queue_field_for_translation` in the same transaction as the `translation_queue` row and zeroed by the translator when the creator's last queue row is deleted. A priority above `0` therefore means the creator has at least one queued field. Migration 27→28 queued the flags that had no row behind them and cleared the ones with nothing left to translate. |
 
 ## `translation_queue`

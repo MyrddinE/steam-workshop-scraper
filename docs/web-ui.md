@@ -519,7 +519,7 @@ Deletes every pending item — those with no status or a 404 status and no succe
 
 ### `/api/save_filter` — POST
 
-Saves the current enrichment filters to `app_tracking` for the configured AppID. The body is `getFilters()` — the builder's rows only. The `Subscribed:` overlay is view state and is deliberately not written here, so what the scraper enriches with stays the set the builder shows. When no target AppID is configured it answers **400** with `{"error": "No target AppID configured"}`; the client shows that message and only reports success on a 2xx, so a rejected save is never presented as a stored one.
+Saves the current enrichment filters to `app_discovery` for the configured AppID. The body is `getFilters()` — the builder's rows only. The `Subscribed:` overlay is view state and is deliberately not written here, so what the scraper enriches with stays the set the builder shows. When no target AppID is configured it answers **400** with `{"error": "No target AppID configured"}`; the client shows that message and only reports success on a 2xx, so a rejected save is never presented as a stored one.
 
 ### `/api/subscribe/<id>` — POST
 

@@ -42,7 +42,7 @@ def _set_filters(db_path, appid, filters):
     raw = filters if isinstance(filters, str) else json.dumps(filters)
     conn = get_connection(db_path)
     conn.execute(
-        "INSERT OR REPLACE INTO app_tracking (appid, enrichment_filters) VALUES (?, ?)",
+        "INSERT OR REPLACE INTO app_discovery (appid, enrichment_filters) VALUES (?, ?)",
         (appid, raw),
     )
     conn.commit()

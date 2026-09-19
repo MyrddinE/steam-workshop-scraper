@@ -21,6 +21,7 @@ from src.database import (
     initialize_database,
     insert_or_update_item,
 )
+from tests.conftest import restore_pre_rename_table_names
 
 
 def _table_info(db_path):
@@ -45,6 +46,7 @@ def _regress_to_v23(db_path, language=6):
     conn.execute(
         "UPDATE workshop_items SET language = ? WHERE workshop_id = 1", (language,)
     )
+    restore_pre_rename_table_names(conn)
     conn.execute("PRAGMA user_version = 23")
     conn.commit()
     conn.close()
@@ -84,6 +86,7 @@ def test_migration_is_idempotent(db_path):
 
     # A second rewind finds no column and must not fail on the missing index.
     conn = get_connection(db_path)
+    restore_pre_rename_table_names(conn)
     conn.execute("PRAGMA user_version = 23")
     conn.commit()
     conn.close()

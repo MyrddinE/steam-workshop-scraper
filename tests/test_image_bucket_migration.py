@@ -10,6 +10,7 @@ from src.database import (
     EXPECTED_VERSION,
 )
 from src.webserver import app, init_webserver
+from tests.conftest import restore_pre_rename_table_names
 
 def test_get_image_subdirs_and_path():
     # Test valid integers and strings
@@ -34,6 +35,7 @@ def test_migration_12_to_13(tmp_path):
     
     # 2. Roll back the schema user_version to 12
     conn = get_connection(db_path)
+    restore_pre_rename_table_names(conn)
     conn.execute("PRAGMA user_version = 12")
     conn.commit()
     

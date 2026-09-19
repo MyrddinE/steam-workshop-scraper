@@ -245,7 +245,7 @@ class StatsScreen(Screen):
         self.db_path = db_path
         #: The configured target AppIDs, when the caller has them. The coverage
         #: metric restricts its second figure to these apps' enrichment filters;
-        #: when this is None the metric falls back to every `app_tracking` row.
+        #: when this is None the metric falls back to every `app_discovery` row.
         self.target_appids = target_appids
         #: Last measured duration per metric, and when it finished, both kept for
         #: the session so the request order and the intervals adapt to the data.

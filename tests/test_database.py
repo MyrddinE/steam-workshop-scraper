@@ -128,8 +128,8 @@ def test_delete_never_fetched_items(db_path):
     
     assert ids == [3, 4, 5]
 
-def test_user_table_operations(db_path):
-    """Tests basic CRUD for the users table."""
+def test_creator_table_operations(db_path):
+    """Tests basic CRUD for the creators table."""
     from src.database import insert_or_update_creator, get_creator
     user_data = {"steamid": 12345, "personaname": "Test User"}
     insert_or_update_creator(db_path, user_data)
@@ -143,8 +143,8 @@ def test_user_table_operations(db_path):
     user = get_creator(db_path, 12345)
     assert user["personaname"] == "Updated Name"
 
-def test_user_join_in_queries(db_path):
-    """Verifies that queries return joined user information."""
+def test_creator_join_in_queries(db_path):
+    """Verifies that queries return joined creator information."""
     from src.database import insert_or_update_creator, insert_or_update_item, search_items, get_item_details
     
     steamid = 76561198000000000

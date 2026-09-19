@@ -28,7 +28,7 @@ The daemon operates as a continuous loop, managing data acquisition, enrichment,
 The daemon does not merely wait for new items; it actively expands the database:
 
 * **Cursor-based discovery (`seed_database`)**: Walks `IPublishedFileService/QueryFiles` sorted by
-  publication date, resuming from the cursor stored in `app_tracking.last_cursor`. Each page
+  publication date, resuming from the cursor stored in `app_discovery.last_cursor`. Each page
   inserts newly seen `publishedfileid` values as bare rows; metadata is filled in later.
 * **Page-based discovery (`_run_page_discovery`)**: Once the cursor is exhausted — or at least 500
   items have been scraped — the daemon periodically walks the same endpoint sorted by last-updated
@@ -57,7 +57,7 @@ For every identified `workshop_id`, the daemon executes a multi-stage enrichment
 2. **Deep enrichment (web scraper)**: The API does not expose the full body text, so a worker
    thread visits the item's HTML page to extract the extended description and tags using CSS
    selectors. Tags from the API and the scraper are merged.
-3. **Identity enrichment (user API)**: Updates the `users` table with the latest creator
+3. **Identity enrichment (user API)**: Updates the `creators` table with the latest creator
    information.
 4. **Translation flagging**: Non-ASCII text fields are added to the translation queue at a
    priority derived from the item's fetch priority. The title and short description are flagged by
@@ -135,8 +135,8 @@ The database is designed for high-concurrency and complex querying. See
     `lifetime_subscriptions` and `lifetime_favorited`.
   * **`tags` / `workshop_tags`**: A normalized tag store and an item-to-tag junction table.
     `workshop_items` has no tags column.
-  * **`users`**: Creator information, keyed by `steamid`, with translated name fields.
-  * **`app_tracking`**: Per-AppID discovery state (`last_cursor`) and the
+  * **`creators`**: Creator information, keyed by `steamid`, with translated name fields.
+  * **`app_discovery`**: Per-AppID discovery state (`last_cursor`) and the
     enrichment filters that gate web scraping.
 * **Schema evolution**: Built-in migration logic adds and renames columns on existing databases
   without data loss. See [schema-migrations.md](schema-migrations.md).

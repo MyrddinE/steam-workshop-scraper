@@ -683,8 +683,8 @@ class TranslatorThread(threading.Thread):
                     continue
 
                 if row["item_type"] == "user":
-                    table, id_col = "users", "steamid"
-                    # Users have no steam_updated_at, so this column holds OUR
+                    table, id_col = "creators", "steamid"
+                    # Creators have no steam_updated_at, so this column holds OUR
                     # wall-clock time and is named translated_at, not a version.
                     stamp_column = "translated_at"
                     stamp_value = now_ts
@@ -720,13 +720,13 @@ class TranslatorThread(threading.Thread):
                     continue
                 if item_type == "user":
                     # The per-field write above already stamped
-                    # `users.translated_at` -- our clock is the only version a
+                    # `creators.translated_at` -- our clock is the only version a
                     # creator has, so completion needs no second stamp. Only the
                     # mirror is left, and clearing it here keeps
-                    # `users.translation_priority` a mirror of the queue exactly
+                    # `creators.translation_priority` a mirror of the queue exactly
                     # as the item column is.
                     conn.execute(
-                        "UPDATE users SET translation_priority = 0 WHERE steamid = ?",
+                        "UPDATE creators SET translation_priority = 0 WHERE steamid = ?",
                         (item_id,)
                     )
                     continue

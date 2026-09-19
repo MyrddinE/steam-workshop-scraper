@@ -297,7 +297,7 @@ rather than assuming it.
 
 ### `_build_sort_clause` (database)
 
-Validates the sort column against `VALID_SORT_COLS`, then builds `ORDER BY w.{col} {ASC|DESC}`. The `w.` prefix prevents ambiguity in JOIN queries (both `workshop_items` and `users` have an `api_fetched_at` column).
+Validates the sort column against `VALID_SORT_COLS`, then builds `ORDER BY w.{col} {ASC|DESC}`. The `w.` prefix prevents ambiguity in JOIN queries (both `workshop_items` and `creators` have an `api_fetched_at` column).
 
 ---
 
