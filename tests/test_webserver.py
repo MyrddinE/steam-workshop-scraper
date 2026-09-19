@@ -1194,6 +1194,7 @@ def test_a_page_cached_before_the_rename_still_calls_the_old_routes(web_client):
     assert client.get('/api/sub_health').status_code == 200
     assert client.get('/api/sub_failures').status_code == 200
     assert client.post('/api/toggle_sub/4242').get_json() == {"ok": True}
+    assert client.post('/api/clear_pending').get_json()["ok"] is True
 
 
 # ── Daemon control routes ────────────────────────────────────────────────────
@@ -1583,7 +1584,7 @@ def test_header_port_display_is_filled_from_the_pages_own_location(web_client, t
 # it leaves alone.
 
 
-def test_clear_pending_route_deletes_only_the_pending_rows(web_client):
+def test_delete_never_fetched_route_deletes_only_the_never_fetched_rows(web_client):
     client, db_path = web_client
     # Removed: never successfully fetched, with no status or a 404.
     insert_or_update_item(db_path, {"workshop_id": 1, "status": None, "api_fetched_at": None})
@@ -1593,7 +1594,7 @@ def test_clear_pending_route_deletes_only_the_pending_rows(web_client):
     insert_or_update_item(db_path, {"workshop_id": 4, "status": None, "api_fetched_at": 1672531200})
     insert_or_update_item(db_path, {"workshop_id": 5, "status": 404, "api_fetched_at": 1672531200})
 
-    resp = client.post('/api/clear_pending')
+    resp = client.post('/api/delete_never_fetched_items')
     assert resp.status_code == 200
     assert resp.get_json() == {"ok": True, "deleted": 2}
 
@@ -1604,12 +1605,12 @@ def test_clear_pending_route_deletes_only_the_pending_rows(web_client):
     assert ids == [3, 4, 5], "the predicate removed a row it must not touch"
 
 
-def test_clear_pending_route_reports_zero_and_is_post_only(web_client):
+def test_delete_never_fetched_route_reports_zero_and_is_post_only(web_client):
     client, db_path = web_client
     insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "api_fetched_at": 1672531200})
 
-    assert client.get('/api/clear_pending').status_code == 405
-    resp = client.post('/api/clear_pending')
+    assert client.get('/api/delete_never_fetched_items').status_code == 405
+    resp = client.post('/api/delete_never_fetched_items')
     assert resp.status_code == 200
     assert resp.get_json() == {"ok": True, "deleted": 0}, \
         "an empty delete must still report the count the UI shows"
@@ -1664,30 +1665,30 @@ global.fetch = async (url, opts) => {
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
-def test_clear_pending_confirms_before_deleting_and_reports_the_count(web_client, tmp_path):
+def test_delete_never_fetched_confirms_before_deleting_and_reports_the_count(web_client, tmp_path):
     client, _ = web_client
     doc = lxml.html.fromstring(client.get('/').data.decode())
-    buttons = doc.xpath('//*[@id="btn-clear-pending"]')
-    assert len(buttons) == 1, "expected exactly one #btn-clear-pending"
+    buttons = doc.xpath('//*[@id="btn-delete-never-fetched"]')
+    assert len(buttons) == 1, "expected exactly one #btn-delete-never-fetched"
     assert buttons[0].tag == "button", "the affordance must be a button, not a link"
-    assert "doClearPending" in (buttons[0].get("onclick") or ""), \
+    assert "doDeleteNeverFetched" in (buttons[0].get("onclick") or ""), \
         "the button must call the confirming handler, not the route directly"
 
-    fn = _extract_function(_served_inline_script(client), "doClearPending")
+    fn = _extract_function(_served_inline_script(client), "doDeleteNeverFetched")
     out = _run_node(CLEAR_PENDING_DRIVER.replace("__FN__", fn), tmp_path)
 
     assert len(out["prompts"]) == 4, "every invocation must ask before deleting"
     for prompt in out["prompts"]:
         lowered = prompt.lower()
-        assert "pending" in lowered and "cannot be undone" in lowered, \
+        assert "never-fetched" in lowered and "cannot be undone" in lowered, \
             f"the confirmation must state what is deleted, not a generic warning: {prompt!r}"
-    assert out["urls"] == ["/api/clear_pending"] * 3, \
+    assert out["urls"] == ["/api/delete_never_fetched_items"] * 3, \
         "declining must send nothing; accepting must call the route"
     assert out["methods"] == ["POST"] * 3
     assert out["alerts"] == [
-        "Removed 2 pending item(s).",
-        "Clear pending failed: 500 INTERNAL SERVER ERROR",
-        "Clear pending failed: backend down",
+        "Removed 2 never-fetched item(s).",
+        "Delete never-fetched failed: 500 INTERNAL SERVER ERROR",
+        "Delete never-fetched failed: backend down",
     ]
     assert out["searches"] == 1, "only a successful clear re-runs the search"
 

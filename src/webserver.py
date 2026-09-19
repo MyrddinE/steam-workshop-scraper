@@ -441,18 +441,18 @@ def api_session_recheck():
     return jsonify({"ok": True, "problem": False})
 
 
-@app.route('/api/clear_pending', methods=['POST'])
-def api_clear_pending():
+@app.route('/api/delete_never_fetched_items', methods=['POST'])
+def api_delete_never_fetched_items():
     """Delete every never-successfully-fetched item.
 
     Deliberately the same predicate and the same delete as the TUI's
-    ``action_clear_pending``, both through ``delete_never_fetched_items``: the web
+    ``action_delete_never_fetched_items``, both through ``delete_never_fetched_items``: the web
     route must not grow its own idea of what "pending" means, and there is no
     dry-run because the TUI has none. The count is returned so the UI can say
     what was removed rather than claiming a generic success.
     """
     deleted = delete_never_fetched_items(_db_path)
-    logging.info("[Clear Pending] removed %d pending item(s)", deleted)
+    logging.info("[Delete Never Fetched] removed %d never-fetched item(s)", deleted)
     return jsonify({"ok": True, "deleted": deleted})
 
 
@@ -916,3 +916,5 @@ app.add_url_rule('/api/toggle_sub/<int:workshop_id>',
                  view_func=api_toggle_subscription_queue, methods=['POST'])
 app.add_url_rule('/api/sub_health', view_func=api_subscribe_throttle)
 app.add_url_rule('/api/sub_failures', view_func=api_subscribe_failures)
+app.add_url_rule('/api/clear_pending', view_func=api_delete_never_fetched_items,
+                 methods=['POST'])

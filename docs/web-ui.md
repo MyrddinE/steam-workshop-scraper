@@ -321,9 +321,9 @@ translation has been stored yet, matching the TUI's notice.
 
 ## Maintenance Actions
 
-The row under the detail pane (`#detail-buttons`) holds the queue and database actions: **Fetch New**, **Update Visible**, and **Clear Pending**.
+The row under the detail pane (`#detail-buttons`) holds the queue and database actions: **Fetch New**, **Update Visible**, and **Delete Never Fetched**.
 
-**Clear Pending** (`#btn-clear-pending`, `doClearPending`) mirrors the TUI's command-palette action. `confirm()` names the exact set before anything is sent — items with no status or a 404 status whose API data was never fetched — because the delete is destructive and irreversible; declining sends no request at all. On a 2xx it reports the count returned by the route and re-runs the search, on a rejected response it shows the status, and on a dead backend it shows the error, so a failed clear is never presented as a successful one.
+**Delete Never Fetched** (`#btn-delete-never-fetched`, `doDeleteNeverFetched`) mirrors the TUI's command-palette action. `confirm()` names the exact set before anything is sent — items with no status or a 404 status whose API data was never fetched — because the delete is destructive and irreversible; declining sends no request at all. On a 2xx it reports the count returned by the route and re-runs the search, on a rejected response it shows the status, and on a dead backend it shows the error, so a failed clear is never presented as a successful one.
 
 ---
 
@@ -513,9 +513,9 @@ Wilson score percentile thresholds. Accepts `{filters, subscribed}` (filters exc
 
 Reads `.tui_state.yaml` for filter/sort state restoration. The client uses this as the **first-visit seed only**: once the browser has its own `view.state.v1` entry, this route is not called at all. The seed includes the TUI's `subscribed_overlay` value as well as `filters`, `sort_by` and `sort_order`.
 
-### `/api/clear_pending` — POST
+### `/api/delete_never_fetched_items` — POST
 
-Deletes every pending item — those with no status or a 404 status and no successful API fetch (`delete_never_fetched_items`, `src/database.py:3414`) — and returns `{ok, deleted}` with the number of rows removed. This is the same predicate and the same delete as the TUI's `action_clear_pending`; there is deliberately no dry-run mode. The UI asks for confirmation first, naming what will be deleted.
+Deletes every pending item — those with no status or a 404 status and no successful API fetch (`delete_never_fetched_items`, `src/database.py:3414`) — and returns `{ok, deleted}` with the number of rows removed. This is the same predicate and the same delete as the TUI's `action_delete_never_fetched_items`; there is deliberately no dry-run mode. The UI asks for confirmation first, naming what will be deleted.
 
 ### `/api/save_filter` — POST
 

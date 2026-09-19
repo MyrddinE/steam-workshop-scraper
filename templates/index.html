@@ -199,7 +199,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
     <div id="detail-buttons">
       <button onclick="fetch('/api/fetch_new',{method:'POST'}).then(()=>alert('Fetch-new triggered!'))">Fetch New</button>
       <button onclick="doUpdateVisible()">Update Visible</button>
-      <button id="btn-clear-pending" onclick="doClearPending()" title="Delete items that were never successfully scraped">Clear Pending</button>
+      <button id="btn-delete-never-fetched" onclick="doDeleteNeverFetched()" title="Delete items that were never successfully fetched">Delete Never Fetched</button>
       {% if open_folder_enabled %}
       <button id="btn-open-folder" onclick="openFolderFromDetail()" disabled
               title="Only a subscribed item Steam has downloaded can be opened.">Open Folder (not downloaded)</button>
@@ -1349,29 +1349,29 @@ async function doUpdateVisible() {
 }
 
 
-async function doClearPending() {
+async function doDeleteNeverFetched() {
   // Destructive and irreversible, so the prompt names the rows the server will
   // delete -- the same predicate as the TUI's action: no status (or 404) and no
   // successful API fetch -- rather than a generic "are you sure".
   const ok = confirm(
-    'Delete every item that was never successfully scraped?\n\n' +
-    'This removes all pending rows from the database: items with no status or a ' +
+    'Delete every item that was never successfully fetched?\n\n' +
+    'This removes every never-fetched row from the database: items with no status or a ' +
     '404 status that have never been fetched from the API. It cannot be undone.'
   );
   if (!ok) return;
   let resp;
   try {
-    resp = await fetch('/api/clear_pending', {method: 'POST'});
+    resp = await fetch('/api/delete_never_fetched_items', {method: 'POST'});
   } catch (e) {
-    alert('Clear pending failed: ' + e.message);
+    alert('Delete never-fetched failed: ' + e.message);
     return;
   }
   if (!resp.ok) {
-    alert('Clear pending failed: ' + resp.status + ' ' + resp.statusText);
+    alert('Delete never-fetched failed: ' + resp.status + ' ' + resp.statusText);
     return;
   }
   const data = await resp.json();
-  alert('Removed ' + data.deleted + ' pending item(s).');
+  alert('Removed ' + data.deleted + ' never-fetched item(s).');
   doSearch(true);
 }
 

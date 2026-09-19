@@ -394,7 +394,7 @@ async def test_tui_on_input_submitted(mock_config):
         app.execute_search.assert_not_called()  # search only on explicit button click
 
 @pytest.mark.asyncio
-async def test_tui_clear_pending_command(tmp_path):
+async def test_tui_delete_never_fetched_command(tmp_path):
     from src.tui import ScraperApp
     from src.database import initialize_database, insert_or_update_item, get_connection
     from unittest.mock import patch
@@ -417,7 +417,7 @@ async def test_tui_clear_pending_command(tmp_path):
         
         async with app.run_test() as pilot:
             # Trigger the action
-            app.action_clear_pending()
+            app.action_delete_never_fetched_items()
             await pilot.pause()
             
             # Verify DB state

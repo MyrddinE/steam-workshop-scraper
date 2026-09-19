@@ -1961,9 +1961,9 @@ class DatabaseCommands(Provider):
     async def discover(self) -> Iterable[DiscoveryHit]:
         """Yield commands that should be discoverable when the palette opens."""
         yield DiscoveryHit(
-            "Clear Pending Database",
-            self.app.action_clear_pending,
-            help="Remove all unscraped/pending items from the database",
+            "Delete Never Fetched Items",
+            self.app.action_delete_never_fetched_items,
+            help="Delete items that were never successfully fetched",
         )
         yield DiscoveryHit(
             "Show Subscription Queue",
@@ -1976,7 +1976,7 @@ class DatabaseCommands(Provider):
         matcher = self.matcher(query)
         
         commands = {
-            "Clear Pending Database": self.app.action_clear_pending,
+            "Delete Never Fetched Items": self.app.action_delete_never_fetched_items,
             "Show Subscription Queue": self.app.action_show_subscription_queue,
         }
         
@@ -3028,10 +3028,10 @@ class ScraperApp(App):
             row_to_delete.remove()
             self.call_after_refresh(self.execute_search)
 
-    def action_clear_pending(self) -> None:
-        """Removes all unscraped/pending items from the database."""
+    def action_delete_never_fetched_items(self) -> None:
+        """Deletes items that were never successfully fetched."""
         count = delete_never_fetched_items(self.db_path)
-        self.notify(f"Database cleared: {count} pending items removed.")
+        self.notify(f"Deleted {count} never-fetched item(s).")
         self.run_worker(self.execute_search())
 
     def action_show_stats(self) -> None:
