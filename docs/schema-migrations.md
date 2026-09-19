@@ -6,11 +6,11 @@ The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_
 - a fresh database built with `legacy_chain=True` takes the historical shape from `_create_legacy_schema` and runs every migration — this is how the chain stays exercised;
 - an **existing** database (`user_version > 0`) always takes `_create_legacy_schema` followed by its pending migrations, whatever the flag says, because the chain is the only thing that can carry it forward.
 
-The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v33) for what that means when you add one.
+The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v34) for what that means when you add one.
 
 ---
 
-## Current Schema (v32)
+## Current Schema (v33)
 
 The application-level reference for every table and column is
 [data-model.md](data-model.md); the timestamp conventions are in
@@ -40,15 +40,15 @@ Primary key: `workshop_id INTEGER PRIMARY KEY` (aliased from rowid). Columns:
 | api_priority | INTEGER | Steam API fetch queue priority |
 | translation_priority | INTEGER | Translation-queue mirror (0 = no queued fields) |
 | wilson_favorite_score, wilson_subscription_score | REAL | Wilson lower-bound scores (0-1), NULL default |
-| needs_web_scrape | INTEGER | Priority for web scraping (10=detail, 5=list, 3=new, 1=backlog, 0=done) |
-| needs_image | INTEGER | Priority for image download (same scale as needs_web_scrape) |
-| image_extension | TEXT | File extension of downloaded image (e.g., "jpg"), NULL if not downloaded |
+| web_scrape_priority | INTEGER | Priority for web scraping (10=detail, 5=list, 3=new, 1=backlog, 0=done). Renamed from `needs_web_scrape` in v33: it holds a priority, not a boolean |
+| image_priority | INTEGER | Priority for image download (same scale as web_scrape_priority). Renamed from `needs_image` in v33 |
+| image_answer | TEXT | The download's answer, not only a file extension: a real extension (e.g. "jpg"), a wholly numeric HTTP status, or a served non-image token; NULL if nothing is recorded. Renamed from `image_extension` in v33 |
 | is_queued_for_subscription | INTEGER | Subscription queue flag, set by the TUI and web UI and cleared when the userscript reports an outcome. Transient: reads 0 when nothing is queued |
 | own_subscribed | INTEGER | Whether the owner (the account whose key and cookies are configured) is subscribed to this item right now. Reconciled from Steam; not the item-wide `subscriptions` count |
 | own_first_subscribed_at | INTEGER | When we first *saw* the owner subscribed; sticky, and the only source of the `previously` state |
-| downloaded_at | INTEGER | Local latch: when this app first saw Steam's downloaded copy of a subscribed item on disk (v26). Set only by `src/workshop_folders`, cleared only beside `own_subscribed` when the item leaves the subscription list. NULL means not confirmed on disk |
+| steam_download_seen_at | INTEGER | One-way local latch: when this app first saw Steam's downloaded copy of a subscribed item on disk (v26). Set only by `src/workshop_folders`, cleared only beside `own_subscribed` when the item leaves the subscription list. NULL means not confirmed on disk. Renamed from `downloaded_at` in v33: it is a sighting latch, not a completion clock |
 
-The columns above are what the database holds at v31, and they are reached two ways.
+The columns above are what the database holds at v33, and they are reached two ways.
 `_create_current_schema` creates them directly, so a fresh database starts at `EXPECTED_VERSION`
 with these names. `_create_legacy_schema`'s `CREATE TABLE` instead declares the historical names
 (`dt_found`, `dt_updated`, `dt_attempted`, `dt_translated`, `time_created`, `time_updated`) and a
@@ -146,8 +146,8 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 | idx_translation_priority | translation_priority | Translation queue scanning |
 | idx_translation_queue_lookup | translation_queue (item_type, item_id, field) | Per-field queue lookup and the 22→23 repair's two-column `NOT EXISTS`. Created in `_create_legacy_schema` (unversioned) and mirrored in `_create_current_schema`, so the index exists when the repair runs |
 | idx_translation_queue_poll | translation_queue (priority DESC, queued_at ASC) | Translation poll (`get_next_batch_for_translation`) ordering. Created in `_ensure_indexes`, which runs after 13→14 renames `dt_queued` to `queued_at` |
-| idx_web_scrape_queue | (needs_web_scrape DESC, api_fetched_at ASC) WHERE needs_web_scrape > 0 | Web scrape worker poll and web queue breakdown (v25) |
-| idx_image_queue | (needs_image DESC, api_fetched_at ASC) WHERE needs_image > 0 | Image worker poll and image queue breakdown (v25) |
+| idx_web_scrape_queue | (web_scrape_priority DESC, api_fetched_at ASC) WHERE web_scrape_priority > 0 | Web scrape worker poll and web queue breakdown (v25). Named for the queue, not the column, so its name stays across v33 |
+| idx_image_queue | (image_priority DESC, api_fetched_at ASC) WHERE image_priority > 0 | Image worker poll and image queue breakdown (v25). Named for the queue, not the column, so its name stays across v33 |
 | idx_api_queue | (api_priority DESC, api_fetched_at ASC) WHERE api_priority > 0 | API fetch worker poll and fetchable count (v25) |
 | idx_web_scraped_at | web_scraped_at WHERE web_scraped_at IS NOT NULL | Web scrape throughput and last-success metric (v27) |
 | idx_image_fetched_at | image_fetched_at WHERE image_fetched_at IS NOT NULL | Image throughput and last-success metric (v27) |
@@ -199,15 +199,15 @@ independently, allowing crash recovery on a per-migration basis.
 from 1 to `EXPECTED_VERSION`, that each entry names the function for its own
 version, and that a fresh database reaches `EXPECTED_VERSION`.
 
-### Adding the next migration (target v33)
+### Adding the next migration (target v34)
 
-1. bump `EXPECTED_VERSION` in `src/database.py` to `33`;
-2. append `def _migration_32_to_33(cursor, conn, db_path): ...` immediately
-   after `_migration_31_to_32`, keeping the body self-contained and preserving
-   what the step meant at v32 (no tidying an older step, no changing a
+1. bump `EXPECTED_VERSION` in `src/database.py` to `34`;
+2. append `def _migration_33_to_34(cursor, conn, db_path): ...` immediately
+   after `_migration_32_to_33`, keeping the body self-contained and preserving
+   what the step meant at v33 (no tidying an older step, no changing a
    `PRAGMA user_version = N` target);
-3. append `(33, _migration_32_to_33)` as the last entry of `MIGRATIONS`;
-4. add a `### v32 → v33: ...` entry below, in the same shape as the others;
+3. append `(34, _migration_33_to_34)` as the last entry of `MIGRATIONS`;
+4. add a `### v33 → v34: ...` entry below, in the same shape as the others;
 5. **mirror the step in `_create_current_schema`.** It is the shape a fresh
    database is created at now, so a schema change that lands only in the chain
    moves the legacy endpoint and not the fresh one. Update the table, index or
@@ -1015,6 +1015,63 @@ re-initialisation and the already-renamed-under-the-old-marker case.
 
 ---
 
+### v32 → v33: the four priority, image-answer and download-latch columns
+
+Four `workshop_items` names no longer said what the columns hold. The stored **values are
+unchanged**; only the names move:
+
+* `needs_web_scrape` → **`web_scrape_priority`** and `needs_image` → **`image_priority`**.
+  The columns carry a 1-10 priority set with `MAX`, not a boolean, and the queue predicates
+  and the docs already call them priorities; `needs_` is a documented historical exception.
+* `image_extension` → **`image_answer`**. The column carries the server's *answer* — a real
+  file extension, a wholly numeric HTTP status, or a served non-image token — and
+  `images.image_state()` is already the classifier with `image_state` as the derived payload
+  key, so the column is the answer that classifier reads. The classifier's own helper
+  `images.is_image_extension()` and the uppercase `IMAGE_EXTENSIONS` frozenset keep their
+  names: they describe one *kind* of answer, not the column.
+* `downloaded_at` → **`steam_download_seen_at`**. It is a one-way latch stamped when the
+  folder scan first sees Steam's downloaded copy on disk, not a per-stage completion clock.
+
+```sql
+ALTER TABLE workshop_items RENAME COLUMN needs_web_scrape TO web_scrape_priority;
+ALTER TABLE workshop_items RENAME COLUMN needs_image TO image_priority;
+ALTER TABLE workshop_items RENAME COLUMN image_extension TO image_answer;
+ALTER TABLE workshop_items RENAME COLUMN downloaded_at TO steam_download_seen_at;
+```
+
+SQLite rewrites an index *definition* on `RENAME COLUMN` but keeps the index *name*. No index
+on `workshop_items` embeds any of these four in its **name**: `idx_web_scrape_queue` and
+`idx_image_queue` are named for their queue, so their names stay and their definitions follow
+the renamed columns in place. There is **no index to drop or recreate** here, and
+`_ensure_indexes` names none of the four columns.
+
+The step is guarded on the column that is present, so a re-run is harmless: a crash between
+the DDL commit and the version bump leaves the columns renamed under the old marker, and the
+step must then be a no-op rather than raise `no such column`. Every migration before this one
+keeps its historical SQL byte-identical, and `_create_legacy_schema` still declares the
+historical names inside its `_safe_add_columns` list, because the chain it replays names them
+at earlier versions.
+
+`_create_current_schema` declares the four new columns and the two queue indexes on them, so
+a fresh database is created at the new endpoint and
+`tests/test_fresh_schema_path.py::test_schema_equivalence` stays green. Because
+`_create_legacy_schema` runs on every startup, its historical `_safe_add_columns` entries for
+these four are skipped once their renamed form is present — otherwise re-initialising a v33
+database would resurrect the old column beside the new one. That guard lives in
+`_safe_add_columns`, keyed by `_RENAMED_COLUMN_NAMES`, so `_create_legacy_schema` itself stays
+byte-identical.
+
+None of the four is a Steam API field: all four are in `daemon.MERGE_EXCLUDED_KEYS`, so the
+API merge never carries a value into them and `_merge_and_clean_api_data` needs no wire-key
+remap for this step.
+
+`tests/test_queue_priority_columns_migration.py` pins the fresh path, the v32 upgrade (row
+counts, per-column NULL and distinct counts and a checksum over every one of the four), the
+in-place index rewrite, the re-initialisation and the already-renamed-under-the-old-marker
+case.
+
+---
+
 ## Database Utility Functions
 
 ### `get_connection` (database)
@@ -1027,7 +1084,7 @@ The driver described under [Migration system](#migration-system-initialize_datab
 
 ### `_create_current_schema`, `_create_legacy_schema`, `_ensure_indexes`, `MIGRATIONS` (database)
 
-`_create_current_schema(cursor, conn)` creates a brand-new database directly at `EXPECTED_VERSION`. Every table, index and trigger definition it holds was dumped from `sqlite_master` of a database the migration chain itself produced at v32 — not written from reading the migrations — so the index SQL it creates is the exact text SQLite stores. It deliberately does **not** repeat the query indexes `_ensure_indexes` owns, because that runs after it on both paths; those are the ones with historical names such as `idx_time_created`, whose definitions a `RENAME COLUMN` rewrote. It does create the indexes a *migration* owns, because no migration runs on this path.
+`_create_current_schema(cursor, conn)` creates a brand-new database directly at `EXPECTED_VERSION`. Every table, index and trigger definition it holds was dumped from `sqlite_master` of a database the migration chain itself produced at v33 — not written from reading the migrations — so the index SQL it creates is the exact text SQLite stores. It deliberately does **not** repeat the query indexes `_ensure_indexes` owns, because that runs after it on both paths; those are the ones with historical names such as `idx_time_created`, whose definitions a `RENAME COLUMN` rewrote. It does create the indexes a *migration* owns, because no migration runs on this path.
 
 `_create_legacy_schema(cursor, conn)` creates the tables (`IF NOT EXISTS`) and the baseline columns in their historical form, and runs the legacy data conversions every database history shares. It is the unversioned part of the schema, run before the versioned steps. Because it runs on every startup for an existing database, it also runs on both sides of migration 29→30: it resolves the creator and discovery table names once with `_current_table_name` (new name if it exists, else the historical one, else the historical one for a brand-new file) and routes its `CREATE TABLE`, `_safe_add_columns`, populate step and legacy-filter conversion through the resolved name.
 

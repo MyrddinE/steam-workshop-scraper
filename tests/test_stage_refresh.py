@@ -30,7 +30,7 @@ def _item(**over):
         "workshop_id": 1,
         "steam_updated_at": 1000,
         "extended_description": "Stored description",
-        "image_extension": "jpg",
+        "image_answer": "jpg",
         "preview_url": "https://example.invalid/preview.jpg",
         "api_priority": 5,
     }
@@ -60,7 +60,7 @@ def test_changed_revision_requeues_both_stages(db_path):
 
 def test_unchanged_revision_still_fetches_a_missing_image(db_path):
     """Change detection must not suppress work that has never been done."""
-    img, _ = _flag(_daemon(db_path), _item(image_extension=None), _item(image_extension=None))
+    img, _ = _flag(_daemon(db_path), _item(image_answer=None), _item(image_answer=None))
     img.assert_called_once()
 
 
@@ -71,8 +71,8 @@ def test_unchanged_revision_still_scrapes_a_missing_description(db_path):
 
 
 def test_no_preview_url_never_flags_an_image(db_path):
-    img, _ = _flag(_daemon(db_path), _item(preview_url=None, image_extension=None),
-                   _item(preview_url=None, image_extension=None))
+    img, _ = _flag(_daemon(db_path), _item(preview_url=None, image_answer=None),
+                   _item(preview_url=None, image_answer=None))
     img.assert_not_called()
 
 
@@ -85,19 +85,19 @@ def test_unknown_revision_counts_as_changed(db_path):
 
 # --- an answer from the server is final ------------------------------------
 #
-# image_extension holds the answer, not only a file type: a 404 or a non-image
+# image_answer holds the answer, not only a file type: a 404 or a non-image
 # content type is stored there as well. These pin the consequence, which is the
 # fix for a preview that was fetched forever: the re-flag gate must treat those
 # values as settled, so an item the server has already refused leaves the queue
 # for good.
 
 def test_a_missing_preview_is_never_fetched_again(db_path):
-    img, _ = _flag(_daemon(db_path), _item(image_extension="404"), _item(image_extension="404"))
+    img, _ = _flag(_daemon(db_path), _item(image_answer="404"), _item(image_answer="404"))
     img.assert_not_called()
 
 
 def test_a_gone_preview_is_never_fetched_again(db_path):
-    img, _ = _flag(_daemon(db_path), _item(image_extension="410"), _item(image_extension="410"))
+    img, _ = _flag(_daemon(db_path), _item(image_answer="410"), _item(image_answer="410"))
     img.assert_not_called()
 
 
@@ -108,26 +108,26 @@ def test_a_missing_preview_is_not_revived_by_a_new_revision(db_path):
     why a present image is re-fetched -- but a 404 is an answer about the item,
     and re-asking is the loop being closed here.
     """
-    img, _ = _flag(_daemon(db_path), _item(image_extension="404", steam_updated_at=1000),
-                   _item(image_extension="404", steam_updated_at=2000))
+    img, _ = _flag(_daemon(db_path), _item(image_answer="404", steam_updated_at=1000),
+                   _item(image_answer="404", steam_updated_at=2000))
     img.assert_not_called()
 
 
 def test_a_non_image_content_type_is_never_fetched_again(db_path):
     """A served text/html is what will be served next time too."""
-    img, _ = _flag(_daemon(db_path), _item(image_extension="html"), _item(image_extension="html"))
+    img, _ = _flag(_daemon(db_path), _item(image_answer="html"), _item(image_answer="html"))
     img.assert_not_called()
 
 
 def test_a_transient_status_is_still_fetched(db_path):
     """A 503 is not a fact about the preview, so it must stay retryable."""
-    img, _ = _flag(_daemon(db_path), _item(image_extension="503"), _item(image_extension="503"))
+    img, _ = _flag(_daemon(db_path), _item(image_answer="503"), _item(image_answer="503"))
     img.assert_called_once()
 
 
 def test_a_real_image_is_still_refetched_when_the_revision_changes(db_path):
     """The gate must not become a blanket refusal to refresh anything."""
-    img, _ = _flag(_daemon(db_path), _item(image_extension="jpg"), _item(steam_updated_at=2000))
+    img, _ = _flag(_daemon(db_path), _item(image_answer="jpg"), _item(steam_updated_at=2000))
     img.assert_called_once()
 
 
@@ -214,7 +214,7 @@ def test_the_discovery_priority_is_not_a_user_request(db_path):
     skipped as already current.
     """
     daemon = _daemon(db_path)
-    item = _item(extended_description=None, image_extension=None)
+    item = _item(extended_description=None, image_answer=None)
     with patch.object(daemon, "_should_enrich", return_value=False), \
          patch("src.daemon.raise_image_priority") as img, \
          patch("src.daemon.raise_web_scrape_priority") as web:

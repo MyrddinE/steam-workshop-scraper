@@ -51,15 +51,15 @@ The main loop is the only thread that writes metadata fields (title, description
 
 ### Web Scraper Thread (`WebScraperThread`)
 
-Independent daemon thread. Picks up items with highest `needs_web_scrape` priority (10 = detail view, 5 = list view, 3 = new item, 1 = backlog). Downloads the Steam Community page, extracts extended_description and tags. Writes `extended_description`, `needs_web_scrape`, `scrape_version` (the Steam revision) and `web_scraped_at` (our completion time). Flags non-ASCII extended_description for translation.
+Independent daemon thread. Picks up items with highest `web_scrape_priority` priority (10 = detail view, 5 = list view, 3 = new item, 1 = backlog). Downloads the Steam Community page, extracts extended_description and tags. Writes `extended_description`, `web_scrape_priority`, `scrape_version` (the Steam revision) and `web_scraped_at` (our completion time). Flags non-ASCII extended_description for translation.
 
-**Shared state**: Reads `workshop_items` (preview_url, extended_description, etc.), writes `extended_description`, `needs_web_scrape`, `scrape_version` and `web_scraped_at` (via `insert_or_update_item`). Writes `translation_queue` via `queue_field_for_translation`. On failure it raises `api_priority` to 2. `web_scraped_at` is written only on the success branch; a miss, a wall, a throttle and a transport failure all leave it alone.
+**Shared state**: Reads `workshop_items` (preview_url, extended_description, etc.), writes `extended_description`, `web_scrape_priority`, `scrape_version` and `web_scraped_at` (via `insert_or_update_item`). Writes `translation_queue` via `queue_field_for_translation`. On failure it raises `api_priority` to 2. `web_scraped_at` is written only on the success branch; a miss, a wall, a throttle and a transport failure all leave it alone.
 
 ### Image Download Thread (`ImageDownloadThread`)
 
-Independent daemon thread. Picks up items with highest `needs_image` priority. Downloads the preview image, detects MIME/extension, saves to the bucketed `images/` directory. Writes `image_extension`, `needs_image` and `image_fetched_at`.
+Independent daemon thread. Picks up items with highest `image_priority` priority. Downloads the preview image, detects MIME/extension, saves to the bucketed `images/` directory. Writes `image_answer`, `image_priority` and `image_fetched_at`.
 
-**Shared state**: Reads `workshop_items` (preview_url, image_extension, needs_image). Writes `image_extension`, `needs_image`, `image_fetched_at`. On failure it decrements `needs_image` and raises `api_priority` to 2. It deliberately does **not** write `scrape_version`: that column records the revision the page was scraped at, and the image worker used to overwrite it on every download (issue 7; pinned by `test_a_downloaded_image_does_not_rewrite_the_scrape_version`). `image_fetched_at` is written only when the bytes are on disk — a 404, an unclassifiable content type and a transport failure all leave it alone.
+**Shared state**: Reads `workshop_items` (preview_url, image_answer, image_priority). Writes `image_answer`, `image_priority`, `image_fetched_at`. On failure it decrements `image_priority` and raises `api_priority` to 2. It deliberately does **not** write `scrape_version`: that column records the revision the page was scraped at, and the image worker used to overwrite it on every download (issue 7; pinned by `test_a_downloaded_image_does_not_rewrite_the_scrape_version`). `image_fetched_at` is written only when the bytes are on disk — a 404, an unclassifiable content type and a transport failure all leave it alone.
 
 ### Translation Thread (`TranslatorThread`)
 
@@ -136,16 +136,16 @@ A `PRAGMA journal_mode` per connection used to be the exception to that concurre
 No formal locking protocol exists, but columns have clear ownership:
 - **Main loop**: title, short_description, extended_description (via insert_or_update_item), subscriptions, favorited, views, tags, `steam_*`, `first_seen_at`, `api_fetched_at`, `last_fetch_attempted_at`, `wilson_*`, `translation_priority`
 - **Discovery thread**: nothing beyond the bare row it creates — `workshop_id` and `api_priority` — so every other column on a discovered item is the main loop's
-- **Web scraper**: extended_description, needs_web_scrape, `web_scraped_at` (our completion time, success only)
-- **Image thread**: image_extension, needs_image, `image_fetched_at` (our completion time, success only)
+- **Web scraper**: extended_description, web_scrape_priority, `web_scraped_at` (our completion time, success only)
+- **Image thread**: image_answer, image_priority, `image_fetched_at` (our completion time, success only)
 - **Translator**: title_en, short_description_en, extended_description_en, personaname_en, translate_version, `translated_at` on both tables (on an item it is written when the last queued field completes; for a creator the per-field write stamps `creators.translated_at`, and completion only clears `creators.translation_priority`, because a creator has no version key)
 - **Web scraper**: scrape_version, the revision the *page* was scraped at. The image thread used to write it too, which made an unscraped item claim a scrape; it no longer touches the column
 
 ### Priority Bumping
 
-The `needs_web_scrape`, `needs_image`, and `translation_priority` columns use priority levels (10 = highest, 1 = lowest, 0 = done). Bump functions use `MAX(current, new_priority)` to upgrade without downgrading. This allows the main loop and frontend views to independently bump priority without coordination.
+The `web_scrape_priority`, `image_priority`, and `translation_priority` columns use priority levels (10 = highest, 1 = lowest, 0 = done). Bump functions use `MAX(current, new_priority)` to upgrade without downgrading. This allows the main loop and frontend views to independently bump priority without coordination.
 
-The image thread uses a direct UPDATE to set `needs_image = max(0, current - 1)` on failure, deliberately using a non-MAX path to decrement priority for transient failures. The web scraper does not do the same for a selector miss: it leaves `needs_web_scrape` untouched when the page was not the item's, and clears it when the item page genuinely has no description. It does not raise `api_priority`, because the request itself succeeded. See [failure-capture.md](failure-capture.md).
+The image thread uses a direct UPDATE to set `image_priority = max(0, current - 1)` on failure, deliberately using a non-MAX path to decrement priority for transient failures. The web scraper does not do the same for a selector miss: it leaves `web_scrape_priority` untouched when the page was not the item's, and clears it when the item page genuinely has no description. It does not raise `api_priority`, because the request itself succeeded. See [failure-capture.md](failure-capture.md).
 
 ### The Outbox Manifest
 
@@ -164,7 +164,7 @@ The web UI's image poll runs in the browser at an adaptive interval via `setTime
 2. POSTs to `/api/items` (bulk ID lookup, near-instant)
 3. Updates DOM for each returned item (title, image, scores)
 
-**Delay**: `max(1, log2(pending_count))` seconds, so polls speed up as images arrive. The poll starts when `doSearch` detects `needs_image > 0` items and stops when no pending placeholders remain.
+**Delay**: `max(1, log2(pending_count))` seconds, so polls speed up as images arrive. The poll starts when `doSearch` detects `image_priority > 0` items and stops when no pending placeholders remain.
 
 The detail poll runs at a fixed 3-second interval for the currently selected item, checking `translation_priority > 0` to detect when translation completes.
 

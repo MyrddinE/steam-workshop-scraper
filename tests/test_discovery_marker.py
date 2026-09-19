@@ -50,7 +50,7 @@ _CURRENT_ESCAPE = "\033[90mcurrent\033[0m"
 _CURRENT_ITEM = {
     "steam_updated_at": 1000,
     "extended_description": "Stored description",
-    "image_extension": "jpg",
+    "image_answer": "jpg",
     "preview_url": "https://example.invalid/preview.jpg",
 }
 _CURRENT_API = {"time_updated": 1000}
@@ -155,7 +155,7 @@ def test_an_enriched_item_with_only_the_image_queued_is_still_enriching(
     with mock.patch("src.daemon.raise_web_scrape_priority") as web, \
             mock.patch("src.daemon.raise_image_priority") as image:
         line = _discovery_line(db_path, tmp_path, caplog, enrich=True,
-                               existing={**_CURRENT_ITEM, "image_extension": None},
+                               existing={**_CURRENT_ITEM, "image_answer": None},
                                api_data=_CURRENT_API)
 
     web.assert_not_called()

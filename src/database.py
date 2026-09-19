@@ -18,9 +18,9 @@ WORKSHOP_ITEM_COLUMNS = frozenset({
     "extended_description", "extended_description_en",
     "lifetime_subscriptions", "lifetime_favorited", "translation_priority",
     "is_queued_for_subscription", "wilson_favorite_score",
-    "wilson_subscription_score", "needs_web_scrape",
-    "image_extension", "needs_image", "api_priority",
-    "own_subscribed", "own_first_subscribed_at", "downloaded_at",
+    "wilson_subscription_score", "web_scrape_priority",
+    "image_answer", "image_priority", "api_priority",
+    "own_subscribed", "own_first_subscribed_at", "steam_download_seen_at",
     # Our completion clocks for the three stages that had none: when *we*
     # scraped the page, fetched the image and finished translating the item.
     # Distinct from scrape_version/translate_version, which store Steam's
@@ -92,7 +92,7 @@ SUBSCRIBED_VIRTUAL_COLUMN = "subscription_state"
 SUBSCRIBED_VALUES = ["any", "never", "subscribed", "previously", "queued", "downloaded"]
 SUBSCRIBED_FILTER_COLUMNS = (
     "own_subscribed", "own_first_subscribed_at",
-    "is_queued_for_subscription", "downloaded_at",
+    "is_queued_for_subscription", "steam_download_seen_at",
 )
 
 # The marker vocabulary unified two values a saved view or a saved filter may
@@ -157,9 +157,9 @@ SUBSCRIBED_VALUE_SPECS = {
         "matches": lambda item: _bool_column(item, "is_queued_for_subscription") == 1,
     },
     "downloaded": {
-        "sql": "downloaded_at IS NOT NULL",
-        "columns": ("downloaded_at",),
-        "matches": lambda item: item.get("downloaded_at") is not None,
+        "sql": "steam_download_seen_at IS NOT NULL",
+        "columns": ("steam_download_seen_at",),
+        "matches": lambda item: item.get("steam_download_seen_at") is not None,
     },
 }
 
@@ -223,7 +223,7 @@ USER_PRIORITY_FLOOR = 5
 # than local to `initialize_database` because the migration tests assert that
 # the chain reaches it, and a magic number repeated in nine test files is a
 # number that will be wrong after the next migration.
-EXPECTED_VERSION = 32
+EXPECTED_VERSION = 33
 
 def _build_text_search_clauses(sql: str, params: list, query_string: str, cols: list[str]) -> tuple[str, list]:
     """Applies positive/negative text search tokens to SQL via LIKE clauses."""
@@ -706,9 +706,33 @@ def _build_limit_offset(limit: int, offset: int) -> tuple[str, list]:
         return f" LIMIT ?", params
     return "", []
 
+# Historical column names a Batch 6 migration has renamed. ``_safe_add_columns``
+# runs on every startup through ``_create_legacy_schema``, so once a database is
+# at the current version it must not resurrect the old name beside the new one.
+# The mapping is what keeps ``_create_legacy_schema``'s historical column list
+# byte-identical: a fresh chain database needs the old name (the migrations it is
+# about to replay name it), while a current database must keep only the new one.
+_RENAMED_COLUMN_NAMES = {
+    "needs_web_scrape": "web_scrape_priority",
+    "needs_image": "image_priority",
+    "image_extension": "image_answer",
+    "downloaded_at": "steam_download_seen_at",
+}
+
+
 def _safe_add_columns(cursor, table: str, columns: list[tuple[str, str]]):
-    """Safely adds columns to an existing table, ignoring duplicate-column errors."""
+    """Safely adds columns to an existing table, ignoring duplicate-column errors.
+
+    A historical name whose renamed current form is already present is skipped:
+    ``_create_legacy_schema`` runs on every startup, so without this a database
+    already at the current version would gain a stray legacy column next to the
+    renamed one.
+    """
+    existing = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
     for col_name, col_type in columns:
+        renamed_to = _RENAMED_COLUMN_NAMES.get(col_name)
+        if renamed_to is not None and renamed_to in existing:
+            continue
         try:
             cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}")
         except sqlite3.OperationalError as e:
@@ -805,6 +829,14 @@ def _demote_filtered_out_queue_priorities(conn) -> tuple[int, int]:
         return 0, 0
 
     columns = {row[1] for row in cursor.execute("PRAGMA table_info(workshop_items)")}
+    # Same resolution as the table above: this helper runs inside migration
+    # 21->22, when the two priority columns still carry their historical names,
+    # and is also called directly by tests against a current-schema database,
+    # where they do not.
+    web_col = ("web_scrape_priority" if "web_scrape_priority" in columns
+               else "needs_web_scrape")
+    image_col = ("image_priority" if "image_priority" in columns
+                 else "needs_image")
     web_demoted = 0
     image_demoted = 0
 
@@ -823,11 +855,11 @@ def _demote_filtered_out_queue_priorities(conn) -> tuple[int, int]:
             referenced.update(SUBSCRIBED_FILTER_COLUMNS)
         selected = sorted(c for c in referenced
                           if c and c.isidentifier() and c in columns)
-        fields = ", ".join(["workshop_id", "needs_web_scrape", "needs_image"] + selected)
+        fields = ", ".join(["workshop_id", web_col, image_col] + selected)
 
         rows = cursor.execute(
             "SELECT %s FROM workshop_items WHERE consumer_appid = ? "
-            "AND (needs_web_scrape > 1 OR needs_image > 1)" % fields,
+            "AND (%s > 1 OR %s > 1)" % (fields, web_col, image_col),
             (appid,),
         ).fetchall()
         if not rows:
@@ -855,13 +887,13 @@ def _demote_filtered_out_queue_priorities(conn) -> tuple[int, int]:
                 item["tags"] = tags.get(row["workshop_id"], [])
                 if _evaluate_filters(item, filters):
                     continue
-                if 2 <= row["needs_web_scrape"] < USER_PRIORITY_FLOOR:
+                if 2 <= row[web_col] < USER_PRIORITY_FLOOR:
                     web_ids.append(row["workshop_id"])
-                if 2 <= row["needs_image"] < USER_PRIORITY_FLOOR:
+                if 2 <= row[image_col] < USER_PRIORITY_FLOOR:
                     image_ids.append(row["workshop_id"])
 
-            for column, column_ids in (("needs_web_scrape", web_ids),
-                                       ("needs_image", image_ids)):
+            for column, column_ids in ((web_col, web_ids),
+                                       (image_col, image_ids)):
                 if column_ids:
                     cursor.execute(
                         "UPDATE workshop_items SET %s = 1 WHERE workshop_id IN (%s)"
@@ -1137,7 +1169,7 @@ def _create_current_schema(cursor, conn):
 
     The statements below are the *terminal* shape the migration chain leaves
     behind, dumped verbatim from ``sqlite_master`` of a database the chain
-    itself produced at ``user_version = 32`` -- no definition here was written
+    itself produced at ``user_version = 33`` -- no definition here was written
     by reading the migrations. The index SQL in particular is the exact text
     SQLite stores, so the fresh database's ``sqlite_master`` matches what the
     chain leaves, including the early indexes whose definitions a ``RENAME
@@ -1145,7 +1177,7 @@ def _create_current_schema(cursor, conn):
     owned by :func:`_ensure_indexes` and are not repeated below).
 
     A fresh database takes this path by default, so it never replays the
-    thirty-two migrations. An existing database always takes the legacy path,
+    thirty-three migrations. An existing database always takes the legacy path,
     because only the chain can carry it forward. The two endpoints must be
     identical. ``_ensure_indexes`` still runs after this function, exactly as
     it does after the chain, so the query indexes it owns are deliberately not
@@ -1203,13 +1235,13 @@ def _create_current_schema(cursor, conn):
         translation_priority INTEGER DEFAULT 0,
         wilson_favorite_score REAL DEFAULT NULL,
         wilson_subscription_score REAL DEFAULT NULL,
-        needs_web_scrape INTEGER DEFAULT 0,
-        image_extension TEXT DEFAULT NULL,
-        needs_image INTEGER DEFAULT 0,
+        web_scrape_priority INTEGER DEFAULT 0,
+        image_answer TEXT DEFAULT NULL,
+        image_priority INTEGER DEFAULT 0,
         api_priority INTEGER NOT NULL DEFAULT 3,
         own_subscribed INTEGER DEFAULT 0,
         own_first_subscribed_at INTEGER DEFAULT NULL,
-        downloaded_at INTEGER DEFAULT NULL,
+        steam_download_seen_at INTEGER DEFAULT NULL,
         web_scraped_at INTEGER DEFAULT NULL,
         image_fetched_at INTEGER DEFAULT NULL,
         translated_at INTEGER DEFAULT NULL,
@@ -1317,13 +1349,13 @@ def _create_current_schema(cursor, conn):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_workshop_tags_tag_id ON workshop_tags (tag_id)")
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_web_scrape_queue "
-        "ON workshop_items (needs_web_scrape DESC, api_fetched_at ASC) "
-        "WHERE needs_web_scrape > 0"
+        "ON workshop_items (web_scrape_priority DESC, api_fetched_at ASC) "
+        "WHERE web_scrape_priority > 0"
     )
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_image_queue "
-        "ON workshop_items (needs_image DESC, api_fetched_at ASC) "
-        "WHERE needs_image > 0"
+        "ON workshop_items (image_priority DESC, api_fetched_at ASC) "
+        "WHERE image_priority > 0"
     )
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_api_queue "
@@ -2645,6 +2677,57 @@ def _migration_31_to_32(cursor, conn, db_path):
     conn.commit()
     logging.info("Migration 31->32 complete.")
 
+def _migration_32_to_33(cursor, conn, db_path):
+    logging.info("Running migration 32->33: renaming the four workshop_items queue, image and download columns...")
+
+    # Four columns whose names no longer say what they hold:
+    #
+    #   * `needs_web_scrape` and `needs_image` hold a 1-10 priority, not a
+    #     boolean, and the queue predicates and the docs already call them
+    #     priorities; `needs_` is a historical exception. They become
+    #     `web_scrape_priority` and `image_priority`.
+    #   * `image_extension` holds the server's *answer* -- a real extension, an
+    #     HTTP status or a served non-image type -- not only a file extension.
+    #     `images.image_state()` is already the classifier and `image_state` is
+    #     the derived payload key, so the column becomes the `image_answer`
+    #     that classifier reads.
+    #   * `downloaded_at` is a one-way latch stamped when the folder scan first
+    #     sees Steam's downloaded copy on disk, not a completion clock, so it
+    #     becomes `steam_download_seen_at`.
+    #
+    # The stored values are untouched; only the names move.
+    #
+    # SQLite rewrites an index *definition* on RENAME COLUMN but keeps the index
+    # *name*. No index on `workshop_items` embeds any of these four in its name:
+    # `idx_web_scrape_queue` and `idx_image_queue` are named for their queue, so
+    # their names stay and SQLite rewrites their definitions in place. There is
+    # therefore nothing to drop or recreate here.
+    #
+    # Each rename is guarded on the column that is present, so a re-run is
+    # harmless: a crash between the DDL commit and the version bump leaves the
+    # columns renamed under the old marker, and this step must then be a no-op
+    # rather than raise "no such column".
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(workshop_items)").fetchall()}
+    for old_name, new_name in (
+        ("needs_web_scrape", "web_scrape_priority"),
+        ("needs_image", "image_priority"),
+        ("image_extension", "image_answer"),
+        ("downloaded_at", "steam_download_seen_at"),
+    ):
+        if new_name in columns:
+            logging.info("  workshop_items.%s already present; nothing to rename", new_name)
+        elif old_name in columns:
+            cursor.execute(f"ALTER TABLE workshop_items RENAME COLUMN {old_name} TO {new_name}")
+            logging.info("  renamed workshop_items.%s -> %s", old_name, new_name)
+        else:
+            logging.info("  neither %s nor %s exists; nothing to rename",
+                         old_name, new_name)
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 33")
+    conn.commit()
+    logging.info("Migration 32->33 complete.")
+
 def _ensure_indexes(cursor):
     """Create the query indexes, after the column renames migrations perform.
 
@@ -2732,6 +2815,7 @@ MIGRATIONS = [
     (30, _migration_29_to_30),
     (31, _migration_30_to_31),
     (32, _migration_31_to_32),
+    (33, _migration_32_to_33),
 ]
 
 def initialize_database(db_path: str, *, legacy_chain: bool = False):
@@ -2875,7 +2959,7 @@ def apply_own_subscriptions(db_path: str, appid: int, subscribed_ids,
     is no evidence about the items it omits -- and wrongly clearing
     ``own_subscribed`` would turn a live subscription into ``previously``.
 
-    **The downloaded latch is cleared here and only here.** ``downloaded_at`` is
+    **The downloaded latch is cleared here and only here.** ``steam_download_seen_at`` is
     set by one writer (``src.workshop_folders``, which only ever stamps) and
     cleared by one event: the item leaving the owner's subscription list, in the
     same transaction that clears ``own_subscribed`` below. A missing folder, an
@@ -2925,7 +3009,7 @@ def apply_own_subscriptions(db_path: str, appid: int, subscribed_ids,
         # The complement of the list. Scoped to this appid so a sync for one app
         # can never clear another app's flags.
         #
-        # downloaded_at is cleared in the same transaction as own_subscribed --
+        # steam_download_seen_at is cleared in the same transaction as own_subscribed --
         # leaving the subscription list is the one event that takes the green
         # star away. The separate statement is what makes the count of cleared
         # latches measurable; the two run in one transaction, so a reader never
@@ -2933,9 +3017,9 @@ def apply_own_subscriptions(db_path: str, appid: int, subscribed_ids,
         if ids:
             placeholders = ",".join("?" * len(ids))
             downloads_cleared = conn.execute(
-                f"UPDATE workshop_items SET downloaded_at = NULL "
+                f"UPDATE workshop_items SET steam_download_seen_at = NULL "
                 f"WHERE consumer_appid = ? AND own_subscribed = 1 "
-                f"AND downloaded_at IS NOT NULL AND workshop_id NOT IN ({placeholders})",
+                f"AND steam_download_seen_at IS NOT NULL AND workshop_id NOT IN ({placeholders})",
                 [appid, *ids]
             ).rowcount
             cleared = conn.execute(
@@ -2946,9 +3030,9 @@ def apply_own_subscriptions(db_path: str, appid: int, subscribed_ids,
             ).rowcount
         else:
             downloads_cleared = conn.execute(
-                "UPDATE workshop_items SET downloaded_at = NULL "
+                "UPDATE workshop_items SET steam_download_seen_at = NULL "
                 "WHERE consumer_appid = ? AND own_subscribed = 1 "
-                "AND downloaded_at IS NOT NULL",
+                "AND steam_download_seen_at IS NOT NULL",
                 (appid,)
             ).rowcount
             cleared = conn.execute(
@@ -2982,7 +3066,7 @@ def get_subscription_queue_items(db_path: str) -> list[dict]:
     cursor = conn.cursor()
     cursor.execute(
         "SELECT workshop_id, title, title_en, is_queued_for_subscription, "
-        "own_subscribed, own_first_subscribed_at, downloaded_at "
+        "own_subscribed, own_first_subscribed_at, steam_download_seen_at "
         "FROM workshop_items WHERE is_queued_for_subscription = 1 ORDER BY title"
     )
     items = [dict(row) for row in cursor.fetchall()]
@@ -3007,7 +3091,7 @@ def get_subscription_states(db_path: str, workshop_ids) -> dict[int, dict]:
         placeholders = ",".join("?" * len(ids))
         rows = conn.execute(
             "SELECT workshop_id, own_subscribed, is_queued_for_subscription, "
-            f"own_first_subscribed_at, downloaded_at FROM workshop_items "
+            f"own_first_subscribed_at, steam_download_seen_at FROM workshop_items "
             f"WHERE workshop_id IN ({placeholders})",
             ids,
         ).fetchall()
@@ -3133,16 +3217,16 @@ def web_scrape_queue_predicate() -> str:
     that it stored a description, not merely that it cleared the flag, which is
     issue 19's shape.
     """
-    return "needs_web_scrape > 0"
+    return "web_scrape_priority > 0"
 
 
 def image_queue_predicate() -> str:
     """API fetch → image: the image queue's entry condition.
 
-    The producer is ``_raise_scrape_and_image_priorities``; ``image_extension`` records the
+    The producer is ``_raise_scrape_and_image_priorities``; ``image_answer`` records the
     answer, so a permanent 404 or a non-image type also settles the stage.
     """
-    return "needs_image > 0"
+    return "image_priority > 0"
 
 
 def translation_queue_predicate() -> str:
@@ -3334,16 +3418,16 @@ def search_items(db_path: str, query: str = "", appid: int = None,
     
     if summary_only:
         cols = ("w.workshop_id, w.title, w.title_en, w.creator_steamid, w.consumer_appid, "
-                "w.translate_version, w.is_queued_for_subscription, w.needs_web_scrape, "
-                "w.needs_image, w.translation_priority, w.file_size, w.image_extension, "
+                "w.translate_version, w.is_queued_for_subscription, w.web_scrape_priority, "
+                "w.image_priority, w.translation_priority, w.file_size, w.image_answer, "
                 "w.wilson_subscription_score, w.wilson_favorite_score, "
                 # Both subscription columns travel with the list rows: the grid
                 # draws its marker from this payload, and a cell that had
                 # own_subscribed without own_first_subscribed_at could not tell
                 # `never` from `previously` after the marker was toggled.
-                # downloaded_at travels too, or the grid could not draw the
+                # steam_download_seen_at travels too, or the grid could not draw the
                 # `downloaded` state for a row that is already subscribed.
-                "w.own_subscribed, w.own_first_subscribed_at, w.downloaded_at, "
+                "w.own_subscribed, w.own_first_subscribed_at, w.steam_download_seen_at, "
                 "u.personaname, u.personaname_en,"
                 "(SELECT GROUP_CONCAT(t.tag_name, ', ') FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id = w.workshop_id) as tags")
     else:
@@ -3588,7 +3672,7 @@ def get_next_web_scrape_item(db_path: str) -> dict | None:
     cursor = conn.execute(f"""
         SELECT * FROM workshop_items
         WHERE {web_scrape_queue_predicate()}
-        ORDER BY needs_web_scrape DESC, api_fetched_at ASC
+        ORDER BY web_scrape_priority DESC, api_fetched_at ASC
         LIMIT 1
     """)
     row = cursor.fetchone()
@@ -3597,10 +3681,10 @@ def get_next_web_scrape_item(db_path: str) -> dict | None:
 
 
 def raise_web_scrape_priority(db_path: str, workshop_id: int, priority: int):
-    """Sets needs_web_scrape to MAX(current, priority). Never downgrades."""
+    """Sets web_scrape_priority to MAX(current, priority). Never downgrades."""
     conn = get_connection(db_path)
     conn.execute(
-        "UPDATE workshop_items SET needs_web_scrape = MAX(needs_web_scrape, ?) WHERE workshop_id = ?",
+        "UPDATE workshop_items SET web_scrape_priority = MAX(web_scrape_priority, ?) WHERE workshop_id = ?",
         (priority, workshop_id)
     )
     conn.commit()
@@ -3611,8 +3695,8 @@ def raise_web_scrape_priority_for_list(db_path: str, workshop_id: int):
     """Bumps web scrape priority to 5 for list items if currently < 5 and > 0."""
     conn = get_connection(db_path)
     conn.execute(
-        "UPDATE workshop_items SET needs_web_scrape = 5 "
-        "WHERE workshop_id = ? AND needs_web_scrape > 0 AND needs_web_scrape < 5",
+        "UPDATE workshop_items SET web_scrape_priority = 5 "
+        "WHERE workshop_id = ? AND web_scrape_priority > 0 AND web_scrape_priority < 5",
         (workshop_id,)
     )
     conn.commit()
@@ -3623,8 +3707,8 @@ def raise_web_scrape_priority_for_detail(db_path: str, workshop_id: int):
     """Bumps web scrape priority to 10 for detail items if currently < 10 and > 0."""
     conn = get_connection(db_path)
     conn.execute(
-        "UPDATE workshop_items SET needs_web_scrape = 10 "
-        "WHERE workshop_id = ? AND needs_web_scrape > 0 AND needs_web_scrape < 10",
+        "UPDATE workshop_items SET web_scrape_priority = 10 "
+        "WHERE workshop_id = ? AND web_scrape_priority > 0 AND web_scrape_priority < 10",
         (workshop_id,)
     )
     conn.commit()
@@ -3637,7 +3721,7 @@ def get_next_image_item(db_path: str) -> dict | None:
     cursor = conn.execute(f"""
         SELECT * FROM workshop_items
         WHERE {image_queue_predicate()}
-        ORDER BY needs_image DESC, api_fetched_at ASC
+        ORDER BY image_priority DESC, api_fetched_at ASC
         LIMIT 1
     """)
     row = cursor.fetchone()
@@ -3646,10 +3730,10 @@ def get_next_image_item(db_path: str) -> dict | None:
 
 
 def raise_image_priority(db_path: str, workshop_id: int, priority: int):
-    """Sets needs_image to MAX(current, priority). Never downgrades."""
+    """Sets image_priority to MAX(current, priority). Never downgrades."""
     conn = get_connection(db_path)
     conn.execute(
-        "UPDATE workshop_items SET needs_image = MAX(needs_image, ?) WHERE workshop_id = ?",
+        "UPDATE workshop_items SET image_priority = MAX(image_priority, ?) WHERE workshop_id = ?",
         (priority, workshop_id)
     )
     conn.commit()
@@ -3659,8 +3743,8 @@ def raise_image_priority(db_path: str, workshop_id: int, priority: int):
 def raise_image_priority_for_list(db_path: str, workshop_id: int):
     conn = get_connection(db_path)
     conn.execute(
-        "UPDATE workshop_items SET needs_image = 5 "
-        "WHERE workshop_id = ? AND needs_image > 0 AND needs_image < 5",
+        "UPDATE workshop_items SET image_priority = 5 "
+        "WHERE workshop_id = ? AND image_priority > 0 AND image_priority < 5",
         (workshop_id,)
     )
     conn.commit()
@@ -3670,8 +3754,8 @@ def raise_image_priority_for_list(db_path: str, workshop_id: int):
 def raise_image_priority_for_detail(db_path: str, workshop_id: int):
     conn = get_connection(db_path)
     conn.execute(
-        "UPDATE workshop_items SET needs_image = 10 "
-        "WHERE workshop_id = ? AND needs_image > 0 AND needs_image < 10",
+        "UPDATE workshop_items SET image_priority = 10 "
+        "WHERE workshop_id = ? AND image_priority > 0 AND image_priority < 10",
         (workshop_id,)
     )
     conn.commit()

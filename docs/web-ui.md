@@ -228,7 +228,7 @@ too, from the same `/api/queued` payload. It has five states, resolved by
 | `previously` | ☆ | yellow | we have seen the owner subscribed, and they are not now | queues |
 | `never` | ○ | gray | never seen subscribed | queues |
 
-`downloaded` requires **both** `own_subscribed` and the local `downloaded_at` latch, so a timestamp
+`downloaded` requires **both** `own_subscribed` and the local `steam_download_seen_at` latch, so a timestamp
 left behind by a cleared subscription cannot claim the green star. The latch is written only by
 `src/workshop_folders` (a periodic scan that finds the item's folder on disk) and cleared only when
 the item leaves the owner's subscription list — so an unplugged drive or a moved library never takes
@@ -258,7 +258,7 @@ re-reads such a cell: it keeps re-reading any row whose subscription marker is s
 the marker moves to `subscribed` on its own next tick ([Image Polling](#image-polling)).
 
 One transition is deliberately not a poll trigger: a cell already at `subscribed` is not re-read
-when the folder scan later stamps `downloaded_at`, so its star turns green when the row is next
+when the folder scan later stamps `steam_download_seen_at`, so its star turns green when the row is next
 rendered (a new search or a rebuilt grid) rather than on a timer. Polling every subscribed row for
 ever, just to catch a download, would cost a request per second on a settled view; the marker is
 correct whenever it is drawn, which is the same promise the TUI's marker poll makes.
@@ -533,7 +533,7 @@ Flips `is_queued_for_subscription` for one item and answers `{ok: true}`. It is 
 
 ### `/api/open_folder/<id>` — POST
 
-Windows only. Opens the item's downloaded workshop folder in Explorer **on the host running the server** (the browser's own machine is not involved), through the shared `src.workshop_folders.open`. It refuses with **400** `{ok: false, message}` when the platform is not Windows, when the item is not in the `downloaded` state (`own_subscribed` and `downloaded_at` both set), and when the folder is not on disk at click time — naming the folders it looked in, and changing nothing. A success is **200** `{ok: true, folder, message}`. The route is not rendered into the page off Windows, and no state is written or cleared either way.
+Windows only. Opens the item's downloaded workshop folder in Explorer **on the host running the server** (the browser's own machine is not involved), through the shared `src.workshop_folders.open`. It refuses with **400** `{ok: false, message}` when the platform is not Windows, when the item is not in the `downloaded` state (`own_subscribed` and `steam_download_seen_at` both set), and when the folder is not on disk at click time — naming the folders it looked in, and changing nothing. A success is **200** `{ok: true, folder, message}`. The route is not rendered into the page off Windows, and no state is written or cleared either way.
 
 ### `/api/sessionid` — POST
 

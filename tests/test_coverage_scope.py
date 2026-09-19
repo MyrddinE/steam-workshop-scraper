@@ -90,7 +90,7 @@ def test_the_filtered_figure_differs_from_the_total_when_filters_exclude(db_path
 def test_both_figures_are_reported_with_the_same_stage_shape(db_path):
     _set_filters(db_path, 294100, _tag_filter("Mature"))
     _item(db_path, 1, 294100, tags=["Mature"], api_fetched_at=1000,
-          extended_description="desc", image_extension="jpg",
+          extended_description="desc", image_answer="jpg",
           translate_version=1, creator_steamid=7)
     _item(db_path, 2, 294100)
 

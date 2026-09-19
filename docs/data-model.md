@@ -9,8 +9,8 @@ Column names follow two conventions, described in full in [timestamps.md](timest
 
 * `steam_*` is Steam's clock; `*_at` is our clock; `*_version` is a stored Steam value used as a
   version key.
-* Work-queue columns end in `_priority` (with historical exceptions: `api_priority`,
-  `needs_web_scrape`, `needs_image`).
+* Work-queue columns end in `_priority` (`api_priority`, `web_scrape_priority`,
+  `image_priority`, `translation_priority`; v33 renamed the two `needs_*` outliers to join them).
 
 ## Provenance Classes
 
@@ -87,19 +87,19 @@ Tags are not a column on `workshop_items`. They live in `tags(tag_id, tag_name)`
 | `web_scraped_at` | STATE (ours) | Our clock: when the web worker last scraped this item's page successfully. NULL means no success has been recorded since the column arrived in v27; unlike `scrape_version` it is not a Steam revision. |
 | `image_fetched_at` | STATE (ours) | Our clock: when the image worker last fetched this item's preview successfully. NULL means no success has been recorded since the column arrived in v27. |
 | `translated_at` | STATE (ours) | Our clock: when the translator finished the **last** queued field for this item. One stamp per item, moved on each later completion; NULL means no completion has been recorded since the column arrived in v27. The `creators` table has a column of the same name meaning "when this profile's text was translated"; the item column is the completion time of the item as a whole, because a per-field stamp is what `translate_version` already carries. |
-| `image_extension` | STATE | The preview's **outcome**, not only its file type. A real extension (`jpg`, `png`, …) means the file exists at `images/<bucket>/<id>.<ext>` and a URL may be built from it. A **wholly numeric** value is an HTTP status the server answered with: `404`/`410` mean the preview is permanently missing and will not be retried, any other code is recorded but still retryable. Any other token (`html`, `svg+xml`) is a content type that was not a picture this downloader can store. NULL means nothing has been recorded yet. One rule follows from this: **a URL is only ever built from a known image extension**, which `src/images.py` owns so the writer and every reader agree. |
+| `image_answer` | STATE | The preview's **outcome**, not only its file type. A real extension (`jpg`, `png`, …) means the file exists at `images/<bucket>/<id>.<ext>` and a URL may be built from it. A **wholly numeric** value is an HTTP status the server answered with: `404`/`410` mean the preview is permanently missing and will not be retried, any other code is recorded but still retryable. Any other token (`html`, `svg+xml`) is a content type that was not a picture this downloader can store. NULL means nothing has been recorded yet. One rule follows from this: **a URL is only ever built from a known image extension**, which `src/images.py` owns so the writer and every reader agree. |
 | `is_queued_for_subscription` | QUEUE | Subscription queue flag. Set by the TUI (`s`) and by `POST /api/toggle_subscription_queue/<id>`; cleared whenever the owner's subscription is observed, so nothing is left pending for an item that is now subscribed: by `mark_own_subscribed` — which the subscribe engine calls on a confirmed subscribe and on its already-`toggled` short-circuit — by `POST /api/subscribed/<id>` and `POST /api/subscribe_failed/<id>` when the userscript reports an outcome, and by a subscription reconcile for any item it finds already subscribed. Transient working state — it reads `0` whenever nothing is queued, which is the normal resting state, not evidence of disuse. |
 | `own_subscribed` | STATE (ours) | Whether **the owner** — the account whose API key and cookies are configured — is subscribed to this item right now. Reconciled from the signed-in Workshop subscriptions page (`src/subscription_sync.py`), stamped immediately by `POST /api/subscribed/<id>` when the userscript confirms a subscribe, and stamped by `src/subscribe_engine.py` both when its confirmation read shows the item subscribed and when its pre-read already shows `toggled` (no request is sent in that case). Not to be confused with `subscriptions` / `lifetime_subscriptions`, which are item-wide counts that cannot be attributed to an account. |
 | `own_first_subscribed_at` | STATE (ours) | When we first *saw* the owner subscribed, Unix epoch seconds; NULL means never seen. **Sticky**: it is never moved or cleared, and it is the only source of the `previously` marker state. Steam exposes no per-account subscription history, so this means "first seen by us", not "first subscribed" — on the day this column shipped it was NULL for every row, and it fills in over time. |
-| `downloaded_at` | STATE (ours) | When this app first saw Steam's downloaded copy of a **subscribed** item on disk, Unix epoch seconds; NULL means not confirmed on disk. **The `downloaded` marker requires this column *and* `own_subscribed`**, so a stray timestamp beside a cleared subscription cannot claim the green star. It is a local latch with exactly one writer and one clearer: `src.workshop_folders` stamps it when its periodic scan finds `<library>/steamapps/workshop/content/<consumer_appid>/<workshop_id>/` for an item that is `own_subscribed = 1` and not yet confirmed, and it only ever writes — a missing folder, an unplugged drive or a moved library changes nothing and a confirmed item is never revisited. The only clearer is `apply_own_subscriptions`, in the same transaction that clears `own_subscribed` when the item leaves the owner's subscription list; re-subscribing re-earns the stamp on the next scan. It is excluded from the API merge allow-list (`daemon.MERGE_EXCLUDED_KEYS`), because it is not a Steam field. |
+| `steam_download_seen_at` | STATE (ours) | When this app first saw Steam's downloaded copy of a **subscribed** item on disk, Unix epoch seconds; NULL means not confirmed on disk. **The `downloaded` marker requires this column *and* `own_subscribed`**, so a stray timestamp beside a cleared subscription cannot claim the green star. It is a local latch with exactly one writer and one clearer: `src.workshop_folders` stamps it when its periodic scan finds `<library>/steamapps/workshop/content/<consumer_appid>/<workshop_id>/` for an item that is `own_subscribed = 1` and not yet confirmed, and it only ever writes — a missing folder, an unplugged drive or a moved library changes nothing and a confirmed item is never revisited. The only clearer is `apply_own_subscriptions`, in the same transaction that clears `own_subscribed` when the item leaves the owner's subscription list; re-subscribing re-earns the stamp on the next scan. It is excluded from the API merge allow-list (`daemon.MERGE_EXCLUDED_KEYS`), because it is not a Steam field. |
 
 ### Queue columns
 
 | Column | Queue |
 |---|---|
 | `api_priority` | Steam API fetch queue. |
-| `needs_web_scrape` | HTML scrape queue. |
-| `needs_image` | Preview image download queue. |
+| `web_scrape_priority` | HTML scrape queue. |
+| `image_priority` | Preview image download queue. |
 | `translation_priority` | Translation queue mirror. Raised together with the `translation_queue` row by `queue_field_for_translation` (which takes the `MAX` of the stored and new priority) **in one transaction**, and zeroed by the translator when the item's last queue row is deleted. A priority above `0` therefore means the item has at least one queued field; migration 22→23 cleared the rows that disagreed. |
 
 ## `creators`
@@ -185,7 +185,7 @@ things depend on it:
   not membership: an item that does not match is queued at `1` for anything the page can change,
   and translation is the only stage skipped outright for it. What it must never do is *outrank* an
   item the filters did select. An enrichment filter can be a `Subscribed` row over
-  `own_subscribed` / `own_first_subscribed_at` / `is_queued_for_subscription` / `downloaded_at`;
+  `own_subscribed` / `own_first_subscribed_at` / `is_queued_for_subscription` / `steam_download_seen_at`;
   both in-memory readers (the daemon's decision and migration 21→22's demotion walk) load all four
   columns for it — see [search-filter.md](search-filter.md) and
   [data-pipeline.md](data-pipeline.md).

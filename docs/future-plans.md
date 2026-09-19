@@ -232,7 +232,7 @@ breakdowns improve by roughly 7× rather than becoming free; and the web queue's
 covers about 89% of rows, so its partial index is nearly full-size.
 
 **One row's framing is narrower than the code.** The shipped `priority_breakdowns` metric covers
-`translation_priority`, `needs_image` and `needs_web_scrape` only, so the table's "API queue
+`translation_priority`, `image_priority` and `web_scrape_priority` only, so the table's "API queue
 breakdown" has no caller in the statistics today — it is the `GROUP BY api_priority` shape the row
 was measured on. The API queue is read in shipped code by the fetch poll and by
 `count_fetchable_items` (the daemon's "is there work?" count), and the new index serves both; the
@@ -277,8 +277,8 @@ much later as work that mysteriously never happened.
 
 | Issue | What the producing stage wrote | Why the consuming stage could not see it |
 |---|---|---|
-| 17 | `fetch_status = -1` and `api_priority = 0` | `needs_web_scrape` and `needs_image` were left set, so the worker polls kept selecting a dead item forever |
-| 19 | `extended_description = NULL`, `needs_web_scrape = 0` | The consumer requires a description; the item was recorded as done and never retried |
+| 17 | `fetch_status = -1` and `api_priority = 0` | `web_scrape_priority` and `image_priority` were left set, so the worker polls kept selecting a dead item forever |
+| 19 | `extended_description = NULL`, `web_scrape_priority = 0` | The consumer requires a description; the item was recorded as done and never retried |
 | 20 | `api_priority` left to the column default | On a migrated database that default is `0` and the fetch queue requires `> 0`, so a discovered item was queued nowhere |
 
 The common cause is that each stage's exit condition is written down only in the stage that performs
@@ -290,8 +290,8 @@ between them, so nothing can test it.
 Every item is, at all times, in **exactly one** of these states:
 
 * queued for the API fetch (`api_priority > 0`), or
-* queued for a web scrape (`needs_web_scrape > 0`), or
-* queued for an image (`needs_image > 0`), or
+* queued for a web scrape (`web_scrape_priority > 0`), or
+* queued for an image (`image_priority > 0`), or
 * queued for translation (`translation_priority > 0`), or
 * complete for the stage that owns it, or
 * deliberately dead (`fetch_status = -1`) and therefore in **no** queue.
@@ -512,7 +512,7 @@ refreshed by whichever code path happens to know about a change.
 - The TUI has exactly one list-refresh path, and it is **subscription-scoped by construction**:
   `SubscriptionQueueScreen.refresh_subscription_rows` (`src/tui.py:2543`) documents that "Only the
   subscription columns are replaced, so the rest of the row's data is left as it was". A field
-  that changes the marker's *precedence* — `downloaded_at`, which outranks `subscribed` in
+  that changes the marker's *precedence* — `steam_download_seen_at`, which outranks `subscribed` in
   `src/subscription.py` — is therefore outside the scope of the only method that redraws a row.
   It is driven by `_start_subscription_poll`/`_poll_queued_subscriptions` (`:2507`, `:2525`) and
   reached from the detail pane through `getattr(self.app, "refresh_subscription_rows", None)`
@@ -524,7 +524,7 @@ refreshed by whichever code path happens to know about a change.
   `refreshItemState(wid)` (`:1412`) is a per-item path, but it is called from specific actions
   rather than from a general "this item changed" signal.
 - Changes made by **background workers have no path at all**: `src/workshop_folders.py:362` writes
-  `downloaded_at` from the daemon's folder scan, and neither front end has a channel to that.
+  `steam_download_seen_at` from the daemon's folder scan, and neither front end has a channel to that.
 
 So the two front ends do not merely differ in detail — they have differently shaped mechanisms
 (one subscription-column-only refresh, one state-conditional poll), which is why the same item can
@@ -553,7 +553,7 @@ the other is stale.
    refresh: the producer of an update says what changed, and the subscription decides who hears it.
 5. **A refresh trigger that is not conditional on one state.** A general poll while either front end
    is open, or better a daemon-side signal for background changes — the folder scan writing
-   `downloaded_at`, a scrape or translation completing — so a change made while the user is watching
+   `steam_download_seen_at`, a scrape or translation completing — so a change made while the user is watching
    arrives without the user having to act. Whatever the mechanism, the web must not stop updating
    merely because nothing is `pending`.
 6. **Tests that pin the invariant rather than the paths**: a change written to the database behind
@@ -561,7 +561,7 @@ the other is stale.
    front ends; a non-subscription change (a download) moves the marker in both; a panel that has
    stopped displaying an item receives nothing.
 
-**What this would have caught.** The owner's report directly: `downloaded_at` moving while the list
+**What this would have caught.** The owner's report directly: `steam_download_seen_at` moving while the list
 held the previous marker. It also covers the general class — any new column that feeds a display
 and any new writer of an existing one — because the fix is defined by the invariant rather than by
 enumerating the paths.

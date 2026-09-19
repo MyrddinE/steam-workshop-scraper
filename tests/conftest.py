@@ -31,6 +31,12 @@ def restore_pre_rename_table_names(conn) -> None:
     reason: migrations 6->7 and 13->14 build ``idx_creator_dt_updated`` and
     ``idx_creator_api_fetched_at`` on the old column, so a rewound marker must
     present it. Migration 31->32 renames it forward again.
+
+    Migration 32->33 renamed four more columns -- ``needs_web_scrape``,
+    ``needs_image``, ``image_extension`` and ``downloaded_at`` -- for the same
+    reason: migrations 2->3, 3->4, 12->13, 16->17, 17->18, 21->22 and 25->26
+    all read the historical names, so a marker rewound below 33 must present
+    them. Migration 32->33 renames them forward again.
     """
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
@@ -44,6 +50,16 @@ def restore_pre_rename_table_names(conn) -> None:
         conn.execute("ALTER TABLE workshop_items RENAME COLUMN fetch_status TO status")
     if "creator_steamid" in columns and "creator" not in columns:
         conn.execute("ALTER TABLE workshop_items RENAME COLUMN creator_steamid TO creator")
+    for new_name, old_name in (
+        ("web_scrape_priority", "needs_web_scrape"),
+        ("image_priority", "needs_image"),
+        ("image_answer", "image_extension"),
+        ("steam_download_seen_at", "downloaded_at"),
+    ):
+        if new_name in columns and old_name not in columns:
+            conn.execute(
+                f"ALTER TABLE workshop_items RENAME COLUMN {new_name} TO {old_name}"
+            )
 
 # Deterministic test database constants
 _DET_SEED = 42

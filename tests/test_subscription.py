@@ -12,7 +12,7 @@ The decisions pinned here are the ones easy to "fix" back:
 * **Precedence.** ``downloaded`` beats ``subscribed``, which beats ``queued``
   (there is nothing left to queue), which beats ``previously``, which beats
   ``never``.
-* **``downloaded`` needs both flags.** A stray ``downloaded_at`` beside a
+* **``downloaded`` needs both flags.** A stray ``steam_download_seen_at`` beside a
   cleared ``own_subscribed`` must not claim the green star.
 * **The sticky timestamp is the only source of ``previously``.** A row whose
   ``own_subscribed`` has been cleared still reads ``previously`` because we saw
@@ -39,7 +39,7 @@ def _item(**over) -> dict:
         "own_subscribed": 0,
         "own_first_subscribed_at": None,
         "is_queued_for_subscription": 0,
-        "downloaded_at": None,
+        "steam_download_seen_at": None,
     }
     item.update(over)
     return item
@@ -58,7 +58,7 @@ def test_a_current_subscription_is_subscribed():
 
 def test_a_subscribed_downloaded_item_is_downloaded():
     assert subscription.subscription_state(
-        _item(own_subscribed=1, downloaded_at=1000)) == subscription.DOWNLOADED
+        _item(own_subscribed=1, steam_download_seen_at=1000)) == subscription.DOWNLOADED
 
 
 def test_a_queued_item_draws_queued():
@@ -76,21 +76,21 @@ def test_a_seen_but_unsubscribed_item_is_previously():
 
 def test_a_downloaded_item_beats_a_bare_subscription():
     assert subscription.subscription_state(
-        _item(own_subscribed=1, downloaded_at=1000)) == subscription.DOWNLOADED
+        _item(own_subscribed=1, steam_download_seen_at=1000)) == subscription.DOWNLOADED
 
 
 def test_a_stray_downloaded_timestamp_without_the_flag_is_not_downloaded():
     """The latch is a green claim only beside a live subscription.
 
-    ``downloaded_at`` is cleared with ``own_subscribed`` by the subscription
+    ``steam_download_seen_at`` is cleared with ``own_subscribed`` by the subscription
     walk, but a timestamp that survived some other path -- an old row, a manual
     edit -- must not draw the green star on its own.
     """
-    assert subscription.subscription_state(_item(downloaded_at=1000)) == subscription.NEVER
+    assert subscription.subscription_state(_item(steam_download_seen_at=1000)) == subscription.NEVER
     assert subscription.subscription_state(
-        _item(downloaded_at=1000, own_first_subscribed_at=5)) == subscription.PREVIOUSLY
+        _item(steam_download_seen_at=1000, own_first_subscribed_at=5)) == subscription.PREVIOUSLY
     assert subscription.subscription_state(
-        _item(downloaded_at=1000, is_queued_for_subscription=1)) == subscription.QUEUED
+        _item(steam_download_seen_at=1000, is_queued_for_subscription=1)) == subscription.QUEUED
 
 
 def test_a_subscribed_item_with_a_stale_queue_flag_is_subscribed():
@@ -120,7 +120,7 @@ def test_the_precedence_order_is_declared_strongest_first():
 
 def test_each_adjacent_pair_of_the_stated_precedence():
     """Each adjacent pair of the stated precedence, in one place."""
-    assert (subscription.subscription_state(_item(own_subscribed=1, downloaded_at=1))
+    assert (subscription.subscription_state(_item(own_subscribed=1, steam_download_seen_at=1))
             == subscription.DOWNLOADED)
     assert (subscription.subscription_state(
         _item(own_subscribed=1, is_queued_for_subscription=1)) == subscription.SUBSCRIBED)

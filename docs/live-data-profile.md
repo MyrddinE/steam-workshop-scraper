@@ -18,7 +18,7 @@ names here are the current ones unless a passage is explicitly describing the mi
 * **1,725,544** items.
 * **96.7%** of them (1,667,817) have no `extended_description` — the web scraper has run on only a
   small fraction of the dataset.
-* **89%** (1,537,998) sit at `needs_web_scrape = 1`.
+* **89%** (1,537,998) sit at `web_scrape_priority = 1`.
 * **1,273,020** items (73.8%) reference a `creator_steamid` that is absent from `creators`; only **24,566**
   creators exist.
 * Only **142,748** items have any translation.
@@ -39,15 +39,15 @@ No `1`, no `3`, no `10` — and `2` appears, which the scale does not document. 
 image worker's failure path (`image_worker.py`), a worker-specific retry marker rather than part
 of the shared vocabulary. The queues do not behave uniformly:
 
-* `needs_web_scrape`: `1` for **1,537,998** (89%), plus 0 / 2 / 3 / 5
-* `needs_image`: `1` for 1,391,080, `0` for 334,005, `5` for 459
+* `web_scrape_priority`: `1` for **1,537,998** (89%), plus 0 / 2 / 3 / 5
+* `image_priority`: `1` for 1,391,080, `0` for 334,005, `5` for 459
 * `translation_priority`: `3` for 91,655, `5` for 64, `10` for 5, `0` for the rest
 
 Treat the scale as per-queue. See [data-model.md](data-model.md) for the column semantics.
 
-**Re-measured 2026-09-17** (2,497,545 rows, five days after the snapshot above): `needs_web_scrape`
+**Re-measured 2026-09-17** (2,497,545 rows, five days after the snapshot above): `web_scrape_priority`
 held `0` for 87,535, **`1` for 1,544,799**, `2` for 2,406, **`3` for 862,650**, `5` for 155; and
-`needs_image` `1` for 1,391,781 with `3` for 670,502. The `3` band had gone from a rounding error to
+`image_priority` `1` for 1,391,781 with `3` for 670,502. The `3` band had gone from a rounding error to
 a third of the queue in five days, because the daemon inherited a discovered item's `api_priority`
 (`3`) into these queues while **95% of what discovery finds fails the enrichment filters** — so the
 backlog was being filled, at discovery speed, with work on items the filters exclude. Migration

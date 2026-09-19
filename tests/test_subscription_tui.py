@@ -40,7 +40,7 @@ def _spans(markup: str):
 
 
 @pytest.mark.parametrize("columns,state", [
-    ({"own_subscribed": 1, "downloaded_at": 1000}, subscription.DOWNLOADED),
+    ({"own_subscribed": 1, "steam_download_seen_at": 1000}, subscription.DOWNLOADED),
     ({"own_subscribed": 1, "own_first_subscribed_at": 1000}, subscription.SUBSCRIBED),
     ({"is_queued_for_subscription": 1}, subscription.QUEUED),
     ({"own_first_subscribed_at": 1000}, subscription.PREVIOUSLY),
@@ -72,7 +72,7 @@ async def test_the_tui_list_row_draws_each_state(tmp_path, columns, state):
 
 
 @pytest.mark.parametrize("columns,state", [
-    ({"own_subscribed": 1, "downloaded_at": 1000}, subscription.DOWNLOADED),
+    ({"own_subscribed": 1, "steam_download_seen_at": 1000}, subscription.DOWNLOADED),
     ({"own_subscribed": 1, "own_first_subscribed_at": 1000}, subscription.SUBSCRIBED),
     ({"is_queued_for_subscription": 1}, subscription.QUEUED),
     ({"own_first_subscribed_at": 1000}, subscription.PREVIOUSLY),
@@ -321,7 +321,7 @@ def test_the_queue_row_builder_draws_the_downloaded_state():
     downloaded = {
         "workshop_id": 5, "title": "Item",
         "own_subscribed": 1, "is_queued_for_subscription": 0,
-        "own_first_subscribed_at": 1000, "downloaded_at": 2000,
+        "own_first_subscribed_at": 1000, "steam_download_seen_at": 2000,
     }
     line = SubscriptionQueueScreen._row_text(downloaded)
     plain, spans = str(line), [span.style for span in line.spans]
@@ -400,7 +400,7 @@ async def test_the_open_button_and_key_act_only_on_a_downloaded_item(tmp_path):
 
             # The scan stamps the latch; the pane's own refresh re-reads it.
             conn = get_connection(db_path)
-            conn.execute("UPDATE workshop_items SET downloaded_at = 123 WHERE workshop_id = 5")
+            conn.execute("UPDATE workshop_items SET steam_download_seen_at = 123 WHERE workshop_id = 5")
             conn.commit()
             conn.close()
             await pane.refresh_data()

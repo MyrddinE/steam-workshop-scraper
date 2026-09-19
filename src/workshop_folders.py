@@ -7,7 +7,7 @@ seen that folder on disk", and this module owns the three things that need that
 fact:
 
 * :func:`WorkshopFolders.scan` -- the periodic walk that stamps
-  ``downloaded_at`` for subscribed, unconfirmed items whose folder exists. **It
+  ``steam_download_seen_at`` for subscribed, unconfirmed items whose folder exists. **It
   only ever writes.** A missing folder, an unplugged drive or a moved library
   must never take the green star away, and a confirmed item is never revisited;
   the only clearer is the subscription walk in ``src.database``, for the item
@@ -327,9 +327,9 @@ class WorkshopFolders:
     # --- the scan ----------------------------------------------------------
 
     def scan_downloads(self, now: int | None = None) -> dict:
-        """Stamp ``downloaded_at`` on subscribed, unconfirmed items on disk.
+        """Stamp ``steam_download_seen_at`` on subscribed, unconfirmed items on disk.
 
-        The candidate set is exactly ``own_subscribed = 1 AND downloaded_at IS
+        The candidate set is exactly ``own_subscribed = 1 AND steam_download_seen_at IS
         NULL``: items that are subscribed and not yet confirmed. It never clears
         anything and never revisits a confirmed item, so an unplugged drive
         cannot take the green star away. Returns ``{"checked", "stamped"}``
@@ -347,7 +347,7 @@ class WorkshopFolders:
         try:
             rows = conn.execute(
                 "SELECT workshop_id, consumer_appid FROM workshop_items "
-                "WHERE own_subscribed = 1 AND downloaded_at IS NULL"
+                "WHERE own_subscribed = 1 AND steam_download_seen_at IS NULL"
             ).fetchall()
             for row in rows:
                 if self._find_folder_in(dirs, row["consumer_appid"], row["workshop_id"]):
@@ -359,8 +359,8 @@ class WorkshopFolders:
                 # The own_subscribed guard keeps a reconcile that cleared the
                 # flag mid-scan from being re-stamped by this write.
                 conn.execute(
-                    f"UPDATE workshop_items SET downloaded_at = ? "
-                    f"WHERE downloaded_at IS NULL AND own_subscribed = 1 "
+                    f"UPDATE workshop_items SET steam_download_seen_at = ? "
+                    f"WHERE steam_download_seen_at IS NULL AND own_subscribed = 1 "
                     f"AND workshop_id IN ({placeholders})",
                     [stamp, *stamped_ids],
                 )
@@ -403,7 +403,7 @@ class WorkshopFolders:
         conn = get_connection(self.db_path)
         try:
             row = conn.execute(
-                "SELECT consumer_appid, own_subscribed, downloaded_at "
+                "SELECT consumer_appid, own_subscribed, steam_download_seen_at "
                 "FROM workshop_items WHERE workshop_id = ?",
                 (workshop_id,),
             ).fetchone()
@@ -415,7 +415,7 @@ class WorkshopFolders:
                 "ok": False, "folder": None,
                 "message": f"No workshop item with id {workshop_id}.",
             }
-        if not (row["own_subscribed"] and row["downloaded_at"]):
+        if not (row["own_subscribed"] and row["steam_download_seen_at"]):
             return {
                 "ok": False, "folder": None,
                 "message": ("Only a subscribed item Steam has downloaded can be opened; "

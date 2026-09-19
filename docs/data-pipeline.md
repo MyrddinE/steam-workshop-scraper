@@ -45,8 +45,8 @@ The sweep **makes work, it does not do work**, so it records its own `rowcount` 
 
 Marks a subscribed item as downloaded once Steam has its folder on disk, so both front ends can draw
 the solid green `downloaded` star. The scan selects exactly the items that are `own_subscribed = 1 AND
-downloaded_at IS NULL` — subscribed and not yet confirmed — and for each one checks
-`<library>/steamapps/workshop/content/<consumer_appid>/<workshop_id>/`, stamping `downloaded_at` when it
+steam_download_seen_at IS NULL` — subscribed and not yet confirmed — and for each one checks
+`<library>/steamapps/workshop/content/<consumer_appid>/<workshop_id>/`, stamping `steam_download_seen_at` when it
 exists. **It only ever writes.** A missing folder, an unplugged drive or a moved library leaves the
 marker alone, and a confirmed item is never revisited; the only clearer is the subscription walk
 (`apply_own_subscriptions`), in the same transaction that clears `own_subscribed` when the item leaves
@@ -73,7 +73,7 @@ AppID and, for every id it sees, stamps `own_subscribed = 1`, sets the sticky `o
 while that is still NULL, and clears `is_queued_for_subscription` — there is nothing left to queue for an
 item that is already subscribed. An id the walk does *not* see is evidence only about the pages that were
 read, so an incomplete walk unstamps nothing. A **complete** walk that does not see an item clears both
-its `own_subscribed` and its `downloaded_at` latch in one transaction: leaving the subscription list is
+its `own_subscribed` and its `steam_download_seen_at` latch in one transaction: leaving the subscription list is
 the one event that takes the green `downloaded` star away, and it is the only clearer the latch has.
 
 `_maybe_reconcile_subscriptions` guards it on a monotonic clock: `SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS`
@@ -144,9 +144,9 @@ The one-id spelling of the batch call, kept for existing callers. Returns `{stat
 
 ### `_merge_and_clean_api_data` (daemon)
 
-Merges API response data into the existing DB row. Applies column-name remapping (`creator_app_id` → `creator_appid`, `description` → `short_description`, `time_created`/`time_updated` → `steam_created_at`/`steam_updated_at`). Filters to `MERGE_ITEM_KEYS` (derived from `WORKSHOP_ITEM_COLUMNS`) to prevent unknown API columns from polluting the DB, and discards known-but-handled-externally keys (for example `needs_web_scrape`, `image_extension`, `needs_image`, `translation_priority`). Normalizes tags via `normalize_tags`. On the success path it stamps `api_fetched_at = now_ts` and `api_priority = 0`.
+Merges API response data into the existing DB row. Applies column-name remapping (`creator_app_id` → `creator_appid`, `description` → `short_description`, `time_created`/`time_updated` → `steam_created_at`/`steam_updated_at`). Filters to `MERGE_ITEM_KEYS` (derived from `WORKSHOP_ITEM_COLUMNS`) to prevent unknown API columns from polluting the DB, and discards known-but-handled-externally keys (for example `web_scrape_priority`, `image_answer`, `image_priority`, `translation_priority`). Normalizes tags via `normalize_tags`. On the success path it stamps `api_fetched_at = now_ts` and `api_priority = 0`.
 
-The queue-owned columns are dropped rather than carried because the merge is a read-modify-write: the existing row is read before the API call and written back after it, so a queue flag that changed while the request was in flight would be overwritten by the stale snapshot. `needs_web_scrape` and `needs_image` are set explicitly between the merge and the insert; `translation_priority` is written by `queue_field_for_translation` just after the insert, so the merge must leave the column untouched.
+The queue-owned columns are dropped rather than carried because the merge is a read-modify-write: the existing row is read before the API call and written back after it, so a queue flag that changed while the request was in flight would be overwritten by the stale snapshot. `web_scrape_priority` and `image_priority` are set explicitly between the merge and the insert; `translation_priority` is written by `queue_field_for_translation` just after the insert, so the merge must leave the column untouched.
 
 ### `_should_enrich` (daemon)
 
@@ -156,7 +156,7 @@ Checks whether an item passes the enrichment filter for its AppID. Reads `enrich
 
 **A `Subscribed` row can now be saved as an enrichment filter**, so the daemon
 evaluates it in memory against four columns. The merge above deliberately drops
-`is_queued_for_subscription` and `downloaded_at` (they are in `MERGE_EXCLUDED_KEYS`),
+`is_queued_for_subscription` and `steam_download_seen_at` (they are in `MERGE_EXCLUDED_KEYS`),
 so the merged record alone would read them as NULL and a `queued`/`downloaded`
 filter would silently answer "no match". `_raise_scrape_and_image_priorities` therefore
 overlays the pre-fetch record's values for exactly those columns on a copy before
@@ -166,7 +166,7 @@ all four when it selects the columns to load — see [search-filter.md](search-f
 
 ### Failure classification (daemon)
 
-`_settle_api_failure` turns a non-success outcome into a queue decision. `404` is permanent: the failure is logged, the item is marked dead (`fetch_status = -1`) and it is removed from **every** queue — `api_priority`, `needs_web_scrape`, `needs_image` and `translation_priority` are all cleared, because a dead item can never complete and a queue flag left set would strand it in a queue that never drains. Everything else is temporary — `500` (including every id of a request that failed and was settled as `500`), transport exceptions, and any status no branch handles. Those keep the item queued at one priority level lower, floored at `1`, because priority `0` means "not queued" and clearing it is what previously stranded transient failures with nothing able to bring them back. Unhandled statuses are captured as evidence and never fall through to the success path.
+`_settle_api_failure` turns a non-success outcome into a queue decision. `404` is permanent: the failure is logged, the item is marked dead (`fetch_status = -1`) and it is removed from **every** queue — `api_priority`, `web_scrape_priority`, `image_priority` and `translation_priority` are all cleared, because a dead item can never complete and a queue flag left set would strand it in a queue that never drains. Everything else is temporary — `500` (including every id of a request that failed and was settled as `500`), transport exceptions, and any status no branch handles. Those keep the item queued at one priority level lower, floored at `1`, because priority `0` means "not queued" and clearing it is what previously stranded transient failures with nothing able to bring them back. Unhandled statuses are captured as evidence and never fall through to the success path.
 
 These per-item outcomes never touch `api_delay`. A batch request that returned and parsed is a success even when some of its items settle here, so only `_fetch_details` — which counts the request once — moves the delay; see the delay rule above.
 
@@ -182,10 +182,10 @@ A stage is therefore re-queued because its source changed, or because its output
 
 ### `WebScraperThread` (web_worker)
 
-A daemon thread that picks up items from `get_next_web_scrape_item`, ordered by `needs_web_scrape DESC, api_fetched_at ASC` (highest priority first, oldest-fetched within priority). For each item:
+A daemon thread that picks up items from `get_next_web_scrape_item`, ordered by `web_scrape_priority DESC, api_fetched_at ASC` (highest priority first, oldest-fetched within priority). For each item:
 
 1. Calls `scrape_extended_details(url)` which fetches the Steam Community workshop page and parses the extended description and tags.
-2. If the description was found, updates `extended_description`, sets `needs_web_scrape = 0`, records `scrape_version = steam_updated_at` and stamps `web_scraped_at` with our clock. The tags the scraper returns are not persisted; tags in the database come from the API.
+2. If the description was found, updates `extended_description`, sets `web_scrape_priority = 0`, records `scrape_version = steam_updated_at` and stamps `web_scraped_at` with our clock. The tags the scraper returns are not persisted; tags in the database come from the API.
 3. Flags non-ASCII `extended_description` for translation at priority 3, unless its translation is already current (see [What queues a field for translation](#what-queues-a-field-for-translation)).
 4. If the request could not be completed at all — a transport failure, which `scrape_extended_details` reports as `None` — raises `api_priority` to 2 so the metadata is re-fetched (that value has no other source); nothing is cleared, so the item stays in the scrape queue.
 5. Otherwise `classify_scrape` names the outcome and the run loop responds to it (see [Outcome taxonomy](#outcome-taxonomy)). Every non-success outcome that carries a served page is captured as evidence, and a miss is never a blanket failure or an empty success: the wording and markup decide what the queue learns. See [failure-capture.md](failure-capture.md).
@@ -196,16 +196,16 @@ A daemon thread that picks up items from `get_next_web_scrape_item`, ordered by 
 
 | Outcome | Recognised by | Item's queue flag | Pacing response |
 |---|---|---|---|
-| `SUCCESS` | `description` is not `None` | `needs_web_scrape = 0` | success: resets the failure streak, can decay the delay |
+| `SUCCESS` | `description` is not `None` | `web_scrape_priority = 0` | success: resets the failure streak, can decay the delay |
 | `RATE_LIMITED` | the body reports "too many requests" | untouched | the delay doubles, at once |
-| `ITEM_MISSING` | HTTP 404/410, or the page's item-error wording | `needs_web_scrape = 0` | no back-off |
-| `ITEM_PAGE_WITHOUT_DESCRIPTION` | `workshopItem` present, `highlightContent` absent | `needs_web_scrape = 0` | neutral: neither success nor failure |
+| `ITEM_MISSING` | HTTP 404/410, or the page's item-error wording | `web_scrape_priority = 0` | no back-off |
+| `ITEM_PAGE_WITHOUT_DESCRIPTION` | `workshopItem` present, `highlightContent` absent | `web_scrape_priority = 0` | neutral: neither success nor failure |
 | `GATED` | no item markup, plus an age-check, sign-in or error marker | untouched | no back-off; `_refresh_login_cookie_if_gated_or_signed_out` has already re-read the login cookie if the page looked gated |
 | `UNKNOWN` | a transport failure, a 5xx, or a page that is neither the item's nor a recognised condition | untouched (a transport failure also raises `api_priority` to 2) | grows `web_delay` |
 
 A 5xx is `UNKNOWN` whatever its body says: the status is a server fault with no attributable cause, so it keeps the back-off.
 
-**A missing item.** A live probe found that the Workshop serves its item-error page with **HTTP 200**, not 404 — a well-formed but absent id returned "There was a problem accessing the item", and a malformed id returned "That item does not exist" — so the status is not trusted and the wording is matched as well (`looks_like_missing_item`). The worker clears `needs_web_scrape` but deliberately does **not** mark the row dead: existence is the API's call, and the API makes it on its own 404. Clearing the flag is the conservative move — the API re-flags the item while its description is still missing if Steam ever serves it again — and it is what stops a gone item spinning in the queue at full pace now that it no longer backs off. Both the status (when there is one) and the matched wording are logged, and the page is captured as evidence, because there was no capture of this page before. A definitive HTTP 404/410 does not even earn the cookie refresh — no credential materialises a gone item — while the HTTP 200 wording still re-reads the cookie, since there the status proves nothing.
+**A missing item.** A live probe found that the Workshop serves its item-error page with **HTTP 200**, not 404 — a well-formed but absent id returned "There was a problem accessing the item", and a malformed id returned "That item does not exist" — so the status is not trusted and the wording is matched as well (`looks_like_missing_item`). The worker clears `web_scrape_priority` but deliberately does **not** mark the row dead: existence is the API's call, and the API makes it on its own 404. Clearing the flag is the conservative move — the API re-flags the item while its description is still missing if Steam ever serves it again — and it is what stops a gone item spinning in the queue at full pace now that it no longer backs off. Both the status (when there is one) and the matched wording are logged, and the page is captured as evidence, because there was no capture of this page before. A definitive HTTP 404/410 does not even earn the cookie refresh — no credential materialises a gone item — while the HTTP 200 wording still re-reads the cookie, since there the status proves nothing.
 
 **Dynamic delay**: The shape is shared with the other queues (`src/pacing.py`) even though the unit is not: a page scrape is one request per item and cannot be batched, so the worker keeps its own `web_delay_seconds`. Every refusal doubles the delay and healthy operation halves it for every 600 s it has been running, so the web scraper recovers over the same wall-clock window as the API and the image worker. The old per-item 100-success / 2-failure compounding rule is gone: a success count is a different amount of time at every delay, so it made the worker recover faster the faster it was already going.
 
@@ -264,7 +264,7 @@ it too, a page that is not the item's — an error page, a wall, a throttle the 
 the priority untouched, and only a page matching no recognised condition counts as a failure for
 pacing. See the [outcome taxonomy](#outcome-taxonomy) and
 [Dynamic delay](#web-scraping-phase). Migration 17→18 requeues the rows the old "truthy dict is
-success" test stranded with `extended_description = NULL` and `needs_web_scrape = 0`; see
+success" test stranded with `extended_description = NULL` and `web_scrape_priority = 0`; see
 [schema-migrations.md](schema-migrations.md).
 
 ### `scrape_extended_details` (web_scraper)
@@ -405,15 +405,15 @@ outbox.
 
 ### `ImageDownloadThread` (image_worker)
 
-A daemon thread that picks up items from `get_next_image_item`, ordered by `needs_image DESC, api_fetched_at ASC`. For each item:
+A daemon thread that picks up items from `get_next_image_item`, ordered by `image_priority DESC, api_fetched_at ASC`. For each item:
 
-1. Checks `preview_url`. If absent, clears `needs_image = 0` (no image to download).
+1. Checks `preview_url`. If absent, clears `image_priority = 0` (no image to download).
 2. Downloads the image via `requests.get(stream=True)`. Detects MIME type from Content-Type header, mapping known types (`image/jpeg` → `jpg`, `image/png` → `png`, etc.) via `MIME_MAP`.
 3. If Content-Type is unrecognized, uses `puremagic` (a file-magic detection library) on the first 8KB of the response body to guess the extension. Maps puremagic extensions via `MAGIC_EXT_MAP` (includes `.jfif` → `jpg` for JPEG variants).
-4. If extension can't be determined, logs a warning (including the puremagic guess), captures the served response as an image failure, and records the **served type** in `image_extension` (`html` for an error page, `svg+xml` for a picture format the downloader cannot write) while clearing `needs_image = 0`. It does not increment the failure counter: an unrecognised type is not a transient error, and it is final — the same response is what a retry would get.
+4. If extension can't be determined, logs a warning (including the puremagic guess), captures the served response as an image failure, and records the **served type** in `image_answer` (`html` for an error page, `svg+xml` for a picture format the downloader cannot write) while clearing `image_priority = 0`. It does not increment the failure counter: an unrecognised type is not a transient error, and it is final — the same response is what a retry would get.
 5. Saves the image to `images/{workshop_id}.{ext}`.
-6. On success updates `image_extension` to the extension, sets `needs_image = 0`, and stamps `image_fetched_at` with our clock. It does not touch `scrape_version`: that column records the revision the *page* was scraped at, which is not what an image download observes.
-7. On failure, splits on whether the server actually answered. A **permanent status** (`404`, `410`) is written into `image_extension`, `needs_image` is cleared, and `api_priority` is deliberately **not** raised — raising it asked for an API refresh, the refresh re-flagged the image, and the download 404'd again, which is how one item came to be fetched twenty-five times in a day for a preview that never existed. A permanent answer is also neutral for pacing. Any **other** failure decrements `needs_image` by 1 (down to a minimum of 0) and raises `api_priority` to 2, so transient errors are retried with decreasing priority.
+6. On success updates `image_answer` to the extension, sets `image_priority = 0`, and stamps `image_fetched_at` with our clock. It does not touch `scrape_version`: that column records the revision the *page* was scraped at, which is not what an image download observes.
+7. On failure, splits on whether the server actually answered. A **permanent status** (`404`, `410`) is written into `image_answer`, `image_priority` is cleared, and `api_priority` is deliberately **not** raised — raising it asked for an API refresh, the refresh re-flagged the image, and the download 404'd again, which is how one item came to be fetched twenty-five times in a day for a preview that never existed. A permanent answer is also neutral for pacing. Any **other** failure decrements `image_priority` by 1 (down to a minimum of 0) and raises `api_priority` to 2, so transient errors are retried with decreasing priority.
 
 **Evidence capture.** Every image failure — an HTTP status, a transport exception, or an unclassifiable MIME type — is captured whenever `daemon.outbox_dir` is set, with its status, response headers, URL, content type and length, and the exception text when there is no response. A download that succeeds is captured **only** while the `daemon.capture_image_downloads` debug switch is on, with the same metadata plus the number of bytes written and the path of the saved file. The image bytes themselves are never copied into the outbox: the file under `images/` is the artefact, so a capture holds metadata only (see [failure-capture.md](failure-capture.md)).
 
@@ -531,7 +531,7 @@ Items become visible in search once they have `fetch_status = 200` (API details 
 
 ### Summary fields
 
-The `summary_only` SELECT returns: `workshop_id, title, title_en, creator_steamid, consumer_appid, translate_version, is_queued_for_subscription, needs_web_scrape, needs_image, translation_priority, file_size, image_extension, wilson_subscription_score, wilson_favorite_score, personaname, personaname_en`. Tags are returned via a subquery joining `workshop_tags` and `tags` as a comma-separated string.
+The `summary_only` SELECT returns: `workshop_id, title, title_en, creator_steamid, consumer_appid, translate_version, is_queued_for_subscription, web_scrape_priority, image_priority, translation_priority, file_size, image_answer, wilson_subscription_score, wilson_favorite_score, personaname, personaname_en`. Tags are returned via a subquery joining `workshop_tags` and `tags` as a comma-separated string.
 
 ### Detail fields
 
@@ -544,8 +544,8 @@ The `summary_only` SELECT returns: `workshop_id, title, title_en, creator_steami
 Every item is, at all times, in exactly one state:
 
 * queued for the API fetch (`api_priority > 0`), or
-* queued for a web scrape (`needs_web_scrape > 0`), or
-* queued for an image (`needs_image > 0`), or
+* queued for a web scrape (`web_scrape_priority > 0`), or
+* queued for an image (`image_priority > 0`), or
 * queued for translation (`translation_priority > 0`), or
 * complete for the stage that owns it, or
 * deliberately dead (`fetch_status = -1`) and therefore in **no** queue.
@@ -557,10 +557,10 @@ to implement it — the producer that writes the column and the consumer that re
 | Handoff | Producer writes | Consumer selects on | Predicate function (`src/database.py`) |
 |---|---|---|---|
 | Discovery → API fetch | `api_priority = 3` for a cursor-discovered item, `5` for a page-discovered new or changed one, with `fetch_status` and `api_fetched_at` left NULL (`seed_database`, `_run_page_discovery`) | `get_next_items_to_fetch`: `api_priority > 0 AND (fetch_status IS NULL OR fetch_status != -1)` | `api_fetch_queue_predicate()` |
-| API fetch → web scrape | `fetch_status = 200`, `api_fetched_at = now`, then `raise_web_scrape_priority(max(3, requested))` — or `max(1, requested)` for an item the enrichment filters exclude (`_raise_scrape_and_image_priorities`) | `get_next_web_scrape_item`: `needs_web_scrape > 0`. The worker's own success test is that it stored a description, not merely that the flag is clear | `web_scrape_queue_predicate()` |
-| API fetch → image | `raise_image_priority(max(3, requested))`, or `max(1, requested)` when the filters exclude, whenever `preview_url` is present (`_raise_scrape_and_image_priorities`) | `get_next_image_item`: `needs_image > 0`; `image_extension` records the answer, so a permanent `404` or a non-image type also settles the stage | `image_queue_predicate()` |
+| API fetch → web scrape | `fetch_status = 200`, `api_fetched_at = now`, then `raise_web_scrape_priority(max(3, requested))` — or `max(1, requested)` for an item the enrichment filters exclude (`_raise_scrape_and_image_priorities`) | `get_next_web_scrape_item`: `web_scrape_priority > 0`. The worker's own success test is that it stored a description, not merely that the flag is clear | `web_scrape_queue_predicate()` |
+| API fetch → image | `raise_image_priority(max(3, requested))`, or `max(1, requested)` when the filters exclude, whenever `preview_url` is present (`_raise_scrape_and_image_priorities`) | `get_next_image_item`: `image_priority > 0`; `image_answer` records the answer, so a permanent `404` or a non-image type also settles the stage | `image_queue_predicate()` |
 | API fetch and web scrape → translation | `queue_field_for_translation` raises the item's `translation_priority` with `MAX` and inserts a `translation_queue` row for each non-ASCII `title`/`short_description` (`_queue_translations`) or `extended_description` (`WebScraperThread`) | `get_next_batch_for_translation`: any `translation_queue` row; the translator clears the mirror to `0` when the item has no queue entries left | `translation_queue_predicate()` (the poll's; `translation_priority_predicate()` is the item-level mirror the invariant reads) |
-| any stage → dead | `_settle_api_failure` on a permanent `404`: `fetch_status = -1` and `api_priority`, `needs_web_scrape`, `needs_image` and `translation_priority` all cleared | every queue predicate. The web, image and translation polls have **no** dead-item guard, so that clear is what keeps a dead item out; the fetch queue also tests `fetch_status != -1` on its own | `queued_anywhere_predicate()` (built from the four above) |
+| any stage → dead | `_settle_api_failure` on a permanent `404`: `fetch_status = -1` and `api_priority`, `web_scrape_priority`, `image_priority` and `translation_priority` all cleared | every queue predicate. The web, image and translation polls have **no** dead-item guard, so that clear is what keeps a dead item out; the fetch queue also tests `fetch_status != -1` on its own | `queued_anywhere_predicate()` (built from the four above) |
 
 Each predicate is a named function, not a copy of its SQL: the worker poll
 interpolates the fragment into its statement and the tests in
@@ -614,7 +614,7 @@ population is what stops a bar promising work that cannot exist.
 | Translations (subsidiary) | **fields**, not items: `title` and `short_description` | the non-empty non-ASCII fields of the **filter-selected** items, because `_queue_translations` returns early unless the item was enriched. A field is filled when `translation_is_current` — stored and taken at the item's current `steam_updated_at` |
 | Extended Web | live items with a non-empty `extended_description` | every live item except the pages that answered with no description (a scrape that stored an empty description); that legitimate-blank count and the resulting ceiling are printed with the bar |
 | Extended Web Translation (subsidiary) | live items whose non-ASCII `extended_description` has a current `extended_description_en` | any **scraped** item with a non-ASCII description, not only the filter-selected ones: `WebScraperThread` flags the description regardless of enrichment. A non-ASCII description is a description, so this bar can never be longer than Extended Web above it |
-| Images | live items with a recorded `image_extension` | every live item; a recorded answer settles the stage even when the preview does not exist |
+| Images | live items with a recorded `image_answer` | every live item; a recorded answer settles the stage even when the preview does not exist |
 | Creator | live items with a creator | every live item |
 | Creator Translation (subsidiary) | **items** attributed to a creator whose `creators.personaname` is non-ASCII and whose `personaname_en` is current | the name lives per creator and is shared by every item that creator made, so the bar counts items to stay comparable with the per-item bars around it. Currency compares our clocks, `translated_at >= api_fetched_at`, because a creator has no `steam_updated_at` |
 
@@ -651,8 +651,8 @@ front ends render it identically: `outstanding`, a `per_day` rate, and a
 | Queue | Outstanding predicate | Completion clock | Rate |
 |---|---|---|---|
 | API fetch | `api_priority > 0` (and live) | `api_fetched_at` | **net** of the staleness sweep |
-| Web scrape | `needs_web_scrape > 0` (and live) | `web_scraped_at` | gross |
-| Image | `needs_image > 0` (and live) | `image_fetched_at` | gross |
+| Web scrape | `web_scrape_priority > 0` (and live) | `web_scraped_at` | gross |
+| Image | `image_priority > 0` (and live) | `image_fetched_at` | gross |
 | Translation | `translation_priority > 0` (and live) | `translated_at` | gross |
 
 Outstanding depth excludes dead items (matching `priority_breakdowns`): a dead
@@ -729,12 +729,12 @@ completion indexes migration 26→27 added. No new index was required.
     ├─► Web Scraper (if enriched): scrape_extended_details
     │      │
     │      ▼
-    │   [Scraped: extended_description populated, needs_web_scrape=0]
+    │   [Scraped: extended_description populated, web_scrape_priority=0]
     │
     ├─► Image Download (if preview_url): ImageDownloadThread
     │      │
     │      ▼
-    │   [Image: image_extension set, needs_image=0]
+    │   [Image: image_answer set, image_priority=0]
     │
     └─► Translator (if non-ASCII): TranslatorThread
            │
@@ -742,7 +742,7 @@ completion indexes migration 26→27 added. No new index was required.
         [Translated: title_en, etc. populated, translation_priority=0]
 ```
 
-Each thread operates independently. The web server's `_ensure_image_flagged` sets `needs_image=5` for list-viewed items and 10 for the detail view, and the daemon calls `raise_image_priority(max(3, requested))` for newly discovered items with a `preview_url`, where `requested` is the user-requested part of the item's pre-fetch `api_priority` (`user_requested_priority`).
+Each thread operates independently. The web server's `_ensure_image_flagged` sets `image_priority=5` for list-viewed items and 10 for the detail view, and the daemon calls `raise_image_priority(max(3, requested))` for newly discovered items with a `preview_url`, where `requested` is the user-requested part of the item's pre-fetch `api_priority` (`user_requested_priority`).
 
 ---
 

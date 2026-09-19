@@ -46,14 +46,14 @@ _EXPECTED = {
 }
 
 _FLAGS = {
-    1: dict(own_subscribed=0, own_first_subscribed_at=None, is_queued_for_subscription=0, downloaded_at=None),
-    2: dict(own_subscribed=1, own_first_subscribed_at=1000, is_queued_for_subscription=0, downloaded_at=None),
-    3: dict(own_subscribed=0, own_first_subscribed_at=2000, is_queued_for_subscription=0, downloaded_at=None),
-    4: dict(own_subscribed=0, own_first_subscribed_at=None, is_queued_for_subscription=1, downloaded_at=None),
-    5: dict(own_subscribed=1, own_first_subscribed_at=3000, is_queued_for_subscription=0, downloaded_at=4000),
-    6: dict(own_subscribed=1, own_first_subscribed_at=1500, is_queued_for_subscription=0, downloaded_at=None),
-    7: dict(own_subscribed=0, own_first_subscribed_at=2500, is_queued_for_subscription=1, downloaded_at=None),
-    8: dict(own_subscribed=1, own_first_subscribed_at=3500, is_queued_for_subscription=0, downloaded_at=4500),
+    1: dict(own_subscribed=0, own_first_subscribed_at=None, is_queued_for_subscription=0, steam_download_seen_at=None),
+    2: dict(own_subscribed=1, own_first_subscribed_at=1000, is_queued_for_subscription=0, steam_download_seen_at=None),
+    3: dict(own_subscribed=0, own_first_subscribed_at=2000, is_queued_for_subscription=0, steam_download_seen_at=None),
+    4: dict(own_subscribed=0, own_first_subscribed_at=None, is_queued_for_subscription=1, steam_download_seen_at=None),
+    5: dict(own_subscribed=1, own_first_subscribed_at=3000, is_queued_for_subscription=0, steam_download_seen_at=4000),
+    6: dict(own_subscribed=1, own_first_subscribed_at=1500, is_queued_for_subscription=0, steam_download_seen_at=None),
+    7: dict(own_subscribed=0, own_first_subscribed_at=2500, is_queued_for_subscription=1, steam_download_seen_at=None),
+    8: dict(own_subscribed=1, own_first_subscribed_at=3500, is_queued_for_subscription=0, steam_download_seen_at=4500),
 }
 
 
@@ -243,7 +243,7 @@ def _item(**over):
         "own_subscribed": 0,
         "own_first_subscribed_at": None,
         "is_queued_for_subscription": 0,
-        "downloaded_at": None,
+        "steam_download_seen_at": None,
     }
     item.update(over)
     return item
@@ -274,15 +274,15 @@ def test_daemon_reads_queued_from_the_prefetch_record(db_path):
 
 
 def test_daemon_reads_downloaded_from_the_prefetch_record(db_path):
-    """`downloaded_at` is excluded from the merge for the same reason."""
+    """`steam_download_seen_at` is excluded from the merge for the same reason."""
     from src.daemon import MERGE_EXCLUDED_KEYS
     save_enrichment_filters(db_path, 294100, enrichment_filters=json.dumps(
         [{"field": SUBSCRIBED_FIELD, "op": "is", "value": "downloaded"}]))
     daemon = _daemon_for(db_path)
 
-    existing = _item(own_subscribed=1, own_first_subscribed_at=1000, downloaded_at=5000)
+    existing = _item(own_subscribed=1, own_first_subscribed_at=1000, steam_download_seen_at=5000)
     merged = {k: v for k, v in existing.items() if k not in MERGE_EXCLUDED_KEYS}
-    assert "downloaded_at" not in merged
+    assert "steam_download_seen_at" not in merged
 
     outcome, web, _img = _flag(daemon, merged, existing)
     assert outcome.enriched is True
@@ -295,16 +295,16 @@ def test_demotion_walk_loads_the_columns_its_filter_reads(subscribed_db):
     save_enrichment_filters(subscribed_db, 294100, enrichment_filters=json.dumps(
         [{"field": SUBSCRIBED_FIELD, "op": "is", "value": "queued"}]))
     conn = get_connection(subscribed_db)
-    conn.execute("UPDATE workshop_items SET needs_web_scrape = 2 WHERE workshop_id = 4")
-    conn.execute("UPDATE workshop_items SET needs_web_scrape = 2 WHERE workshop_id = 1")
+    conn.execute("UPDATE workshop_items SET web_scrape_priority = 2 WHERE workshop_id = 4")
+    conn.execute("UPDATE workshop_items SET web_scrape_priority = 2 WHERE workshop_id = 1")
     conn.commit()
 
     _demote_filtered_out_queue_priorities(conn)
     conn.close()
 
     conn = get_connection(subscribed_db)
-    priorities = {r["workshop_id"]: r["needs_web_scrape"] for r in conn.execute(
-        "SELECT workshop_id, needs_web_scrape FROM workshop_items")}
+    priorities = {r["workshop_id"]: r["web_scrape_priority"] for r in conn.execute(
+        "SELECT workshop_id, web_scrape_priority FROM workshop_items")}
     conn.close()
 
     assert priorities[4] == 2, "the queued item matches the filter and is left alone"
@@ -496,7 +496,7 @@ async def test_tui_detail_pane_shows_subscribed_at_only_when_set(mock_config):
             base = {
                 "workshop_id": 7, "title": "T", "tags": "[]",
                 "own_subscribed": 1, "own_first_subscribed_at": 1700000000,
-                "is_queued_for_subscription": 0, "downloaded_at": None,
+                "is_queued_for_subscription": 0, "steam_download_seen_at": None,
             }
             pane.item_data = dict(base)
             await pilot.pause(ASYNC_PAUSE)

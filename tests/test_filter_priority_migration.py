@@ -1,6 +1,6 @@
 """Migration 21->22: filter-excluded items give up their queue priority.
 
-`needs_web_scrape` and `needs_image` *are* priority columns, and the daemon used
+`web_scrape_priority` and `image_priority` *are* priority columns, and the daemon used
 to hand them the item's whole pre-fetch `api_priority`. A newly discovered item
 carries `3`, so every new item the enrichment filters excluded was queued in the
 same band as the ones they selected -- and `MAX(stored, new)` means nothing ever
@@ -65,10 +65,10 @@ def _tag(db_path, workshop_id, name):
 def _queues(db_path, workshop_id):
     conn = get_connection(db_path)
     row = conn.execute(
-        "SELECT needs_web_scrape, needs_image FROM workshop_items WHERE workshop_id = ?",
+        "SELECT web_scrape_priority, image_priority FROM workshop_items WHERE workshop_id = ?",
         (workshop_id,)).fetchone()
     conn.close()
-    return row["needs_web_scrape"], row["needs_image"]
+    return row["web_scrape_priority"], row["image_priority"]
 
 
 def _item(db_path, workshop_id, **over):
@@ -82,7 +82,7 @@ def test_an_excluded_item_at_discovery_priority_goes_back_to_backlog(db_path):
     # The row is written while the database is still current (`fetch_status`);
     # `_age_to_v21` then rewinds it to the v21 shape (the old `status` column and
     # the `app_tracking` table) before the migration is replayed.
-    _item(db_path, 1, needs_web_scrape=3, needs_image=3)   # matches nothing: no tags
+    _item(db_path, 1, web_scrape_priority=3, image_priority=3)   # matches nothing: no tags
     _age_to_v21(db_path)
     _filters_for(db_path, 294100, "Mature")
 
@@ -93,7 +93,7 @@ def test_an_excluded_item_at_discovery_priority_goes_back_to_backlog(db_path):
 
 def test_an_item_the_filters_select_keeps_its_priority(db_path):
     """The whole point is the ordering between the two, not a blanket reset."""
-    _item(db_path, 1, needs_web_scrape=3, needs_image=3)
+    _item(db_path, 1, web_scrape_priority=3, image_priority=3)
     _tag(db_path, 1, "Mature")
     _age_to_v21(db_path)
     _filters_for(db_path, 294100, "Mature")
@@ -105,7 +105,7 @@ def test_an_item_the_filters_select_keeps_its_priority(db_path):
 
 def test_backlog_and_idle_entries_are_left_alone(db_path):
     """`MIN(column, 1)` means 1 stays 1 and 0 (not queued) stays 0."""
-    _item(db_path, 1, needs_web_scrape=1, needs_image=0)
+    _item(db_path, 1, web_scrape_priority=1, image_priority=0)
     _age_to_v21(db_path)
     _filters_for(db_path, 294100, "Mature")
 
@@ -122,7 +122,7 @@ def test_a_user_requested_priority_is_kept(db_path):
     tidy up after the daemon. The migration undoes the daemon's own priorities
     and nothing else.
     """
-    _item(db_path, 1, needs_web_scrape=10, needs_image=5)
+    _item(db_path, 1, web_scrape_priority=10, image_priority=5)
     _age_to_v21(db_path)
     _filters_for(db_path, 294100, "Mature")
 
@@ -133,7 +133,7 @@ def test_a_user_requested_priority_is_kept(db_path):
 
 def test_an_appid_without_filters_is_not_touched(db_path):
     """No filters means everything matches, so nothing is excluded."""
-    _item(db_path, 1, needs_web_scrape=3, needs_image=3)
+    _item(db_path, 1, web_scrape_priority=3, image_priority=3)
     _age_to_v21(db_path)
 
     initialize_database(db_path)
@@ -143,7 +143,7 @@ def test_an_appid_without_filters_is_not_touched(db_path):
 
 def test_an_unreadable_filter_set_enriches_rather_than_excludes(db_path):
     """A malformed filter list must not be read as "excludes everything"."""
-    _item(db_path, 1, needs_web_scrape=3, needs_image=3)
+    _item(db_path, 1, web_scrape_priority=3, image_priority=3)
     _age_to_v21(db_path)
     conn = get_connection(db_path)
     conn.execute("INSERT OR REPLACE INTO app_tracking (appid, enrichment_filters) "
@@ -157,8 +157,8 @@ def test_an_unreadable_filter_set_enriches_rather_than_excludes(db_path):
 
 
 def test_the_migration_reports_what_it_returned(db_path, caplog):
-    _item(db_path, 1, needs_web_scrape=3, needs_image=3)
-    _item(db_path, 2, needs_web_scrape=3, needs_image=0)
+    _item(db_path, 1, web_scrape_priority=3, image_priority=3)
+    _item(db_path, 2, web_scrape_priority=3, image_priority=0)
     _age_to_v21(db_path)
     _filters_for(db_path, 294100, "Mature")
 
@@ -170,7 +170,7 @@ def test_the_migration_reports_what_it_returned(db_path, caplog):
 
 def test_the_migration_runs_once_and_leaves_no_rows_behind(db_path):
     """A second call has nothing left to do, which is what makes it idempotent."""
-    _item(db_path, 1, needs_web_scrape=3, needs_image=3)
+    _item(db_path, 1, web_scrape_priority=3, image_priority=3)
     _age_to_v21(db_path)
     _filters_for(db_path, 294100, "Mature")
     initialize_database(db_path)
@@ -184,7 +184,7 @@ def test_the_migration_runs_once_and_leaves_no_rows_behind(db_path):
 
 
 def test_the_terminal_version_is_reached(db_path):
-    _item(db_path, 1, needs_web_scrape=3)
+    _item(db_path, 1, web_scrape_priority=3)
     _age_to_v21(db_path)
 
     initialize_database(db_path)

@@ -1,6 +1,6 @@
 """The downloaded-star folder helper: discovery, the latch scan, and the open action.
 
-`src/subscription.py` decides that `own_subscribed` plus `downloaded_at` draws the
+`src/subscription.py` decides that `own_subscribed` plus `steam_download_seen_at` draws the
 green star; this module is what produces the second half. Three properties matter
 and are pinned here:
 
@@ -39,12 +39,12 @@ def _db(tmp_path) -> str:
     return path
 
 
-def _seed(db_path, wid, *, appid=294100, own_subscribed=1, downloaded_at=None,
+def _seed(db_path, wid, *, appid=294100, own_subscribed=1, steam_download_seen_at=None,
           title=None):
     insert_or_update_item(db_path, {
         "workshop_id": wid, "title": title or f"Item {wid}", "fetch_status": 200,
         "consumer_appid": appid, "own_subscribed": own_subscribed,
-        "downloaded_at": downloaded_at,
+        "steam_download_seen_at": steam_download_seen_at,
     })
 
 
@@ -220,7 +220,7 @@ def test_scan_downloads_stamps_a_subscribed_item_whose_folder_exists(tmp_path):
     result = svc.scan_downloads(now=1234)
 
     assert result == {"checked": 1, "stamped": 1}
-    assert _row(db, 5)["downloaded_at"] == 1234
+    assert _row(db, 5)["steam_download_seen_at"] == 1234
 
 
 def test_scan_downloads_leaves_an_item_that_is_not_subscribed_alone(tmp_path):
@@ -231,7 +231,7 @@ def test_scan_downloads_leaves_an_item_that_is_not_subscribed_alone(tmp_path):
     svc, _ = _service(db, [str(content)])
 
     assert svc.scan_downloads() == {"checked": 0, "stamped": 0}
-    assert _row(db, 5)["downloaded_at"] is None
+    assert _row(db, 5)["steam_download_seen_at"] is None
 
 
 def test_scan_downloads_leaves_an_item_whose_folder_is_missing_unstamped(tmp_path):
@@ -240,7 +240,7 @@ def test_scan_downloads_leaves_an_item_whose_folder_is_missing_unstamped(tmp_pat
     svc, _ = _service(db, [str(tmp_path / "content")])
 
     assert svc.scan_downloads() == {"checked": 1, "stamped": 0}
-    assert _row(db, 5)["downloaded_at"] is None
+    assert _row(db, 5)["steam_download_seen_at"] is None
 
 
 def test_scan_downloads_checks_every_candidate_directory(tmp_path):
@@ -251,18 +251,18 @@ def test_scan_downloads_checks_every_candidate_directory(tmp_path):
     svc, _ = _service(db, [str(first), str(second)])
 
     assert svc.scan_downloads(now=9)["stamped"] == 1
-    assert _row(db, 5)["downloaded_at"] == 9
+    assert _row(db, 5)["steam_download_seen_at"] == 9
 
 
 def test_scan_downloads_never_revisits_a_confirmed_item(tmp_path):
     db = _db(tmp_path)
     content = tmp_path / "content"
     (content / "294100" / "5").mkdir(parents=True)
-    _seed(db, 5, downloaded_at=111)
+    _seed(db, 5, steam_download_seen_at=111)
     svc, _ = _service(db, [str(content)])
 
     assert svc.scan_downloads() == {"checked": 0, "stamped": 0}
-    assert _row(db, 5)["downloaded_at"] == 111, "the latch must not move"
+    assert _row(db, 5)["steam_download_seen_at"] == 111, "the latch must not move"
 
 
 def test_scan_downloads_never_clears_when_the_folder_disappears(tmp_path):
@@ -273,24 +273,24 @@ def test_scan_downloads_never_clears_when_the_folder_disappears(tmp_path):
     _seed(db, 5)
     svc, _ = _service(db, [str(content)])
     svc.scan_downloads(now=42)
-    assert _row(db, 5)["downloaded_at"] == 42
+    assert _row(db, 5)["steam_download_seen_at"] == 42
 
     # The drive is unplugged / the library moved: the folder is gone.
     os.rmdir(folder)
 
     assert svc.scan_downloads() == {"checked": 0, "stamped": 0}
-    assert _row(db, 5)["downloaded_at"] == 42, \
+    assert _row(db, 5)["steam_download_seen_at"] == 42, \
         "a missing folder must never take the green star away"
 
 
 def test_scan_downloads_never_clears_a_stray_latch_without_a_subscription(tmp_path):
     db = _db(tmp_path)
-    _seed(db, 5, own_subscribed=0, downloaded_at=7)
+    _seed(db, 5, own_subscribed=0, steam_download_seen_at=7)
     svc, _ = _service(db, [])
 
     svc.scan_downloads()
 
-    assert _row(db, 5)["downloaded_at"] == 7
+    assert _row(db, 5)["steam_download_seen_at"] == 7
 
 
 def test_scan_downloads_off_windows_is_a_silent_noop(tmp_path, caplog):
@@ -304,7 +304,7 @@ def test_scan_downloads_off_windows_is_a_silent_noop(tmp_path, caplog):
         assert svc.scan_downloads() == {"checked": 0, "stamped": 0}
         assert svc.scan_downloads() == {"checked": 0, "stamped": 0}
 
-    assert _row(db, 5)["downloaded_at"] is None
+    assert _row(db, 5)["steam_download_seen_at"] is None
     # `caplog` captures what reaches the root logger from *any* thread, so
     # `caplog.records == []` would be asserting that no background thread left
     # by another test happened to log during this window -- an order-dependent
@@ -349,7 +349,7 @@ def _green(db, tmp_path, *, wid=5):
     folder.mkdir(parents=True)
     _seed(db, wid)
     conn = get_connection(db)
-    conn.execute("UPDATE workshop_items SET downloaded_at = 1 WHERE workshop_id = ?", (wid,))
+    conn.execute("UPDATE workshop_items SET steam_download_seen_at = 1 WHERE workshop_id = ?", (wid,))
     conn.commit()
     conn.close()
     return content, folder
@@ -364,7 +364,7 @@ def test_open_folder_refuses_an_item_that_is_not_downloaded(tmp_path):
 
     assert result["ok"] is False
     assert launched == []
-    assert _row(db, 5)["downloaded_at"] is None
+    assert _row(db, 5)["steam_download_seen_at"] is None
 
 
 def test_open_folder_refuses_a_stray_latch_without_a_subscription(tmp_path):
@@ -380,7 +380,7 @@ def test_open_folder_refuses_a_stray_latch_without_a_subscription(tmp_path):
 
     assert result["ok"] is False
     assert launched == []
-    assert _row(db, 5)["downloaded_at"] is not None, "the refusal changes nothing"
+    assert _row(db, 5)["steam_download_seen_at"] is not None, "the refusal changes nothing"
 
 
 def test_open_folder_warns_naming_the_missing_folder_without_changing_state(tmp_path):
@@ -394,7 +394,7 @@ def test_open_folder_warns_naming_the_missing_folder_without_changing_state(tmp_
     assert result["ok"] is False
     assert str(content) in result["message"], "the warning must name where it looked"
     assert launched == []
-    assert _row(db, 5)["downloaded_at"] is not None, "a missing folder clears nothing"
+    assert _row(db, 5)["steam_download_seen_at"] is not None, "a missing folder clears nothing"
 
 
 def test_open_folder_launches_the_folder_when_the_item_is_green(tmp_path):

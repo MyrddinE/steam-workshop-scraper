@@ -344,7 +344,7 @@ def test_merge_and_clean_sets_api_priority_zero(mock_config):
 
 
 def test_the_api_merge_never_carries_the_downloaded_latch(mock_config):
-    """`downloaded_at` is local state, so the merge neither keeps nor sets it.
+    """`steam_download_seen_at` is local state, so the merge neither keeps nor sets it.
 
     It is absent from the cleaned record whether it arrived on the API payload
     (where it is not a Steam field) or on the stored row. `insert_or_update_item`
@@ -355,10 +355,10 @@ def test_the_api_merge_never_carries_the_downloaded_latch(mock_config):
          patch('src.daemon.save_config'):
         daemon = Daemon(mock_config)
         result = daemon._merge_and_clean_api_data(
-            {"title": "Test", "downloaded_at": 1},
-            {"workshop_id": 1, "downloaded_at": 99},
+            {"title": "Test", "steam_download_seen_at": 1},
+            {"workshop_id": 1, "steam_download_seen_at": 99},
             1, 1000000)
-        assert "downloaded_at" not in result
+        assert "steam_download_seen_at" not in result
 
 
 @patch('src.database.initialize_database')
@@ -600,11 +600,11 @@ def test_process_item_404_clears_every_queue_flag(db_path, tmp_path):
 
     insert_or_update_item(db_path, {
         "workshop_id": 1, "fetch_status": 200, "api_priority": 5,
-        "needs_web_scrape": 5, "needs_image": 10, "translation_priority": 3,
+        "web_scrape_priority": 5, "image_priority": 10, "translation_priority": 3,
     })
     daemon = _real_db_daemon(db_path, tmp_path)
     existing = {"workshop_id": 1, "fetch_status": 200, "api_priority": 5,
-                "needs_web_scrape": 5, "needs_image": 10,
+                "web_scrape_priority": 5, "image_priority": 10,
                 "translation_priority": 3}
 
     with patch("src.daemon.get_workshop_details", return_value={"status": 404}):
@@ -615,8 +615,8 @@ def test_process_item_404_clears_every_queue_flag(db_path, tmp_path):
     conn.close()
     assert row["fetch_status"] == -1
     assert row["api_priority"] == 0
-    assert row["needs_web_scrape"] == 0
-    assert row["needs_image"] == 0
+    assert row["web_scrape_priority"] == 0
+    assert row["image_priority"] == 0
     assert row["translation_priority"] == 0
 
 
