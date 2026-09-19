@@ -136,6 +136,7 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 | idx_wilson_favorite_score | wilson_favorite_score | "Favorite Score" sort |
 | idx_translation_priority | translation_priority | Translation queue scanning |
 | idx_translation_queue_lookup | translation_queue (item_type, item_id, field) | Per-field queue lookup and the 22→23 repair's two-column `NOT EXISTS`. Created in `_create_schema` (unversioned), so the index exists when the repair runs |
+| idx_translation_queue_poll | translation_queue (priority DESC, queued_at ASC) | Translation poll (`get_next_batch_for_translation`) ordering. Created in `_ensure_indexes`, which runs after 13→14 renames `dt_queued` to `queued_at` |
 | idx_web_scrape_queue | (needs_web_scrape DESC, api_fetched_at ASC) WHERE needs_web_scrape > 0 | Web scrape worker poll and web queue breakdown (v25) |
 | idx_image_queue | (needs_image DESC, api_fetched_at ASC) WHERE needs_image > 0 | Image worker poll and image queue breakdown (v25) |
 | idx_api_queue | (api_priority DESC, api_fetched_at ASC) WHERE api_priority > 0 | API fetch worker poll and fetchable count (v25) |
@@ -301,8 +302,10 @@ Data cleanup performed by the migration:
   that had `first_seen_at IS NULL`.
 * `queued_at` is deliberately **not** backfilled: the pre-existing queue backlog
   keeps NULL (unknown), and `get_next_batch_for_translation` orders with
-  `queued_at IS NOT NULL, queued_at ASC` so those unknown-time rows stay ahead
-  of newly queued work.
+  `priority DESC, queued_at ASC`, whose implicit NULL-first ordering keeps those
+  unknown-time rows ahead of newly queued work at the same priority. (The old
+  explicit `queued_at IS NOT NULL` term was redundant and is gone; see
+  [data-model.md](data-model.md#translation_queue).)
 
 Indexes recreated under clear names: `idx_api_fetched_at`, `idx_scraped_version`,
 `idx_status_scraped_version`, `idx_creator_api_fetched_at`; the old `idx_dt_*`

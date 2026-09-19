@@ -130,8 +130,10 @@ One row per text field awaiting translation.
 | `queued_at` | Our clock: when the entry was created. Written for new rows. Rows that predate migration 13→14 keep NULL because their queue time is genuinely unknown. |
 
 Ordering (`get_next_batch_for_translation`) is `priority DESC`, then NULL-`queued_at` rows ahead
-of dated rows, then `queued_at ASC`. The explicit NULL-first term keeps the legacy backlog from
-being jumped by newly queued work at the same priority.
+of dated rows, then `queued_at ASC`. NULL-first is SQLite's implicit ascending order, so the
+legacy backlog is not jumped by newly queued work at the same priority. An older
+`queued_at IS NOT NULL` term made that rule explicit but was redundant with the implicit ordering,
+and it forced a temp B-tree; it was dropped so `idx_translation_queue_poll` can serve the sort.
 
 `idx_translation_queue_lookup` on `(item_type, item_id, field)` serves both the per-field lookup
 `queue_field_for_translation` runs before every queue write and migration 22→23's correlated
@@ -140,6 +142,12 @@ is created by `_create_schema` rather than `_ensure_indexes`: the repair runs in
 loop, before `_ensure_indexes` does, so an index created there would not exist yet when the repair
 scans. Creating it in the unversioned schema also means an existing database picks it up on the next
 startup without a migration step.
+
+`idx_translation_queue_poll` on `(priority DESC, queued_at ASC)` serves that poll's ordering. It is
+created by `_ensure_indexes` and not by `_create_schema`, the opposite placement for a concrete
+reason: on a fresh database `_create_schema` runs while the column is still called `dt_queued`
+(migration 13→14 renames it), so an index naming `queued_at` there fails with "no such column".
+`_ensure_indexes` runs after the migration chain.
 
 ## Queue Priorities
 
