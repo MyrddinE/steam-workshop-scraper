@@ -535,26 +535,31 @@ a poll, or an action — is reflected in every component that displays that item
 the detail pane must never disagree about the same `workshop_id`, and neither may be current while
 the other is stale.
 
-**Approach.**
+**Approach — the owner's design: components subscribe to the items they display.**
 
-1. **One notification per front end, keyed by `workshop_id`** — `item_changed(wid)` in the TUI and
-   the equivalent in the page. Every path that learns of a change calls that, whatever the change
-   was and whichever component learned it.
-2. **One implementation of "re-read the item and push it to every display of it."** The read returns
-   the whole displayed shape (marker state, subscription columns, `downloaded_at`, the fields the
-   detail pane shows), not a column subset, so a change to any input of the marker's precedence
-   reaches the row. Components become **subscribers** to that update rather than targets a caller
-   has to remember.
-3. **One source of truth for the value**: the item's row (or the search payload built from it),
-   never a value a particular call site happens to be holding.
-4. **A refresh trigger that is not conditional on one state.** A general poll while either front end
+1. **A per-item subscription registry in each front end.** A component that displays an item
+   (a list row, the detail pane, anything else showing that `workshop_id`) **subscribes to that
+   `workshop_id` when it starts displaying it**, and unsubscribes when it stops — so the registry
+   always describes what is on screen rather than what exists in the database.
+2. **One dispatch point.** Every update the UI receives — from a callback, a poll, an action, or a
+   signal from the daemon — goes through a single path that looks up the subscribers for that
+   `workshop_id` and hands each of them the update.
+3. **The update carries a block of data, not a field.** A subscriber receives **everything about
+   the item that came in** — which may be one field or all of them — and applies whatever it
+   renders from those values, ignoring the rest. A panel therefore never has to know which fields
+   a given producer happened to send, and a field added later reaches every panel that renders it
+   without touching any call site.
+4. **The registry is the only coupling.** No component is a "target" a caller has to remember to
+   refresh: the producer of an update says what changed, and the subscription decides who hears it.
+5. **A refresh trigger that is not conditional on one state.** A general poll while either front end
    is open, or better a daemon-side signal for background changes — the folder scan writing
    `downloaded_at`, a scrape or translation completing — so a change made while the user is watching
    arrives without the user having to act. Whatever the mechanism, the web must not stop updating
    merely because nothing is `pending`.
-5. **Tests that pin the invariant rather than the paths**: a change written to the database behind
+6. **Tests that pin the invariant rather than the paths**: a change written to the database behind
    the front end's back appears in the list row *and* the detail pane; a marker change reaches both
-   front ends; a non-subscription change (a download) moves the marker in both.
+   front ends; a non-subscription change (a download) moves the marker in both; a panel that has
+   stopped displaying an item receives nothing.
 
 **What this would have caught.** The owner's report directly: `downloaded_at` moving while the list
 held the previous marker. It also covers the general class — any new column that feeds a display
