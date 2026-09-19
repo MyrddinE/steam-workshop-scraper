@@ -30,7 +30,7 @@ from src.database import (
     get_subscription_queue_items,
     initialize_database,
     insert_or_update_item,
-    toggle_subscription_queue_status,
+    toggle_subscription_queue,
 )
 
 LIVE_CAPTURES = Path("/root/.dsh/live/scrapes")
@@ -213,7 +213,7 @@ def engine_env(tmp_path, monkeypatch):
     initialize_database(db_path)
     insert_or_update_item(db_path, {"workshop_id": 7, "title": "T", "status": 200,
                                     "consumer_appid": 294100})
-    toggle_subscription_queue_status(db_path, 7)
+    toggle_subscription_queue(db_path, 7)
     config = {"database": {"path": db_path}, "session": {"id": "TOK"}}
     monkeypatch.setattr(
         web_scraper, "_build_workshop_cookies",

@@ -890,6 +890,6 @@ Returns all columns for a single workshop_id, joined with users table. Tags are 
 
 Counts items where `api_fetched_at IS NULL` (never successfully fetched) — used to determine if the processing queue needs more items.
 
-### `toggle_subscription_queue_status` / `get_subscription_queue_items` (database)
+### `toggle_subscription_queue` / `get_subscription_queue_items` (database)
 
 Simple toggle and retrieval for the subscription queue feature.

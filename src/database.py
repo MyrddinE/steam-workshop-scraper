@@ -2331,7 +2331,7 @@ def initialize_database(db_path: str):
     conn.close()
 
 
-def toggle_subscription_queue_status(db_path: str, workshop_id: int):
+def toggle_subscription_queue(db_path: str, workshop_id: int):
     """Toggles the subscription queue status for a workshop item."""
     conn = get_connection(db_path)
     cursor = conn.cursor()

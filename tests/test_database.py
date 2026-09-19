@@ -365,17 +365,17 @@ def test_get_item_details_missing_user(db_path):
     assert details.get("personaname") is None
 
 def test_toggle_and_query_queued_items(db_path):
-    from src.database import toggle_subscription_queue_status, get_subscription_queue_items
+    from src.database import toggle_subscription_queue, get_subscription_queue_items
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "Item A"})
     insert_or_update_item(db_path, {"workshop_id": 2, "title": "Item B"})
 
-    toggle_subscription_queue_status(db_path, 1)
+    toggle_subscription_queue(db_path, 1)
     queued = get_subscription_queue_items(db_path)
     assert len(queued) == 1
     assert queued[0]["workshop_id"] == 1
     assert queued[0]["title"] == "Item A"
 
-    toggle_subscription_queue_status(db_path, 1)
+    toggle_subscription_queue(db_path, 1)
     queued = get_subscription_queue_items(db_path)
     assert len(queued) == 0
 

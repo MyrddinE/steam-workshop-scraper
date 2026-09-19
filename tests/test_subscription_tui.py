@@ -23,7 +23,7 @@ from src.database import (
     initialize_database,
     insert_or_update_item,
     mark_own_subscribed,
-    toggle_subscription_queue_status,
+    toggle_subscription_queue,
 )
 from src.tui import DetailsPane, ScraperApp, SubscriptionQueueScreen, app_bindings
 from tests.conftest import ASYNC_PAUSE
@@ -173,7 +173,7 @@ def _seed_queued(db_path: str, workshop_id: int = 5, title: str = "Item") -> Non
     initialize_database(db_path)
     insert_or_update_item(
         db_path, {"workshop_id": workshop_id, "title": title, "status": 200})
-    toggle_subscription_queue_status(db_path, workshop_id)
+    toggle_subscription_queue(db_path, workshop_id)
 
 
 def _list_row_markup(app: ScraperApp, index: int = 0) -> str:
