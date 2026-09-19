@@ -70,7 +70,7 @@ def test_the_item_payload_carries_the_whole_marker(web_client):
 @pytest.mark.parametrize("columns,state", [
     ({"own_subscribed": 1, "downloaded_at": 1000}, subscription.DOWNLOADED),
     ({"own_subscribed": 1, "own_first_subscribed_at": 1000}, subscription.SUBSCRIBED),
-    ({"is_queued_for_subscription": 1}, subscription.PENDING),
+    ({"is_queued_for_subscription": 1}, subscription.QUEUED),
     ({"own_first_subscribed_at": 1000}, subscription.PREVIOUSLY),
     ({}, subscription.NEVER),
 ])
@@ -100,9 +100,9 @@ def test_the_search_payload_carries_the_marker_for_every_cell(web_client):
     by_id = {r["workshop_id"]: r for r in rows}
     assert by_id[1]["subscription_state"] == subscription.SUBSCRIBED
     assert by_id[1]["subscription_clickable"] is False
-    assert by_id[2]["subscription_state"] == subscription.PENDING
+    assert by_id[2]["subscription_state"] == subscription.QUEUED
     # own_first_subscribed_at travels with the row, or a cell toggled away from
-    # `pending` could not tell `never` from `previously`.
+    # `queued` could not tell `never` from `previously`.
     assert by_id[1]["own_first_subscribed_at"] == 5
 
 
@@ -358,7 +358,7 @@ const event = {stopPropagation: () => { stopped += 1; }};
 
 // The four states, clicked.
 fn(event, el('subscribed', '0', 1, '\\u2605'));
-fn(event, el('pending', '1', 2, '\\u2606'));
+fn(event, el('queued', '1', 2, '\\u2606'));
 fn(event, el('previously', '1', 3, '\\u2606'));
 fn(event, el('never', '1', 4, '\\u25cb'));
 console.log(JSON.stringify({calls: calls, stopped: stopped}));
@@ -377,7 +377,7 @@ def test_clicking_the_marker_routes_the_three_actionable_states(web_client, tmp_
     result = _run_node(SUB_CLICK_DRIVER.replace("__FN__", fn), tmp_path)
 
     assert result["calls"] == [2, 3, 4], \
-        "only pending, previously and never act; subscribed must send nothing"
+        "only queued, previously and never act; subscribed must send nothing"
     assert result["stopped"] == 4, \
         "every marker click must stop propagation, including the inert one"
 
@@ -387,7 +387,7 @@ def test_clicking_the_marker_routes_the_three_actionable_states(web_client, tmp_
 # /api/subscribed/<id> stamps `own_subscribed` and clears the queue flag
 # immediately, but the cell is only re-read by _startListPoll. A row queued only
 # for subscription has no stage spinner, so the poll's id set used to miss it
-# and the cell kept the green `pending` marker after the subscribe had landed.
+# and the cell kept the green `queued` marker after the subscribe had landed.
 # These drive the served functions under node: what the poll actually asks
 # /api/items for, and whether the poll is started for such a row at all.
 
@@ -399,7 +399,7 @@ const item = (over) => Object.assign(
   over);
 console.log(JSON.stringify({
   stage: listNeedsPoll([item({needs_web_scrape: 5})]),
-  subscription: listNeedsPoll([item({subscription_state: 'pending'})]),
+  subscription: listNeedsPoll([item({subscription_state: 'queued'})]),
   subscribed: listNeedsPoll([item({subscription_state: 'subscribed'})]),
   never: listNeedsPoll([item({subscription_state: 'never'})]),
 }));
@@ -447,7 +447,7 @@ function cell(wid, classes, subState) {
 }
 const cells = [
   cell(11, ['grid-cell', 'has-spinner'], null),   // a stage marker
-  cell(22, ['grid-cell'], 'pending'),             // queued only for subscription
+  cell(22, ['grid-cell'], 'queued'),             // queued only for subscription
   cell(33, ['grid-cell'], 'subscribed'),          // settled
 ];
 // The selectors the poll uses: '.grid-cell[data-wid]' and the old
@@ -513,7 +513,7 @@ global.fetch = async (url) => {
     queued = queued ? 0 : 1;
     return {ok: true, status: 200, statusText: 'OK',
             json: async () => ({workshop_id: 77,
-                                subscription_state: queued ? 'pending' : 'never'})};
+                                subscription_state: queued ? 'queued' : 'never'})};
   }
   throw new Error('unexpected url ' + url);
 };
@@ -533,7 +533,7 @@ def test_queueing_a_row_starts_the_poll(web_client, tmp_path):
     """A row queued after the search rendered must be watched too.
 
     _listNeedsPoll only runs when a batch is rendered, so a marker clicked into
-    `pending` afterwards would otherwise never be re-read and the subscribe
+    `queued` afterwards would otherwise never be re-read and the subscribe
     landing would leave the stale marker the poll exists to clear.
     """
     client, _ = web_client

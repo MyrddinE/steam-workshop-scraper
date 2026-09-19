@@ -3159,7 +3159,7 @@ global.fetch = async (url) => {
   if (url.indexOf('/api/item/') === 0) {
     return {ok: true, status: 200, statusText: 'OK',
             json: async () => ({workshop_id: 77, is_queued_for_subscription: serverQueued,
-                                subscription_state: serverQueued ? 'pending' : 'never',
+                                subscription_state: serverQueued ? 'queued' : 'never',
                                 subscription_glyph: serverQueued ? '\\u2606' : '\\u25cb',
                                 subscription_colour: serverQueued ? '#2ecc40' : '#808080',
                                 subscription_tooltip: 'tip', subscription_clickable: true})};
@@ -3232,7 +3232,7 @@ def test_toggle_queue_reflects_the_databases_state_and_updates_the_marker(web_cl
     ]
     # The cell marker was rewritten from the read-back payload, not from a local
     # flip of the old `queued` class.
-    assert result["markerAfterFirst"] == "pending"
+    assert result["markerAfterFirst"] == "queued"
     assert result["markerAfterExternalQueued"] == "never"
     assert result["markerText"] == "\u25cb"
     assert result["leftoverClasses"] == [], \

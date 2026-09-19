@@ -844,7 +844,7 @@ function _listNeedsPoll(items) {
   for (const item of items) {
     // A stage spinner moves on its own; a subscription marker moves when a
     // subscribe lands, which the database records and only this poll re-reads.
-    if (_pendingStage(item) !== null || item.subscription_state === 'pending') return true;
+    if (_pendingStage(item) !== null || item.subscription_state === 'queued') return true;
   }
   return false;
 }
@@ -868,7 +868,7 @@ function _startListPoll(filters, sortBy, sortOrder) {
       grid.querySelectorAll('.grid-cell[data-wid]').forEach(el => {
         const sub = el.querySelector('.grid-sub');
         if (el.classList.contains('has-spinner') ||
-            (sub && sub.getAttribute('data-sub-state') === 'pending')) {
+            (sub && sub.getAttribute('data-sub-state') === 'queued')) {
           pending.push(parseInt(el.getAttribute('data-wid'), 10));
         }
       });
@@ -1246,7 +1246,7 @@ async function toggleDetailQueue(wid) {
     // pane's help: the subscribe lands in the database. The list poll is what
     // re-reads such a cell, and a row queued after the search rendered was
     // never seen by _listNeedsPoll, so the transition starts it.
-    if (item.subscription_state === 'pending') _startListPoll([], '', '');
+    if (item.subscription_state === 'queued') _startListPoll([], '', '');
   } catch (e) { console.debug('Queue state refresh failed', e); }
 }
 
@@ -1418,7 +1418,7 @@ async function refreshItemState(wid) {
     if (_currentDetail && _currentDetail.workshop_id === wid) renderDetail(item);
     const cell = document.querySelector(`#results-grid .grid-cell[data-wid="${wid}"]`);
     if (cell) _applySub(cell.querySelector('.grid-sub'), item);
-    if (item.subscription_state === 'pending') _startListPoll([], '', '');
+    if (item.subscription_state === 'queued') _startListPoll([], '', '');
   } catch (e) { console.debug('Item state refresh failed', e); }
 }
 

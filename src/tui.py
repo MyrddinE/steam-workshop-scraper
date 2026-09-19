@@ -2496,7 +2496,7 @@ class ScraperApp(App):
             data = getattr(child, "item_data", None)
             if not data:
                 continue
-            if subscription.subscription_state(data) != subscription.PENDING:
+            if subscription.subscription_state(data) != subscription.QUEUED:
                 continue
             workshop_id = data.get("workshop_id")
             if workshop_id is not None:
@@ -2966,7 +2966,7 @@ class ScraperApp(App):
 
         # A row queued from the keyboard is watched too: the web grid starts its
         # poll on the transition into `pending` for the same reason.
-        if subscription.subscription_state(item.item_data) == subscription.PENDING:
+        if subscription.subscription_state(item.item_data) == subscription.QUEUED:
             self._start_subscription_poll()
 
         # Update details pane if it's showing the same item

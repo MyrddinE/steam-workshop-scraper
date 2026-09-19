@@ -107,10 +107,10 @@ When `doSearch(reset=true)` clears the grid (`innerHTML = ''`), the old sentinel
 
 An adaptive-timeout poll that keeps a rendered cell's markers in step with the database:
 - Collects workshop_ids from rendered cells (`.grid-cell[data-wid]`) whose row is not settled: one
-  with a stage spinner (`.has-spinner`), or one whose subscription marker is still `pending`. The
+  with a stage spinner (`.has-spinner`), or one whose subscription marker is still `queued`. The
   subscription queue is deliberately not a stage, so a row queued only to subscribe has no spinner;
   selecting on `has-spinner` alone missed it, and a subscribe landing behind the cell's back left the
-  green `pending` marker on it.
+  green `queued` marker on it.
 - POSTs to `/api/items` (read-only bulk ID lookup)
 - For each returned item: updates the title, replaces the image placeholder with `_imageCellHtml(item)`
   when the server has an answer, re-applies the stage marker (`_applyPending`) and the subscription
@@ -128,7 +128,7 @@ subscription change, so every writer of the flag is covered by one refresh: the 
 `POST /api/subscribe/<id>` route (which stamps on Steam `success == 1`). The autosubscribe verifier
 reads the same queue exit to mark the overlay's rows, independently of the grid. Because
 `_listNeedsPoll` only runs when a batch is rendered, `toggleDetailQueue` also starts the poll on the
-transition into `pending`, so a marker clicked into the queue after the search is watched too.
+transition into `queued`, so a marker clicked into the queue after the search is watched too.
 
 ### Stopping the poll
 
@@ -224,7 +224,7 @@ too, from the same `/api/queued` payload. It has five states, resolved by
 |---|---|---|---|---|
 | `downloaded` | ★ | deep green | the owner is subscribed and Steam has the item on disk | nothing |
 | `subscribed` | ★ | solid yellow | the owner is subscribed now | nothing |
-| `pending` | ☆ | green | queued to subscribe | un-queues |
+| `queued` | ☆ | green | queued to subscribe | un-queues |
 | `previously` | ☆ | yellow | we have seen the owner subscribed, and they are not now | queues |
 | `never` | ○ | gray | never seen subscribed | queues |
 
@@ -254,7 +254,7 @@ the pane alone.
 The click is not the only writer. A subscribe can land behind a rendered cell through
 `POST /api/subscribed/<id>` (the userscript bridge, or this page's cancel/clear calls) or through the
 direct `POST /api/subscribe/<id>` route, and none of those touches the DOM. The list poll is what
-re-reads such a cell: it keeps re-reading any row whose subscription marker is still `pending`, so
+re-reads such a cell: it keeps re-reading any row whose subscription marker is still `queued`, so
 the marker moves to `subscribed` on its own next tick ([Image Polling](#image-polling)).
 
 One transition is deliberately not a poll trigger: a cell already at `subscribed` is not re-read
