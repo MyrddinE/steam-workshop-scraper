@@ -373,7 +373,7 @@ def _build_tag_clause(op: str, val) -> tuple[str, list]:
     return ("", [])
 
 
-def build_filter_clause_sql(filters: list[dict]) -> tuple[str, list]:
+def build_filters_sql(filters: list[dict]) -> tuple[str, list]:
     """Translate a filter list into one SQL predicate, exactly as search does.
 
     This is the one filter-to-SQL builder. ``search_items`` calls it for its
@@ -2931,9 +2931,9 @@ def search_items(db_path: str, query: str = "", appid: int = None,
         pct_filters = [f for f in filters if f.get("op") == "percentile"]
         regular_filters = [f for f in filters if f.get("op") != "percentile"]
 
-        # One shared translation (see `build_filter_clause_sql`), so the SQL the
+        # One shared translation (see `build_filters_sql`), so the SQL the
         # search runs and the SQL the coverage metric runs cannot drift apart.
-        group_sql, group_params = build_filter_clause_sql(regular_filters)
+        group_sql, group_params = build_filters_sql(regular_filters)
         if group_sql:
             sql += f" AND ({group_sql})"
             params.extend(group_params)

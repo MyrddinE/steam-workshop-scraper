@@ -31,7 +31,7 @@ import pytest
 from src import metrics
 from src.database import (
     _evaluate_filters,
-    build_filter_clause_sql,
+    build_filters_sql,
     get_connection,
     insert_or_update_item,
 )
@@ -211,7 +211,7 @@ def test_the_translation_searches_the_en_counterpart_where_the_daemon_does_not(d
 
 def test_the_shared_builder_is_what_the_search_uses():
     """`search_items` and the metric call one function, so they cannot drift."""
-    clause, params = build_filter_clause_sql(
+    clause, params = build_filters_sql(
         [{"field": "Title", "op": "contains", "value": "Hello"}])
     assert "title LIKE ?" in clause and "title_en LIKE ?" in clause
     assert params == ["%Hello%", "%Hello%"]
