@@ -714,7 +714,7 @@ def test_a_gated_attempt_makes_exactly_one_request_and_keeps_the_item_queued(db_
     A gated page used to earn a second request the moment the cookie refresh
     changed anything -- the only request in the worker that paid no delay at
     all, and one spaced by nothing but the scraper's own fixed 5 s gate. The
-    miss now takes the ordinary `GATE` path: one request, the cookie still
+    miss now takes the ordinary `GATED` path: one request, the cookie still
     refreshed, the item left queued, and the queue retries it later.
     """
     from src.database import insert_or_update_item
