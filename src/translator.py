@@ -214,17 +214,34 @@ def system_prompt(phrase: str) -> str:
     )
 
 
-def field_label(field: str) -> str:
-    """The queue's field name without its ``_en`` suffix.
+# The wire vocabulary: the label that names a queue field in a boundary line. One
+# word each, because a label is repeated on every block of every request and a
+# single token is the cheapest one can be. Written out rather than derived by
+# trimming `_en`, so the vocabulary the model is shown is stated in one place and a
+# renamed column cannot quietly change the wire.
+FIELD_LABELS = {
+    "title_en": "title",
+    "short_description_en": "short",
+    "extended_description_en": "long",
+    "personaname_en": "user",
+}
 
-    ``title_en`` goes out as ``title``: the suffix is redundant when the request
-    asks for English, and dropping it shortens every boundary line. What is *not*
-    dropped is the word distinguishing ``short_description`` from
-    ``extended_description`` -- an item can have both queued at once, and the
-    fallback alignment matches on ``(item_id, field)``, so collapsing the two would
-    leave a mismatched block unattributable.
+
+def field_label(field: str) -> str:
+    """The boundary-line label for a queue field.
+
+    ``short`` and ``long`` are deliberately different words. An item can have both
+    descriptions queued at once, and the fallback alignment matches on
+    ``(item_id, label)``, so collapsing them to one label would leave a mismatched
+    block unattributable.
+
+    A field with no alias is returned unchanged rather than raising: there is no
+    fifth field today, but a future one must not break alignment. The fallback name
+    is still unique per field and the reader accepts any lowercase label
+    (``FIELD_LABEL``), so such a field round-trips -- it is simply labelled with a
+    longer word than the aliases.
     """
-    return field[:-3] if field.endswith("_en") else field
+    return FIELD_LABELS.get(field, field)
 
 
 def generate_phrase(rng=None) -> str:

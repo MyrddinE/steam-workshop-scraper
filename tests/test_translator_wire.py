@@ -220,11 +220,41 @@ def test_a_phrase_the_source_does_not_contain_is_taken_first_time():
 
 # ── field labels ─────────────────────────────────────────────────────────────
 
-def test_field_labels_drop_the_en_suffix():
+def test_field_labels_are_single_word_aliases():
+    """One token each: a label is repeated on every block of every request."""
     assert field_label("title_en") == "title"
-    assert field_label("short_description_en") == "short_description"
-    assert field_label("extended_description_en") == "extended_description"
-    assert field_label("personaname_en") == "personaname"
+    assert field_label("short_description_en") == "short"
+    assert field_label("extended_description_en") == "long"
+    assert field_label("personaname_en") == "user"
+
+
+def test_an_unmapped_field_falls_back_to_its_own_name():
+    """There is no fifth field today; a future one must not break alignment.
+
+    The fallback is the queue's field name, which stays unique per field, so such a
+    field still round-trips -- it is simply labelled with a longer word.
+    """
+    assert field_label("future_field_en") == "future_field_en"
+
+
+def test_every_alias_round_trips_through_the_wire():
+    """The regexes accept the aliases -- confirmed rather than assumed.
+
+    `FIELD_LABEL` is what the tolerant fallback matches, so a label it could not
+    read would silently cost a batch its alignment whenever the model mangled the
+    phrase. Every alias has to survive write, split and match.
+    """
+    for field, label in [
+        ("title_en", "title"),
+        ("short_description_en", "short"),
+        ("extended_description_en", "long"),
+        ("personaname_en", "user"),
+    ]:
+        row = _row(4, field, SOURCE)
+        assert boundary_line(row, PHRASE) == f"{PHRASE} 4 {label}"
+        reply = f"{boundary_line(row, PHRASE)}\nHello"
+        assert split_blocks(reply, PHRASE) == [(4, label, "Hello")]
+        assert match_translations(reply, [row], PHRASE) == {0: "Hello"}
 
 
 def test_short_and_extended_descriptions_keep_distinct_labels():
@@ -233,6 +263,8 @@ def test_short_and_extended_descriptions_keep_distinct_labels():
     An item can have both queued at once, and the fallback alignment keys on
     `(item_id, field label)`.
     """
+    assert field_label("short_description_en") == "short"
+    assert field_label("extended_description_en") == "long"
     assert field_label("short_description_en") != field_label("extended_description_en")
 
 
@@ -241,9 +273,9 @@ def test_both_descriptions_align_independently():
     batch = [_row(1, "short_description_en", SOURCE),
              _row(1, "extended_description_en", SOURCE)]
     reply = (
-        f"{PHRASE} 1 extended_description\nThe long one\n"
+        f"{PHRASE} 1 long\nThe long one\n"
         f"{PHRASE} 999 title\nNot ours\n"
-        f"{PHRASE} 1 short_description\nThe short one"
+        f"{PHRASE} 1 short\nThe short one"
     )
     assert match_translations(reply, batch, PHRASE) == {
         0: "The short one", 1: "The long one",
@@ -337,8 +369,8 @@ def test_a_reply_missing_a_block_resolves_the_rest_by_boundary():
 def test_reordered_blocks_align_by_id_and_label_and_extras_are_ignored():
     batch = [_row(1, "title_en", SOURCE), _row(2, "short_description_en", SOURCE)]
     reply = (
-        f"{PHRASE} 2 short_description\nTimes\n"
-        f"{PHRASE} 77 extended_description\nNot ours\n"
+        f"{PHRASE} 2 short\nTimes\n"
+        f"{PHRASE} 77 long\nNot ours\n"
         f"{PHRASE} 1 title\nCities"
     )
     assert match_translations(reply, batch, PHRASE) == {0: "Cities", 1: "Times"}
@@ -351,14 +383,14 @@ def test_a_mangled_phrase_falls_back_to_position():
     tolerant boundary pattern is what finds the blocks to assign.
     """
     batch = [_row(1, "title_en", SOURCE), _row(2, "short_description_en", SOURCE)]
-    reply = "cat dog fish bird 1 title\nOne\ncat dog fish bird 2 short_description\nTwo"
+    reply = "cat dog fish bird 1 title\nOne\ncat dog fish bird 2 short\nTwo"
     assert match_translations(reply, batch, PHRASE) == {0: "One", 1: "Two"}
 
 
 def test_an_empty_block_leaves_its_row_unresolved():
     """A boundary with nothing under it is not a translation."""
     batch = [_row(1, "title_en", SOURCE), _row(2, "short_description_en", SOURCE)]
-    reply = f"{PHRASE} 1 title\n\n{PHRASE} 2 short_description\nTimes"
+    reply = f"{PHRASE} 1 title\n\n{PHRASE} 2 short\nTimes"
     assert match_translations(reply, batch, PHRASE) == {1: "Times"}
 
 
@@ -374,7 +406,7 @@ def test_a_boundary_shaped_line_inside_the_text_does_not_split_the_block():
     content = "A Tale\ncat dog fish bird 999 title\nof Two Cities\n----------"
     reply = f"{boundary_line(batch[0], PHRASE)}\n{content}"
     assert match_translations(reply, batch, PHRASE) == {0: content}
-    assert split_blocks(reply, PHRASE) == [(1, "short_description", content)]
+    assert split_blocks(reply, PHRASE) == [(1, "short", content)]
 
 
 def test_a_preamble_before_the_first_boundary_is_ignored():
@@ -398,9 +430,9 @@ def test_the_request_is_written_in_the_shape_of_the_reply():
     batch = [_row(11, "title_en", SOURCE), _row(12, "extended_description_en", SOURCE)]
     request = build_wire_request(batch, PHRASE)
     assert f"{PHRASE} 11 title" in request
-    assert f"{PHRASE} 12 extended_description" in request
+    assert f"{PHRASE} 12 long" in request
     assert request.index(f"{PHRASE} 11 title") < request.index(
-        f"{PHRASE} 12 extended_description"
+        f"{PHRASE} 12 long"
     ), "queue order is the order the reply is read in"
 
 
