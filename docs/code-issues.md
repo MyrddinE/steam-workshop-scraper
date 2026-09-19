@@ -89,6 +89,12 @@ way to say "unknown" so that neither front end claims a measurement it does not 
 the better reading of the data and the larger change. [architecture.md](architecture.md),
 [tui.md](tui.md), [web-ui.md](web-ui.md)
 
+### Issue 61
+
+**The 34→35 drop can outlast the busy timeout, so a second entry point starting during it fails** — *Open*, Medium
+
+Migration 34→35 drops three columns, and SQLite implements `DROP COLUMN` by rewriting the table: *measured* at **14.9 s** on the real 2.5 M-row `workshop_items` copy, on this machine's disk. Every connection is opened with a **15 s** busy timeout (`src/database.py:51`), so a second entry point — the TUI or the web runner — calling `initialize_database` while the first is still rewriting the table waits out its timeout and raises "database is locked" instead. All three call it, and whichever starts first owns the migration. The measured margin is about 0.1 s here and would be negative on slower hardware; the figure is from a copy, not from production. Workarounds, in order of preference: bring the entry points up one at a time and let the first finish, since the migration is one-time; raise the busy timeout for the initialising connection; or run the drops as a standalone maintenance step before deploying. [schema-migrations.md](schema-migrations.md), [threading.md](threading.md)
+
 ## Recently closed
 
 Removed from the list above rather than marked resolved. Each is now documented as current
