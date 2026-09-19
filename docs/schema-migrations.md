@@ -6,11 +6,11 @@ The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_
 - a fresh database built with `legacy_chain=True` takes the historical shape from `_create_legacy_schema` and runs every migration — this is how the chain stays exercised;
 - an **existing** database (`user_version > 0`) always takes `_create_legacy_schema` followed by its pending migrations, whatever the flag says, because the chain is the only thing that can carry it forward.
 
-The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v34) for what that means when you add one.
+The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v35) for what that means when you add one.
 
 ---
 
-## Current Schema (v33)
+## Current Schema (v34)
 
 The application-level reference for every table and column is
 [data-model.md](data-model.md); the timestamp conventions are in
@@ -71,14 +71,14 @@ drops `tags`. The two endpoints must agree, which
 | Column | Type | Purpose |
 |---|---|---|
 | id | INTEGER PK AUTO | Queue entry ID |
-| item_type | TEXT | "item" or "user" |
-| item_id | INTEGER | workshop_id or steamid |
+| entity_type | TEXT | "item" or "user" |
+| entity_id | INTEGER | workshop_id or steamid, per entity_type |
 | field | TEXT | Column name to translate (e.g., "title_en") |
 | original_text | TEXT | Source text |
 | priority | INTEGER | Priority level |
 | queued_at | INTEGER | Our clock: when queued (epoch). NULL on pre-v14 rows, where the time is unknown |
 
-Indexed by `idx_translation_queue_lookup` on `(item_type, item_id, field)`, created by both schema
+Indexed by `idx_translation_queue_lookup` on `(entity_type, entity_id, field)`, created by both schema
 builders rather than by a migration (see [Indexes](#indexes) for why).
 
 ### `tags` — normalized tag names
@@ -144,7 +144,7 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 | idx_wilson_subscription_score | wilson_subscription_score | "Subscriber Score" sort |
 | idx_wilson_favorite_score | wilson_favorite_score | "Favorite Score" sort |
 | idx_translation_priority | translation_priority | Translation queue scanning |
-| idx_translation_queue_lookup | translation_queue (item_type, item_id, field) | Per-field queue lookup and the 22→23 repair's two-column `NOT EXISTS`. Created in `_create_legacy_schema` (unversioned) and mirrored in `_create_current_schema`, so the index exists when the repair runs |
+| idx_translation_queue_lookup | translation_queue (entity_type, entity_id, field) | Per-field queue lookup and the 22→23 repair's two-column `NOT EXISTS` (that step names the columns' pre-rename spelling; SQLite rewrites the definition in place at 33→34). Created in `_create_legacy_schema` (unversioned, resolving the two column names for whichever side of the rename it finds) and mirrored in `_create_current_schema`, so the index exists when the repair runs |
 | idx_translation_queue_poll | translation_queue (priority DESC, queued_at ASC) | Translation poll (`get_next_batch_for_translation`) ordering. Created in `_ensure_indexes`, which runs after 13→14 renames `dt_queued` to `queued_at` |
 | idx_web_scrape_queue | (web_scrape_priority DESC, api_fetched_at ASC) WHERE web_scrape_priority > 0 | Web scrape worker poll and web queue breakdown (v25). Named for the queue, not the column, so its name stays across v33 |
 | idx_image_queue | (image_priority DESC, api_fetched_at ASC) WHERE image_priority > 0 | Image worker poll and image queue breakdown (v25). Named for the queue, not the column, so its name stays across v33 |
@@ -199,15 +199,15 @@ independently, allowing crash recovery on a per-migration basis.
 from 1 to `EXPECTED_VERSION`, that each entry names the function for its own
 version, and that a fresh database reaches `EXPECTED_VERSION`.
 
-### Adding the next migration (target v34)
+### Adding the next migration (target v35)
 
-1. bump `EXPECTED_VERSION` in `src/database.py` to `34`;
-2. append `def _migration_33_to_34(cursor, conn, db_path): ...` immediately
-   after `_migration_32_to_33`, keeping the body self-contained and preserving
-   what the step meant at v33 (no tidying an older step, no changing a
+1. bump `EXPECTED_VERSION` in `src/database.py` to `35`;
+2. append `def _migration_34_to_35(cursor, conn, db_path): ...` immediately
+   after `_migration_33_to_34`, keeping the body self-contained and preserving
+   what the step meant at v34 (no tidying an older step, no changing a
    `PRAGMA user_version = N` target);
-3. append `(34, _migration_33_to_34)` as the last entry of `MIGRATIONS`;
-4. add a `### v33 → v34: ...` entry below, in the same shape as the others;
+3. append `(35, _migration_34_to_35)` as the last entry of `MIGRATIONS`;
+4. add a `### v34 → v35: ...` entry below, in the same shape as the others;
 5. **mirror the step in `_create_current_schema`.** It is the shape a fresh
    database is created at now, so a schema change that lands only in the chain
    moves the legacy endpoint and not the fresh one. Update the table, index or
@@ -891,7 +891,8 @@ The `users` table holds Steam creators — there are no application users anywhe
 project — so it becomes `creators`; its `steamid` primary key already says whose id it is.
 `app_tracking`'s live columns are the discovery cursor and the enrichment filters, not
 "tracking", so it becomes `app_discovery`. Both are pure table renames: the columns and the
-`item_type = 'user'` queue value deliberately keep their names here. The `creator`
+`item_type = 'user'` queue value deliberately keep their names here (migration 33→34 later
+renames the column to `entity_type`; the `'user'` value stays). The `creator`
 foreign-key column is renamed to `creator_steamid` by migration 31→32 instead.
 
 ```sql
@@ -1070,6 +1071,50 @@ counts, per-column NULL and distinct counts and a checksum over every one of the
 in-place index rewrite, the re-initialisation and the already-renamed-under-the-old-marker
 case.
 
+### v33 → v34: the `translation_queue` discriminator columns
+
+`translation_queue` holds one row per text field awaiting translation, and its first two
+columns are the row's identity: a discriminator and the id it belongs to. `item_type` and
+`item_id` read as if every row described a workshop item — but a creator's row is
+`item_type = 'user'`, and the bare `item_id` collides with the workshop-id vocabulary the
+workers use everywhere else — so they become **`entity_type`** and **`entity_id`**. The
+stored **values are unchanged**, including the discriminators `'item'` and `'user'`; only
+the names move.
+
+```sql
+ALTER TABLE translation_queue RENAME COLUMN item_type TO entity_type;
+ALTER TABLE translation_queue RENAME COLUMN item_id TO entity_id;
+```
+
+SQLite rewrites an index *definition* on `RENAME COLUMN` but keeps the index *name*.
+`idx_translation_queue_lookup` is named for the queue rather than a column, so its name
+stays and its definition follows both columns in place: there is **no index to drop or
+recreate**.
+
+The step is guarded on the column that is present, so a re-run is harmless: a crash between
+the DDL commit and the version bump leaves the columns renamed under the old marker, and the
+step must then be a no-op rather than raise `no such column`. Every migration before this one
+keeps its historical SQL byte-identical — that includes 22→23's repair and 27→28's creator
+repair, which both name `item_type`/`item_id`.
+
+`_create_current_schema` declares the two new columns and its copy of the lookup index on
+them, so a fresh database is created at the new endpoint and
+`tests/test_fresh_schema_path.py::test_schema_equivalence` stays green. The other half of the
+forward rule is subtler here: `_create_legacy_schema` builds the lookup index on **every**
+startup, before the migration loop, so on a database already at v34 the table carries
+`entity_type`/`entity_id`. It therefore resolves each column with `_current_column_name`
+(new name if present, else the historical one) rather than hardcoding either pair — naming
+`item_type` unconditionally would raise `no such column` on the next start, and naming
+`entity_type` would fail on a fresh chain database the same way. Issue 57 is why the index
+stays in the legacy builder at all: 22→23's repair runs before `_ensure_indexes`.
+
+`tests/test_translation_queue_entity_columns_migration.py` pins the fresh path, the v33
+upgrade (row counts and both columns' NULL and distinct counts and a checksum over every
+value), the in-place index rewrite, the re-initialisation, the
+already-renamed-under-the-old-marker case, and both sides of the legacy builder — including
+a `legacy_chain=True` fresh database that starts with the historical names and still reaches
+v34.
+
 ---
 
 ## Database Utility Functions
@@ -1084,11 +1129,11 @@ The driver described under [Migration system](#migration-system-initialize_datab
 
 ### `_create_current_schema`, `_create_legacy_schema`, `_ensure_indexes`, `MIGRATIONS` (database)
 
-`_create_current_schema(cursor, conn)` creates a brand-new database directly at `EXPECTED_VERSION`. Every table, index and trigger definition it holds was dumped from `sqlite_master` of a database the migration chain itself produced at v33 — not written from reading the migrations — so the index SQL it creates is the exact text SQLite stores. It deliberately does **not** repeat the query indexes `_ensure_indexes` owns, because that runs after it on both paths; those are the ones with historical names such as `idx_time_created`, whose definitions a `RENAME COLUMN` rewrote. It does create the indexes a *migration* owns, because no migration runs on this path.
+`_create_current_schema(cursor, conn)` creates a brand-new database directly at `EXPECTED_VERSION`. Every table, index and trigger definition it holds was dumped from `sqlite_master` of a database the migration chain itself produced at v34 — not written from reading the migrations — so the index SQL it creates is the exact text SQLite stores. It deliberately does **not** repeat the query indexes `_ensure_indexes` owns, because that runs after it on both paths; those are the ones with historical names such as `idx_time_created`, whose definitions a `RENAME COLUMN` rewrote. It does create the indexes a *migration* owns, because no migration runs on this path.
 
 `_create_legacy_schema(cursor, conn)` creates the tables (`IF NOT EXISTS`) and the baseline columns in their historical form, and runs the legacy data conversions every database history shares. It is the unversioned part of the schema, run before the versioned steps. Because it runs on every startup for an existing database, it also runs on both sides of migration 29→30: it resolves the creator and discovery table names once with `_current_table_name` (new name if it exists, else the historical one, else the historical one for a brand-new file) and routes its `CREATE TABLE`, `_safe_add_columns`, populate step and legacy-filter conversion through the resolved name.
 
-`_ensure_indexes(cursor)` creates the query indexes. It is separate from the schema builders because several index columns (`api_fetched_at`, `scrape_version`) only exist after migration 13→14's renames, so it must run last; every statement is `IF NOT EXISTS`. One queue index is the exception and lives in both schema builders instead: `idx_translation_queue_lookup` on `translation_queue (item_type, item_id, field)`, because migration 22→23's repair runs *inside* the `MIGRATIONS` loop and an index created here would be too late to serve it. Its columns have existed since the table was created, so it is safe at every version.
+`_ensure_indexes(cursor)` creates the query indexes. It is separate from the schema builders because several index columns (`api_fetched_at`, `scrape_version`) only exist after migration 13→14's renames, so it must run last; every statement is `IF NOT EXISTS`. One queue index is the exception and lives in both schema builders instead: `idx_translation_queue_lookup` on `translation_queue (entity_type, entity_id, field)`, because migration 22→23's repair runs *inside* the `MIGRATIONS` loop and an index created here would be too late to serve it. Its columns have existed since the table was created, so it is safe at every version; after migration 33→34 renamed them, `_create_legacy_schema` resolves the current spelling with `_current_column_name` rather than hardcoding either pair.
 
 `MIGRATIONS` is the ordered `[(target version, function), ...]` table the driver walks. The functions are `_migration_<from>_to_<to>(cursor, conn, db_path)` and sit above the table in ascending order. See [Migration system](#migration-system-initialize_database) for the shape and for how to add the next one.
 

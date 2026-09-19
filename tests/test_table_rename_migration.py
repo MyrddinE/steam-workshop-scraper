@@ -70,7 +70,7 @@ def _seed_both_tables(db_path) -> None:
 
 
 def test_a_fresh_database_reaches_the_expected_version_under_the_new_names(db_path):
-    assert EXPECTED_VERSION == 33
+    assert EXPECTED_VERSION == 34
     assert _version(db_path) == EXPECTED_VERSION
 
     names = _table_names(db_path)

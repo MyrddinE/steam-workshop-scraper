@@ -4,12 +4,14 @@ Both queries that matter predicate on this table and it had no index beyond its
 primary key. The per-field lookup in `queue_field_for_translation`
 
     SELECT id, priority FROM translation_queue
-    WHERE item_type=? AND item_id=? AND field=?
+    WHERE entity_type=? AND entity_id=? AND field=?
 
 runs once per queued field, and migration 22->23's stranded-mirror repair
-correlates a `NOT EXISTS` over `(item_type, item_id)` for every raised mirror.
-`idx_translation_queue_lookup` on `(item_type, item_id, field)` serves both,
-because SQLite can seek an index on a leftmost-columns prefix.
+correlates a `NOT EXISTS` over the same two columns for every raised mirror --
+naming them `item_type`/`item_id`, the spelling they still carry when that step
+runs, before migration 33->34 renames them. `idx_translation_queue_lookup` on
+`(entity_type, entity_id, field)` serves both, because SQLite can seek an index
+on a leftmost-columns prefix.
 
 The repair runs *inside* the `MIGRATIONS` loop, so the index has to be created by
 `_create_legacy_schema` (which runs before the loop for every caller and every version)
@@ -97,7 +99,7 @@ def _seed(db_path, item_count: int = 1500):
     )
     conn.executemany(
         "INSERT INTO translation_queue "
-        "(item_type, item_id, field, original_text, priority, queued_at) "
+        "(entity_type, entity_id, field, original_text, priority, queued_at) "
         "VALUES ('item', ?, 'title_en', 'テキスト', 3, 1)",
         [(i,) for i in range(1, item_count + 1) if i % 3 == 0],
     )
@@ -158,7 +160,7 @@ def _row_counts(db_path) -> dict[str, int]:
 def test_a_fresh_database_has_the_lookup_index(db_path):
     indexes = _index_sql(db_path)
     assert INDEX in indexes, f"fresh database has these queue indexes: {sorted(indexes)}"
-    assert "ON translation_queue (item_type, item_id, field)" in " ".join(
+    assert "ON translation_queue (entity_type, entity_id, field)" in " ".join(
         indexes[INDEX].split()
     ), indexes[INDEX]
 
@@ -280,6 +282,15 @@ def test_the_repairs_two_column_predicate_reads_the_index(db_path):
     nothing for the step that motivated it.
     """
     _seed(db_path)
+    # The repair is historical SQL: it runs before migration 33->34, so it names
+    # the columns' pre-rename spelling. Present that shape (the index definition
+    # follows the columns through RENAME COLUMN) before invoking it directly on
+    # this otherwise-current database.
+    conn = database.get_connection(db_path)
+    restore_pre_rename_table_names(conn)
+    conn.commit()
+    conn.close()
+
     sql = _repair_sql(db_path)
     assert "q.item_type = 'item' AND q.item_id = workshop_items.workshop_id" in " ".join(
         sql.split()

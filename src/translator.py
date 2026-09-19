@@ -288,12 +288,12 @@ def boundary_re(phrase: str) -> re.Pattern:
 
 def _row_key(row: dict) -> str:
     """A queue row's identity, for logs. Not a wire format -- see `boundary_line`."""
-    return f"{row['item_type']}_{row['item_id']}_{row['field']}"
+    return f"{row['entity_type']}_{row['entity_id']}_{row['field']}"
 
 
 def boundary_line(row: dict, phrase: str) -> str:
     """The line that opens ``row``'s block, which the model is asked to copy."""
-    return f"{phrase} {row['item_id']} {field_label(row['field'])}"
+    return f"{phrase} {row['entity_id']} {field_label(row['field'])}"
 
 
 def wire_block(row: dict, phrase: str) -> str:
@@ -360,7 +360,7 @@ def _aligned(blocks: list[tuple[int, str, str]], batch: list[dict]) -> dict[int,
             by_key.setdefault((item_id, label), text)
     usable: dict[int, str] = {}
     for index, row in enumerate(batch):
-        text = by_key.get((row["item_id"], field_label(row["field"])))
+        text = by_key.get((row["entity_id"], field_label(row["field"])))
         if text:
             usable[index] = text
     return usable
@@ -682,7 +682,7 @@ class TranslatorThread(threading.Thread):
                     logging.warning(f"No translation returned for {_row_key(row)}")
                     continue
 
-                if row["item_type"] == "user":
+                if row["entity_type"] == "user":
                     table, id_col = "creators", "steamid"
                     # Creators have no steam_updated_at, so this column holds OUR
                     # wall-clock time and is named translated_at, not a version.
@@ -694,31 +694,31 @@ class TranslatorThread(threading.Thread):
                     stamp_column = "translate_version"
                     revision_row = conn.execute(
                         "SELECT steam_updated_at FROM workshop_items WHERE workshop_id = ?",
-                        (row["item_id"],)
+                        (row["entity_id"],)
                     ).fetchone()
                     stamp_value = revision_row["steam_updated_at"] if revision_row and revision_row["steam_updated_at"] else now_ts
 
                 conn.execute(
                     f"UPDATE {table} SET {row['field']} = ?, {stamp_column} = ? WHERE {id_col} = ?",
-                    (trans_text, stamp_value, row["item_id"])
+                    (trans_text, stamp_value, row["entity_id"])
                 )
                 conn.execute("DELETE FROM translation_queue WHERE id = ?", (row["id"],))
                 translated_count += 1
-                translated_ids.add((row["item_type"], row["item_id"]))
-                logging.debug(f"[{row['item_id']}] {row['field']}: \"{row['original_text'][:40]}\" → \"{trans_text[:40]}\"")
+                translated_ids.add((row["entity_type"], row["entity_id"]))
+                logging.debug(f"[{row['entity_id']}] {row['field']}: \"{row['original_text'][:40]}\" → \"{trans_text[:40]}\"")
 
-            for item_type, item_id in translated_ids:
+            for entity_type, entity_id in translated_ids:
                 # Keyed by type as well as id: a steamid and a workshop_id are
                 # both integers, so an unqualified id could count or complete a
                 # row belonging to the other table.
                 remaining = conn.execute(
                     "SELECT COUNT(*) as cnt FROM translation_queue "
-                    "WHERE item_type=? AND item_id=?",
-                    (item_type, item_id)
+                    "WHERE entity_type=? AND entity_id=?",
+                    (entity_type, entity_id)
                 ).fetchone()["cnt"]
                 if remaining:
                     continue
-                if item_type == "user":
+                if entity_type == "user":
                     # The per-field write above already stamped
                     # `creators.translated_at` -- our clock is the only version a
                     # creator has, so completion needs no second stamp. Only the
@@ -727,12 +727,12 @@ class TranslatorThread(threading.Thread):
                     # as the item column is.
                     conn.execute(
                         "UPDATE creators SET translation_priority = 0 WHERE steamid = ?",
-                        (item_id,)
+                        (entity_id,)
                     )
                     continue
                 revision_row = conn.execute(
                     "SELECT steam_updated_at FROM workshop_items WHERE workshop_id = ?",
-                    (item_id,)
+                    (entity_id,)
                 ).fetchone()
                 stamp_value = revision_row["steam_updated_at"] if revision_row and revision_row["steam_updated_at"] else now_ts
                 # translated_at is OUR clock, stamped when the item's last
@@ -747,7 +747,7 @@ class TranslatorThread(threading.Thread):
                 conn.execute(
                     "UPDATE workshop_items SET translation_priority = 0, "
                     "translate_version = ?, translated_at = ? WHERE workshop_id = ?",
-                    (stamp_value, int(time.time()), item_id)
+                    (stamp_value, int(time.time()), entity_id)
                 )
 
             conn.commit()

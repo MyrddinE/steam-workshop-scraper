@@ -122,8 +122,8 @@ One row per text field awaiting translation.
 | Column | Meaning |
 |---|---|
 | `id` | Auto-increment queue entry ID. |
-| `item_type` | `"item"` or `"user"`. |
-| `item_id` | `workshop_id` or `steamid`. |
+| `entity_type` | `"item"` or `"user"`. |
+| `entity_id` | `workshop_id` or `steamid`, per `entity_type`. |
 | `field` | Target column, for example `title_en`. |
 | `original_text` | Source text. |
 | `priority` | Work priority; the translator drains highest first. |
@@ -135,13 +135,16 @@ legacy backlog is not jumped by newly queued work at the same priority. An older
 `queued_at IS NOT NULL` term made that rule explicit but was redundant with the implicit ordering,
 and it forced a temp B-tree; it was dropped so `idx_translation_queue_poll` can serve the sort.
 
-`idx_translation_queue_lookup` on `(item_type, item_id, field)` serves both the per-field lookup
+`idx_translation_queue_lookup` on `(entity_type, entity_id, field)` serves both the per-field lookup
 `queue_field_for_translation` runs before every queue write and migration 22→23's correlated
-`NOT EXISTS` repair, which constrains only the first two columns. Unlike the other query indexes it
-is created by both schema builders rather than `_ensure_indexes`: the repair runs inside the migration
-loop, before `_ensure_indexes` does, so an index created there would not exist yet when the repair
-scans. Creating it in the unversioned schema also means an existing database picks it up on the next
-startup without a migration step.
+`NOT EXISTS` repair, which constrains only the first two columns (that step runs before migration
+33→34 renames them, and SQLite rewrites the index definition in place). Unlike the other query
+indexes it is created by both schema builders rather than `_ensure_indexes`: the repair runs inside
+the migration loop, before `_ensure_indexes` does, so an index created there would not exist yet when
+the repair scans. Because `_create_legacy_schema` runs on every startup and on both sides of the
+rename, it resolves the two column names dynamically rather than hardcoding either pair. Creating it
+in the unversioned schema also means an existing database picks it up on the next startup without a
+migration step.
 
 `idx_translation_queue_poll` on `(priority DESC, queued_at ASC)` serves that poll's ordering. It is
 created by `_ensure_indexes` and not by the schema builders, the opposite placement for a concrete

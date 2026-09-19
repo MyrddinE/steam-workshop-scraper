@@ -24,7 +24,7 @@ def _queue_rows(db_path):
     conn = get_connection(db_path)
     try:
         return [dict(r) for r in conn.execute(
-            "SELECT item_id, field, priority FROM translation_queue"
+            "SELECT entity_id, field, priority FROM translation_queue"
         ).fetchall()]
     finally:
         conn.close()
@@ -94,7 +94,7 @@ def test_daemon_requeues_when_the_source_was_edited(db_path, tmp_path):
         enriched=True, inherited_priority=0)
 
     rows = _queue_rows(db_path)
-    assert [(r["item_id"], r["field"]) for r in rows] == [(1, "title_en")]
+    assert [(r["entity_id"], r["field"]) for r in rows] == [(1, "title_en")]
     assert rows[0]["priority"] == 3
 
 
@@ -106,7 +106,7 @@ def test_daemon_queues_a_field_that_has_never_been_translated(db_path, tmp_path)
         _merged(title_en=None, translate_version=None), 1,
         enriched=True, inherited_priority=0)
 
-    assert [(r["item_id"], r["field"]) for r in _queue_rows(db_path)] == [(1, "title_en")]
+    assert [(r["entity_id"], r["field"]) for r in _queue_rows(db_path)] == [(1, "title_en")]
 
 
 def test_daemon_ignores_ascii_text(db_path, tmp_path):
@@ -155,7 +155,7 @@ def test_web_worker_queues_an_untranslated_description(db_path):
         {"description": "日本語のテキスト", "tags": []},
     )
 
-    assert [(r["item_id"], r["field"]) for r in _queue_rows(db_path)] == [
+    assert [(r["entity_id"], r["field"]) for r in _queue_rows(db_path)] == [
         (1, "extended_description_en")]
 
 
@@ -182,5 +182,5 @@ def test_web_worker_requeues_when_the_description_changed(db_path):
         {"description": "新しいテキスト", "tags": []},
     )
 
-    assert [(r["item_id"], r["field"]) for r in _queue_rows(db_path)] == [
+    assert [(r["entity_id"], r["field"]) for r in _queue_rows(db_path)] == [
         (1, "extended_description_en")]

@@ -34,7 +34,7 @@ def test_translator_thread_no_config():
 @patch("time.sleep")
 def test_translator_thread_loop(mock_sleep, mock_get_batch, mock_config):
     mock_get_batch.side_effect = [
-        [{"id": 1, "item_type": "item", "item_id": 123, "field": "title_en", "original_text": "\uc548\ub155", "priority": 10}],
+        [{"id": 1, "entity_type": "item", "entity_id": 123, "field": "title_en", "original_text": "\uc548\ub155", "priority": 10}],
         None,
     ]
     thread = TranslatorThread(mock_config)
@@ -94,7 +94,7 @@ def test_translate_batch_writes_translation_and_resets_priority(tmp_path):
     mock_client.chat.completions.create.return_value = mock_response
 
     batch = [{
-        "id": 1, "item_type": "item", "item_id": 1, "field": "title_en",
+        "id": 1, "entity_type": "item", "entity_id": 1, "field": "title_en",
         "original_text": "\u30c6\u30b9\u30c8", "priority": 10,
     }]
     with patch("src.translator.choose_phrase", return_value=PHRASE):
@@ -107,7 +107,7 @@ def test_translate_batch_writes_translation_and_resets_priority(tmp_path):
     assert result[0] == "Hello"
     assert result[1] is not None
     assert result[2] == 0
-    queue_count = conn.execute("SELECT COUNT(*) FROM translation_queue WHERE item_id = 1").fetchone()[0]
+    queue_count = conn.execute("SELECT COUNT(*) FROM translation_queue WHERE entity_id = 1").fetchone()[0]
     assert queue_count == 0
     conn.close()
 
@@ -140,7 +140,7 @@ def test_translate_batch_stamps_steam_updated_at(tmp_path):
     mock_response.choices[0].message.content = f"{PHRASE} 1 title\nHello"
     mock_client.chat.completions.create.return_value = mock_response
 
-    batch = [{"id": 1, "item_type": "item", "item_id": 1, "field": "title_en", "original_text": "\u30c6\u30b9\u30c8", "priority": 10}]
+    batch = [{"id": 1, "entity_type": "item", "entity_id": 1, "field": "title_en", "original_text": "\u30c6\u30b9\u30c8", "priority": 10}]
     with patch("src.translator.choose_phrase", return_value=PHRASE):
         thread._translate_batch(batch, mock_client, "gpt-test")
 
@@ -177,7 +177,7 @@ def test_translate_batch_falls_back_when_no_steam_updated_at(tmp_path):
     mock_response.choices[0].message.content = f"{PHRASE} 1 title\nHello"
     mock_client.chat.completions.create.return_value = mock_response
 
-    batch = [{"id": 1, "item_type": "item", "item_id": 1, "field": "title_en", "original_text": "\u30c6\u30b9\u30c8", "priority": 10}]
+    batch = [{"id": 1, "entity_type": "item", "entity_id": 1, "field": "title_en", "original_text": "\u30c6\u30b9\u30c8", "priority": 10}]
     with patch("src.translator.choose_phrase", return_value=PHRASE):
         thread._translate_batch(batch, mock_client, "gpt-test")
 
