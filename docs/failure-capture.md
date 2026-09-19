@@ -23,17 +23,29 @@ nothing, so the feature is a deliberate switch and tests stay hermetic.
 
 | Kind | Stage | Trigger | Where |
 |---|---|---|---|
-| `web_selector_miss` | `web_scrape` | The page loaded but `DESCRIPTION_SELECTOR` did not match | `web_worker.py` |
+| `web_description_absent` | `web_scrape` | The item's own page was served but its description block is absent, so the absence is permanent | `web_worker.py` |
 | `web_item_missing` | `web_scrape` | The Workshop reports the item is gone (HTTP 404/410, or its item-error wording on an HTTP 200 page) | `web_worker.py` |
+| `web_gated` | `web_scrape` | An age check, a sign-in wall or Steam's error shell withheld the item's page | `web_worker.py` |
+| `web_unknown` | `web_scrape` | A served page that is neither the item's nor a recognised condition | `web_worker.py` |
 | `api_unparsed_body` | `api_fetch` | The API response body is not JSON | `steam_api.py` |
+| `api_unparseable_tags` | `item_write` | The API's tags payload is neither JSON nor a Python-repr list | `database.py` |
 | `api_unhandled_status` | `api_fetch` | A status other than 200, 404 or 500 | `daemon.py` |
 | `image_download_failed` | `image_download` | The download returned a non-200 status, raised a transport error, or served a MIME type that could not be classified | `image_worker.py` |
 
-All five are **additive**. The failure site returns or raises exactly as it did
-before; the capture is recorded on the way past. `api_unparsed_body` re-raises the
-`ValueError`, so the existing handler still reports its 500 — the body is simply
-no longer thrown away. `api_unhandled_status` records the payload but still falls
-through to the success path, because changing that flow is a separate decision.
+Each kind names the cause the worker actually determined, because the distinction
+is the point of the tree. `web_selector_miss` is **no longer emitted**: it was the
+worker's default label, so a gated page, an unattributable page and a page whose
+item simply has no description were all filed under it. `src/capture_promote.py`
+still maps it to `fixtures/web/`, so an outbox written by an earlier build
+promotes rather than landing in `fixtures/other/`.
+
+All the captures are **additive**. The failure site returns or raises exactly as it
+did before; the capture is recorded on the way past. `api_unparsed_body` re-raises
+the `ValueError`, so the existing handler still reports its 500 — the body is
+simply no longer thrown away. `api_unhandled_status` records the payload but still
+falls through to the success path, because changing that flow is a separate
+decision. `api_unparseable_tags` keeps the unparseable payload and writes the item
+with no tags.
 
 ## Image downloads
 
@@ -62,7 +74,9 @@ Image failures are grouped by a **failure signature** — the status code, the
 content type and the exception *class*, never the exception message — so a 404
 loop costs a bounded number of files while a genuinely different failure (a 404
 and a transport error, say) still produces its own evidence. The group counters
-carry the scale.
+carry the scale. The record writes the signature as `signature` and its hash as
+`failure_digest`; that hash, not `shape.class_digest`, is the group's per-shape
+key. The manifest entry for an image sample carries the same `failure_digest`.
 
 ## Web downloads
 
@@ -179,18 +193,26 @@ One JSON record per sample:
 |---|---|
 | `kind`, `stage` | Which failure, and which step of the pipeline |
 | `workshop_id` | The item being processed |
-| `selector` | The CSS selector that failed, for `web_selector_miss` (absent for `web_item_missing`, which is a missing item rather than a broken selector) |
+| `selector` | The CSS selector that failed. Set only for a `web_selector_miss` capture, which the worker no longer emits: a description-less page, a gate, an unknown page and a missing item are not about the selector, so they record `null` here |
 | `http_status`, `final_url`, `content_type` | How the response arrived |
 | `body_file`, `body_bytes`, `body_sha256` | The retained bytes, and the hash and length of the **full** response, so a re-fetch can be matched against it |
 | `body_truncated` | The 64 KB cap cut the retained content |
 | `body_noise_stripped` | `<script>` and `<style>` bodies were removed before capping |
 | `shape` | `class_digest`, `class_count`, `title_tag` — see below |
+| `signature`, `failure_digest` | Image-failure records only: the stable failure signature (status, content type and exception class) and its hash, which is the per-shape key for an image group |
 | `captured_at`, `app_version` | When, and which build |
 
-`shape.class_digest` is a hash of the sorted set of CSS class names in the retained
-content, or of a JSON skeleton when the body has no classes (the API path). Class names
-rather than page text, so rotating text does not change the shape. It is recorded,
-not interpreted: nothing classifies pages by it yet.
+For a body-carrying record, `shape.class_digest` is a hash of the sorted set of CSS
+class names in the retained content, or of a JSON skeleton when the body has no
+classes (the API path). Class names rather than page text, so rotating text does not
+change the shape. It is recorded, not interpreted: nothing classifies pages by it yet.
+
+An image-failure record carries **no body**, so it has no class names and its
+`shape.class_digest` is `null`. Its per-shape key is `failure_digest`, the hash of
+`signature`; the group-state rebuild reads `failure_digest` and falls back to
+`shape.class_digest` for a record written before that field existed, so an outbox
+produced by the old writer is still counted. `shape.class_count` stays `0` and
+`shape.title_tag` stays `null` for these records, because neither was measured.
 
 Retention removes `<script>` and `<style>` bodies before applying the cap. Capping the
 raw head instead kept whatever loaded first, and a modern Steam page is mostly script:
@@ -205,8 +227,9 @@ A persistent break must cost a bounded number of files. Two caps do that, and bo
 are constants in `src/capture.py`:
 
 * Captures group by `(kind, selector)`. Within a group, the first
-  **`SAMPLES_PER_DIGEST`** (3) samples of each distinct `class_digest` are kept and
-  no more.
+  **`SAMPLES_PER_DIGEST`** (3) samples of each distinct per-shape key are kept and
+  no more: a body-carrying record's `shape.class_digest`, and an image-failure
+  record's `failure_digest`.
 * A group tracks at most **`MAX_VARIANTS_PER_GROUP`** (5) distinct digests. Past
   that, a new shape is counted but not written — otherwise a page whose content
   rotates would produce a new digest per fetch and the per-shape cap would mean
@@ -291,11 +314,16 @@ python3 -m src.capture_promote --from <outbox>/failures
 
 For each capture it writes `tests/fixtures/<area>/<name>.<ext>` plus a
 `.meta.json` sidecar, then regenerates `tests/test_ingest_regressions.py`
-parametrized over every fixture found. Credentials (`key=`, `sessionid`,
-`steamLoginSecure`, `api_key`) are scrubbed on the way in, since a body may carry
-them. A capture with no `body_file` is skipped rather than promoted: image
-failures are metadata-only by design, and turning one into an empty fixture would
-produce a test that asserts nothing.
+parametrized over every fixture found. The area comes from `FIXTURE_AREAS`,
+keyed by the record's `kind`: every web kind lands in `tests/fixtures/web/`,
+every API kind in `tests/fixtures/steam_api/`, and a kind not in the table falls
+back to `tests/fixtures/other/` — so a kind the code records but the table omits
+is filed away from the code it exercises, which is why the table lists all of
+them. Credentials (`key=`, `sessionid`, `steamLoginSecure`, `api_key`) are
+scrubbed on the way in, since a body may carry them. A capture with no
+`body_file` is skipped rather than promoted: image failures are metadata-only by
+design, and turning one into an empty fixture would produce a test that asserts
+nothing.
 
 The generated assertions are deliberately weak: they prove the input is handled
 gracefully and the payload is preserved, and nothing more. A generated test that

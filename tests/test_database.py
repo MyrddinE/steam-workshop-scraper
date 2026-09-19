@@ -244,7 +244,7 @@ def test_search_items_advanced_queries(db_path):
     assert "short_description" not in results[0]  # Only essential columns returned
 
     # Test specific fields
-    results = search_items(db_path, title_query="Apple", desc_query="Fruit", filename_query="apple", tags_query="fruit", creator=123)
+    results = search_items(db_path, title_query="Apple", desc_query="Fruit", filename_query="apple", creator=123)
     assert len(results) == 1
     assert results[0]["workshop_id"] == 1
 
@@ -870,3 +870,16 @@ def test_get_db_stats_fetch_recency_uses_last_fetch_attempted_at(db_path):
     assert stats["fetch_recency_counts"] == {"fresh": 1, "stale": 1, "blank": 1}
     assert "dt_updated_counts" not in stats
     assert "highest_api_fetched_at" in stats
+
+
+def test_the_dead_search_arguments_are_gone():
+    """An argument with no reader reads as a control that does not exist."""
+    import inspect
+
+    from src.database import _build_tag_clause, get_next_items_to_scrape, search_items
+
+    assert "staleness_days" not in inspect.signature(get_next_items_to_scrape).parameters
+    search_params = inspect.signature(search_items).parameters
+    for dead in ("tags_query", "required_tags", "excluded_tags"):
+        assert dead not in search_params, f"{dead} has no reader in the body"
+    assert "db_col" not in inspect.signature(_build_tag_clause).parameters

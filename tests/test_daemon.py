@@ -36,6 +36,14 @@ def test_daemon_init_defaults(tmp_path, monkeypatch):
     assert daemon.user_staleness_days == 90
     assert daemon.target_appids == [456]
 
+
+def test_daemon_carries_no_dead_filter_state(tmp_path, monkeypatch):
+    """``last_filters`` held only a cursor the live code reads from the row."""
+    monkeypatch.chdir(tmp_path)
+    initialize_database("workshop.db")
+    daemon = Daemon({"daemon": {"target_appids": [456]}})
+    assert not hasattr(daemon, "last_filters")
+
 def test_daemon_init_missing_appids():
     """Test that the Daemon raises a ValueError if target_appids is omitted."""
     empty_config = {}
@@ -63,7 +71,7 @@ def test_daemon_process_batch_success(mock_sleep, mock_flag_web, mock_insert, mo
     daemon = Daemon(mock_config)
     daemon.process_batch()
 
-    mock_get_items.assert_called_once_with(mock_config["database"]["path"], limit=2, staleness_days=30)
+    mock_get_items.assert_called_once_with(mock_config["database"]["path"], limit=2)
     # One request carrying the whole batch, not one call per item.
     mock_api.assert_called_once_with([123], "TEST_KEY")
     mock_flag_web.assert_called_once_with(mock_config["database"]["path"], 123, 3)

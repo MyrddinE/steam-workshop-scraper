@@ -411,13 +411,19 @@ Sends a POST request to the local web server's `/api/subscribe/<workshop_id>` en
 
 ### `format_ts(ts)` — Unix timestamp to YYYY-MM-DD string, or "N/A"
 
-### `format_size(bytes)` — Bytes to human-readable with Rich markup and color thresholds:
+A value `datetime.fromtimestamp` cannot read — a string, an out-of-range number — is caught and
+renders "N/A", so a bad timestamp degrades in the pane instead of raising out of the render path.
+The handler logs the value under `format_ts`, not another function's name.
+
+### `format_size(size_bytes)` — Bytes to human-readable with Rich markup and color thresholds:
 - < 100KB: gray
 - 100KB–10MB: gray with decimal precision
 - 100MB–1GB: white
 - 1GB–10GB: yellow
 - ≥ 10GB: red
-Uses 3-significant-digit precision matching `format_count`.
+Uses 3-significant-digit precision matching `format_count`. A value that cannot be coerced to a
+number takes the same "N/A" fallback, and the handler logs the value it was given rather than
+shadowing the name with the `bytes` builtin.
 
 ### `format_count(n)` — Number to human-readable with K/M suffix and color thresholds:
 - < 1000: gray

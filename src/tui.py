@@ -91,7 +91,7 @@ def format_ts(ts):
     try:
         return datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d')
     except Exception:
-        logging.debug("format_count failed for value %r", n)
+        logging.debug("format_ts failed for value %r", ts)
         return "N/A"
 
 def format_size(size_bytes):
@@ -117,7 +117,7 @@ def format_size(size_bytes):
             return f"[red]{gb:.1f} GB[/red]"
         return f"[red]{gb:.0f} GB[/red]"
     except Exception:
-        logging.debug("format_size failed for value %r", bytes)
+        logging.debug("format_size failed for value %r", size_bytes)
         return "N/A"
 
 def format_count(n):

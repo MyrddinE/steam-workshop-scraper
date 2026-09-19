@@ -36,11 +36,12 @@ def _with_image_state(rows):
     what counts as a picture is the bug this exists to prevent.
     """
     for row in rows:
-        state = images.image_state(row.get("image_extension"))
-        row["image_state"] = state
+        stored = row.get("image_extension")
+        row["image_state"] = images.image_state(stored)
         # Sent alongside so the page never has to know which states count as
-        # settled; only src/images.py decides that.
-        row["image_resolved"] = state in (images.PRESENT, images.PERMANENT, images.OTHER)
+        # settled; only src/images.py decides that, and this calls its predicate
+        # rather than spelling the rule out a second time here.
+        row["image_resolved"] = images.is_resolved(stored)
     return rows
 
 
@@ -136,49 +137,6 @@ def _bbcode_to_html(text):
     t = re.sub(r'\[url=([^\]]*)\](.*?)\[/url\]', r'<a href="\1" target="_blank">\2</a>', t, flags=re.IGNORECASE)
     t = re.sub(r'\n', '<br>', t)
     return t
-
-
-def _format_count(n):
-    if not n or n == 0:
-        return "0"
-    n = int(n)
-    if n < 1000:
-        return str(n)
-    if n < 1_000_000:
-        if n < 10_000:
-            return f"{n/1000:.2f}K"
-        elif n < 100_000:
-            return f"{n/1000:.1f}K"
-        return f"{n/1000:.0f}K"
-    v = n / 1_000_000
-    if n < 10_000_000:
-        return f"{v:.2f}M"
-    elif n < 100_000_000:
-        return f"{v:.1f}M"
-    return f"{v:.0f}M"
-
-
-def _format_size(size_bytes):
-    if not size_bytes:
-        return "N/A"
-    size = float(size_bytes)
-    kb = size / 1024
-    if kb < 1024:
-        return f"{kb:.1f} KB"
-    mb = kb / 1024
-    if mb < 1024:
-        return f"{mb:.1f} MB"
-    return f"{mb/1024:.1f} GB"
-
-
-@app.template_filter('fcount')
-def template_fcount(n):
-    return _format_count(n)
-
-
-@app.template_filter('fsize')
-def template_fsize(n):
-    return _format_size(n)
 
 
 @app.route('/images/<path:filename>')
