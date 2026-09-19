@@ -2756,7 +2756,7 @@ def get_next_items_to_fetch(db_path: str, limit: int = 10) -> list[dict]:
     conn.close()
     return items
 
-def count_unscraped_items(db_path: str) -> int:
+def count_never_fetched_items(db_path: str) -> int:
     """Returns the number of items that have never been fetched via API (api_fetched_at is NULL)."""
     conn = get_connection(db_path)
     cursor = conn.execute("SELECT COUNT(workshop_id) as count FROM workshop_items WHERE api_fetched_at IS NULL")
@@ -2769,7 +2769,7 @@ def count_fetchable_items(db_path: str) -> int:
     """Returns how many items the API fetch queue can actually hand out.
 
     This is the population ``get_next_items_to_fetch`` selects: queued and not
-    dead. It is deliberately distinct from ``count_unscraped_items``, which
+    dead. It is deliberately distinct from ``count_never_fetched_items``, which
     counts items never successfully fetched regardless of whether they are
     queued. Those two populations do not overlap, and treating the second as a
     measure of the first is how discovery came to be suppressed permanently

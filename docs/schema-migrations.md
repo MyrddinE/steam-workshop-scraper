@@ -886,7 +886,7 @@ Same upsert pattern for `users` table, using `USER_COLUMNS` frozenset for filter
 
 Returns all columns for a single workshop_id, joined with users table. Tags are returned as comma-separated via a correlated `GROUP_CONCAT` subquery against the junction table.
 
-### `count_unscraped_items` (database)
+### `count_never_fetched_items` (database)
 
 Counts items where `api_fetched_at IS NULL` (never successfully fetched) — used to determine if the processing queue needs more items.
 

@@ -2,7 +2,7 @@ import pytest
 import json
 from unittest.mock import patch, MagicMock
 from src.daemon import Daemon
-from src.database import initialize_database, count_unscraped_items, update_app_tracking_cursor
+from src.database import initialize_database, count_never_fetched_items, update_app_tracking_cursor
 
 @patch('src.daemon.query_workshop_files')
 @patch('src.daemon.time.sleep')
@@ -28,7 +28,7 @@ def test_seed_database_fetches_multiple_cursors(mock_sleep, mock_query, tmp_path
     daemon.seed_database(fill_target=100)
 
     assert mock_query.call_count == 2
-    assert count_unscraped_items(db_path) == 120
+    assert count_never_fetched_items(db_path) == 120
 
 
 @patch('src.daemon.query_workshop_files')
@@ -54,7 +54,7 @@ def test_seed_database_stops_after_enough_items(mock_sleep, mock_query, tmp_path
     daemon.seed_database(fill_target=100)
 
     assert mock_query.call_count == 1
-    assert count_unscraped_items(db_path) == 110
+    assert count_never_fetched_items(db_path) == 110
 
 
 @patch('src.daemon.query_workshop_files')
@@ -83,7 +83,7 @@ def test_seed_database_resumes_from_cursor(mock_sleep, mock_query, tmp_path):
 
     mock_query.assert_called_once_with(1062090, cursor="saved_cursor", api_key="test_key",
                                        keep_running=daemon._discovery_alive)
-    assert count_unscraped_items(db_path) == 120
+    assert count_never_fetched_items(db_path) == 120
 
 
 @patch('src.daemon.query_workshop_files')

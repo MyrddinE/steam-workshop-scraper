@@ -10,7 +10,7 @@ from src.database import (
     get_next_items_to_fetch,
     search_items,
     get_connection,
-    count_unscraped_items,
+    count_never_fetched_items,
     clear_pending_items,
     flag_for_web_scrape,
     flag_for_image,
@@ -21,15 +21,15 @@ from src.database import (
     EXPECTED_VERSION,
 )
 
-def test_count_unscraped_items(db_path):
+def test_count_never_fetched_items(db_path):
     """Test counting items that have never been attempted."""
-    assert count_unscraped_items(db_path) == 0
+    assert count_never_fetched_items(db_path) == 0
     
     insert_or_update_item(db_path, {"workshop_id": 1}) # Unscraped
     insert_or_update_item(db_path, {"workshop_id": 2}) # Unscraped
     insert_or_update_item(db_path, {"workshop_id": 3, "api_fetched_at": 1672531200}) # Scraped
     
-    assert count_unscraped_items(db_path) == 2
+    assert count_never_fetched_items(db_path) == 2
 
 def test_initialize_database(db_path):
     """Tests that the database and table are created correctly."""
