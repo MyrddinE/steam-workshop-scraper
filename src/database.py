@@ -223,7 +223,24 @@ USER_PRIORITY_FLOOR = 5
 # than local to `initialize_database` because the migration tests assert that
 # the chain reaches it, and a magic number repeated in nine test files is a
 # number that will be wrong after the next migration.
+#
+# `initialize_database` refuses a database whose recorded version is *above*
+# this number (see `_newer_schema_error` and the guard that calls it): a build
+# that is older than its database cannot know what the newer schema means, and
+# reading it as though it did is how an older build ends up writing beside the
+# real tables instead of stopping. Raise this value only by adding a migration.
 EXPECTED_VERSION = 35
+
+
+class SchemaVersionError(Exception):
+    """A database whose recorded schema version is newer than this build.
+
+    Raised by :func:`initialize_database` before it sets the journal mode or
+    touches the schema, so the refused file is left byte-for-byte as it was. The
+    operator-facing message (see :func:`_newer_schema_error`) says which file,
+    which versions, and that the remedy is a newer build -- not deleting or
+    repairing the database, and not rolling back to an even older build.
+    """
 
 def _build_text_search_clauses(sql: str, params: list, query_string: str, cols: list[str]) -> tuple[str, list]:
     """Applies positive/negative text search tokens to SQL via LIKE clauses."""
@@ -2969,6 +2986,26 @@ MIGRATIONS = [
     (35, _migration_34_to_35),
 ]
 
+def _newer_schema_error(db_path: str, recorded_version: int) -> SchemaVersionError:
+    """The refusal an older build owes a newer database.
+
+    Built in one place so every entry point and every test sees the same
+    sentence: the file, both versions, and the remedy. It is deliberately
+    explicit that the database is *not* the problem and that an older build is
+    not a way out.
+    """
+    return SchemaVersionError(
+        f"{db_path} was written by a newer build: its schema version is "
+        f"{recorded_version}, but this build expects {EXPECTED_VERSION}. This "
+        f"build is older than the database and must not run against it -- it "
+        f"does not understand the newer schema and would read and write it as "
+        f"though it did. Replace this build with one that expects version "
+        f"{recorded_version} or newer; the database is not corrupt, so do not "
+        f"delete or rewrite it. Rolling back to an older build is not a way out "
+        f"once the schema renames have run."
+    )
+
+
 def initialize_database(db_path: str, *, legacy_chain: bool = False):
     """
     Initializes the SQLite database and creates the workshop_items table and indexes.
@@ -2984,6 +3021,11 @@ def initialize_database(db_path: str, *, legacy_chain: bool = False):
     The path is chosen by the database's *recorded version*, never by whether
     the file exists:
 
+    - a database **newer** than :data:`EXPECTED_VERSION` is refused with
+      :class:`SchemaVersionError` before any schema work -- including the
+      journal-mode statement -- so a refused start leaves the file untouched.
+      An older build must not read a schema it does not understand; see
+      :func:`_newer_schema_error`;
     - a **fresh** database (``user_version = 0``) is built directly at
       :data:`EXPECTED_VERSION` by :func:`_create_current_schema`, with no
       migrations replayed;
@@ -3000,12 +3042,30 @@ def initialize_database(db_path: str, *, legacy_chain: bool = False):
     """
     conn = get_connection(db_path)
     cursor = conn.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL;")
 
-    # Schema versioning: run migrations cumulatively from current to expected version
+    # The recorded version is read first, before `PRAGMA journal_mode=WAL` and
+    # before any schema statement, so that refusing a database newer than this
+    # build writes nothing at all: no journal-mode switch, no `CREATE`/`ALTER`,
+    # no `_ensure_indexes`, no version write. Batch 6a measured what the silent
+    # alternative costs -- an older build against a renamed database resurrects
+    # its own tables beside the real ones and keeps using them, so creator joins
+    # blank, every creator looks stale, and discovery progress or filter edits
+    # made in that window are lost. The refusal turns that silence into a
+    # sentence. Reading `user_version` needs no lock different from the one
+    # `get_connection` already took, so this does not narrow the startup window.
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
+    if db_version > EXPECTED_VERSION:
+        # Closed before the raise: on Windows an open handle would keep the
+        # refused file locked for as long as the process lingers.
+        conn.close()
+        raise _newer_schema_error(db_path, db_version)
 
+    cursor.execute("PRAGMA journal_mode=WAL;")
+
+    # Migrations run cumulatively from the recorded version to EXPECTED_VERSION.
+    # Every entry above the recorded version is applied, in order; a database
+    # already at EXPECTED_VERSION applies none and only gets `_ensure_indexes`.
     if db_version == 0 and not legacy_chain:
         _create_current_schema(cursor, conn)
     else:

@@ -2,6 +2,7 @@
 
 The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_version` increment pattern. Each migration is its own function in `src/database.py`, named `_migration_<from>_to_<to>`, and the ordered `MIGRATIONS` table maps each target version to its function. `initialize_database` is a short driver, and the path it takes is decided by the database's **recorded version**, never by whether the file exists:
 
+- a database **newer** than `EXPECTED_VERSION` is refused outright with `SchemaVersionError` — before the journal mode is set and before any schema statement — so a refused start leaves the file byte-for-byte untouched. The message names the file and both versions and says the remedy: replace this build with one that expects at least the recorded version. The database is not corrupt, so it must not be deleted or rewritten, and rolling back to an older build is not a way out once the schema renames have run (see [`SchemaVersionError`](#schemaversionerror-database));
 - a **fresh** database (`user_version = 0`) is built directly at `EXPECTED_VERSION` by `_create_current_schema`, with no migrations replayed;
 - a fresh database built with `legacy_chain=True` takes the historical shape from `_create_legacy_schema` and runs every migration — this is how the chain stays exercised;
 - an **existing** database (`user_version > 0`) always takes `_create_legacy_schema` followed by its pending migrations, whatever the flag says, because the chain is the only thing that can carry it forward.
@@ -160,21 +161,28 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 
 `initialize_database` (`src/database.py`) is a short driver. It:
 
-1. opens the connection and sets `PRAGMA journal_mode=WAL`;
-2. reads `PRAGMA user_version`;
-3. branches on the recorded version:
+1. opens the connection and reads `PRAGMA user_version` — read *first*, before
+   the journal mode and before any schema statement, so the refusal below can
+   leave the file untouched;
+2. refuses a database whose recorded version is **higher** than
+   `EXPECTED_VERSION` by raising `SchemaVersionError`, and writes nothing: no
+   journal-mode switch, no `CREATE`/`ALTER`, no `_ensure_indexes`, no version
+   write. The connection is closed first, so the refused file is not left locked
+   (see [`SchemaVersionError`](#schemaversionerror-database));
+3. sets `PRAGMA journal_mode=WAL`;
+4. branches on the recorded version:
    - a fresh file (`user_version = 0`) with `legacy_chain=False` calls
-     `_create_current_schema(cursor, conn)`, which builds the v30 schema directly
-     and records `EXPECTED_VERSION`;
+     `_create_current_schema(cursor, conn)`, which builds the current schema
+     directly and records `EXPECTED_VERSION`;
    - otherwise it calls `_create_legacy_schema(cursor, conn)` and then runs every
      entry in the module-level `MIGRATIONS` table whose target version is above
      the recorded one, in ascending order. `legacy_chain=True` is the only way a
      fresh file arrives here; an existing database (`user_version > 0`) always
      does;
-4. calls `_ensure_indexes(cursor)`, then commits and closes.
+5. calls `_ensure_indexes(cursor)`, then commits and closes.
 
 `MIGRATIONS` is an ordered list of `(target version, function)` pairs, from
-`(1, _migration_0_to_1)` to `(30, _migration_29_to_30)`. The functions are
+`(1, _migration_0_to_1)` to `(35, _migration_34_to_35)`. The functions are
 defined in `src/database.py` immediately above the table, in that same ascending
 order, so the file still reads as the schema's history top to bottom; each
 function body is the migration exactly as it stood at its version.
@@ -1188,7 +1196,13 @@ Opens a new SQLite connection with `row_factory = sqlite3.Row` for dict-like row
 
 ### `initialize_database` (database)
 
-The driver described under [Migration system](#migration-system-initialize_database): sets WAL mode, reads the recorded version, then builds a fresh file at `EXPECTED_VERSION` with `_create_current_schema` or runs `_create_legacy_schema` plus the pending entries of `MIGRATIONS` in ascending order, calls `_ensure_indexes`, and commits. The keyword-only `legacy_chain` (default `False`) selects the chain for a fresh file only; every existing `initialize_database(db_path)` call site keeps working untouched. This is called on every startup by the daemon, TUI, and web runner — before anything reads or writes — so the one call covers every later connection. Idempotent and safe to call on an existing database: on a database already in WAL the statement is a no-op.
+The driver described under [Migration system](#migration-system-initialize_database): reads the recorded version, refuses it with `SchemaVersionError` if it is higher than `EXPECTED_VERSION`, then sets WAL mode and builds a fresh file at `EXPECTED_VERSION` with `_create_current_schema` or runs `_create_legacy_schema` plus the pending entries of `MIGRATIONS` in ascending order, calls `_ensure_indexes`, and commits. The keyword-only `legacy_chain` (default `False`) selects the chain for a fresh file only; every existing `initialize_database(db_path)` call site keeps working untouched. This is called on every startup by the daemon, TUI, and web runner — before anything reads or writes — so the one call covers every later connection. Idempotent and safe to call on an existing database: on a database already in WAL the statement is a no-op.
+
+### `SchemaVersionError` (database)
+
+Raised by `initialize_database` when the database's recorded `user_version` is **higher** than `EXPECTED_VERSION`: the build is older than the file, so it cannot know what the newer schema means. The read happens before the journal-mode statement and before any `CREATE`/`ALTER`/`_ensure_indexes`/version write, and the connection is closed before the raise, so a refused start leaves the file byte-for-byte unchanged — `tests/test_schema_version_refusal.py` pins that with a SHA-256, the full `sqlite_master` and every table's columns, and the WAL sidecars.
+
+The exception exists rather than a bare `ValueError` because the three entry points must all report it rather than print a traceback: `daemon_runner.main()` and `web_runner.main()` catch it, log the sentence at error level and exit 2 (the same handoff as `ConfigError`), and `ScraperApp.__init__` prints it to stderr and raises `SystemExit(2)` before the screen mounts. Its message (built by `_newer_schema_error`) names the file, the recorded version, the version this build expects, and the remedy: replace the build with one that expects at least the recorded version. It is explicit that the database is not corrupt — so it must not be deleted, rewritten or treated as damage — and that rolling back to an older build is not a way out once the schema renames have run, because that build would keep using tables the database no longer has.
 
 ### `_create_current_schema`, `_create_legacy_schema`, `_ensure_indexes`, `MIGRATIONS` (database)
 

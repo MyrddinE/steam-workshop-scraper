@@ -3,7 +3,7 @@ import sys
 import socket
 import logging
 from src.config import ConfigError, load_config
-from src.database import initialize_database
+from src.database import initialize_database, SchemaVersionError
 from src.webserver import app, init_webserver
 from src import crash
 
@@ -29,7 +29,14 @@ def main():
     # to reach the outbox instead of a console nobody reads.
     crash.install("web", config, config_path=config_path)
     db_path = config.get("database", {}).get("path", "workshop.db")
-    initialize_database(db_path)
+    try:
+        initialize_database(db_path)
+    except SchemaVersionError as exc:
+        # Refused before the web server is initialised: the operator gets the
+        # sentence and exit 2, and no degraded server is left bound to a port
+        # against a schema this build does not understand.
+        logging.error("%s", exc)
+        sys.exit(2)
     init_webserver(db_path, config, config_path=config_path)
 
     web_config = config.get("web", {})

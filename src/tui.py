@@ -13,7 +13,7 @@ from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, L
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.worker import Worker, WorkerState
-from src.database import search_items, get_all_creator_ids, initialize_database, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, raise_api_priority_for_list, raise_api_priority_for_detail, get_subscription_states, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES, normalise_subscribed_value
+from src.database import search_items, get_all_creator_ids, initialize_database, SchemaVersionError, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, raise_api_priority_for_list, raise_api_priority_for_detail, get_subscription_states, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES, normalise_subscribed_value
 from src.analysis import view_window_analysis
 from src import metrics
 from src import db_poll
@@ -28,6 +28,10 @@ from src.web_worker import configured_web_delay
 from src.config import ConfigError, load_config, save_config
 from src.daemon_control import DaemonController
 import os
+# Module level, not just inside `main`: `ScraperApp.__init__` prints the
+# ConfigError and SchemaVersionError refusals to stderr before `main` ever runs,
+# and the old in-`main` import left those branches with a NameError.
+import sys
 import yaml
 import threading
 import datetime
@@ -2276,7 +2280,15 @@ class ScraperApp(App):
             print(f"\n{exc}\n", file=sys.stderr)
             raise SystemExit(2)
         self.db_path = self.config["database"]["path"]
-        initialize_database(self.db_path)
+        try:
+            initialize_database(self.db_path)
+        except SchemaVersionError as exc:
+            # Same handoff as the ConfigError branch above: the sentence goes to
+            # stderr and the process exits 2. The screen must not mount against a
+            # schema this build does not understand, so there is nothing to
+            # degrade to -- refusing is the whole answer.
+            print(f"\n{exc}\n", file=sys.stderr)
+            raise SystemExit(2)
         self._wilson_cutoffs = {}
         self._web_port = None
         # One controller for the process: the TUI screen and the embedded web
