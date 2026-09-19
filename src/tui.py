@@ -909,13 +909,13 @@ class DaemonManagerScreen(Screen):
         """Run a daemon transition on a worker so the interface keeps running.
 
         Every controller transition blocks: ``stop`` polls the process every half
-        second for up to ``STOP_TIMEOUT_SECONDS`` (15 s) and then waits up to
-        another 3 s for a forced kill, and ``restart`` is ``stop`` followed by
-        ``start``. Called straight from the button handler, that froze the whole
-        application for the duration -- no keypress, no screen change and no
-        timer, including this screen's own two-second log poll, which fell silent
-        at the moment its output was most wanted. See issue 26 in
-        docs/code-issues.md.
+        second for up to ``STOP_TIMEOUT_SECONDS`` (25 s, derived from the daemon's
+        worst case in ``src/daemon_control.py``) and then waits up to another 3 s
+        for a forced kill, and ``restart`` is ``stop`` followed by ``start``.
+        Called straight from the button handler, that froze the whole application
+        for the duration -- no keypress, no screen change and no timer, including
+        this screen's own two-second log poll, which fell silent at the moment
+        its output was most wanted. See issue 26 in docs/code-issues.md.
         """
         if self._transitioning:
             # The controls are disabled while this is true, so reaching here

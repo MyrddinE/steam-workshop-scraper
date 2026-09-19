@@ -6,8 +6,8 @@ a missing file for a stop request, the ordering of the stop flags against the
 joins, and the *joint* budget the joins now share. The ordering is the fix for a
 real failure: the workers used to be signalled and joined one after another, so
 a later worker was not told to stop until every earlier join had returned, five
-5-second joins added up to 25 seconds worst case, and the controller's 15 s
-grace expired while the workers were still logging.
+5-second joins added up to 25 seconds worst case, and the controller's grace
+(15 s at the time) expired while the workers were still logging.
 """
 
 import logging

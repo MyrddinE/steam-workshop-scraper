@@ -224,12 +224,19 @@ survivor means a writer may still be mid-transaction, so the snapshot is skipped
 with a line naming the thread that outlived the budget. The daemon then exits,
 and `atexit` removes the PID file.
 
-The controller's side is unchanged: it waits `STOP_TIMEOUT_SECONDS` (15 s in
-`src/daemon_control.py`) for the process to exit before escalating to
-terminate/kill. The daemon's notice (up to about a second in `_wait_for_work`)
-plus its 5-second join budget and the failure-capture flush fit inside that
-grace. The closing snapshot, when a backup outbox is configured, runs after the
-joins and is bounded by the size of the database rather than by the budget.
+The controller's side is derived so that it covers that worst case rather than
+fitting it by luck: `STOP_TIMEOUT_SECONDS` (25 s in `src/daemon_control.py`) is
+the longest single blocking call the daemon's main thread can be inside when the
+stop arrives (15 s: the SQLite busy timeout in `src/database.py`, and the
+subscriptions page fetch in `src/subscription_sync._fetch_page`; the Steam calls
+on that path are 10 s and the 15 s workers run on their own threads), plus the
+daemon's 5 s join budget (`SHUTDOWN_BUDGET_SECONDS`) plus a 5 s margin for the
+up-to-a-second PID-file tick in `_wait_for_work`, the failure-capture flush, the
+controller's own half-second poll and process teardown. Only after that grace
+does the controller escalate to terminate/kill, and only against a process it
+started. The closing snapshot, when a backup outbox is configured, runs after
+the joins and is bounded by the size of the database rather than by the budget,
+so it is not covered by this figure.
 
 ---
 
