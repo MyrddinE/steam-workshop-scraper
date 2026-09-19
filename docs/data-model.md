@@ -204,6 +204,7 @@ that is not there.
   `image_fetched_at` and `translated_at` arrived in v27, so every item that completed its stage
   earlier keeps NULL and no rate can be reconstructed for it. The per-queue throughput metrics
   report "no history yet" for a queue with no stamps rather than a zero or an estimate
-  ([timestamps.md](timestamps.md)). **Burn-down and ETA are deliberately absent** while the owner
-  decides how to present a rate that has no stable history behind it; the timestamps a later ETA
-  would need are recorded from now on.
+  ([timestamps.md](timestamps.md)). The `queue_eta` metric is not blocked on history: it reports
+  each queue's outstanding depth and, from whatever completions exist, a rate in active time and a
+  `53d ± 30%` time to drain, with the uncertainty widening when the evidence is thin
+  ([data-pipeline.md](data-pipeline.md#queue-state-outstanding-rate-and-time-to-drain)).

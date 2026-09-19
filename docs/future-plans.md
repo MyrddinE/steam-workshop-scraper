@@ -107,9 +107,9 @@ So **three of the four queues cannot report a rate or an ETA from the data alone
 can. This is the single largest gap between the current stats screen and the intended one, and it is a
 schema question rather than a presentation one. *(Landed: migration 26→27 added
 `web_scraped_at`, `image_fetched_at` and `translated_at`, and the per-queue throughput and
-last-success metrics read them. A rate is now available for all four queues; burn-down and ETA are
-still deliberately not computed, because the owner is deciding how to present a rate that has no
-history behind it yet.)*
+last-success metrics read them. A rate is now available for all four queues, and the `queue_eta`
+metric reports each one's outstanding depth, active-time rate and `53d ± 30%` time to drain from
+whatever history exists — see [data-pipeline.md](data-pipeline.md#queue-state-outstanding-rate-and-time-to-drain).)*
 
 **Decision taken:** add a per-queue completion timestamp for the three queues that lack one, rather
 than inferring rates from sampled queue-depth deltas. Sampled deltas would avoid a migration but
@@ -249,7 +249,7 @@ for the full-text index. They should therefore take the next migration number ra
 one, so each can be deployed and reverted on its own. *(The queue indexes took their own number,
 24→25, following this rule. The per-queue completion timestamps took 26→27: `web_scraped_at`,
 `image_fetched_at` and `translated_at`, with the per-queue throughput and last-success metrics that
-read them. Burn-down and ETA are still open — see below.)*
+read them. Burn-down and ETA landed on top of them as the `queue_eta` metric — see below.)*
 
 ### Open decisions
 
@@ -260,7 +260,9 @@ read them. Burn-down and ETA are still open — see below.)*
   should be presented as a separate "still exploring" indicator. (The landed coverage metric uses
   discovered live items as its denominator.)
 * Whether ETA should be shown for queues whose completion timestamps are newly added, before there is
-  enough history for a stable rate.
+  enough history for a stable rate. *(Resolved: it is shown immediately, and the uncertainty is a
+  percentage that is widest while the evidence is thinnest, so a newly-started queue reads as
+  uncertain rather than as a stable wrong answer — [data-pipeline.md](data-pipeline.md#the-uncertainty).)*
 
 ---
 

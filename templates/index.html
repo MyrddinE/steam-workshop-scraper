@@ -2082,6 +2082,7 @@ const STATS_LABELS = {
   web_throughput: 'Web scrape throughput',
   image_throughput: 'Image download throughput',
   translation_throughput: 'Translation throughput',
+  queue_eta: 'Time to drain',
   tag_counts: 'Tags',
 };
 
@@ -2105,26 +2106,71 @@ function _fmtTimestamp(ts) {
   return ts ? new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ') : 'never';
 }
 
-function _renderCoverage(cov) {
-  const total = cov.total || 0;
-  if (!total) return '<p class="stat-label">No live items to cover.</p>';
-  const stages = [
-    ['api_fetched', 'API data'],
-    ['described', 'Description'],
-    ['imaged', 'Image'],
-    ['translated', 'Translation'],
-    ['attributed', 'Creator'],
-  ];
-  const rows = stages.map(function(stage) {
-    const done = cov[stage[0]] || 0;
+const COVERAGE_STAGES = [
+  ['api_fetched', 'API data'],
+  ['described', 'Description'],
+  ['imaged', 'Image'],
+  ['translated', 'Translation'],
+  ['attributed', 'Creator'],
+];
+
+function _coverageRows(counts, total) {
+  return COVERAGE_STAGES.map(function(stage) {
+    const done = counts[stage[0]] || 0;
     const pct = done / total * 100;
     return '<tr><td>' + stage[1] + '</td>'
       + '<td style="white-space:nowrap">' + fmtCount(done) + ' / ' + fmtCount(total) + '</td>'
       + '<td style="width:45%"><progress value="' + pct.toFixed(1) + '" max="100"></progress></td>'
       + '<td>' + pct.toFixed(1) + '%</td></tr>';
   }).join('');
-  return '<p class="stat-label">Progress over ' + fmtCount(total) + ' live items (dead items excluded).</p>'
-    + '<table class="stats-table"><tbody>' + rows + '</tbody></table>';
+}
+
+function _coverageScopeNote(filtered) {
+  // Why the two coverage figures are what they are. The second is the search
+  // builder's SQL translation of the target AppIDs' enrichment filters, so it
+  // is not a re-derivation of the daemon's per-item check; an AppID with no
+  // filters, or one whose stored filters cannot be read, excludes nothing.
+  const appids = (filtered.appids || []).join(', ') || 'none configured';
+  const unreadable = (filtered.unreadable || []).join(', ');
+  const withFilters = filtered.with_filters || [];
+  const restricting = filtered.restricting || [];
+  if (unreadable) {
+    return 'Target AppIDs: ' + appids + '. The stored filter set for ' + unreadable
+      + ' could not be read, so those items are all counted (no exclusion).';
+  }
+  if (!withFilters.length) {
+    return 'Target AppIDs: ' + appids
+      + '. No enrichment filters are set for them, so both figures are the same.';
+  }
+  if (!restricting.length) {
+    return 'Target AppIDs: ' + appids + '. Their filters exclude nothing'
+      + ' (a percentile has no fixed predicate), so both figures are the same.';
+  }
+  return 'Target AppIDs: ' + appids
+    + ". SQL translation of their filters; it may differ from the daemon's per-item"
+    + ' check on translated (_en) fields.';
+}
+
+function _renderCoverage(cov) {
+  const total = cov.total || 0;
+  if (!total) return '<p class="stat-label">No live items to cover.</p>';
+  let html = '<p class="stat-label">All live items: ' + fmtCount(total)
+    + ' (dead items excluded).</p>'
+    + '<table class="stats-table"><tbody>' + _coverageRows(cov, total) + '</tbody></table>';
+  const filtered = cov.filtered;
+  if (filtered && typeof filtered === 'object') {
+    const fTotal = filtered.total || 0;
+    html += '<p class="stat-label" style="margin-top:8px">Target AppIDs&rsquo; enrichment'
+      + ' filters &mdash; what I care about: ' + fmtCount(fTotal) + '</p>';
+    if (fTotal) {
+      html += '<table class="stats-table"><tbody>' + _coverageRows(filtered, fTotal)
+        + '</tbody></table>';
+    } else {
+      html += '<p class="stat-label">No live items match the filters.</p>';
+    }
+    html += '<p class="stat-label">' + _escapeHtml(_coverageScopeNote(filtered)) + '</p>';
+  }
+  return html;
 }
 
 function _renderStuck(stuck) {
@@ -2222,6 +2268,60 @@ function _renderThroughput(t) {
     + '<li>Last success: ' + _fmtTimestamp(t.last_success) + '</li></ul>';
 }
 
+function _fmtDuration(seconds) {
+  // One unit, coarse enough to read: 53d, 4h, 12m. The ETA is never split into
+  // days-and-hours, so the uncertainty beside it is the only second number.
+  const s = Math.max(0, Number(seconds) || 0);
+  if (s >= 86400) return fmtExact(Math.round(s / 86400)) + 'd';
+  if (s >= 3600) return fmtExact(Math.round(s / 3600)) + 'h';
+  if (s >= 60) return fmtExact(Math.round(s / 60)) + 'm';
+  return fmtExact(Math.round(s)) + 's';
+}
+
+function _fmtUncertainty(pct) {
+  // Always a percentage, never an absolute span.
+  if (pct === null || pct === undefined) return '';
+  if (pct < 1) return '&plusmn; &lt;1%';
+  return '&plusmn; ' + fmtExact(Math.round(pct)) + '%';
+}
+
+function _renderQueueEta(value) {
+  // Outstanding depth, rate and time to drain per queue. The rate is in active
+  // time so a pause does not read as a slowdown; a queue with no completions in
+  // the window shows "no rate yet" rather than a fabricated number, and one
+  // with nothing outstanding is drained. A gross figure is marked, because it
+  // must not be read as a time to empty. See docs/data-pipeline.md.
+  const queues = value.queues || {};
+  const order = [['api', 'API fetch'], ['web', 'Web scrape'],
+                 ['image', 'Image'], ['translation', 'Translation']];
+  const rows = order.map(function(q) {
+    const entry = queues[q[0]];
+    if (!entry) return '';
+    const outstanding = entry.outstanding || 0;
+    let rate = '&mdash;';
+    let drain;
+    if (outstanding <= 0) {
+      drain = '<span style="color:#44aa44">drained</span>';
+    } else if (entry.eta_seconds === null || entry.eta_seconds === undefined) {
+      drain = '<span class="stat-label">no rate yet</span>';
+    } else {
+      const basis = entry.basis === 'net' ? '' : ' <span class="stat-label">(gross)</span>';
+      rate = (entry.per_day || 0).toFixed(1) + '/day';
+      drain = _fmtDuration(entry.eta_seconds) + ' ' + _fmtUncertainty(entry.uncertainty_pct) + basis;
+    }
+    return '<tr><td>' + q[1] + '</td><td>' + fmtCount(outstanding) + '</td><td>'
+      + rate + '</td><td>' + drain + '</td></tr>';
+  }).join('');
+  return '<p class="stat-label">Rate window ' + _fmtDuration(value.window_seconds)
+    + '; paused ' + _fmtDuration(value.paused_seconds)
+    + '; API inflow subtracted ' + fmtCount(value.sweep_inflow || 0)
+    + '. Web and image rates use active time (pauses excluded); the API rate is net of the '
+    + 'staleness sweep. Web, image and translation figures are gross &mdash; their inflow is '
+    + 'the items an API refresh re-flags, which nothing records.</p>'
+    + '<table class="stats-table"><thead><tr><th>Queue</th><th>Outstanding</th>'
+    + '<th>Rate</th><th>Time to drain</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
 function _renderMetricBody(name, value) {
   if (value === null || value === undefined) return '<span class="stat-label">failed</span>';
   if (name === 'totals') return _renderTotals(value);
@@ -2239,6 +2339,7 @@ function _renderMetricBody(name, value) {
   if (name === 'priority_breakdowns') return _renderPriority(value);
   if (name === 'web_throughput' || name === 'image_throughput'
       || name === 'translation_throughput') return _renderThroughput(value);
+  if (name === 'queue_eta') return _renderQueueEta(value);
   if (name === 'tag_counts') return _renderTags(value);
   if (name === 'app_tracking') return _renderAppTracking(value);
   return '<pre style="white-space:pre-wrap;margin:0">' + JSON.stringify(value) + '</pre>';

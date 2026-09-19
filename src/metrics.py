@@ -25,12 +25,22 @@ Two rules keep this honest:
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator
 
+from src import activity
 from src import db_poll
-from src.database import get_connection
+from src.database import (
+    api_fetch_queue_predicate,
+    build_filter_clause_sql,
+    enrichment_filters_for,
+    get_connection,
+    image_queue_predicate,
+    translation_priority_predicate,
+    web_scrape_queue_predicate,
+)
 
 #: Used when a caller wants every metric and has no measurements of its own.
 DEFAULT_STALENESS_DAYS = 30
@@ -128,6 +138,11 @@ def iter_metrics(db_path: str, names: list[str] | None = None,
     chunk as it lands rather than holding everything until the last one is done.
     """
     ctx = dict(params or {})
+    # The runner knows the database path, and a metric that reads the
+    # restart-surviving state kept beside it (`queue_eta` and the pause record)
+    # needs it. It travels in the params dict every metric already receives
+    # rather than widening the ``(conn, params)`` signature for one caller.
+    ctx["db_path"] = db_path
     conn = get_connection(db_path)
     try:
         for name in _resolve(names):
@@ -240,6 +255,143 @@ def _translation_throughput(conn, params) -> dict:
     # One stamp per item, written when its last queued field is translated, so
     # this counts items completed, not fields.
     return _completion_window(conn, "translated_at")
+
+
+# --------------------------------------------------------------------------
+# time to drain, per queue
+# --------------------------------------------------------------------------
+
+#: How long a drain rate is measured over. A day smooths an hourly rate enough
+#: to be worth showing while still moving when the pace does.
+DRAIN_WINDOW_SECONDS = 86400
+
+#: name, completion column, outstanding predicate, whether `.pauselock` stops
+#: this stage, and whether the queue's rate is net of the staleness sweep.
+#:
+#: The pause flag is per queue because the pause is: the daemon's web and image
+#: workers poll `.pauselock` and genuinely stop, while the API fetch loop and the
+#: translator are not gated by it (see `src/daemon.py`, `src/web_worker.py`,
+#: `src/image_worker.py`). Subtracting the pause from a queue that kept working
+#: would overstate its rate, so only the gated queues lose the paused time.
+_DRAIN_QUEUES = (
+    ("api", "api_fetched_at", api_fetch_queue_predicate(), False, True),
+    ("web", "web_scraped_at", web_scrape_queue_predicate(), True, False),
+    ("image", "image_fetched_at", image_queue_predicate(), True, False),
+    ("translation", "translated_at", translation_priority_predicate(), False, False),
+)
+
+_LIVE_ITEM = "(status IS NULL OR status <> -1)"
+
+
+def _drain_estimate(outstanding: int, completed: int, active_seconds: float) -> dict:
+    """One queue's rate and time to drain, with a relative uncertainty.
+
+    The completions in the window are modelled as a Poisson count: the rate is
+    ``completed / active_seconds`` and the relative standard error of that count
+    is ``1/sqrt(completed)``, so the rate and therefore the ETA carry a
+    percentage uncertainty that is **wide while the evidence is thin and narrows
+    as it accumulates** -- 100% at one completion, 50% at four, 10% at a hundred.
+    That is the spread of the observed completions expressed as a count; the
+    alternative, the spread of the inter-completion gaps, would need every
+    timestamp in the window loaded instead of one indexed count.
+
+    A queue with **no completions in the window gets no rate**: ``per_hour``,
+    ``per_day``, ``eta_seconds`` and ``uncertainty_pct`` are all ``None``, which
+    the front ends render as "no rate yet" beside the outstanding depth. That is
+    the honest answer rather than a fabricated one -- a queue that completed
+    nothing may be stalled, or may simply have had no work, and the volume of
+    completions cannot tell those apart. An empty queue is not that case: with
+    nothing outstanding the time to drain is a real zero.
+    """
+    estimate = {
+        "outstanding": int(outstanding),
+        "completed": int(completed),
+        "active_seconds": int(round(active_seconds)),
+    }
+    if outstanding <= 0:
+        estimate.update({"per_hour": 0.0, "per_day": 0.0,
+                         "eta_seconds": 0.0, "uncertainty_pct": None})
+        return estimate
+    if completed <= 0 or active_seconds <= 0:
+        estimate.update({"per_hour": None, "per_day": None,
+                         "eta_seconds": None, "uncertainty_pct": None})
+        return estimate
+    rate = completed / active_seconds
+    estimate.update({
+        "per_hour": round(rate * 3600, 3),
+        "per_day": round(rate * 86400, 2),
+        "eta_seconds": round(outstanding / rate, 1),
+        "uncertainty_pct": round(100.0 / math.sqrt(completed), 1),
+    })
+    return estimate
+
+
+@metric("queue_eta", 150, "Outstanding depth, active-time rate and time to drain per queue, with uncertainty.")
+def _queue_eta(conn, params) -> dict:
+    """How long each of the four work queues will take to drain, at its own rate.
+
+    One question per queue -- outstanding depth, the rate it has been draining
+    at, and the time to drain -- measured over ``drain_window_seconds`` (a day by
+    default). It is computed from whatever history exists, so it is shown
+    immediately after the completion clocks start recording rather than waiting
+    for a "stable" rate; the uncertainty the queue entry carries is what makes
+    that safe to show, since it is a percentage and is widest while the evidence
+    is thinnest.
+
+    **The rate is in active time, not wall-clock**, so a pause does not read as a
+    slowdown: the paused intervals are recorded beside the database
+    (``src/activity.py``) and subtracted from the window for the queues `.pauselock`
+    actually stops (web and image), with a pause still in progress counted up to
+    now. The **API queue's completions are net** of the staleness sweep, whose
+    own rowcount is recorded per run and subtracted when it falls inside the
+    window. The other three queues' figures are **gross**: their inflow is the
+    items an API refresh re-flags, which nothing records on our clock, so they
+    are not a time to empty. Discovery's inflow into the API queue is likewise
+    not counted -- `first_seen_at` is our clock but is not indexed, and a window
+    count over it would be a full scan; the docs say so rather than implying it
+    was measured (see `docs/data-pipeline.md`).
+
+    The outstanding depth excludes dead items, matching `priority_breakdowns`:
+    a dead item can never complete, so leaving it in would promise a drain that
+    cannot happen. Completion counts are not filtered by liveness -- a completed
+    item is a completion however that item ended.
+    """
+    db_path = params.get("db_path")
+    window = int(params.get("drain_window_seconds") or DRAIN_WINDOW_SECONDS)
+    if window <= 0:
+        window = DRAIN_WINDOW_SECONDS
+    now = int(time.time())
+    window_start = now - window
+    sweep = activity.sweep_inflow(db_path, window_start, now)
+    paused = activity.paused_seconds(db_path, window_start, now)
+    active = max(0.0, window - paused)
+
+    queues: dict[str, dict] = {}
+    for name, column, predicate, honours_pause, net in _DRAIN_QUEUES:
+        gross = conn.execute(
+            f"SELECT COUNT(*) AS n FROM workshop_items WHERE {column} >= ?",
+            (window_start,),
+        ).fetchone()["n"]
+        subtracted = sweep if net else 0
+        completed = max(0, gross - subtracted)
+        outstanding = conn.execute(
+            f"SELECT COUNT(*) AS n FROM workshop_items "
+            f"WHERE ({predicate}) AND {_LIVE_ITEM}"
+        ).fetchone()["n"]
+        entry = _drain_estimate(outstanding, completed,
+                                active if honours_pause else float(window))
+        entry["gross_completed"] = int(gross)
+        entry["inflow_subtracted"] = int(subtracted)
+        entry["basis"] = "net" if net else "gross"
+        entry["honours_pause"] = bool(honours_pause)
+        queues[name] = entry
+
+    return {
+        "window_seconds": window,
+        "paused_seconds": int(round(paused)),
+        "sweep_inflow": int(sweep),
+        "queues": queues,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -382,14 +534,140 @@ def _fetch_recency(conn, params) -> dict:
     return counts
 
 
-@metric("coverage", 80, "How much of the live library each stage has reached.")
-def _coverage(conn, params) -> dict:
-    """Processing coverage over live items.
+# --------------------------------------------------------------------------
+# coverage, at two scopes
+# --------------------------------------------------------------------------
 
-    This is the progress view: outstanding depth says how much is queued, but
-    only coverage says how far along the library actually is. Dead items are
-    excluded because they will never be covered, and counting them would make
-    coverage fall as the library is cleaned up.
+#: The five stages the coverage figure counts, in display order.
+COVERAGE_STAGES = ("api_fetched", "described", "imaged", "translated", "attributed")
+
+#: Live items only: dead items can never be covered.
+_LIVE_ITEMS = "(w.status IS NULL OR w.status <> -1)"
+
+
+def _coverage_counts(conn, where_sql: str, params: list) -> dict:
+    """The six coverage counts over whatever population ``where_sql`` selects."""
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(CASE WHEN w.api_fetched_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS api_fetched,
+               COALESCE(SUM(CASE WHEN COALESCE(w.extended_description, '') <> '' THEN 1 ELSE 0 END), 0) AS described,
+               COALESCE(SUM(CASE WHEN COALESCE(w.image_extension, '') <> '' THEN 1 ELSE 0 END), 0) AS imaged,
+               COALESCE(SUM(CASE WHEN w.translate_version IS NOT NULL THEN 1 ELSE 0 END), 0) AS translated,
+               COALESCE(SUM(CASE WHEN COALESCE(w.creator, '') <> '' THEN 1 ELSE 0 END), 0) AS attributed
+        FROM workshop_items w
+        WHERE {where_sql}
+        """,
+        params,
+    ).fetchone()
+    return {key: row[key] or 0 for key in ("total",) + COVERAGE_STAGES}
+
+
+def _care_about_population(conn, target_appids) -> tuple[str, list, dict]:
+    """The SQL predicate for "what I care about": the target AppIDs' filters.
+
+    Each target AppID contributes ``consumer_appid = ? AND <its filters>`` and
+    the AppIDs are joined with OR, so the figure is the **union** of whatever any
+    target's filters select. An AppID with no stored filters, or one whose stored
+    set could not be read, contributes its AppID alone and therefore everything
+    it owns -- the same contract as :func:`enrichment_filters_for` (``None`` and
+    ``[]`` both mean "no exclusion").
+
+    Returns ``(predicate, params, detail)``. ``predicate`` is empty when there is
+    no target AppID at all, and the caller then counts the whole live library for
+    both figures: with nothing to restrict to, "what I care about" is everything,
+    exactly as an empty filter set is.
+
+    ``detail`` names the AppIDs used, the ones with a readable non-empty filter
+    set (``with_filters``), the subset of those whose filters actually produce a
+    predicate (``restricting``) and the ones whose stored set was unreadable
+    (``unreadable``), so a front end can explain why the two figures coincide
+    rather than leaving it looking like a bug.
+    """
+    if target_appids is None:
+        target_appids = [
+            row["appid"]
+            for row in conn.execute("SELECT appid FROM app_tracking ORDER BY appid")
+            if row["appid"] is not None
+        ]
+    appids: list[int] = []
+    for value in target_appids:
+        try:
+            appids.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    if not appids:
+        return "", [], {"appids": [], "with_filters": [], "restricting": [],
+                        "unreadable": []}
+
+    clauses: list[str] = []
+    params: list = []
+    with_filters: list[int] = []
+    restricting: list[int] = []
+    unreadable: list[int] = []
+    for appid in appids:
+        row = conn.execute(
+            "SELECT * FROM app_tracking WHERE appid = ?", (appid,)
+        ).fetchone()
+        tracking = dict(row) if row is not None else None
+        filters = enrichment_filters_for(tracking) if tracking else []
+        if tracking is not None and filters is None:
+            unreadable.append(appid)
+        parts = ["w.consumer_appid = ?"]
+        app_params: list = [appid]
+        if filters:
+            with_filters.append(appid)
+            group, group_params = build_filter_clause_sql(filters)
+            if group:
+                restricting.append(appid)
+                parts.append(f"({group})")
+                app_params.extend(group_params)
+        clauses.append("(" + " AND ".join(parts) + ")")
+        params.extend(app_params)
+    predicate = "(" + " OR ".join(clauses) + ")"
+    return predicate, params, {
+        "appids": appids,
+        "with_filters": with_filters,
+        "restricting": restricting,
+        "unreadable": unreadable,
+    }
+
+
+@metric("coverage", 80, "How much of the live library each stage has reached, at both scopes.")
+def _coverage(conn, params) -> dict:
+    """Processing coverage over live items, at two scopes side by side.
+
+    The first figure is the whole live library: this is the progress view, and
+    outstanding depth says how much is queued while only coverage says how far
+    along the library actually is. Dead items are excluded because they will
+    never be covered, and counting them would make coverage fall as the library
+    is cleaned up.
+
+    The second figure, under ``filtered``, is the same coverage restricted to
+    *what the owner cares about*: the items the target AppIDs'
+    ``enrichment_filters`` select. Its population is the one the daemon calls
+    *enriched*. Each AppID contributes ``consumer_appid = ? AND <its filters>``
+    and the AppIDs are ORed together, so with more than one target the figure is
+    the **union** of what any target's filters select. The AppIDs come from the
+    ``target_appids`` parameter when a front end can supply the configured list,
+    and otherwise from every row in ``app_tracking``.
+
+    **This figure is a translation, not a re-derivation of the daemon's per-item
+    decision.** It is built by :func:`src.database.build_filter_clause_sql`, the
+    same SQL builder a search uses, while the daemon's in-memory
+    :func:`src.database._evaluate_filters` reads the original columns alone. The
+    builder also searches each text field's ``_en`` counterpart, so the two can
+    disagree on an item whose original text does not match but whose stored
+    translation does. Where they disagree, this is the search builder's answer; the
+    demotion walk deliberately keeps using the Python one. A ``percentile``
+    filter has no fixed predicate and is skipped by both, since it is relative to
+    the result set it is computed over.
+
+    An unreadable or empty filter set means *everything* for that AppID
+    (:func:`enrichment_filters_for`'s contract: ``None`` and ``[]`` both mean no
+    exclusion), so the two figures then coincide. ``filtered.with_filters`` and
+    ``filtered.unreadable`` say which AppIDs actually restricted anything, so the
+    coincidence reads as the contract it is.
 
     The image stage counts a *recorded answer*, not only a stored file.
     ``image_extension`` holds the server's reply as well as a file type, so an
@@ -398,26 +676,14 @@ def _coverage(conn, params) -> dict:
     the bar permanently short of the truth. What is still outstanding is an item
     with no answer at all.
     """
-    row = conn.execute(
-        """
-        SELECT COUNT(*) AS total,
-               COALESCE(SUM(CASE WHEN api_fetched_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS api_fetched,
-               COALESCE(SUM(CASE WHEN COALESCE(extended_description, '') <> '' THEN 1 ELSE 0 END), 0) AS described,
-               COALESCE(SUM(CASE WHEN COALESCE(image_extension, '') <> '' THEN 1 ELSE 0 END), 0) AS imaged,
-               COALESCE(SUM(CASE WHEN translate_version IS NOT NULL THEN 1 ELSE 0 END), 0) AS translated,
-               COALESCE(SUM(CASE WHEN COALESCE(creator, '') <> '' THEN 1 ELSE 0 END), 0) AS attributed
-        FROM workshop_items
-        WHERE status IS NULL OR status <> -1
-        """
-    ).fetchone()
-    return {
-        "total": row["total"] or 0,
-        "api_fetched": row["api_fetched"],
-        "described": row["described"],
-        "imaged": row["imaged"],
-        "translated": row["translated"],
-        "attributed": row["attributed"],
-    }
+    overall = _coverage_counts(conn, _LIVE_ITEMS, [])
+    predicate, predicate_params, detail = _care_about_population(
+        conn, params.get("target_appids"))
+    if predicate:
+        filtered = _coverage_counts(conn, f"{_LIVE_ITEMS} AND {predicate}", predicate_params)
+    else:
+        filtered = dict(overall)
+    return {**overall, "filtered": {**filtered, **detail}}
 
 
 # --------------------------------------------------------------------------

@@ -10,6 +10,7 @@ from src.database import search_items, get_item_details, get_db_stats, get_all_a
 from src.analysis import view_window_analysis
 from src import capture
 from src import crash
+from src import activity
 from src import images
 from src import metrics
 from src import session_health
@@ -563,7 +564,11 @@ def api_metric(name):
     """
     if name not in metrics.REGISTRY:
         return jsonify({"error": f"unknown metric {name!r}"}), 404
-    entry = metrics.compute(_db_path, [name])[name]
+    # The configured target AppIDs travel with the request so the coverage
+    # metric can restrict its second figure to what the owner cares about; a
+    # config with none lets the metric fall back to every `app_tracking` row.
+    params = {"target_appids": (_config.get("daemon", {}) or {}).get("target_appids")}
+    entry = metrics.compute(_db_path, [name], params)[name]
     return jsonify({
         "name": name,
         "value": entry["value"],
@@ -903,19 +908,17 @@ def api_open_folder(workshop_id):
 
 @app.route('/api/pause', methods=['POST'])
 def api_pause():
-    with open('.pauselock', 'w') as f:
-        f.write('1')
+    # Creating the lock is also how the pause interval is recorded for the
+    # drain estimate's active-time rate; see src/activity.py.
+    activity.begin_pause('.pauselock', _db_path, source="web_subscribe")
     return jsonify({"ok": True})
 
 
 @app.route('/api/resume', methods=['POST'])
 def api_resume():
-    try:
-        os.remove('.pauselock')
-    # Idempotent resume: an absent pause lock is the desired end state, so the
-    # remove is a no-op success.
-    except FileNotFoundError:
-        pass
+    # Idempotent resume: an absent pause lock is the desired end state, so
+    # `end_pause` is a no-op success when it is already gone.
+    activity.end_pause('.pauselock', _db_path)
     return jsonify({"ok": True})
 
 

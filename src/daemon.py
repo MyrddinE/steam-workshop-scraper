@@ -46,6 +46,7 @@ from src.backup import BackupThread
 from src.daemon_state import StateStore, state_path_for
 from src import pacing
 from src import images
+from src import activity
 from src import capture
 from src import crash
 from src import session_health
@@ -782,20 +783,28 @@ class Daemon:
     def _promote_stale_items(self) -> None:
         """Periodic sweep: promote stale items from API priority 0 to 1.
 
+        The sweep pushes items back into the API queue, so its own rowcount is
+        recorded (timestamped) beside the database: the API queue's drain rate is
+        net of that inflow, and nothing else records it on our clock. See
+        ``src/activity.py``.
+
         Failures are swallowed deliberately (housekeeping must never stop the
         fetch loop); see notes/findings.md for the capture-on-failure follow-up.
         """
         try:
             threshold = int(time.time()) - self.item_staleness_days * 86400
             conn = get_connection(self.db_path)
-            conn.execute(
+            cursor = conn.execute(
                 "UPDATE workshop_items SET api_priority = 1 "
                 "WHERE api_priority = 0 AND status = 200 AND api_fetched_at < ? "
                 "AND (status IS NULL OR status != -1)",
                 (threshold,)
             )
             conn.commit()
+            promoted = cursor.rowcount
             conn.close()
+            if promoted and promoted > 0:
+                activity.record_sweep_inflow(self.db_path, promoted)
         except Exception as exc:
             pass
             logging.warning("Stale-item promotion failed; housekeeping skipped this sweep: %s", exc)
