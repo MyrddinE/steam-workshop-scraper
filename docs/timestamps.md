@@ -76,6 +76,22 @@ measurement. The metrics say so instead of guessing:
 * The counts only include rows inside their window, so a NULL-stamped row can
   never be counted in either.
 
+## Active Time and the Pause Record
+
+A completion clock says when we finished a stage. A **rate** taken from one is
+completions divided by time, and the time that matters is the time the queues
+were actually running: a pause stops the web and image workers while the clock
+keeps going, so a wall-clock rate falls every time the daemon is switched off.
+The dot-prefixed `.pauselock` intervals are therefore recorded in
+`.daemon_state.yaml` beside the database (`src/activity.py`) — the same
+transient, restart-surviving store as the pacing backoff and the session warning
+— rather than in the versioned schema, because they describe a condition that
+passes and the clocks table above is about the item rows. The drain metric reads
+that record and subtracts the paused time from the rate window
+([data-pipeline.md](data-pipeline.md#active-time-not-wall-clock)). The API
+queue's rate additionally subtracts the staleness sweep's recorded rowcount,
+because the sweep makes work rather than doing it.
+
 ## Why `last_fetch_attempted_at` Exists
 
 `get_next_items_to_scrape` orders by `api_priority DESC, api_fetched_at ASC`. If

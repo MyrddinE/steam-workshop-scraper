@@ -2082,6 +2082,7 @@ const STATS_LABELS = {
   web_throughput: 'Web scrape throughput',
   image_throughput: 'Image download throughput',
   translation_throughput: 'Translation throughput',
+  queue_eta: 'Time to drain',
   tag_counts: 'Tags',
 };
 
@@ -2267,6 +2268,60 @@ function _renderThroughput(t) {
     + '<li>Last success: ' + _fmtTimestamp(t.last_success) + '</li></ul>';
 }
 
+function _fmtDuration(seconds) {
+  // One unit, coarse enough to read: 53d, 4h, 12m. The ETA is never split into
+  // days-and-hours, so the uncertainty beside it is the only second number.
+  const s = Math.max(0, Number(seconds) || 0);
+  if (s >= 86400) return fmtExact(Math.round(s / 86400)) + 'd';
+  if (s >= 3600) return fmtExact(Math.round(s / 3600)) + 'h';
+  if (s >= 60) return fmtExact(Math.round(s / 60)) + 'm';
+  return fmtExact(Math.round(s)) + 's';
+}
+
+function _fmtUncertainty(pct) {
+  // Always a percentage, never an absolute span.
+  if (pct === null || pct === undefined) return '';
+  if (pct < 1) return '&plusmn; &lt;1%';
+  return '&plusmn; ' + fmtExact(Math.round(pct)) + '%';
+}
+
+function _renderQueueEta(value) {
+  // Outstanding depth, rate and time to drain per queue. The rate is in active
+  // time so a pause does not read as a slowdown; a queue with no completions in
+  // the window shows "no rate yet" rather than a fabricated number, and one
+  // with nothing outstanding is drained. A gross figure is marked, because it
+  // must not be read as a time to empty. See docs/data-pipeline.md.
+  const queues = value.queues || {};
+  const order = [['api', 'API fetch'], ['web', 'Web scrape'],
+                 ['image', 'Image'], ['translation', 'Translation']];
+  const rows = order.map(function(q) {
+    const entry = queues[q[0]];
+    if (!entry) return '';
+    const outstanding = entry.outstanding || 0;
+    let rate = '&mdash;';
+    let drain;
+    if (outstanding <= 0) {
+      drain = '<span style="color:#44aa44">drained</span>';
+    } else if (entry.eta_seconds === null || entry.eta_seconds === undefined) {
+      drain = '<span class="stat-label">no rate yet</span>';
+    } else {
+      const basis = entry.basis === 'net' ? '' : ' <span class="stat-label">(gross)</span>';
+      rate = (entry.per_day || 0).toFixed(1) + '/day';
+      drain = _fmtDuration(entry.eta_seconds) + ' ' + _fmtUncertainty(entry.uncertainty_pct) + basis;
+    }
+    return '<tr><td>' + q[1] + '</td><td>' + fmtCount(outstanding) + '</td><td>'
+      + rate + '</td><td>' + drain + '</td></tr>';
+  }).join('');
+  return '<p class="stat-label">Rate window ' + _fmtDuration(value.window_seconds)
+    + '; paused ' + _fmtDuration(value.paused_seconds)
+    + '; API inflow subtracted ' + fmtCount(value.sweep_inflow || 0)
+    + '. Web and image rates use active time (pauses excluded); the API rate is net of the '
+    + 'staleness sweep. Web, image and translation figures are gross &mdash; their inflow is '
+    + 'the items an API refresh re-flags, which nothing records.</p>'
+    + '<table class="stats-table"><thead><tr><th>Queue</th><th>Outstanding</th>'
+    + '<th>Rate</th><th>Time to drain</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
 function _renderMetricBody(name, value) {
   if (value === null || value === undefined) return '<span class="stat-label">failed</span>';
   if (name === 'totals') return _renderTotals(value);
@@ -2284,6 +2339,7 @@ function _renderMetricBody(name, value) {
   if (name === 'priority_breakdowns') return _renderPriority(value);
   if (name === 'web_throughput' || name === 'image_throughput'
       || name === 'translation_throughput') return _renderThroughput(value);
+  if (name === 'queue_eta') return _renderQueueEta(value);
   if (name === 'tag_counts') return _renderTags(value);
   if (name === 'app_tracking') return _renderAppTracking(value);
   return '<pre style="white-space:pre-wrap;margin:0">' + JSON.stringify(value) + '</pre>';

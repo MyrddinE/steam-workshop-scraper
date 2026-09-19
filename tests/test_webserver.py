@@ -6,8 +6,10 @@ import re
 import shutil
 import subprocess
 import base64
+import time
 from unittest.mock import MagicMock
 import lxml.html
+from src import activity
 from src import session_health
 from src import webserver
 from src import subscribe_engine
@@ -352,6 +354,33 @@ def test_metrics_unknown_metric_is_a_404(web_client):
     resp = client.get('/api/metrics/banana')
     assert resp.status_code == 404
     assert "banana" in resp.get_json()["error"]
+
+
+def test_the_pause_routes_record_one_interval(web_client, tmp_path, monkeypatch):
+    """`POST /api/pause` is a writer of `.pauselock`, so its interval is recorded.
+
+    A second pause while the lock is already held must not open a second
+    interval, and resume is idempotent: the drain estimate subtracts the paused
+    interval exactly once (see src/activity.py).
+    """
+    from src.daemon_state import StateStore, state_path_for
+
+    client, db_path = web_client
+    monkeypatch.chdir(tmp_path)
+    try:
+        assert client.post('/api/pause').get_json() == {"ok": True}
+        assert client.post('/api/pause').get_json() == {"ok": True}
+        assert client.post('/api/resume').get_json() == {"ok": True}
+        assert client.post('/api/resume').get_json() == {"ok": True}
+    finally:
+        if os.path.exists('.pauselock'):
+            os.remove('.pauselock')
+
+    section = StateStore(state_path_for(db_path)).load().get(activity.PAUSE_SECTION)
+    assert section["open"] is None
+    assert len(section["closed"]) == 1
+    start, end = section["closed"][0]
+    assert end >= start
 
 
 def test_stats_button_opens_a_panel_instead_of_navigating(web_client):

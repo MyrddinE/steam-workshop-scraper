@@ -97,7 +97,7 @@ import os
 import re
 from dataclasses import dataclass
 
-from src import capture, pacing, session_health, web_scraper
+from src import activity, capture, pacing, session_health, web_scraper
 from src.config import save_config
 from src.database import get_connection, mark_own_subscribed
 from src.web_worker import (
@@ -854,25 +854,26 @@ class PauseLock:
     The daemon's web and image workers poll this path; holding it is what makes
     a subscribe pass run against a quiet account. ``__exit__`` removes the file
     whatever happened, so an engine that raises still releases the daemon.
+
+    ``db_path`` is optional but should be given by a caller that has it: the
+    interval the lock is held for is recorded beside the database so the drain
+    estimate can subtract paused time (``src/activity.py``). The file's own
+    absent/present edge is the signal, so this nests under the TUI screen's lock
+    without opening a second interval.
     """
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, db_path: str | None = None,
+                 source: str = "subscribe_engine"):
         self.path = path
+        self.db_path = db_path
+        self.source = source
 
     def __enter__(self):
-        directory = os.path.dirname(self.path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        with open(self.path, "w"):
-            pass
+        activity.begin_pause(self.path, self.db_path, source=self.source)
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        try:
-            if os.path.exists(self.path):
-                os.remove(self.path)
-        except OSError as exc:  # a lock we cannot remove is worth a warning
-            logging.error("Failed to remove pause lock file: %s", exc)
+        activity.end_pause(self.path, self.db_path)
         return False
 
 
@@ -890,11 +891,14 @@ def run_subscription_pass(items, *, config: dict, db_path: str,
     One :class:`WebInterval` is built for the whole pass and threaded through
     every item, so each item's two page reads are spaced by the shared interval
     and the delay the pass learns is persisted once for the daemon to pick up.
+    It is built *after* the pause is taken, so recording the pause interval (a
+    small state-file write) is not measured as the first read's elapsed time and
+    charged against the shared delay.
     """
-    interval = WebInterval(config, config_path=config_path,
-                           keep_running=keep_running)
     outcomes = []
-    with PauseLock(pause_lock_file):
+    with PauseLock(pause_lock_file, db_path=db_path):
+        interval = WebInterval(config, config_path=config_path,
+                               keep_running=keep_running)
         for item in items:
             outcome = subscribe_item(
                 item["workshop_id"], config=config, db_path=db_path,

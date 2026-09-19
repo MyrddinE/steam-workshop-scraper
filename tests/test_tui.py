@@ -515,6 +515,28 @@ _FAKE_METRIC_VALUES = {
     "image_throughput": {"hour": 1, "day": 3, "last_success": 1_700_000_000},
     # The no-history shape: a queue whose completion column holds no stamp.
     "translation_throughput": {"hour": None, "day": None, "last_success": None},
+    "queue_eta": {
+        "window_seconds": 86400, "paused_seconds": 3600, "sweep_inflow": 4,
+        "queues": {
+            "api": {"outstanding": 40, "completed": 0, "active_seconds": 86400,
+                    "per_hour": None, "per_day": None, "eta_seconds": None,
+                    "uncertainty_pct": None, "gross_completed": 0,
+                    "inflow_subtracted": 4, "basis": "net", "honours_pause": False},
+            "web": {"outstanding": 100, "completed": 4, "active_seconds": 82800,
+                    "per_hour": 0.17, "per_day": 4.2, "eta_seconds": 86400.0,
+                    "uncertainty_pct": 50.0, "gross_completed": 4,
+                    "inflow_subtracted": 0, "basis": "gross", "honours_pause": True},
+            "image": {"outstanding": 0, "completed": 3, "active_seconds": 82800,
+                      "per_hour": 0.0, "per_day": 0.0, "eta_seconds": 0.0,
+                      "uncertainty_pct": None, "gross_completed": 3,
+                      "inflow_subtracted": 0, "basis": "gross", "honours_pause": True},
+            "translation": {"outstanding": 5, "completed": 1, "active_seconds": 86400,
+                            "per_hour": 0.04, "per_day": 1.0, "eta_seconds": 432000.0,
+                            "uncertainty_pct": 100.0, "gross_completed": 1,
+                            "inflow_subtracted": 0, "basis": "gross",
+                            "honours_pause": False},
+        },
+    },
 }
 
 

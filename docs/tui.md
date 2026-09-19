@@ -242,7 +242,7 @@ The stats screen's own read runs on a worker (`exit_on_error=False`), so it was 
 
 Opened by Ctrl+R. The screen asks `src.metrics` for named metrics and draws each into its own
 labelled section — one widget per metric — so a chunk appears the moment its own query
-finishes without touching any other. Nothing is grouped or classified by cost. The fifteen
+finishes without touching any other. Nothing is grouped or classified by cost. The sixteen
 metrics and what each section renders:
 
 | Metric | Rendered as |
@@ -260,6 +260,7 @@ metrics and what each section renders:
 | `tag_counts` | the tag table |
 | `priority_breakdowns` | per-queue waiting counts by priority |
 | `web_throughput`, `image_throughput`, `translation_throughput` | completions in the last hour and day, then the last success; "no history yet" when the queue's completion column holds no stamp |
+| `queue_eta` | outstanding depth, active-time rate and time to drain (`53d ± 30%`) per queue; "no rate yet" when a queue completed nothing in the window |
 
 **Layout.** The screen is two columns. The metrics scroll down the left; `tag_counts` is the
 exception and gets the right-hand column to itself, filling the screen height and scrolling within
@@ -283,6 +284,20 @@ translation matches and whose original text does not. Where they disagree, the s
 builder's answer is the one shown. With more than one target AppID the population is the
 **union** of what any target's filters select. The metric's own docstring
 (`src/metrics.py`, `_coverage`) is the reference for the translation's edges.
+
+Time to drain (`_format_queue_eta`) is one row per work queue: outstanding depth,
+the rate in `per_day`, and the time to drain as `53d ± 30%`. The uncertainty is
+always a percentage, never an absolute span, and the duration is one coarse unit
+(days, hours, minutes or seconds) so the percentage is the only second number
+the reader parses. A queue with no completions in the window shows "no rate yet"
+rather than a fabricated number, and one with nothing outstanding shows
+"drained". A row whose figure is gross — web, image and translation, whose inflow
+nothing records — is marked `(gross)`, because a gross rate must not be read as a
+time to empty. The header line names the rate window, the paused time subtracted
+from it and the API inflow subtracted. The metric's docstring and
+[data-pipeline.md](data-pipeline.md#queue-state-outstanding-rate-and-time-to-drain)
+own the active-time and net/gross detail.
+
 `stuck_work`
 (`_format_stuck`, `src/tui.py:418`) names any dead items still flagged in a queue and says
 the queues will not drain until they are cleared; a zero value shows an all-clear. The two

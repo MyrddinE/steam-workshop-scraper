@@ -17,6 +17,7 @@ from src.database import search_items, get_all_authors, initialize_database, get
 from src.analysis import view_window_analysis
 from src import metrics
 from src import db_poll
+from src import activity
 from src import images
 from src import pending
 from src import subscription
@@ -214,6 +215,7 @@ class StatsScreen(Screen):
         "web_throughput": "Web scrape throughput",
         "image_throughput": "Image download throughput",
         "translation_throughput": "Translation throughput",
+        "queue_eta": "Time to drain",
     }
 
     #: Text metrics own a Static widget; the two table metrics are special-cased
@@ -232,6 +234,7 @@ class StatsScreen(Screen):
         "web_throughput": "web-throughput-content",
         "image_throughput": "image-throughput-content",
         "translation_throughput": "translation-throughput-content",
+        "queue_eta": "queue-eta-content",
     }
 
     def __init__(self, db_path: str, target_appids: list | None = None):
@@ -498,6 +501,8 @@ class StatsScreen(Screen):
             self._set_text(name, self._format_priority(value))
         elif name in ("web_throughput", "image_throughput", "translation_throughput"):
             self._set_text(name, self._format_throughput(value))
+        elif name == "queue_eta":
+            self._set_text(name, self._format_queue_eta(value))
 
     @staticmethod
     def _format_throughput(value: dict) -> str:
@@ -588,6 +593,78 @@ class StatsScreen(Screen):
                     "the same.")
         return (f"Target AppIDs: {names}. SQL translation of their filters; it may "
                 "differ from the daemon's per-item check on translated (_en) fields.")
+
+    @staticmethod
+    def _format_duration(seconds) -> str:
+        """A span in one unit, coarse enough to read: ``53d``, ``4h``, ``12m``.
+
+        The ETA is never split into days-and-hours: one form only, so the
+        uncertainty beside it is the only second number the reader parses.
+        """
+        seconds = max(0.0, float(seconds or 0))
+        if seconds >= 86400:
+            return f"{seconds / 86400:,.0f}d"
+        if seconds >= 3600:
+            return f"{seconds / 3600:,.0f}h"
+        if seconds >= 60:
+            return f"{seconds / 60:,.0f}m"
+        return f"{seconds:,.0f}s"
+
+    @staticmethod
+    def _format_uncertainty(pct) -> str:
+        """The relative uncertainty, always as a percentage."""
+        if pct is None:
+            return ""
+        if pct < 1:
+            return "± <1%"
+        return f"± {pct:,.0f}%"
+
+    @staticmethod
+    def _format_queue_eta(value: dict) -> str:
+        """Outstanding depth, rate and time to drain for each work queue.
+
+        The rate is in active time, so a pause does not read as a slowdown; the
+        header says how much of the window was paused and how much API inflow
+        was subtracted. A queue with no completions in the window shows "no rate
+        yet" rather than a fabricated number, and one with nothing outstanding
+        shows "drained". Where the figure is gross -- the three queues whose
+        inflow nobody records -- the row says so, because a gross rate must not
+        be read as a time to empty. See `docs/data-pipeline.md`.
+        """
+        queues = value.get("queues") or {}
+        rows = (
+            ("api", "API fetch"),
+            ("web", "Web scrape"),
+            ("image", "Image"),
+            ("translation", "Translation"),
+        )
+        lines = [
+            f"[b]Rate window:[/b] {StatsScreen._format_duration(value.get('window_seconds'))}"
+            f"   [dim]paused {StatsScreen._format_duration(value.get('paused_seconds'))};"
+            f" API inflow subtracted: {value.get('sweep_inflow', 0):,}[/dim]",
+            "",
+        ]
+        for key, label in rows:
+            entry = queues.get(key)
+            if not isinstance(entry, dict):
+                continue
+            outstanding = entry.get("outstanding", 0) or 0
+            eta = entry.get("eta_seconds")
+            if outstanding <= 0:
+                rate = "[dim]—[/dim]"
+                drain = "[green]drained[/green]"
+            elif eta is None:
+                rate = "[dim]—[/dim]"
+                drain = "[dim]no rate yet[/dim]"
+            else:
+                basis = "" if entry.get("basis") == "net" else " [dim](gross)[/dim]"
+                rate = f"{entry.get('per_day', 0):,.1f}/day"
+                drain = (f"{StatsScreen._format_duration(eta)} "
+                         f"{StatsScreen._format_uncertainty(entry.get('uncertainty_pct'))}{basis}")
+            lines.append(
+                f"{label:<12} {outstanding:>10,} outstanding   {rate:>10}   {drain}"
+            )
+        return "\n".join(lines)
 
     @staticmethod
     def _format_stuck(stuck: dict) -> str:
@@ -922,22 +999,20 @@ class SubscriptionQueueScreen(ModalScreen):
         self._closing = False
 
     def on_mount(self) -> None:
-        """Create the pause lock file when the screen is mounted."""
-        try:
-            with open(self.pause_lock_file, "w") as f:
-                pass # Create the file
-        except Exception as e:
-            logging.error(f"Failed to create pause lock file: {e}")
+        """Create the pause lock file when the screen is mounted.
+
+        The lock's interval is recorded in the daemon state file beside the
+        database, so the drain estimate measures the queues' active time rather
+        than the wall clock; see ``src/activity.py``.
+        """
+        activity.begin_pause(self.pause_lock_file, self.db_path,
+                             source="tui_subscription_queue")
 
     def on_unmount(self) -> None:
         """Remove the pause lock file when the screen is unmounted."""
         self._closing = True
         self._stop_estimate_timer()
-        try:
-            if os.path.exists(self.pause_lock_file):
-                os.remove(self.pause_lock_file)
-        except Exception as e:
-            logging.error(f"Failed to remove pause lock file: {e}")
+        activity.end_pause(self.pause_lock_file, self.db_path)
 
     @staticmethod
     def _row_text(item: dict, status: str | None = None, colour: str | None = None,

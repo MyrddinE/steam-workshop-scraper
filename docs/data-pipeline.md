@@ -39,6 +39,8 @@ It is floored at `API_DELAY_FLOOR = 0.01 s` and has **no ceiling**. One was kept
 
 Promotes successfully-fetched items whose `api_fetched_at` is older than `item_staleness_days` from `api_priority = 0` back to `1`, returning them to the fetch queue. It is a full-table UPDATE, so `_maybe_promote_stale_items` runs it at most once per `STALE_SWEEP_INTERVAL_SECONDS` (1 hour, monotonic clock) instead of on every batch; the first batch after startup always sweeps, so a long-idle daemon does not sit on a stale queue.
 
+The sweep **makes work, it does not do work**, so it records its own `rowcount` (timestamped) in `.daemon_state.yaml` beside the database. The API queue's time-to-drain is net of that inflow: the recorded rows are subtracted from the API completions inside the rate window. Nothing else records the sweep, and a run that promoted nothing writes nothing (see [Queue state: outstanding, rate and time to drain](#queue-state-outstanding-rate-and-time-to-drain)).
+
 ### `_scan_downloaded_items` (daemon, via `src.workshop_folders`)
 
 Marks a subscribed item as downloaded once Steam has its folder on disk, so both front ends can draw
@@ -542,6 +544,80 @@ with the handoff contract tests, so a divergence between a predicate and the
 producer's write is now caught at the handoff rather than inferred from these two
 numbers; the counters remain how the same divergence is noticed in the field,
 where no test is running.
+
+---
+
+## Queue state: outstanding, rate and time to drain
+
+The `queue_eta` metric answers, for all four queues, **how much is outstanding,
+how fast it has been draining, and how long it will take**. It is deliberately
+computed from whatever history exists, so it appears as soon as the completion
+clocks record anything rather than after a "stable" rate has accumulated. Both
+front ends render it identically: `outstanding`, a `per_day` rate, and a
+`53d ± 30%` time to drain.
+
+| Queue | Outstanding predicate | Completion clock | Rate |
+|---|---|---|---|
+| API fetch | `api_priority > 0` (and live) | `api_fetched_at` | **net** of the staleness sweep |
+| Web scrape | `needs_web_scrape > 0` (and live) | `web_scraped_at` | gross |
+| Image | `needs_image > 0` (and live) | `image_fetched_at` | gross |
+| Translation | `translation_priority > 0` (and live) | `translated_at` | gross |
+
+Outstanding depth excludes dead items (matching `priority_breakdowns`): a dead
+item can never complete, so leaving it in would promise a drain that cannot
+happen. Completion counts are not filtered by liveness.
+
+### Active time, not wall-clock
+
+A rate over wall-clock **falls every time the daemon is switched off**, which is
+not a slowdown. The `.pauselock` intervals are therefore recorded in
+`.daemon_state.yaml` beside the database (`src/activity.py`) and subtracted from
+the window. The lock's own absent/present edge is the signal, so the three
+writers — the TUI's subscription screen, `POST /api/pause`, and the subscribe
+engine's `PauseLock` — may nest without the same paused second being subtracted
+twice; an interval still open is counted up to now, so a pause *in progress*
+still leaves the rate computable from the active time before it.
+
+The pause is applied **per queue, because the pause is per queue**: only the web
+and image workers poll `.pauselock` (`src/web_worker.py`, `src/image_worker.py`),
+while the API fetch loop and the translator are not gated by it. Subtracting the
+pause from a stage that kept working would overstate its rate, so the API and
+translation rates use the full window.
+
+### The API rate is net; the other three are gross
+
+The staleness sweep pushes items back into the API queue, so the API queue's
+completions are reduced by the sweep's recorded rowcount for runs inside the
+window — the one inflow the project measures.
+
+**Discovery's inflow into the API queue is not counted.** `first_seen_at` is our
+clock, but it is not indexed on `workshop_items`, and a window count over it
+would be a full scan of a multi-million-row table; the API figure subtracts the
+sweep alone.
+
+**The web, image and translation rates are gross, not net**: their inflow is the
+items an API refresh re-flags, which nothing records on our clock. A gross rate
+must not be read as a time to empty, and both front ends mark those rows
+`(gross)` for exactly that reason.
+
+### The uncertainty
+
+The completions inside the window are modelled as a Poisson count. The rate is
+`completed / active_seconds`, and the relative standard error of that count is
+`100/sqrt(completed)` — a percentage, never an absolute span, and one form only
+(`53d ± 30%`). It is wide while the evidence is thin (100% at one completion,
+50% at four) and narrows as completions accumulate (10% at a hundred). A queue
+with **no completions in the window gets no rate**: `per_hour`, `per_day`,
+`eta_seconds` and `uncertainty_pct` are `NULL`, shown as "no rate yet" beside the
+outstanding depth. That case is not the same as an empty queue, whose time to
+drain is a real zero.
+
+### Cost
+
+All four outstanding counts reach their rows through the queue's own partial
+index (`idx_api_queue`, `idx_web_scrape_queue`, `idx_image_queue`,
+`idx_translation_priority`), and the completion counts through the partial
+completion indexes migration 26→27 added. No new index was required.
 
 ---
 
