@@ -514,12 +514,12 @@ refreshed by whichever code path happens to know about a change.
   subscription columns are replaced, so the rest of the row's data is left as it was". A field
   that changes the marker's *precedence* — `downloaded_at`, which outranks `subscribed` in
   `src/subscription.py` — is therefore outside the scope of the only method that redraws a row.
-  It is driven by `_start_subscription_poll`/`_poll_pending_subscriptions` (`:2506`, `:2524`) and
+  It is driven by `_start_subscription_poll`/`_poll_queued_subscriptions` (`:2506`, `:2524`) and
   reached from the detail pane through `getattr(self.app, "refresh_subscription_rows", None)`
   (`:1304`), so it exists mainly while a subscribe pass is running.
 - The web grid's poll is conditional on rendered state: `_listNeedsPoll`
   (`templates/index.html:843`) returns true only for a pending stage spinner or
-  `subscription_state === 'pending'`, and `_startListPoll`'s tick re-reads only rows that carry a
+  `subscription_state === 'queued'`, and `_startListPoll`'s tick re-reads only rows that carry a
   spinner or a pending marker. When nothing is pending, the grid stops polling entirely. Its
   `refreshItemState(wid)` (`:1412`) is a per-item path, but it is called from specific actions
   rather than from a general "this item changed" signal.

@@ -769,7 +769,7 @@ function _applyPending(el, item) {
 
 // ── the owner's subscription marker ──────────────────────────────────────────
 //
-// Four states (subscribed / pending / previously / never), with glyph, colour,
+// Four states (subscribed / queued / previously / never), with glyph, colour,
 // tooltip and clickability all computed by the server from src/subscription.py
 // and carried on the payload. The page deliberately holds no table of its own:
 // the TUI draws the same four states from the same module, and a contract test
@@ -869,7 +869,7 @@ function _startListPoll(filters, sortBy, sortOrder) {
       // No grid is not a transient failure: there is nothing to poll.
       if (!grid) { _stopListPoll(); return; }
       // A stage spinner needs re-reading, but so does a row whose subscription
-      // marker is still `pending`: a subscribe can land behind the cell's back
+      // marker is still `queued`: a subscribe can land behind the cell's back
       // and that row has no spinner to be found by. Deciding here from the
       // rendered state means the marker is refreshed from the database, so no
       // writer of the flag -- the userscript's /api/subscribed, this page's own
@@ -890,7 +890,7 @@ function _startListPoll(filters, sortBy, sortOrder) {
       if (!resp.ok) {
         // A 500 from a locked database is transient. Fall through to the
         // re-arm below so the next tick retries; treating a failed response as
-        // a stop used to freeze every pending marker for the rest of the
+        // a stop used to freeze every queued marker for the rest of the
         // session.
       } else {
         const items = await resp.json();

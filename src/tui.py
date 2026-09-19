@@ -1066,7 +1066,7 @@ class SubscriptionQueueScreen(ModalScreen):
         The marker is the item's real state from ``src/subscription.py`` -- the
         same table the list row, the detail pane and the web render from -- so a
         completed subscribe moves this row's glyph too, rather than every row
-        drawing the green ``pending`` outline whatever happened. ``countdown`` is
+        drawing the green ``queued`` outline whatever happened. ``countdown`` is
         the estimated seconds until the engine reaches the item, absent for the
         item it is reading now and for outcomes already reported.
         """
@@ -2289,7 +2289,7 @@ class ScraperApp(App):
         self.current_item_creator = None
         self.pause_lock_file = ".pauselock"
         # One-shot timer that re-reads rendered rows whose subscription marker
-        # is still pending. Armed only while such a row exists, and disarmed by
+        # is still queued. Armed only while such a row exists, and disarmed by
         # its own tick when none does; see `_start_subscription_poll`.
         self._sub_poll_timer = None
         
@@ -2480,7 +2480,7 @@ class ScraperApp(App):
 
     # --- the subscription-marker poll ---------------------------------------
 
-    def _pending_subscription_ids(self) -> list[int]:
+    def _queued_subscription_ids(self) -> list[int]:
         """Ids of rendered rows whose subscription marker is still ``pending``.
 
         The selection is made from what is *rendered* -- the item data the row
@@ -2505,34 +2505,34 @@ class ScraperApp(App):
         return ids
 
     def _start_subscription_poll(self, delay: float = 0.05) -> None:
-        """Arm a one-shot re-read of the rendered rows that are still pending.
+        """Arm a one-shot re-read of the rendered rows that are still queued.
 
         The web grid's ``_startListPoll`` is the model: a new search, a row
-        moving into ``pending``, or a pass result all arm the next tick, and the
-        tick re-arms itself only while a rendered row is still pending. A
+        moving into ``queued``, or a pass result all arm the next tick, and the
+        tick re-arms itself only while a rendered row is still queued. A
         settled list therefore costs no reads, and there is no fixed interval.
         The default is a hair above zero rather than Textual's ``set_timer(0)``,
         whose zero interval divides by zero when a busy loop skips it.
         """
         self._stop_subscription_poll()
-        self._sub_poll_timer = self.set_timer(delay, self._poll_pending_subscriptions)
+        self._sub_poll_timer = self.set_timer(delay, self._poll_queued_subscriptions)
 
     def _stop_subscription_poll(self) -> None:
         if self._sub_poll_timer is not None:
             self._sub_poll_timer.stop()
             self._sub_poll_timer = None
 
-    async def _poll_pending_subscriptions(self) -> None:
-        """Re-read the rendered pending rows once; re-arm only if some remain."""
+    async def _poll_queued_subscriptions(self) -> None:
+        """Re-read the rendered queued rows once; re-arm only if some remain."""
         self._sub_poll_timer = None
         if not self.is_mounted:
             return
-        ids = self._pending_subscription_ids()
+        ids = self._queued_subscription_ids()
         if not ids:
             self._stop_subscription_poll()
             return
         await self.refresh_subscription_rows(ids)
-        remaining = len(self._pending_subscription_ids())
+        remaining = len(self._queued_subscription_ids())
         if not remaining:
             self._stop_subscription_poll()
             return
@@ -2745,7 +2745,7 @@ class ScraperApp(App):
         await list_view.mount(*items)
 
         # Watch the rows that arrived already queued for subscription; the poll
-        # disarms itself at once when none of them is pending.
+        # disarms itself at once when none of them is queued.
         self._start_subscription_poll()
 
         for item in results:
@@ -2966,7 +2966,7 @@ class ScraperApp(App):
         await item.refresh_item()
 
         # A row queued from the keyboard is watched too: the web grid starts its
-        # poll on the transition into `pending` for the same reason.
+        # poll on the transition into `queued` for the same reason.
         if subscription.subscription_state(item.item_data) == subscription.QUEUED:
             self._start_subscription_poll()
 
