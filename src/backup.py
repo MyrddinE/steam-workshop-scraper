@@ -84,7 +84,7 @@ def read_source_stats(db_path: str) -> dict:
     """Read a few facts about the source with a read-only view.
 
     ``rows`` is the live row count and moves under the reader whenever the
-    daemon is running; it is reported, never enforced. ``user_version`` is the
+    daemon is running; it is reported, never enforced. ``schema_version`` is the
     schema version, which does *not* move while the daemon runs -- migrations
     all happen before the backup thread starts -- so it is the one thing here a
     snapshot can fairly be checked against.
@@ -99,9 +99,9 @@ def read_source_stats(db_path: str) -> dict:
         conn.execute("PRAGMA query_only = ON;")
         rows = conn.execute("SELECT COUNT(*) FROM workshop_items").fetchone()[0]
         max_api_fetched_at = conn.execute("SELECT MAX(api_fetched_at) FROM workshop_items").fetchone()[0]
-        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        schema_version = conn.execute("PRAGMA user_version").fetchone()[0]
         return {"rows": rows, "max_api_fetched_at": max_api_fetched_at,
-                "user_version": user_version}
+                "schema_version": schema_version}
     finally:
         conn.close()
 
@@ -158,13 +158,13 @@ def verify_snapshot(snapshot_path: str, source_db_path: str) -> dict:
     except sqlite3.DatabaseError as exc:
         raise BackupError(f"could not read source database {source_db_path}: {exc}") from exc
 
-    if snapshot_version != source["user_version"]:
+    if snapshot_version != source["schema_version"]:
         # The schema does not change while the daemon runs, so this is a fair
         # comparison, and it is the check that answers "is this a copy of our
         # database" without racing the writer.
         raise BackupError(
             f"snapshot schema version {snapshot_version} does not match the "
-            f"source's {source['user_version']}"
+            f"source's {source['schema_version']}"
         )
 
     if snapshot_rows == 0 and source["rows"] > 0:
