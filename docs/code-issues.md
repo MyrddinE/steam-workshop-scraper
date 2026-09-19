@@ -95,18 +95,6 @@ way to say "unknown" so that neither front end claims a measurement it does not 
 the better reading of the data and the larger change. [architecture.md](architecture.md),
 [tui.md](tui.md), [web-ui.md](web-ui.md)
 
-### Issue 59
-
-**A stop that arrives before the daemon's first PID-file check is ignored** — *Open*, High
-
-The daemon takes the disappearance of `.daemon.pid` as its shutdown signal, but `_pid_file_removed()` (`src/daemon.py:1231`) only acts on the absence *after* it has observed the file's presence at least once (`self._saw_pid_file`). A stop landing before that first observation is discarded for the life of the process, so the daemon keeps fetching and downloading until `DaemonController`'s 15 s grace expires and kills it mid-call. *Reproduced*: starting the daemon in a temporary directory and removing `.daemon.pid` the instant it appears, polling every 20 ms, leaves the process running indefinitely with the shutdown line absent from its log. It is intermittent because it depends on whether the stop lands before or after the first check, and that window is wide — config load, `initialize_database` and thread startup all precede it. A stop that lands after the first check runs the whole graceful sequence in about 2.6 s, measured from the owner's production log. **Secondary, measured:** with two daemons running, removing the file makes both log the removal but neither exits within 8 s, because each walks its worker joins sequentially, five seconds at a time, before telling the later workers to stop at all. Recorded with issue 60; both are being fixed together. [threading.md](threading.md), [tui.md](tui.md)
-
-### Issue 60
-
-**A stale PID file makes the controller kill an unrelated process and report success** — *Open*, Medium
-
-`DaemonController.stop()` reads the PID from `.daemon.pid` and escalates to `os.kill(pid, SIGTERM)`, or `TerminateProcess` on Windows, against a process it did not start. A stale, corrupted or hand-edited PID file therefore aims that escalation at whatever process now holds the PID. *Reproduced*: with a real daemon running, writing the PID of an unrelated `sleep` process into `.daemon.pid` and calling `stop()` sent it `SIGTERM` and killed it, returned `(True, "Daemon stopped")`, and left the real daemon running. The fix is to escalate only against a process this controller started itself — it holds the `Popen` handle for that case — and otherwise remove the file, report that the daemon did not exit, and leave an unknown PID alone. [threading.md](threading.md), [tui.md](tui.md)
-
 ## Recently closed
 
 Removed from the list above rather than marked resolved. Each is now documented as current
@@ -391,3 +379,11 @@ loop: the repair runs inside that loop and `_ensure_indexes` runs after it. The 
 **3.2 µs**, and a v22→v29 upgrade chain takes about 14–21 s instead of 652 s — a cost
 production has already paid, kept here as the evidence that the index is used. [schema-migrations.md]
 (schema-migrations.md), [data-model.md](data-model.md)
+
+### A stop that arrived before the daemon's first PID-file check was ignored
+
+**Was issue 59.** The daemon took the disappearance of `.daemon.pid` as its stop signal but only acted on an absence it had already seen a presence for, so a stop landing before the first check was discarded for the life of the process and the controller killed it mid-call. `daemon_runner` now tells the daemon a PID file is *expected*, which makes a missing file a stop from the first check, while a directly-constructed daemon keeps the old guard. Around it, every worker is signalled before any join is attempted and the joins share one five-second budget, naming any survivor; the duplicate per-worker stop lines are gone and the idle waits wake for a stop. *Measured*: the removed-before-first-check case now exits in **1.04 s** where it previously ran past 20 s; two daemons sharing one file stop in **2.0 s** instead of 9.97 s. The controller's grace is now derived rather than guessed — 15 s for the longest main-thread block, plus the 5 s join budget, plus 5 s of margin — and a test pins the budget coupling so the two numbers cannot drift apart. [threading.md](threading.md), [tui.md](tui.md), [cross-platform.md](cross-platform.md)
+
+### A stale PID file made the controller kill an unrelated process
+
+**Was issue 60.** `stop()` read a PID from the file and escalated against it, so a stale or corrupted file aimed that escalation at whatever process now held the number — and the controller reported success while the real daemon ran on. It now signals only a process it started itself, through the `Popen` handle it holds; a PID read from the file is never signalled. On timeout with nothing owned it removes the file and reports that the daemon did not exit, naming the PID it left alone, and the Windows `TerminateProcess` branch is gone with it. *Measured*: the bystander that was previously SIGTERM'd is now untouched, and the real daemon still stops through the file. [threading.md](threading.md), [tui.md](tui.md)
