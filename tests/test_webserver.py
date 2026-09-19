@@ -1585,7 +1585,7 @@ def test_header_port_display_is_filled_from_the_pages_own_location(web_client, t
         "the page never calls showServerPort()"
 
 
-# ── clear pending database ───────────────────────────────────────────────────
+# ── delete never fetched items ───────────────────────────────────────────────
 #
 # The route is a thin wrapper over delete_never_fetched_items, so the predicate is the
 # contract worth pinning: the rows it removes and, just as importantly, the rows
@@ -1637,7 +1637,7 @@ def _extract_const(script: str, name: str) -> str:
 
 
 
-# ── clear pending: the confirmation and the report ────────────────────────────
+# ── delete never fetched: the confirmation and the report ─────────────────────
 #
 # The route is destructive, so the client's half of the contract is that the
 # confirmation is asked first and names what will go, and that the count the

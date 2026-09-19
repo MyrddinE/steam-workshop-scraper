@@ -69,8 +69,11 @@ async def test_command_palette_contrast(mock_config):
         from textual.command import CommandPalette
         assert isinstance(top_screen, CommandPalette)
         
-        # Type something to get hits
-        await pilot.press("c", "l", "e", "a", "r")
+        # The palette lists its commands with an empty query, so nothing is
+        # typed here: the readability check needs hits, not any particular
+        # command, and typing a query would tie this test to one command's
+        # label. Batch 4 renamed `Clear Pending Database` and a `clear` query
+        # silently stopped matching, which is exactly that coupling.
         await pilot.pause(ASYNC_PAUSE * 2)
         
         # Verify there are hits in the CommandList
