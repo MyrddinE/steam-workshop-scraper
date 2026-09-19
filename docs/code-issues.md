@@ -45,12 +45,6 @@ The original entry here said the web-download capture claimed a budget it did no
 
 `<outbox>/db` holds `workshop-backup.db.gz` — 672.9 MB, written 2026-09-12 — beside the current `workshop-backup.db` of 1,915.4 MB. `DB_SNAPSHOT_REL_PATH` is `db/workshop-backup.db` (`src/backup.py`) and the only `gzip` reference left anywhere in `src/` is a request header (`src/web_scraper.py`), so no code path writes, reads or deletes the compressed file: it is a leftover from a layout the module has since changed. **It is now reported** — `_warn_about_stale_artefacts` names any file in that directory the build does not manage, with the total size, once per process, because silence about a file that size is how it goes unnoticed. It deliberately does not delete anything: a backup artefact is exactly the kind of file that may have been kept on purpose, and deleting from someone's outbox is not this module's call. So the 672.9 MB still needs removing by hand. Separately, a snapshot is still written as a complete second copy before `os.replace` publishes it — the temp file lives in the destination directory on purpose (`src/backup.py`) — so each run needs roughly twice the database's size free, and `_check_free_space` only logs a warning when that is not available.
 
-### Issue 30
-
-**Two columns are written and never read** — *Informational*, Info
-
-`scrape_version` and `app_discovery.last_historical_date_scanned` are both written and have no reader anywhere in `src/`. `scrape_version` is written by the web worker (`src/web_worker.py:445`), read only by a migration that clears it on rows with no Steam payload; `last_historical_date_scanned` is written by `update_app_tracking` (`src/database.py:3522`), which nothing but `tests/test_database.py` calls, and its `window_size` sibling is written alongside it. Write-only columns are not free: they invite a future reader to trust a value nothing maintains on purpose, which is exactly how `scrape_version` came to be overwritten by the image worker (issue 7). Neither is harmful today. Removing either needs a schema migration, so it is a decision rather than a fix, and this entry records it so the next person to reach for one of them knows nothing depends on it.
-
 ### Issue 36
 
 **The discovery guard's message names a population it does not measure** — *Open*, Low
@@ -387,3 +381,7 @@ production has already paid, kept here as the evidence that the index is used. [
 ### A stale PID file made the controller kill an unrelated process
 
 **Was issue 60.** `stop()` read a PID from the file and escalated against it, so a stale or corrupted file aimed that escalation at whatever process now held the number — and the controller reported success while the real daemon ran on. It now signals only a process it started itself, through the `Popen` handle it holds; a PID read from the file is never signalled. On timeout with nothing owned it removes the file and reports that the daemon did not exit, naming the PID it left alone, and the Windows `TerminateProcess` branch is gone with it. *Measured*: the bystander that was previously SIGTERM'd is now untouched, and the real daemon still stops through the file. [threading.md](threading.md), [tui.md](tui.md)
+
+### Two columns were written and never read
+
+**Was issue 30.** `scrape_version` and `app_discovery.last_historical_date_scanned` were written and read by nothing in `src/`, `window_size` was written alongside them, and the only caller of the function that wrote them was a test. Removing any of the three needed a schema migration, which is why the entry sat open as a decision rather than a fix. Migration 34→35 drops all three and removes `update_app_tracking` with them, taking the two indexes that embedded `scrape_version` (`idx_scraped_version`, `idx_fetch_status_scraped_version`) as well, so the schema no longer invites a future reader to trust a value nothing maintains. Its one real cost is that SQLite implements `DROP COLUMN` by rewriting the table — **14.9 s measured** on the 2.5 M-row copy, where every rename in the same batch was metadata-only. [data-model.md](data-model.md), [schema-migrations.md](schema-migrations.md)
