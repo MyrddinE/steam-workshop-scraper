@@ -465,14 +465,14 @@ def _get_tag_sets(db_path, wids):
 def test_random_filter_combinations_no_crash(deterministic_db):
     """Call search_items with random filter combinations to catch SQL errors."""
     import random
-    from src.database import get_connection, FILTER_SCHEMA
+    from src.database import get_connection, SEARCH_FILTER_SCHEMA
 
     rng = random.Random(42)
 
     # Build field→ops map and type map from central schema
-    field_ops = {f["field"]: f["ops"] for f in FILTER_SCHEMA}
-    ID_FIELDS = [f["field"] for f in FILTER_SCHEMA if f["type"] == "id"]
-    STRING_FIELDS = [f["field"] for f in FILTER_SCHEMA if f["type"] == "string"]
+    field_ops = {f["field"]: f["ops"] for f in SEARCH_FILTER_SCHEMA}
+    ID_FIELDS = [f["field"] for f in SEARCH_FILTER_SCHEMA if f["type"] == "id"]
+    STRING_FIELDS = [f["field"] for f in SEARCH_FILTER_SCHEMA if f["type"] == "string"]
 
     # Pre-fetch some real values for "is" operators
     conn = get_connection(deterministic_db)

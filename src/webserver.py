@@ -6,7 +6,7 @@ import time
 import re
 import logging
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, mark_own_subscribed, get_subscription_queue_items, FILTER_SCHEMA, bump_api_priority_for_detail, clear_pending_items
+from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, bump_api_priority_for_detail, clear_pending_items
 from src.analysis import view_window_analysis
 from src import capture
 from src import crash
@@ -173,7 +173,7 @@ def index():
     # render it at all: off Windows the button and the `o` shortcut are absent,
     # not merely inert.
     return render_template('index.html', web_delay=web_delay,
-                           filter_schema_json=_json.dumps(FILTER_SCHEMA),
+                           filter_schema_json=_json.dumps(SEARCH_FILTER_SCHEMA),
                            open_folder_enabled=bool(
                                _workshop_folders and _workshop_folders.enabled()))
 

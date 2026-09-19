@@ -150,7 +150,7 @@ SUBSCRIBED_VALUE_SPECS = {
     },
 }
 
-FILTER_SCHEMA = [
+SEARCH_FILTER_SCHEMA = [
     {"field": "Full Text",        "db_col": "full_text",                 "type": "string", "ops": ["contains", "does_not_contain"]},
     {"field": "Title",            "db_col": "title",                     "type": "string", "ops": ["contains", "does_not_contain", "is", "is_not"]},
     {"field": "Description",      "db_col": "short_description",          "type": "string", "ops": ["contains", "does_not_contain", "is", "is_not"]},
@@ -168,8 +168,8 @@ FILTER_SCHEMA = [
 ]
 
 # Build FIELD_NAME_MAP and ALL_FILTER_FIELDS from the schema
-ALL_FILTER_FIELDS = [f["field"] for f in FILTER_SCHEMA]
-FIELD_NAME_MAP = {f["field"]: f["db_col"] for f in FILTER_SCHEMA}
+ALL_FILTER_FIELDS = [f["field"] for f in SEARCH_FILTER_SCHEMA]
+FIELD_NAME_MAP = {f["field"]: f["db_col"] for f in SEARCH_FILTER_SCHEMA}
 # AppID backwards-compat alias
 FIELD_NAME_MAP["AppID"] = "consumer_appid"
 FIELD_NAME_MAP["Filename"] = "filename"

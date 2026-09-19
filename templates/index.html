@@ -315,24 +315,24 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 
 <script>
 const WEB_DELAY = {{ web_delay }};
-const FILTER_SCHEMA = {{ filter_schema_json | safe }};
+const SEARCH_FILTER_SCHEMA = {{ filter_schema_json | safe }};
 
 // Derived from schema
-const ALL_FIELDS = FILTER_SCHEMA.map(f => f.field);
+const ALL_FIELDS = SEARCH_FILTER_SCHEMA.map(f => f.field);
 const FIELD_OPS = {};
-FILTER_SCHEMA.forEach(f => {
+SEARCH_FILTER_SCHEMA.forEach(f => {
   FIELD_OPS[f.field] = f.ops;
 });
-const ID_FIELDS = FILTER_SCHEMA.filter(f => f.type === 'id').map(f => f.field);
-const NUMERIC_FIELDS = FILTER_SCHEMA.filter(f => f.type === 'number').map(f => f.field);
-const TEXT_FIELDS = FILTER_SCHEMA.filter(f => f.type === 'string').map(f => f.field);
+const ID_FIELDS = SEARCH_FILTER_SCHEMA.filter(f => f.type === 'id').map(f => f.field);
+const NUMERIC_FIELDS = SEARCH_FILTER_SCHEMA.filter(f => f.type === 'number').map(f => f.field);
+const TEXT_FIELDS = SEARCH_FILTER_SCHEMA.filter(f => f.type === 'string').map(f => f.field);
 // The one enum field and its choices. The overlay control below offers the same
 // list, and the value control of a builder row is a <select> for these fields
 // where every other field gets a free-text input.
 const SUBSCRIBED_FIELD = 'Subscribed';
-const SUBSCRIBED_VALUES = (FILTER_SCHEMA.find(f => f.field === SUBSCRIBED_FIELD) || {}).values || [];
+const SUBSCRIBED_VALUES = (SEARCH_FILTER_SCHEMA.find(f => f.field === SUBSCRIBED_FIELD) || {}).values || [];
 const ENUM_FIELDS = {};
-FILTER_SCHEMA.forEach(f => { if (f.type === 'enum') ENUM_FIELDS[f.field] = f.values || []; });
+SEARCH_FILTER_SCHEMA.forEach(f => { if (f.type === 'enum') ENUM_FIELDS[f.field] = f.values || []; });
 
 let currentOffset = 0, hasMore = true, loading = false, cutoffs = {};
 let _cutoffsCache = null, _cutoffsFilterKey = '';

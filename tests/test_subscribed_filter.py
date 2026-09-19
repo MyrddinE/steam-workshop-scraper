@@ -1,6 +1,6 @@
 """The Subscribed field, its overlay control and the `Subscribed at` sort.
 
-The field is the first enum in FILTER_SCHEMA and the first whose predicate spans
+The field is the first enum in SEARCH_FILTER_SCHEMA and the first whose predicate spans
 more than one column, so these tests pin the two things that field invites:
 
 * the SQL builder and the in-memory mirror answer the same question, including

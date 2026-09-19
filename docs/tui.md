@@ -83,7 +83,7 @@ Each row contains:
 
 **Operator categories** mirror the web UI: text operators for Title/Description/Filename/Full Text, numeric operators (including `percentile`) for File Size/Subs/Favs/Views/Subscriber Score/Favorite Score, id operators for Author ID/Workshop ID/AppID, and `is`/`is_not` for the `Subscribed` enum.
 
-**Field type determination** in `compose()` and `on_select_changed()` reads the type from the central `FILTER_SCHEMA` (`_FIELD_TYPES`), so a field added there gets the right control without a second field list here.
+**Field type determination** in `compose()` and `on_select_changed()` reads the type from the central `SEARCH_FILTER_SCHEMA` (`_FIELD_TYPES`), so a field added there gets the right control without a second field list here.
 
 **The enum value control** offers the schema's `values`, with `any` dropped while
 the operator is `is_not` (a NOT over "everything" matches nothing, so it is not a
