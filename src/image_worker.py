@@ -108,7 +108,7 @@ class ImageDownloadThread(threading.Thread):
                         magic_ext = puremagic.from_string(magic_header)
                         ext = MAGIC_EXT_MAP.get(magic_ext, "")
                         if ext:
-                            logging.info(f"[I:{wid}] Puremagic detected {magic_ext} → .{ext}")
+                            logging.debug(f"[I:{wid}] Puremagic detected {magic_ext} → .{ext}")
                     except Exception:
                         logging.debug("[I:%s] Puremagic detection failed, falling back to URL extension", wid)
                         pass
