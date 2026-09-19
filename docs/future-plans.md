@@ -338,7 +338,7 @@ meant to be zero, and one query finds them.
 ## Discovery logging: mark what was queued for the item, not what the filters matched
 
 **Status: Landed.** The marker is chosen in `src/daemon.py` from the
-`ScrapeImageOutcome` that `_flag_scrape_and_image` returns; the behaviour and its
+`ScrapeImageOutcome` that `_raise_scrape_and_image_priorities` returns; the behaviour and its
 colour are pinned by `tests/test_discovery_marker.py`. The measured evidence that
 motivated the change is kept below.
 
@@ -371,7 +371,7 @@ decoration; the informative event is the one item in a hundred that is about to 
 preview fetched, and that is the one currently unmarked.
 
 Invert it: drop the `ignored` marker, and mark the line from whether
-`_flag_scrape_and_image` actually queued work — `enriching` in green (`\033[32m`) when the item also
+`_raise_scrape_and_image_priorities` actually queued work — `enriching` in green (`\033[32m`) when the item also
 matched its AppID's filters, `current` in grey (`\033[90m`) when it queued nothing, and no marker
 when the queued work is backlog because the filters did not match. One line changes, and the web log
 viewer needs nothing: its SGR table already renders 32 as `#98c379` and 90 as `#6b7280`. The TUI's
@@ -379,9 +379,9 @@ pane needs nothing either, but for a different reason — `_poll_tail` writes th
 `RichLog` and nothing in the TUI *decodes* ANSI, so no marker colour has ever been applied by the
 widget; the raw escape bytes do reach it, unrendered and zero-width.
 
-*(Landed. `_flag_scrape_and_image` returns a `ScrapeImageOutcome(enriched, queued)` rather than a
+*(Landed. `_raise_scrape_and_image_priorities` returns a `ScrapeImageOutcome(enriched, queued)` rather than a
 bare bool: `queued` is set when `flag_for_web_scrape` or `flag_for_image` is called, and `enriched`
-is the filter verdict the two other consumers still need — `_flag_translations` and
+is the filter verdict the two other consumers still need — `_queue_translations` and
 `_creator_to_refresh` read `outcome.enriched`, because a filter match is what gates translation and
 the creator refresh. The first landed form chose the marker from `enriched` alone, so an item that
 matched its filters and queued nothing — its description at the stored revision with a renderable

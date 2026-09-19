@@ -76,17 +76,17 @@ CRASH_KIND = "crash"
 # How many formatted log records the ring buffer keeps. What happened just
 # before the crash is the difference between guessing and knowing, and this path
 # is rarely exercised.
-RECENT_LOG_LINES = 200
+RECENT_LOG_RECORDS = 200
 
 # Rendered-locals caps. Locals can be enormous or hostile, so nothing here is
 # unbounded: a value, the number of values in one frame, how deep the redactor
 # follows a container, and the size of the whole file.
 MAX_LOCAL_VALUE_CHARS = 2000
 MAX_LOCALS_PER_FRAME = 50
-MAX_MAPPING_ITEMS = 20
+MAX_CONTAINER_ITEMS = 20
 MAX_LOCAL_DEPTH = 3
 MAX_LOCAL_NODES = 20000
-MAX_LOG_LINE_CHARS = 4000
+MAX_LOG_RECORD_CHARS = 4000
 MAX_DUMP_BYTES = 256 * 1024
 
 # The string a redacted value becomes, matching the capture's elision.
@@ -104,7 +104,7 @@ _SENSITIVE_KEY_PARTS = (
     "login", "sessionid",
 )
 
-_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_FILENAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 # Guards the module state: the installed hooks, the context, the ring-buffer
 # handler and the registered secrets. An RLock because register_secret can be
@@ -146,7 +146,7 @@ class RecentLogHandler(logging.Handler):
     still be writable at crash time.
     """
 
-    def __init__(self, capacity: int = RECENT_LOG_LINES):
+    def __init__(self, capacity: int = RECENT_LOG_RECORDS):
         super().__init__()
         self.records = deque(maxlen=max(1, int(capacity)))
 
@@ -157,15 +157,15 @@ class RecentLogHandler(logging.Handler):
         except Exception:
             self.handleError(record)
 
-    def lines(self):
+    def recent_records(self):
         """The buffered records, oldest first."""
         return list(self.records)
 
 
-def install(process, config=None, config_path=None):
+def install(process_name, config=None, config_path=None):
     """Install the crash hooks and the recent-log ring buffer.
 
-    ``process`` names the entry point (``"tui"``, ``"web"``, ``"daemon"``) and is
+    ``process_name`` names the entry point (``"tui"``, ``"web"``, ``"daemon"``) and is
     recorded in every dump. ``config`` supplies the outbox and the cookie values
     to elide; it may be ``None`` when the config could not be loaded, which is
     exactly when a crash is likely.
@@ -178,7 +178,7 @@ def install(process, config=None, config_path=None):
     """
     try:
         with _STATE_LOCK:
-            _state["process"] = process
+            _state["process"] = process_name
             if config is not None:
                 _state["config"] = config
             if config_path is not None:
@@ -244,11 +244,11 @@ def register_secret(value):
         _log_own_failure("Could not register a secret for crash-dump elision")
 
 
-def record_exception(exc_type, exc_value, exc_tb, *, process=None, config=None,
+def record_exception(exc_type, exc_value, exc_tb, *, process_name=None, config=None,
                      config_path=None):
     """Write one crash dump and return its path, or ``None`` on any failure.
 
-    Never raises. ``process`` and ``config`` default to whatever :func:`install`
+    Never raises. ``process_name`` and ``config`` default to whatever :func:`install`
     recorded, so a hook can call this with only the exception.
 
     Every call writes a dump. Textual calls ``App._handle_exception`` once per
@@ -258,7 +258,7 @@ def record_exception(exc_type, exc_value, exc_tb, *, process=None, config=None,
     header says how many errors had been reported when it was written.
     """
     try:
-        return _record_exception(exc_type, exc_value, exc_tb, process=process,
+        return _record_exception(exc_type, exc_value, exc_tb, process=process_name,
                                  config=config, config_path=config_path)
     except BaseException:  # noqa: BLE001 - see docstring
         _log_own_failure("Crash dump failed")
@@ -298,7 +298,7 @@ def _record_exception(exc_type, exc_value, exc_tb, *, process, config, config_pa
     global _ERROR_COUNT
     with _DUMP_LOCK:
         with _STATE_LOCK:
-            resolved_process = _safe_process(process or _state["process"])
+            resolved_process = _safe_process_name(process or _state["process"])
             resolved_config = config if config is not None else _state["config"]
             resolved_config_path = (config_path if config_path is not None
                                     else _state["config_path"])
@@ -313,14 +313,14 @@ def _record_exception(exc_type, exc_value, exc_tb, *, process, config, config_pa
 
         text = _render_dump(exc_type, exc_value, exc_tb, resolved_process,
                             resolved_config, resolved_config_path, occurrence)
-        directory, outbox, print_path = _destination(resolved_config)
+        directory, outbox, should_print_path = _destination(resolved_config)
         path = os.path.join(directory,
                             _dump_filename(resolved_process, occurrence))
         payload = text.encode("utf-8", "replace")
         _write_atomic(path, payload)
         if outbox:
-            _register(outbox, path, payload, resolved_process, occurrence)
-        elif print_path:
+            _register_dump(outbox, path, payload, resolved_process, occurrence)
+        elif should_print_path:
             _print_path(path)
         return path
 
@@ -340,7 +340,7 @@ def _render_dump(exc_type, exc_value, exc_tb, process, config, config_path,
     elision = (f"{len(secrets)} known value(s) scrubbed" if secrets
                else "none known (redaction is by key name only)")
     tb_text, locals_note = _format_traceback(exc_type, exc_value, exc_tb, secrets)
-    log_lines = _recent_lines()
+    log_lines = _recent_log_records()
 
     def header(truncated):
         return _context_lines(exc_type, process, config, config_path, elision,
@@ -426,7 +426,7 @@ def _format_traceback(exc_type, exc_value, exc_tb, secrets):
             "unavailable (could not be captured)"
 
     budget = [MAX_LOCAL_NODES]
-    _capture_locals(te, exc_value, exc_tb, secrets, budget, set())
+    _install_locals(te, exc_value, exc_tb, secrets, budget, set())
     try:
         return "".join(te.format(chain=True)), "included (redacted and capped)"
     except BaseException:  # noqa: BLE001 - fall back rather than lose the dump
@@ -434,7 +434,7 @@ def _format_traceback(exc_type, exc_value, exc_tb, secrets):
             "unavailable (rendering failed)"
 
 
-def _capture_locals(te, exc, tb, secrets, budget, seen):
+def _install_locals(te, exc, tb, secrets, budget, seen):
     """Install redacted, capped locals on every frame a traceback will render.
 
     Follows the same cause/context/group graph the formatter walks, pairing each
@@ -457,10 +457,10 @@ def _capture_locals(te, exc, tb, secrets, budget, seen):
             summary.locals = _redact_locals(raw, secrets, budget)
 
     cause = getattr(exc, "__cause__", None)
-    _capture_locals(te.__cause__, cause, getattr(cause, "__traceback__", None),
+    _install_locals(te.__cause__, cause, getattr(cause, "__traceback__", None),
                     secrets, budget, seen)
     context = getattr(exc, "__context__", None)
-    _capture_locals(te.__context__, context,
+    _install_locals(te.__context__, context,
                     getattr(context, "__traceback__", None),
                     secrets, budget, seen)
     groups = getattr(te, "exceptions", None)
@@ -468,7 +468,7 @@ def _capture_locals(te, exc, tb, secrets, budget, seen):
         sub_exceptions = getattr(exc, "exceptions", ()) if exc is not None else ()
         for index, group_te in enumerate(groups):
             sub = sub_exceptions[index] if index < len(sub_exceptions) else None
-            _capture_locals(group_te, sub, getattr(sub, "__traceback__", None),
+            _install_locals(group_te, sub, getattr(sub, "__traceback__", None),
                             secrets, budget, seen)
 
 
@@ -532,7 +532,7 @@ def _redact_and_render(value, secrets, depth, seen, budget):
             return _render_scalar(value, secrets)
         parts = []
         for index, (key, item) in enumerate(items):
-            if index >= MAX_MAPPING_ITEMS:
+            if index >= MAX_CONTAINER_ITEMS:
                 parts.append(f"... <{len(items) - index} more>")
                 break
             safe_key = _safe_key(key)
@@ -551,7 +551,7 @@ def _redact_and_render(value, secrets, depth, seen, budget):
         seen.add(marker)
         parts = []
         for index, item in enumerate(value):
-            if index >= MAX_MAPPING_ITEMS:
+            if index >= MAX_CONTAINER_ITEMS:
                 try:
                     parts.append(f"... <{len(value) - index} more>")
                 except BaseException:  # noqa: BLE001
@@ -716,14 +716,14 @@ def _scrub(text, secrets):
 # ── destination and writing ──────────────────────────────────────────────────
 
 def _destination(config):
-    """``(directory, outbox or None, print_path)`` for this dump.
+    """``(directory, outbox or None, should_print_path)`` for this dump.
 
     The outbox is the configured ``daemon.outbox_dir`` (or the legacy
     ``backup_dir``). When it cannot be determined the dump goes beside the
     configured log file, else the working directory, and its path is printed --
     a dump the user cannot find is not a dump.
     """
-    outbox = _outbox_dir(config)
+    outbox = _configured_outbox_dir(config)
     if outbox:
         return os.path.join(outbox, CRASHES_DIR_NAME), outbox, False
     log_file = ""
@@ -738,7 +738,7 @@ def _destination(config):
     return directory, None, True
 
 
-def _outbox_dir(config):
+def _configured_outbox_dir(config):
     if not isinstance(config, dict):
         return None
     daemon_config = config.get("daemon")
@@ -749,7 +749,7 @@ def _outbox_dir(config):
 
 def _dump_filename(process, occurrence):
     stamp = _utc_now_iso().replace(":", "-")
-    safe = _SAFE_NAME_RE.sub("-", str(process or "unknown")).strip("-") or "unknown"
+    safe = _FILENAME_UNSAFE_RE.sub("-", str(process or "unknown")).strip("-") or "unknown"
     return f"{stamp}-{safe}-error{occurrence}.txt"
 
 
@@ -777,7 +777,7 @@ def _remove_quietly(path):
         logging.debug("Could not remove temporary crash dump %s: %s", path, exc)
 
 
-def _register(outbox, path, payload, process, occurrence):
+def _register_dump(outbox, path, payload, process, occurrence):
     try:
         entry = {
             "path": os.path.relpath(path, outbox).replace(os.sep, "/"),
@@ -797,13 +797,13 @@ def _register(outbox, path, payload, process, occurrence):
         _log_own_failure("Crash dump was not registered in the outbox manifest")
 
 
-def _recent_lines():
+def _recent_log_records():
     with _STATE_LOCK:
         handler = _state["handler"]
     if handler is None:
         return []
     try:
-        lines = handler.lines()
+        lines = handler.recent_records()
     except BaseException:  # noqa: BLE001
         return []
     trimmed = []
@@ -813,8 +813,8 @@ def _recent_lines():
                 line = repr(line)
             except BaseException:  # noqa: BLE001
                 line = "<unrepresentable log line>"
-        if len(line) > MAX_LOG_LINE_CHARS:
-            line = line[:MAX_LOG_LINE_CHARS] + "... [truncated]"
+        if len(line) > MAX_LOG_RECORD_CHARS:
+            line = line[:MAX_LOG_RECORD_CHARS] + "... [truncated]"
         trimmed.append(line)
     return trimmed
 
@@ -832,12 +832,12 @@ def _attach_handler():
         root.addHandler(handler)
 
 
-def _safe_process(process):
+def _safe_process_name(process):
     try:
         text = str(process or "unknown")
     except BaseException:  # noqa: BLE001
         return "unknown"
-    return _SAFE_NAME_RE.sub("-", text).strip("-") or "unknown"
+    return _FILENAME_UNSAFE_RE.sub("-", text).strip("-") or "unknown"
 
 
 def _safe_cwd(fallback="<unknown>"):

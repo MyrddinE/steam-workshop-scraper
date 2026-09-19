@@ -152,7 +152,7 @@ def test_one_non_ascii_field_of_two_counts_once_per_field(db_path):
 
 
 def test_the_translation_scope_is_the_filter_selected_items(db_path):
-    """`_flag_translations` returns unless the item was enriched.
+    """`_queue_translations` returns unless the item was enriched.
 
     The Filters bar's API translations are only ever queued for filter-selected
     items, so the non-ASCII fields of an item the filters exclude are not in the

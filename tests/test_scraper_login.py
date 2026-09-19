@@ -20,7 +20,7 @@ ITEM_URL = "https://steamcommunity.com/sharedfiles/filedetails/?id=1"
 def _restore_webserver_globals():
     """Leave the webserver module as we found it.
 
-    `init_webserver` mutates module globals and `_sessionid` is process state.
+    `init_webserver` mutates module globals and `_pushed_sessionid` is process state.
     Without restoring them, a test here that pushes a sessionid makes a later
     "no session configured" test see one — which is exactly how this file first
     broke `test_webserver.py::test_api_subscribe_no_session` when the two ran in
@@ -29,10 +29,10 @@ def _restore_webserver_globals():
     from src import webserver
 
     saved = (webserver._db_path, webserver._config, webserver._images_dir,
-             webserver._config_path, webserver._sessionid)
+             webserver._config_path, webserver._pushed_sessionid)
     yield
     (webserver._db_path, webserver._config, webserver._images_dir,
-     webserver._config_path, webserver._sessionid) = saved
+     webserver._config_path, webserver._pushed_sessionid) = saved
 
 
 # --- normalising the config key -------------------------------------------

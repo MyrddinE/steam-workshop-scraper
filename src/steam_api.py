@@ -12,7 +12,7 @@ from src import capture
 # own thread: concurrency redistributes the budget, it does not enlarge it.
 _lock = threading.Lock()
 _next_slot = 0.0
-_API_DELAY = 1.5
+_api_delay = 1.5
 
 # Ceiling on ids carried by one bulk request. The Steamworks reference documents
 # ISteamUser/GetPlayerSummaries/v2's `steamids` as a "Comma-delimited list of
@@ -28,9 +28,9 @@ STEAM_API_MAX_IDS_PER_REQUEST = 100
 
 
 def set_api_delay(seconds: float):
-    global _API_DELAY
+    global _api_delay
     with _lock:
-        _API_DELAY = seconds
+        _api_delay = seconds
 
 
 def _rate_limit(keep_running=None) -> bool:
@@ -57,7 +57,7 @@ def _rate_limit(keep_running=None) -> bool:
     with _lock:
         now = time.monotonic()
         slot = max(now, _next_slot)
-        _next_slot = slot + _API_DELAY
+        _next_slot = slot + _api_delay
         delay = slot - now
 
     if delay <= 0:
@@ -249,9 +249,9 @@ def get_player_summaries(steamids: list[int], api_key: str) -> dict[int, dict]:
         
         players = json_data.get("response", {}).get("players", [])
         result = {}
-        for p in players:
-            sid = int(p["steamid"])
-            result[sid] = p
+        for player in players:
+            sid = int(player["steamid"])
+            result[sid] = player
         return result
         
     except (requests.exceptions.RequestException, ValueError, KeyError):

@@ -74,7 +74,7 @@ ITEMS_PER_PAGE = 10
 # unsubscribe renumbered a page mid-walk); the rest guard a genuinely busy
 # account. A failed reconcile changes nothing, so the cost of a retry is a few
 # page fetches, and the cost of accepting a short read is a wrong marker.
-MAX_ATTEMPTS = 3
+MAX_READ_ATTEMPTS = 3
 
 # A page cap, so a nonsensical declared total (or a page that never repeats its
 # own wording) cannot make the loop unbounded. Well above the observed 208/10.
@@ -96,12 +96,12 @@ def parse_item_ids(body: str) -> list[int]:
     the one the probe observed, and duplicates (a link rendered more than once
     per row) are collapsed so the total check counts distinct items.
     """
-    seen = []
+    ordered_ids = []
     for raw in _ITEM_ID_PATTERN.findall(body or ""):
         item_id = int(raw)
-        if item_id not in seen:
-            seen.append(item_id)
-    return seen
+        if item_id not in ordered_ids:
+            ordered_ids.append(item_id)
+    return ordered_ids
 
 
 def parse_declared_total(body: str) -> int | None:
@@ -280,8 +280,8 @@ def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
     if seen_at is None:
         seen_at = int(time.time())
 
-    login = web_scraper._resolve_login_secure(config)
-    if not login:
+    login_cookie = web_scraper._resolve_login_secure(config)
+    if not login_cookie:
         # An anonymous request returns the sign-in shell, whose total cannot be
         # verified. Say so once rather than fetching pages that cannot succeed.
         logging.warning(
@@ -290,9 +290,9 @@ def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
         )
         return None
 
-    cookie = session_cookie.parse(login)
+    cookie = session_cookie.parse(login_cookie)
 
-    reason = session_health.evaluate_login(login, now=seen_at)
+    reason = session_health.evaluate_login(login_cookie, now=seen_at)
     if reason:
         # The token says it is dead, so the walk cannot succeed: Steam answers
         # every page with its sign-in shell. Declining here costs nothing and
@@ -309,9 +309,9 @@ def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
         )
         return None
 
-    best: tuple[set[int], int | None] | None = None
+    best_read: tuple[set[int], int | None] | None = None
 
-    for attempt in range(1, MAX_ATTEMPTS + 1):
+    for attempt in range(1, MAX_READ_ATTEMPTS + 1):
         try:
             ids, declared_total = collect_subscribed_ids(
                 appid, config, keep_running=keep_running)
@@ -333,18 +333,18 @@ def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
         except Exception as exc:
             logging.warning(
                 "Subscription reconcile for appid %s failed on attempt %d/%d: %s",
-                appid, attempt, MAX_ATTEMPTS, exc,
+                appid, attempt, MAX_READ_ATTEMPTS, exc,
             )
             continue
 
-        if best is None or len(ids) > len(best[0]):
-            best = (ids, declared_total)
+        if best_read is None or len(ids) > len(best_read[0]):
+            best_read = (ids, declared_total)
 
         if declared_total is None:
             logging.warning(
                 "Subscription reconcile for appid %s could not read the page's declared "
                 "total (attempt %d/%d); the page may be a sign-in wall or an error page.",
-                appid, attempt, MAX_ATTEMPTS,
+                appid, attempt, MAX_READ_ATTEMPTS,
             )
             continue
 
@@ -362,7 +362,7 @@ def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
                 "Subscription reconcile for appid %s read %d of a declared %d on attempt "
                 "%d/%d (a short read can mean a page was renumbered while we walked it); "
                 "retrying from page 1.",
-                appid, len(ids), declared_total, attempt, MAX_ATTEMPTS,
+                appid, len(ids), declared_total, attempt, MAX_READ_ATTEMPTS,
             )
             continue
 
@@ -375,18 +375,18 @@ def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
         )
         return counts
 
-    if best is not None and best[0]:
+    if best_read is not None and best_read[0]:
         logging.warning(
             "Subscription reconcile for appid %s could not verify a complete list after %d "
             "attempts; applying the %d ids that were seen as subscribed but clearing nothing, "
             "so items omitted by the short reads keep their current state.",
-            appid, MAX_ATTEMPTS, len(best[0]),
+            appid, MAX_READ_ATTEMPTS, len(best_read[0]),
         )
-        return apply_own_subscriptions(db_path, appid, best[0], seen_at=seen_at, complete=False)
+        return apply_own_subscriptions(db_path, appid, best_read[0], seen_at=seen_at, complete=False)
 
     logging.warning(
         "Subscription reconcile for appid %s learned nothing after %d attempts; no flags "
         "were changed, so the previous reconcile's state stands.",
-        appid, MAX_ATTEMPTS,
+        appid, MAX_READ_ATTEMPTS,
     )
     return None

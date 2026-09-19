@@ -113,7 +113,7 @@ def test_a_stale_timestamp_beside_a_set_flag_is_subscribed():
 
 
 def test_the_precedence_order_is_declared_strongest_first():
-    assert subscription.PRECEDENCE == (
+    assert subscription.STATE_PRECEDENCE == (
         subscription.DOWNLOADED, subscription.SUBSCRIBED, subscription.PENDING,
         subscription.PREVIOUSLY, subscription.NEVER)
 
@@ -133,8 +133,8 @@ def test_each_adjacent_pair_of_the_stated_precedence():
 # --- the appearance table ---------------------------------------------------
 
 def test_every_state_has_a_spec_and_a_tooltip():
-    assert set(subscription.SPECS) == set(subscription.PRECEDENCE)
-    assert set(subscription.TOOLTIPS) == set(subscription.PRECEDENCE)
+    assert set(subscription.MARKER_SPECS) == set(subscription.STATE_PRECEDENCE)
+    assert set(subscription.MARKER_TOOLTIPS) == set(subscription.STATE_PRECEDENCE)
 
 
 def test_the_glyphs_are_the_real_unicode_characters():
@@ -178,7 +178,7 @@ def test_pending_and_previously_share_a_glyph_but_not_a_colour():
 
 
 def test_the_spec_and_the_named_getters_agree():
-    for state in subscription.PRECEDENCE:
+    for state in subscription.STATE_PRECEDENCE:
         glyph, colour, css, label = subscription.spec(state)
         assert (glyph, colour) == (
             subscription.glyph(state), subscription.colour(state))
@@ -194,13 +194,13 @@ def test_only_the_three_actionable_states_are_clickable():
     # too (its action is the separate open-folder button and key).
     assert not subscription.is_clickable(subscription.SUBSCRIBED)
     assert not subscription.is_clickable(subscription.DOWNLOADED)
-    assert set(subscription.CLICKABLE) == {
+    assert set(subscription.CLICKABLE_STATES) == {
         subscription.PENDING, subscription.PREVIOUSLY, subscription.NEVER}
 
 
 def test_every_css_class_is_distinct():
-    assert len({subscription.spec(s)[2] for s in subscription.PRECEDENCE}) == len(
-        subscription.PRECEDENCE)
+    assert len({subscription.spec(s)[2] for s in subscription.STATE_PRECEDENCE}) == len(
+        subscription.STATE_PRECEDENCE)
 
 
 def test_an_unknown_state_is_a_loud_error():
@@ -258,7 +258,7 @@ def test_the_template_renders_the_glyphs_and_colours_from_the_shared_table():
     # about the subscription marker.
     for name in ("showSubscriptionMarker", "_applySub", "onSubMarkerClick"):
         body = _function_body(html, name)
-        for state in subscription.PRECEDENCE:
+        for state in subscription.STATE_PRECEDENCE:
             _glyph, colour, _css, _label = subscription.spec(state)
             assert colour not in body, \
                 f"{name} must take {state}'s colour from the payload"

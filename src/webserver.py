@@ -67,7 +67,7 @@ def _do_not_cache_generated_pages(response):
 _db_path = "workshop.db"
 _config = {}
 _images_dir = "images"
-_sessionid = ""
+_pushed_sessionid = ""
 _config_path = "config.yaml"
 _daemon_controller = None
 # The shared folder helper. Created by init_webserver; None until then, which is
@@ -114,29 +114,29 @@ def _bbcode_to_html(text):
     """Converts Steam BBCode to HTML for web display."""
     if not text:
         return ""
-    t = re.sub(r'\[h1\](.*?)\[/h1\]', r'<h3>\1</h3>', text, flags=re.IGNORECASE | re.DOTALL)
-    t = re.sub(r'\[h2\](.*?)\[/h2\]', r'<h4>\1</h4>', t, flags=re.IGNORECASE | re.DOTALL)
-    t = re.sub(r'\[h3\](.*?)\[/h3\]', r'<h5>\1</h5>', t, flags=re.IGNORECASE | re.DOTALL)
-    t = re.sub(r'\[b\](.*?)\[/b\]', r'<b>\1</b>', t, flags=re.IGNORECASE)
-    t = re.sub(r'\[i\](.*?)\[/i\]', r'<i>\1</i>', t, flags=re.IGNORECASE)
-    t = re.sub(r'\[u\](.*?)\[/u\]', r'<u>\1</u>', t, flags=re.IGNORECASE)
-    t = re.sub(r'\[list\]', '<ul>', t, flags=re.IGNORECASE)
-    t = re.sub(r'\[/list\]', '</ul>', t, flags=re.IGNORECASE)
-    t = re.sub(r'\[\*\](.*?)\n?', r'<li>\1</li>', t, flags=re.IGNORECASE)
-    t = re.sub(r'\[table\]', '<table>', t, flags=re.IGNORECASE)
-    t = re.sub(r'\[/table\]', '</table>', t, flags=re.IGNORECASE)
-    t = re.sub(r'\[tr\]', '<tr>', t, flags=re.IGNORECASE)
-    t = re.sub(r'\[/tr\]', '</tr>', t, flags=re.IGNORECASE)
-    t = re.sub(r'\[th\](.*?)\[/th\]', r'<th>\1</th>', t, flags=re.IGNORECASE)
-    t = re.sub(r'\[td\](.*?)\[/td\]', r'<td>\1</td>', t, flags=re.IGNORECASE)
-    t = re.sub(r'\[quote\](.*?)\[/quote\]', r'<blockquote>\1</blockquote>', t, flags=re.IGNORECASE | re.DOTALL)
-    t = re.sub(r'\[quote=([^\]]*)\](.*?)\[/quote\]', r'<blockquote><b>\1:</b><br>\2</blockquote>', t, flags=re.IGNORECASE | re.DOTALL)
-    t = re.sub(r'\[code\](.*?)\[/code\]', r'<pre><code>\1</code></pre>', t, flags=re.IGNORECASE | re.DOTALL)
-    t = re.sub(r'\[img\](.*?)\[/img\]', r'<img src="\1" alt="image">', t, flags=re.IGNORECASE)
-    t = re.sub(r'\[url\](.*?)\[/url\]', r'<a href="\1" target="_blank">\1</a>', t, flags=re.IGNORECASE)
-    t = re.sub(r'\[url=([^\]]*)\](.*?)\[/url\]', r'<a href="\1" target="_blank">\2</a>', t, flags=re.IGNORECASE)
-    t = re.sub(r'\n', '<br>', t)
-    return t
+    html = re.sub(r'\[h1\](.*?)\[/h1\]', r'<h3>\1</h3>', text, flags=re.IGNORECASE | re.DOTALL)
+    html = re.sub(r'\[h2\](.*?)\[/h2\]', r'<h4>\1</h4>', html, flags=re.IGNORECASE | re.DOTALL)
+    html = re.sub(r'\[h3\](.*?)\[/h3\]', r'<h5>\1</h5>', html, flags=re.IGNORECASE | re.DOTALL)
+    html = re.sub(r'\[b\](.*?)\[/b\]', r'<b>\1</b>', html, flags=re.IGNORECASE)
+    html = re.sub(r'\[i\](.*?)\[/i\]', r'<i>\1</i>', html, flags=re.IGNORECASE)
+    html = re.sub(r'\[u\](.*?)\[/u\]', r'<u>\1</u>', html, flags=re.IGNORECASE)
+    html = re.sub(r'\[list\]', '<ul>', html, flags=re.IGNORECASE)
+    html = re.sub(r'\[/list\]', '</ul>', html, flags=re.IGNORECASE)
+    html = re.sub(r'\[\*\](.*?)\n?', r'<li>\1</li>', html, flags=re.IGNORECASE)
+    html = re.sub(r'\[table\]', '<table>', html, flags=re.IGNORECASE)
+    html = re.sub(r'\[/table\]', '</table>', html, flags=re.IGNORECASE)
+    html = re.sub(r'\[tr\]', '<tr>', html, flags=re.IGNORECASE)
+    html = re.sub(r'\[/tr\]', '</tr>', html, flags=re.IGNORECASE)
+    html = re.sub(r'\[th\](.*?)\[/th\]', r'<th>\1</th>', html, flags=re.IGNORECASE)
+    html = re.sub(r'\[td\](.*?)\[/td\]', r'<td>\1</td>', html, flags=re.IGNORECASE)
+    html = re.sub(r'\[quote\](.*?)\[/quote\]', r'<blockquote>\1</blockquote>', html, flags=re.IGNORECASE | re.DOTALL)
+    html = re.sub(r'\[quote=([^\]]*)\](.*?)\[/quote\]', r'<blockquote><b>\1:</b><br>\2</blockquote>', html, flags=re.IGNORECASE | re.DOTALL)
+    html = re.sub(r'\[code\](.*?)\[/code\]', r'<pre><code>\1</code></pre>', html, flags=re.IGNORECASE | re.DOTALL)
+    html = re.sub(r'\[img\](.*?)\[/img\]', r'<img src="\1" alt="image">', html, flags=re.IGNORECASE)
+    html = re.sub(r'\[url\](.*?)\[/url\]', r'<a href="\1" target="_blank">\1</a>', html, flags=re.IGNORECASE)
+    html = re.sub(r'\[url=([^\]]*)\](.*?)\[/url\]', r'<a href="\1" target="_blank">\2</a>', html, flags=re.IGNORECASE)
+    html = re.sub(r'\n', '<br>', html)
+    return html
 
 
 @app.route('/images/<path:filename>')
@@ -151,8 +151,8 @@ def serve_image(filename):
         try:
             wid = int(name_part)
             from src.database import get_image_subdirs
-            char1, char2, char3 = get_image_subdirs(wid)
-            nested_path = f"{char1}/{char2}/{char3}/{filename}"
+            bucket1, bucket2, bucket3 = get_image_subdirs(wid)
+            nested_path = f"{bucket1}/{bucket2}/{bucket3}/{filename}"
             return send_from_directory(_images_dir, nested_path)
         # Filename stem is not a workshop_id: fall through to the flat image
         # directory below.
@@ -180,23 +180,23 @@ def index():
 
 @app.route('/userscript/<path:filename>')
 def serve_userscript(filename):
-    template_path = os.path.join(os.path.dirname(__file__), '..', 'userscripts', filename)
-    if not os.path.isfile(template_path):
+    script_path = os.path.join(os.path.dirname(__file__), '..', 'userscripts', filename)
+    if not os.path.isfile(script_path):
         return jsonify({"error": "not found"}), 404
 
-    with open(template_path, 'r', encoding='utf-8') as f:
-        content = f.read()
+    with open(script_path, 'r', encoding='utf-8') as handle:
+        content = handle.read()
 
     host = request.host
     if host and not host.startswith('127.') and not host.startswith('localhost'):
         base = f"http://{host}"
-        extras = [
+        metadata_lines = [
             f'// @include      {base}/*',
             f'// @updateURL    {base}/userscript/{filename}',
             f'// @downloadURL  {base}/userscript/{filename}',
         ]
         marker = '// ==/UserScript=='
-        content = content.replace(marker, '\n'.join(extras) + '\n' + marker)
+        content = content.replace(marker, '\n'.join(metadata_lines) + '\n' + marker)
 
     return content, 200, {'Content-Type': 'application/javascript; charset=utf-8'}
 
@@ -235,26 +235,26 @@ def api_search():
                     image_flagged_count += 1
                 bump_translation_for_list(_db_path, wid)
 
-            ids = [r['workshop_id'] for r in results]
+            ids = [row['workshop_id'] for row in results]
             conn = get_connection(_db_path)
             placeholders = ','.join('?' * len(ids))
-            updated = conn.execute(
+            flag_rows = conn.execute(
                 f"SELECT workshop_id, needs_web_scrape, needs_image, translation_priority FROM workshop_items WHERE workshop_id IN ({placeholders})",
                 ids
             ).fetchall()
             conn.close()
-            updated_map = {row['workshop_id']: dict(row) for row in updated}
-            for r in results:
-                if r['workshop_id'] in updated_map:
-                    u = updated_map[r['workshop_id']]
-                    r['needs_web_scrape'] = u['needs_web_scrape']
-                    r['needs_image'] = u['needs_image']
-                    r['translation_priority'] = u['translation_priority']
+            flag_map = {row['workshop_id']: dict(row) for row in flag_rows}
+            for row in results:
+                if row['workshop_id'] in flag_map:
+                    flag_row = flag_map[row['workshop_id']]
+                    row['needs_web_scrape'] = flag_row['needs_web_scrape']
+                    row['needs_image'] = flag_row['needs_image']
+                    row['translation_priority'] = flag_row['translation_priority']
 
             sample = results[0] if results else {}
             logging.info(f"[Search] returned {len(results)} items, flagged {image_flagged_count} for image, sample needs_image={sample.get('needs_image')} image_extension={sample.get('image_extension')!r}")
 
-        return jsonify([_attach_subscription(r) for r in _with_image_state(results)])
+        return jsonify([_attach_subscription(row) for row in _with_image_state(results)])
     except Exception as e:
         logging.exception(f"[Search] Error processing search request")
         return jsonify({"error": str(e)}), 500
@@ -369,8 +369,8 @@ def api_items():
         FROM workshop_items w LEFT JOIN users u ON w.creator = u.steamid
         WHERE w.workshop_id IN ({placeholders})
     """
-    results = [_attach_subscription(r) for r in
-               _with_image_state([dict(r) for r in conn.execute(sql, ids).fetchall()])]
+    results = [_attach_subscription(row) for row in
+               _with_image_state([dict(row) for row in conn.execute(sql, ids).fetchall()])]
     conn.close()
     return jsonify(results)
 
@@ -380,8 +380,8 @@ def api_state():
     state_path = os.path.join(os.path.dirname(_db_path), ".tui_state.yaml")
     try:
         import yaml
-        with open(state_path, 'r', encoding='utf-8') as f:
-            state = yaml.safe_load(f) or {}
+        with open(state_path, 'r', encoding='utf-8') as handle:
+            state = yaml.safe_load(handle) or {}
     except Exception:
         logging.info("No saved filter state found or failed to read")
         state = {}
@@ -465,8 +465,8 @@ def api_cutoffs():
     cutoffs = compute_wilson_cutoffs(_db_path, filters if filters else None,
                                      subscribed_overlay=data.get('subscribed'))
     result = {}
-    for k, v in cutoffs.items():
-        result[k] = v
+    for k, percentile in cutoffs.items():
+        result[k] = percentile
     return jsonify(result)
 
 
@@ -599,7 +599,7 @@ def api_subscribe(workshop_id):
     engine's does. ``sessionid`` is a session cookie Firefox keeps in memory and
     never writes to ``cookies.sqlite``, so the profile read can never carry the
     current one; the page's own ``g_sessionID`` is the token that belongs to the
-    credential that authenticated that read. The pushed ``_sessionid`` global and
+    credential that authenticated that read. The pushed ``_pushed_sessionid`` global and
     ``session.id`` are only a fallback for a page that carries no token, which is
     what keeps the userscript-driven flow working for an anonymous page. The read
     is gated on the shared web interval -- ``daemon.web_delay_seconds`` through
@@ -608,11 +608,11 @@ def api_subscribe(workshop_id):
     changed**: the same refusal branches, the same status codes, the same
     response bodies. (What a refusal *records* did change; see the block below.)
     """
-    cookies, fallback_sid, login = subscribe_engine.resolve_subscribe_credentials(
-        _config, _sessionid)
+    cookies, fallback_token, login = subscribe_engine.resolve_subscribe_credentials(
+        _config, _pushed_sessionid)
     logging.info(
         f"[Subscribe] request for workshop_id={workshop_id}, "
-        f"sessionid_fallback={'set' if fallback_sid else 'missing'}, "
+        f"token_fallback={'set' if fallback_token else 'missing'}, "
         f"login={'set' if login else 'missing'}")
     # Refuse before spending a request: without a login cookie the page read
     # would be anonymous and Steam answers anonymously, which can never
@@ -644,15 +644,15 @@ def api_subscribe(workshop_id):
     page = subscribe_engine.fetch_item_page(workshop_id, interval=interval)
     page_html = subscribe_engine.page_body(page)
     page_authenticated = subscribe_engine.page_read_authenticated(page_html)
-    sid, page_sid = subscribe_engine.resolve_subscribe_token(
-        page_html, cookies, fallback_sid)
+    sid, page_token = subscribe_engine.resolve_subscribe_token(
+        page_html, cookies, fallback_token)
     if not sid:
         logging.warning(f"[Subscribe] No sessionid available — refusing before the request")
         return jsonify({"success": -1, "message": _SUBSCRIBE_NO_SESSION_MESSAGE}), 400
 
     logging.info(
         f"[Subscribe] POSTing to Steam: id={workshop_id}, appid={appid}, "
-        f"{subscribe_engine.token_log_note(sid, page_sid, fallback_sid)}, "
+        f"{subscribe_engine.token_log_note(sid, page_token, fallback_token)}, "
         f"login={'set' if login else 'missing'}")
     try:
         # The shared request shape and the shared session, so the TCP connection
@@ -691,14 +691,14 @@ def api_subscribe(workshop_id):
 
 @app.route('/api/sessionid', methods=['POST'])
 def api_sessionid():
-    global _sessionid
+    global _pushed_sessionid
     data = request.get_json(silent=True) or {}
     sid = data.get("sessionid", "").strip()
     login_secure = data.get("login_secure", "").strip()
     if not sid:
         return jsonify({"ok": False, "message": "No sessionid provided."}), 400
 
-    _sessionid = sid
+    _pushed_sessionid = sid
     # A pushed token and a refreshed login cookie may match nothing in the
     # config or the browser profile, so hand both to the crash reporter now: a
     # crash inside the subscribe route would otherwise write them verbatim.
@@ -712,9 +712,9 @@ def api_sessionid():
     # file write every thirty seconds, per open Steam tab, for no change.
     changed = bool(login_secure) and login_secure_value(_config) != login_secure
     if not login_secure:
-        state = "missing"
+        persist_state = "missing"
     elif not changed:
-        state = "unchanged"
+        persist_state = "unchanged"
     else:
         _config.setdefault("session", {})["login_secure"] = login_secure
         # Persist it so the daemon sees it. The daemon is a separate process
@@ -723,9 +723,9 @@ def api_sessionid():
         # effect without restarting anything.
         try:
             save_config(_config_path, _config)
-            state = "set and persisted"
+            persist_state = "set and persisted"
         except Exception as exc:
-            state = f"set but not persisted ({exc})"
+            persist_state = f"set but not persisted ({exc})"
         # A push carries the operator's own live credential, so it is the best
         # evidence available here that the login works again. Judged from the
         # token alone -- Steam is not asked -- which is the same rule the
@@ -734,8 +734,8 @@ def api_sessionid():
             session_health.record_accepted(_db_path)
 
     # A push that changed nothing is worth a debug line, not an info one.
-    log = logging.info if changed else logging.debug
-    log("SessionID updated from userscript (login_secure: %s)", state)
+    log_line = logging.info if changed else logging.debug
+    log_line("SessionID updated from userscript (login_secure: %s)", persist_state)
     return jsonify({"ok": True})
 
 
@@ -776,15 +776,15 @@ def api_subscribe_failed(workshop_id):
 # tabs until the request budget refills — Steam's is per account or address and
 # refills over minutes.
 SUBSCRIBE_THROTTLE_PAUSE_SECONDS = 300.0
-_sub_throttled_at = 0.0
-_sub_throttled_id = None
+_subscribe_throttled_at = 0.0
+_subscribe_throttled_id = None
 
 
 @app.route('/api/subscribe_throttled/<int:workshop_id>', methods=['POST'])
 def api_subscribe_throttled(workshop_id):
-    global _sub_throttled_at, _sub_throttled_id
-    _sub_throttled_at = time.time()
-    _sub_throttled_id = workshop_id
+    global _subscribe_throttled_at, _subscribe_throttled_id
+    _subscribe_throttled_at = time.time()
+    _subscribe_throttled_id = workshop_id
     logging.warning(
         "[Subscribe] Steam throttled the request for workshop_id=%s; it stays queued "
         "and is retried once the budget refills.", workshop_id)
@@ -795,8 +795,8 @@ def api_subscribe_throttled(workshop_id):
 def api_sub_health():
     """Whether Steam is currently refusing us, and for how much longer."""
     return jsonify({
-        "throttled_at": _sub_throttled_at,
-        "throttled_id": _sub_throttled_id,
+        "throttled_at": _subscribe_throttled_at,
+        "throttled_id": _subscribe_throttled_id,
         "retry_after": SUBSCRIBE_THROTTLE_PAUSE_SECONDS,
     })
 
@@ -808,8 +808,8 @@ def api_sub_failures():
 
 @app.route('/api/fetch_new', methods=['POST'])
 def api_fetch_new():
-    with open('.fetch_new', 'w') as f:
-        f.write('1')
+    with open('.fetch_new', 'w') as handle:
+        handle.write('1')
     return jsonify({"ok": True})
 
 

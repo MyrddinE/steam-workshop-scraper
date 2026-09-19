@@ -307,12 +307,12 @@ class DaemonController:
         except OSError:
             return {"lines": [], "offset": floor, "reset": False}
 
-        consumed = data.rfind(b"\n")
-        if consumed == -1:
+        last_newline = data.rfind(b"\n")
+        if last_newline == -1:
             # No complete line in what was read; leave the offset where it was.
             return {"lines": [], "offset": start, "reset": reset}
 
-        lines = data[:consumed].decode("utf-8", errors="replace").splitlines()
+        lines = data[:last_newline].decode("utf-8", errors="replace").splitlines()
         if start > 0 and start != since:
             # We jumped backwards to the tail, so the first line is the tail end
             # of a line whose beginning we never read. Resuming from a real
@@ -320,4 +320,4 @@ class DaemonController:
             lines = lines[1:]
         if len(lines) > max_lines:
             lines = lines[-max_lines:]
-        return {"lines": lines, "offset": start + consumed + 1, "reset": reset}
+        return {"lines": lines, "offset": start + last_newline + 1, "reset": reset}

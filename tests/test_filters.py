@@ -229,7 +229,7 @@ def _flag(daemon, item, api_priority):
     from unittest.mock import patch
     with patch("src.daemon.flag_for_web_scrape") as web, \
          patch("src.daemon.flag_for_image") as img:
-        daemon._flag_scrape_and_image(item, item, item["workshop_id"], api_priority)
+        daemon._raise_scrape_and_image_priorities(item, item, item["workshop_id"], api_priority)
     return web, img
 
 

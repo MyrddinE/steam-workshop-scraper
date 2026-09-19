@@ -237,7 +237,7 @@ def _item(**over):
 def _flag(daemon, merged, existing, api_priority=3):
     with patch("src.daemon.flag_for_web_scrape") as web, \
          patch("src.daemon.flag_for_image") as img:
-        outcome = daemon._flag_scrape_and_image(merged, existing, existing["workshop_id"], api_priority)
+        outcome = daemon._raise_scrape_and_image_priorities(merged, existing, existing["workshop_id"], api_priority)
     return outcome, web, img
 
 
@@ -403,7 +403,7 @@ async def test_tui_overlay_survives_a_builder_change_and_stays_out_of_the_saved_
                 "the scraper filter is the builder's rows, never the overlay"
 
             with patch('src.tui.save_tui_state') as save_state:
-                app._has_restored_state = True
+                app._initial_load_done = True
                 app.save_state()
             state = save_state.call_args.args[1]
             assert state["subscribed_overlay"] == "previously"

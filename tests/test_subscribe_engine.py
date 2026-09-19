@@ -221,7 +221,7 @@ def engine_env(tmp_path, monkeypatch):
                         "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)})
     # Capture is off unless a test turns it on, so no test writes to an outbox
     # another test configured.
-    monkeypatch.setattr(capture, "_web_download_capture", False)
+    monkeypatch.setattr(capture, "_capture_web_downloads", False)
     # The interval is real (a page read waits it); tests must not actually
     # sleep, so the wait itself is stubbed. The pacing tests below replace this
     # with a recorder.
@@ -593,7 +593,7 @@ def test_the_engine_captures_the_item_page_and_the_subscribe(engine_env,
                                                              monkeypatch, tmp_path):
     db_path, config = engine_env
     outbox = tmp_path / "outbox"
-    capture.configure(str(outbox), web_download_capture=True)
+    capture.configure(str(outbox), capture_web_downloads=True)
     try:
         monkeypatch.setattr(web_scraper, "scrape_extended_details",
                             _Fetcher([NOT_TOGGLED, TOGGLED]))

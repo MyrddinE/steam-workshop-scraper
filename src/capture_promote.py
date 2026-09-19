@@ -29,7 +29,7 @@ import os
 import re
 import sys
 
-FIXTURE_AREAS = {
+FIXTURE_AREA_BY_KIND = {
     "web_selector_miss": "web",
     "web_item_missing": "web",
     "web_description_absent": "web",
@@ -51,15 +51,15 @@ _SECRET_PATTERNS = [
 ]
 
 
-def scrub(body: bytes) -> bytes:
+def scrub_body(body: bytes) -> bytes:
     """Strip credentials that must never reach a committed fixture."""
     for pattern, replacement in _SECRET_PATTERNS:
         body = pattern.sub(replacement, body)
     return body
 
 
-def area_for(kind: str) -> str:
-    return FIXTURE_AREAS.get(kind, "other")
+def fixture_area_for(kind: str) -> str:
+    return FIXTURE_AREA_BY_KIND.get(kind, "other")
 
 
 def extension_for(content_type, body: bytes) -> str:
@@ -106,9 +106,9 @@ def promote(record_path: str, outbox_root: str, fixtures_root: str = DEFAULT_FIX
     """Write one capture out as a fixture plus replay metadata."""
     record, body = load_capture(record_path, outbox_root)
     kind = record.get("kind", "failure")
-    area = area_for(kind)
+    area = fixture_area_for(kind)
     name = fixture_name(record, record_path)
-    body = scrub(body)
+    body = scrub_body(body)
     ext = extension_for(record.get("content_type"), body)
 
     area_dir = os.path.join(fixtures_root, area)
@@ -126,7 +126,7 @@ def promote(record_path: str, outbox_root: str, fixtures_root: str = DEFAULT_FIX
         "http_status": record.get("http_status"),
         "workshop_id": record.get("workshop_id"),
         # Scrubbed: the API key travels in the query string.
-        "url": scrub(original_url.encode("utf-8", "replace")).decode("utf-8", "replace"),
+        "url": scrub_body(original_url.encode("utf-8", "replace")).decode("utf-8", "replace"),
         "content_type": record.get("content_type"),
         "body": os.path.basename(body_path),
         "shape": record.get("shape"),

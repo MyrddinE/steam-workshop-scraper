@@ -275,7 +275,7 @@ def looks_like_missing_item(body: str) -> bool:
     return missing_item_reason(body) is not None
 
 
-def _session_id(config: dict) -> str:
+def _csrf_token(config: dict) -> str:
     """The CSRF token, from the browser when that source is enabled.
 
     Taken from the same read as the login cookie on purpose: a sessionid from a
@@ -341,23 +341,23 @@ def _build_workshop_cookies(config: dict) -> dict:
         # profile cookie is invented here.
     cookies = {
         'workshop_preferences_v2': '%7B%22bOptedIn%22%3Atrue%7D',
-        'sessionid': _session_id(config),
+        'sessionid': _csrf_token(config),
     }
     login_secure = _resolve_login_secure(config)
     if login_secure:
         cookies['steamLoginSecure'] = login_secure
     return cookies
 
-def _build_browse_url_params(appid: int, start_date: int, end_date: int, page: int,
+def _build_browse_url_params(appid: int, updated_after: int, updated_before: int, page: int,
                               search_text: str = "", required_tags: list[str] = None,
                               excluded_tags: list[str] = None,
-                              appids_required_for_use: list[int] = None) -> list[str]:
+                              required_appids: list[int] = None) -> list[str]:
     """Builds query parameters for the Steam Workshop browse page."""
     params = [
         f"appid={appid}", "browsesort=mostrecent", "section=readytouseitems",
         f"p={page}",
-        f"updated_date_range_filter_start={start_date}",
-        f"updated_date_range_filter_end={end_date}"
+        f"updated_date_range_filter_start={updated_after}",
+        f"updated_date_range_filter_end={updated_before}"
     ]
     if search_text:
         params.append(f"searchtext={requests.utils.quote(search_text)}")
@@ -367,9 +367,9 @@ def _build_browse_url_params(appid: int, start_date: int, end_date: int, page: i
     if excluded_tags:
         for tag in excluded_tags:
             params.append(f"excludedtags[]={requests.utils.quote(tag)}")
-    if appids_required_for_use:
-        for rid in appids_required_for_use:
-            params.append(f"appids_required_for_use[]={rid}")
+    if required_appids:
+        for required_appid in required_appids:
+            params.append(f"appids_required_for_use[]={required_appid}")
     return params
 
 def _extract_item_ids_from_page(response) -> list[int]:
@@ -498,7 +498,7 @@ def scrape_extended_details(item_url: str, keep_body: bool = False) -> dict | No
         return None
 
 
-def discover_items_by_date_html(appid: int, start_date: int, end_date: int, page: int = 1, search_text: str = "", required_tags: list[str] = None, excluded_tags: list[str] = None, appids_required_for_use: list[int] = None) -> tuple[list[int], int]:
+def discover_items_by_date_html(appid: int, updated_after: int, updated_before: int, page: int = 1, search_text: str = "", required_tags: list[str] = None, excluded_tags: list[str] = None, required_appids: list[int] = None) -> tuple[list[int], int]:
     """
     Scrapes the Steam Workshop browse page using date filters.
     Returns a tuple of (list_of_ids, total_pages).
@@ -510,9 +510,9 @@ def discover_items_by_date_html(appid: int, start_date: int, end_date: int, page
         sys.exit(1)
 
     cookies = _build_workshop_cookies(config)
-    url_params = _build_browse_url_params(appid, start_date, end_date, page,
+    url_params = _build_browse_url_params(appid, updated_after, updated_before, page,
         search_text=search_text, required_tags=required_tags,
-        excluded_tags=excluded_tags, appids_required_for_use=appids_required_for_use)
+        excluded_tags=excluded_tags, required_appids=required_appids)
     url = "https://steamcommunity.com/workshop/browse?" + "&".join(url_params)
     logging.info(url)
 

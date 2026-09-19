@@ -58,8 +58,8 @@ def test_the_step_is_two_gated_page_reads_of_the_shared_delay(tmp_path):
     config = {"daemon": {"web_delay_seconds": 12.0}}
     screen = _screen(tmp_path, config)
 
-    assert screen._step_seconds() == 2 * configured_web_delay(config)
-    assert screen._step_seconds() == 24.0
+    assert screen._seed_item_seconds() == 2 * configured_web_delay(config)
+    assert screen._seed_item_seconds() == 24.0
     # The third item is reached after two completed items, not after one.
     assert screen._estimate_remaining(0, 0.0) == 0
     assert screen._estimate_remaining(1, 0.0) == 24
@@ -135,7 +135,7 @@ def test_the_seeded_mean_moves_less_with_each_later_item(tmp_path):
     # 12 -> 15 -> 16: the first item moved the mean 3 s, the second only 1 s.
     mean_after_two = screen._estimated_item_seconds()
     assert mean_after_two == 16.0
-    assert mean_after_two - 15.0 < 15.0 - screen._step_seconds()
+    assert mean_after_two - 15.0 < 15.0 - screen._seed_item_seconds()
 
 
 def test_each_items_duration_is_timed_between_the_passes_results(tmp_path):
@@ -196,29 +196,29 @@ def test_the_current_item_is_distinct_and_has_no_countdown(tmp_path):
 
     # The first item is the one the engine is reading: no countdown, a word
     # that distinguishes it from the rows still waiting.
-    countdown, status, _colour = screen._row_state(0, 0.0)
+    countdown, status, _colour = screen._row_display(0, 0.0)
     assert countdown is None
     assert status == "subscribing..."
 
     # The second and third are still waiting, spaced by two reads each.
-    assert screen._row_state(1, 0.0)[0] == "~24s"
-    assert screen._row_state(2, 0.0)[0] == "~48s"
+    assert screen._row_display(1, 0.0)[0] == "~24s"
+    assert screen._row_display(2, 0.0)[0] == "~48s"
 
     # Once an item's outcome lands its countdown is cleared and the next item
     # becomes the current one.
     from src import subscribe_engine
     screen._outcomes[1] = subscribe_engine.SubscribeOutcome(
         1, subscribe_engine.SUBSCRIBED, subscribed=True)
-    assert screen._row_state(0, 0.0)[0] is None
-    assert screen._row_state(0, 0.0)[1] == "subscribed"
-    assert screen._row_state(1, 0.0)[1] == "subscribing..."
+    assert screen._row_display(0, 0.0)[0] is None
+    assert screen._row_display(0, 0.0)[1] == "subscribed"
+    assert screen._row_display(1, 0.0)[1] == "subscribing..."
 
     screen._outcomes[2] = subscribe_engine.SubscribeOutcome(
         2, subscribe_engine.THROTTLED)
-    assert screen._row_state(1, 0.0)[0] is None
-    assert screen._row_state(1, 0.0)[1] == "left queued (throttled)"
-    assert screen._row_state(2, 0.0)[1] == "subscribing..."
+    assert screen._row_display(1, 0.0)[0] is None
+    assert screen._row_display(1, 0.0)[1] == "left queued (throttled)"
+    assert screen._row_display(2, 0.0)[1] == "subscribing..."
 
     # And with the pass over there is no countdown and no "current" row left.
     screen._pass_running = False
-    assert screen._row_state(2, 0.0) == (None, None, None)
+    assert screen._row_display(2, 0.0) == (None, None, None)

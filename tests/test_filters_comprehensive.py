@@ -7,7 +7,7 @@ from src.database import search_items, compute_wilson_cutoffs, get_connection
 # They used to carry language = 6 as the marker, but that column could never be
 # populated from any Steam response and was dropped in migration 23->24, so the
 # tests select the same population from the text that actually distinguishes it.
-# Same predicate as metrics._IS_ASCII, inverted.
+# Same predicate as metrics._ASCII_SQL_TEMPLATE, inverted.
 _NON_ASCII_TITLE = (
     "length(CAST(COALESCE(title, '') AS BLOB)) != length(COALESCE(title, ''))"
 )

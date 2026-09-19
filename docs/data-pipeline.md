@@ -98,14 +98,14 @@ Cursor-based discovery using `IPublishedFileService/QueryFiles` with `query_type
 
 - Resumes from the last stored cursor (`app_tracking.last_cursor`), or `*` for the first page.
 - Fetches `numperpage=100` items per request. Each item's `publishedfileid` is inserted into `workshop_items` as a bare row at `api_priority = 3`, the documented new-item priority (status NULL, no metadata). The priority is passed explicitly rather than left to the column default, because that default is not stable across database histories: `CREATE TABLE` declares `DEFAULT 3` while the `ALTER TABLE` in migration 11→12 gives an existing database `DEFAULT 0`, so leaning on it queues discovered items on a fresh database and strands them on a migrated one (the fetch queue selects `api_priority > 0`). `_run_page_discovery` uses `5` because it handles new *and changed* items that should refresh as if visible; cursor discovery finds genuinely new items, so it uses the documented `3`.
-- Stops when `target_new` unscraped items are accumulated, or when the cursor returns empty (no more pages).
+- Stops when `fill_target` unscraped items are accumulated, or when the cursor returns empty (no more pages).
 - Persists the cursor after each page via `update_app_tracking_cursor`.
 - When the cursor is empty after a successful scan, sets `_cursor_exhausted = True`, enabling the page-based discovery mode.
 
 This is called when `get_next_items_to_scrape` returns empty — meaning the processing queue is drained and new items need to be discovered.
 
 Discovery is skipped while the daemon already has enough outstanding work: for each target AppID,
-`seed_database` returns early when at least `DISCOVERY_TARGET_NEW` (200) items are fetchable — queued
+`seed_database` returns early when at least `DISCOVERY_FILL_TARGET` (200) items are fetchable — queued
 and not dead, the population `get_next_items_to_scrape` selects. The same value is the per-run fill
 target, so a pass that does run refills to 200. The guard exists so that a healthy backlog is not
 re-crawled, and the target was raised from 100 because the fetch loop drains the queue between
@@ -158,7 +158,7 @@ Checks whether an item passes the enrichment filter for its AppID. Reads `enrich
 evaluates it in memory against four columns. The merge above deliberately drops
 `is_queued_for_subscription` and `downloaded_at` (they are in `MERGE_EXCLUDED_KEYS`),
 so the merged record alone would read them as NULL and a `queued`/`downloaded`
-filter would silently answer "no match". `_flag_scrape_and_image` therefore
+filter would silently answer "no match". `_raise_scrape_and_image_priorities` therefore
 overlays the pre-fetch record's values for exactly those columns on a copy before
 calling `_should_enrich`, and never writes them back. Migration 21→22's demotion
 walk calls the same `_evaluate_filters` and expands the field's virtual column to
@@ -172,7 +172,7 @@ These per-item outcomes never touch `api_delay`. A batch request that returned a
 
 ### Change detection across stages
 
-The API refresh is the change detector. It is the cheapest call and the only stage that goes stale on a timer, so the stages hanging off an item follow it. `_flag_scrape_and_image` compares the pre-fetch `steam_updated_at` against the freshly merged one: when they match it reuses the stored extended description and leaves the image alone, and when they differ it re-queues both. Translation does the equivalent with `translate_version` — see [What queues a field for translation](#what-queues-a-field-for-translation).
+The API refresh is the change detector. It is the cheapest call and the only stage that goes stale on a timer, so the stages hanging off an item follow it. `_raise_scrape_and_image_priorities` compares the pre-fetch `steam_updated_at` against the freshly merged one: when they match it reuses the stored extended description and leaves the image alone, and when they differ it re-queues both. Translation does the equivalent with `translate_version` — see [What queues a field for translation](#what-queues-a-field-for-translation).
 
 A stage is therefore re-queued because its source changed, or because its output is missing — never because time passed. Per-queue staleness sweeps are deliberately not used. An item whose stored revision is unknown (`steam_updated_at` NULL) counts as changed, since no change can be ruled out.
 
@@ -200,7 +200,7 @@ A daemon thread that picks up items from `get_next_web_scrape_item`, ordered by 
 | `RATE_LIMITED` | the body reports "too many requests" | untouched | the delay doubles, at once |
 | `ITEM_MISSING` | HTTP 404/410, or the page's item-error wording | `needs_web_scrape = 0` | no back-off |
 | `ITEM_PAGE_WITHOUT_DESCRIPTION` | `workshopItem` present, `highlightContent` absent | `needs_web_scrape = 0` | neutral: neither success nor failure |
-| `GATE` | no item markup, plus an age-check, sign-in or error marker | untouched | no back-off; `_refresh_login_cookie_if_gated` has already re-read the login cookie if the page looked gated |
+| `GATED` | no item markup, plus an age-check, sign-in or error marker | untouched | no back-off; `_refresh_login_cookie_if_gated_or_signed_out` has already re-read the login cookie if the page looked gated |
 | `UNKNOWN` | a transport failure, a 5xx, or a page that is neither the item's nor a recognised condition | untouched (a transport failure also raises `api_priority` to 2) | grows `web_delay` |
 
 A 5xx is `UNKNOWN` whatever its body says: the status is a server fault with no attributable cause, so it keeps the back-off.
@@ -242,10 +242,10 @@ the signed-in markers is therefore caused by the throttling, not by a bad cookie
 page must not be read as evidence that the session has lapsed.
 
 **Gated pages**: A miss whose body carries no item markup but does look like an error page, an age
-check or a sign-in wall is classified `GATE`. `_refresh_login_cookie_if_gated` has already re-read the
+check or a sign-in wall is classified `GATED`. `_refresh_login_cookie_if_gated_or_signed_out` has already re-read the
 login cookie when the page looked gated or signed out, so the next request carries the freshest
 credential. Nothing is re-scraped immediately: the miss goes through `classify_scrape` and takes the
-ordinary `GATE` path, which leaves the item queued in its place and the delay alone (a slower pace
+ordinary `GATED` path, which leaves the item queued in its place and the delay alone (a slower pace
 cannot fix a session that is not working), and the queue retries it under the worker's own adaptive
 delay. A merely broken page therefore cannot double the request rate either.
 
@@ -326,7 +326,7 @@ to say:
 * `sessionid` is a **session cookie**: Firefox keeps it in memory and never writes it to
   `cookies.sqlite`, so a profile read can never supply the current one. The page carries
   `g_sessionID` instead, which belongs to the session that served that page, and it is the token the
-  POST uses. The cookie set's `sessionid`, the pushed `_sessionid` global and `session.id` are only
+  POST uses. The cookie set's `sessionid`, the pushed `_pushed_sessionid` global and `session.id` are only
   fallbacks for a page that carries no token.
 
 So one run is:
@@ -478,7 +478,7 @@ priority. The fifth, a creator's name, is the exception and says why below.
 
 | Trigger | Code path | Fields | Priority | Skips a current translation? |
 |---|---|---|---|---|
-| Daemon enriches an item via the API | `daemon.py`, `_flag_translations` (from `_process_item`) | `title_en`, `short_description_en` | `max(3, requested)` | Yes |
+| Daemon enriches an item via the API | `daemon.py`, `_queue_translations` (from `_process_item`) | `title_en`, `short_description_en` | `max(3, requested)` | Yes |
 | Web scrape succeeds | `web_worker.py`, `WebScraperThread` | `extended_description_en` | 3 | Yes |
 | Item appears in a list | `bump_translation_for_list` (TUI list load, `POST /api/search`) | all three | 5 | Yes |
 | Item opened in the detail pane | `bump_translation_for_detail` (TUI selection, `GET /api/item/<id>`) | all three | 10 | Yes |
@@ -557,9 +557,9 @@ to implement it — the producer that writes the column and the consumer that re
 | Handoff | Producer writes | Consumer selects on | Predicate function (`src/database.py`) |
 |---|---|---|---|
 | Discovery → API fetch | `api_priority = 3` for a cursor-discovered item, `5` for a page-discovered new or changed one, with `status` and `api_fetched_at` left NULL (`seed_database`, `_run_page_discovery`) | `get_next_items_to_scrape`: `api_priority > 0 AND (status IS NULL OR status != -1)` | `api_fetch_queue_predicate()` |
-| API fetch → web scrape | `status = 200`, `api_fetched_at = now`, then `flag_for_web_scrape(max(3, requested))` — or `max(1, requested)` for an item the enrichment filters exclude (`_flag_scrape_and_image`) | `get_next_web_scrape_item`: `needs_web_scrape > 0`. The worker's own success test is that it stored a description, not merely that the flag is clear | `web_scrape_queue_predicate()` |
-| API fetch → image | `flag_for_image(max(3, requested))`, or `max(1, requested)` when the filters exclude, whenever `preview_url` is present (`_flag_scrape_and_image`) | `get_next_image_item`: `needs_image > 0`; `image_extension` records the answer, so a permanent `404` or a non-image type also settles the stage | `image_queue_predicate()` |
-| API fetch and web scrape → translation | `flag_field_for_translation` raises the item's `translation_priority` with `MAX` and inserts a `translation_queue` row for each non-ASCII `title`/`short_description` (`_flag_translations`) or `extended_description` (`WebScraperThread`) | `get_next_batch_for_translation`: any `translation_queue` row; the translator clears the mirror to `0` when the item has no queue entries left | `translation_queue_predicate()` (the poll's; `translation_priority_predicate()` is the item-level mirror the invariant reads) |
+| API fetch → web scrape | `status = 200`, `api_fetched_at = now`, then `flag_for_web_scrape(max(3, requested))` — or `max(1, requested)` for an item the enrichment filters exclude (`_raise_scrape_and_image_priorities`) | `get_next_web_scrape_item`: `needs_web_scrape > 0`. The worker's own success test is that it stored a description, not merely that the flag is clear | `web_scrape_queue_predicate()` |
+| API fetch → image | `flag_for_image(max(3, requested))`, or `max(1, requested)` when the filters exclude, whenever `preview_url` is present (`_raise_scrape_and_image_priorities`) | `get_next_image_item`: `needs_image > 0`; `image_extension` records the answer, so a permanent `404` or a non-image type also settles the stage | `image_queue_predicate()` |
+| API fetch and web scrape → translation | `flag_field_for_translation` raises the item's `translation_priority` with `MAX` and inserts a `translation_queue` row for each non-ASCII `title`/`short_description` (`_queue_translations`) or `extended_description` (`WebScraperThread`) | `get_next_batch_for_translation`: any `translation_queue` row; the translator clears the mirror to `0` when the item has no queue entries left | `translation_queue_predicate()` (the poll's; `translation_priority_predicate()` is the item-level mirror the invariant reads) |
 | any stage → dead | `_settle_api_failure` on a permanent `404`: `status = -1` and `api_priority`, `needs_web_scrape`, `needs_image` and `translation_priority` all cleared | every queue predicate. The web, image and translation polls have **no** dead-item guard, so that clear is what keeps a dead item out; the fetch queue also tests `status != -1` on its own | `queued_anywhere_predicate()` (built from the four above) |
 
 Each predicate is a named function, not a copy of its SQL: the worker poll
@@ -611,7 +611,7 @@ population is what stops a bar promising work that cannot exist.
 | Bar | Counts | Population — the same test that flags the work |
 |---|---|---|
 | API Data | live items with `api_fetched_at` | every live item |
-| Translations (subsidiary) | **fields**, not items: `title` and `short_description` | the non-empty non-ASCII fields of the **filter-selected** items, because `_flag_translations` returns early unless the item was enriched. A field is filled when `translation_is_current` — stored and taken at the item's current `steam_updated_at` |
+| Translations (subsidiary) | **fields**, not items: `title` and `short_description` | the non-empty non-ASCII fields of the **filter-selected** items, because `_queue_translations` returns early unless the item was enriched. A field is filled when `translation_is_current` — stored and taken at the item's current `steam_updated_at` |
 | Extended Web | live items with a non-empty `extended_description` | every live item except the pages that answered with no description (a scrape that stored an empty description); that legitimate-blank count and the resulting ceiling are printed with the bar |
 | Extended Web Translation (subsidiary) | live items whose non-ASCII `extended_description` has a current `extended_description_en` | any **scraped** item with a non-ASCII description, not only the filter-selected ones: `WebScraperThread` flags the description regardless of enrichment. A non-ASCII description is a description, so this bar can never be longer than Extended Web above it |
 | Images | live items with a recorded `image_extension` | every live item; a recorded answer settles the stage even when the preview does not exist |

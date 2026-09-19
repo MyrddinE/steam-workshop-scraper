@@ -37,7 +37,7 @@ cannot be attributed to an account, and ``EnumerateUserSubscribedFiles`` is
 publisher-key-only. ``previously`` therefore means only "we have seen this
 account subscribed", and on the day this shipped there were zero such markers
 regardless of real history; they fill in over time. That limitation is stated in
-the marker's tooltip rather than hidden, which is exactly what :data:`TOOLTIPS`
+the marker's tooltip rather than hidden, which is exactly what :data:`MARKER_TOOLTIPS`
 is for.
 
 **Why the glyph is not a bare symbol.** Both front ends draw a real Unicode
@@ -59,7 +59,7 @@ NEVER = "never"
 # Precedence, strongest first. The first state whose flag is set wins, which is
 # what makes "subscribed + queued" draw the confirmed subscription and not the
 # queue entry.
-PRECEDENCE = (DOWNLOADED, SUBSCRIBED, PENDING, PREVIOUSLY, NEVER)
+STATE_PRECEDENCE = (DOWNLOADED, SUBSCRIBED, PENDING, PREVIOUSLY, NEVER)
 
 # state -> (glyph, colour, CSS class, human label). The CSS class is what the
 # web element carries; the colour is the same value the TUI interpolates into
@@ -69,7 +69,7 @@ PRECEDENCE = (DOWNLOADED, SUBSCRIBED, PENDING, PREVIOUSLY, NEVER)
 # glyph says "subscribed" (a filled star, like `subscribed`) and the colour says
 # "settled" -- the two greens are deliberately different values in this one
 # table, so neither front end has to decide how to distinguish them.
-SPECS = {
+MARKER_SPECS = {
     DOWNLOADED: ("\u2605", "#00a651", "sub-downloaded", "Subscribed, and downloaded"),
     SUBSCRIBED: ("\u2605", "#ffd700", "sub-subscribed", "Currently subscribed"),
     PENDING: ("\u2606", "#2ecc40", "sub-pending", "About to subscribe"),
@@ -82,7 +82,7 @@ SPECS = {
 # `subscribed`, `pending` and `never` can be stated plainly. `previously` must
 # not imply a complete history: it is a claim about what we have observed, and
 # spelling that out is the honest wording the owner asked for.
-TOOLTIPS = {
+MARKER_TOOLTIPS = {
     DOWNLOADED: "You are subscribed to this item and Steam has downloaded it.",
     SUBSCRIBED: "You are subscribed to this item.",
     PENDING: "Queued to subscribe.",
@@ -103,7 +103,7 @@ TOOLTIPS = {
 # only action would be an unsubscribe, and an accidental unsubscribe is not
 # wanted. `downloaded` is the same subscription seen from disk, so it is inert
 # too; its action (opening the folder) is a separate button and key.
-CLICKABLE = (PENDING, PREVIOUSLY, NEVER)
+CLICKABLE_STATES = (PENDING, PREVIOUSLY, NEVER)
 
 
 def subscription_state(item: dict) -> str:
@@ -131,7 +131,7 @@ def subscription_state(item: dict) -> str:
 def spec(state: str) -> tuple[str, str, str, str]:
     """``(glyph, colour, css class, label)`` for ``state``."""
     try:
-        return SPECS[state]
+        return MARKER_SPECS[state]
     except KeyError:
         raise ValueError(f"unknown subscription state {state!r}") from None
 
@@ -153,13 +153,13 @@ def tooltip(state: str) -> str:
     back to some default wording.
     """
     try:
-        return TOOLTIPS[state]
+        return MARKER_TOOLTIPS[state]
     except KeyError:
         raise ValueError(f"unknown subscription state {state!r}") from None
 
 
 def is_clickable(state: str) -> bool:
     """Whether clicking the web marker for ``state`` does anything."""
-    if state not in SPECS:
+    if state not in MARKER_SPECS:
         raise ValueError(f"unknown subscription state {state!r}")
-    return state in CLICKABLE
+    return state in CLICKABLE_STATES

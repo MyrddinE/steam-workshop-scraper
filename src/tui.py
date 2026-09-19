@@ -138,13 +138,13 @@ def format_count(n):
         else:
             return f"[white]{n/1000:.0f}K[/white]"
     # >= 1M
-    v = n / 1_000_000
+    millions = n / 1_000_000
     if n < 10_000_000:
-        return f"[yellow]{v:.2f}M[/yellow]"
+        return f"[yellow]{millions:.2f}M[/yellow]"
     elif n < 100_000_000:
-        return f"[yellow]{v:.1f}M[/yellow]"
+        return f"[yellow]{millions:.1f}M[/yellow]"
     else:
-        return f"[yellow]{v:.0f}M[/yellow]"
+        return f"[yellow]{millions:.0f}M[/yellow]"
 
 def parse_tags(tags) -> list[str]:
     """Parses a comma-separated tag string (junction-table format) or legacy
@@ -153,11 +153,11 @@ def parse_tags(tags) -> list[str]:
         return []
     # Junction-table format: comma-separated via GROUP_CONCAT(t.tag_name, ', ')
     if isinstance(tags, str) and not tags.startswith('['):
-        return [t.strip() for t in tags.split(',') if t.strip()]
+        return [tag.strip() for tag in tags.split(',') if tag.strip()]
     # Legacy JSON format
     try:
         parsed = json.loads(tags) if isinstance(tags, str) else tags
-        return [str(t.get("tag") if isinstance(t, dict) else t) for t in (parsed if isinstance(parsed, list) else [])]
+        return [str(tag.get("tag") if isinstance(tag, dict) else tag) for tag in (parsed if isinstance(parsed, list) else [])]
     except Exception:
         logging.debug("parse_tags: failed to parse %r", tags)
         return []
@@ -198,7 +198,7 @@ class StatsScreen(Screen):
     TAG_METRIC = "tag_counts"
 
     #: Human labels for the section headings, kept in step with the web panel's.
-    LABELS = {
+    METRIC_LABELS = {
         "high_water": "Last successful API fetch",
         "totals": "Totals",
         "app_tracking": "App tracking",
@@ -218,8 +218,8 @@ class StatsScreen(Screen):
     }
 
     #: Text metrics own a Static widget; the two table metrics are special-cased
-    #: in `_compose_chunk` and `_render_metric`.
-    CONTENT_IDS = {
+    #: in `_compose_metric_section` and `_render_metric`.
+    METRIC_CONTENT_IDS = {
         "high_water": "high-water-content",
         "totals": "totals-content",
         "status_counts": "status-content",
@@ -265,10 +265,10 @@ class StatsScreen(Screen):
                 for name in metrics.all_names():
                     if name == self.TAG_METRIC:
                         continue
-                    yield from self._compose_chunk(name)
+                    yield from self._compose_metric_section(name)
             with Vertical(id="stats-right-col"):
                 yield Label(
-                    f"[b]{self.LABELS[self.TAG_METRIC]}[/b]",
+                    f"[b]{self.METRIC_LABELS[self.TAG_METRIC]}[/b]",
                     id=f"stats-label-{self.TAG_METRIC}",
                     classes="stats-header",
                 )
@@ -277,18 +277,18 @@ class StatsScreen(Screen):
         yield Footer()
         yield Button("Close", id="btn-close-stats")
 
-    def _compose_chunk(self, name: str):
+    def _compose_metric_section(self, name: str):
         """One metric's section: a heading, and the one widget only it writes."""
-        with Vertical(classes="stats-chunk", id=f"chunk-{name}"):
+        with Vertical(classes="stats-section", id=f"chunk-{name}"):
             yield Label(
-                f"[b]{self.LABELS.get(name, name)}[/b]",
+                f"[b]{self.METRIC_LABELS.get(name, name)}[/b]",
                 id=f"stats-label-{name}",
                 classes="stats-header",
             )
             if name == "app_tracking":
                 yield DataTable(id="app-stats-table")
             else:
-                yield Static(id=self.CONTENT_IDS[name])
+                yield Static(id=self.METRIC_CONTENT_IDS[name])
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-close-stats":
@@ -297,10 +297,10 @@ class StatsScreen(Screen):
     def on_mount(self) -> None:
         # Placeholders name every section while it is still computing; the first
         # pass then starts without waiting for the scheduler's first tick.
-        for widget_id in self.CONTENT_IDS.values():
+        for widget_id in self.METRIC_CONTENT_IDS.values():
             self.query_one(f"#{widget_id}", Static).update("[dim]Computing…[/dim]")
         self._start_due_metrics()
-        self.set_interval(self.SCHEDULER_TICK_SECONDS, self._refresh_due_metrics)
+        self.set_interval(self.SCHEDULER_TICK_SECONDS, self._on_scheduler_tick)
 
     def on_unmount(self) -> None:
         # A pass can be mid-query when the screen closes. Cancel the group so a
@@ -356,7 +356,7 @@ class StatsScreen(Screen):
             exit_on_error=False,
         )
 
-    def _refresh_due_metrics(self) -> None:
+    def _on_scheduler_tick(self) -> None:
         """Timer callback: let the worker decide what is due."""
         self._start_due_metrics()
 
@@ -409,11 +409,11 @@ class StatsScreen(Screen):
         self._inflight.discard(name)
         self._render_metric(name, entry.get("value"))
         self.query_one(f"#stats-label-{name}", Label).update(
-            f"[b]{self.LABELS.get(name, name)}[/b] [dim]{duration:.1f} ms[/dim]"
+            f"[b]{self.METRIC_LABELS.get(name, name)}[/b] [dim]{duration:.1f} ms[/dim]"
         )
 
     def _set_text(self, name: str, text: str) -> None:
-        self.query_one(f"#{self.CONTENT_IDS[name]}", Static).update(text)
+        self.query_one(f"#{self.METRIC_CONTENT_IDS[name]}", Static).update(text)
 
     def _render_metric(self, name: str, value) -> None:
         """Draw one metric's value into the widget that metric owns."""
@@ -426,7 +426,7 @@ class StatsScreen(Screen):
             )
             self._set_text(name, fetched)
         elif value is None:
-            if name in self.CONTENT_IDS:
+            if name in self.METRIC_CONTENT_IDS:
                 self._set_text(name, "[dim]unavailable[/dim]")
             elif name in ("app_tracking", "tag_counts"):
                 self.query_one(
@@ -570,7 +570,7 @@ class StatsScreen(Screen):
         bars = scope.get("bars") or []
         if not bars:
             return []
-        label_width = max(len(b.get("label") or b.get("key", "")) for b in bars)
+        label_width = max(len(bucket.get("label") or bucket.get("key", "")) for bucket in bars)
         lines: list[str] = []
         index = 0
         while index < len(bars):
@@ -592,7 +592,7 @@ class StatsScreen(Screen):
         return lines
 
     @staticmethod
-    def _format_coverage(cov: dict) -> str:
+    def _format_coverage(coverage: dict) -> str:
         """Coverage over live items, at two scopes kept visibly separate.
 
         The first block is every live item. The second is the items the target
@@ -605,14 +605,14 @@ class StatsScreen(Screen):
         The bars themselves are the metric's: it owns the labels, the counts and
         the reachable maximum, so this renderer only lays them out.
         """
-        total = cov.get("total", 0) or 0
+        total = coverage.get("total", 0) or 0
         if not total:
             return "[dim]No live items to cover.[/dim]"
 
         lines = [f"[b]Live items:[/b] {total:,}", "", "[b]All live items[/b]"]
-        lines += StatsScreen._coverage_block(cov)
+        lines += StatsScreen._coverage_block(coverage)
 
-        filtered = cov.get("filtered")
+        filtered = coverage.get("filtered")
         if isinstance(filtered, dict):
             f_total = filtered.get("total", 0) or 0
             lines += ["", "[b]Target AppIDs' enrichment filters — what I care about[/b]"]
@@ -804,8 +804,8 @@ class AnalysisScreen(Screen):
 
     def run_analysis(self) -> None:
         try:
-            bucket_val = self.query_one("#analysis-bucket-size", Input).value
-            self.bucket_days = max(1, int(bucket_val or "7"))
+            bucket_input = self.query_one("#analysis-bucket-size", Input).value
+            self.bucket_days = max(1, int(bucket_input or "7"))
         except ValueError:
             self.bucket_days = 7
 
@@ -814,17 +814,17 @@ class AnalysisScreen(Screen):
         table.clear(columns=True)
         table.add_columns("Age Range", "Items", "Median Views", "P10", "P90", "Relative")
 
-        max_median = max((b["median"] for b in result["buckets"]), default=1)
+        max_median = max((bucket["median"] for bucket in result["buckets"]), default=1)
 
-        for b in result["buckets"]:
-            bar_len = int(b["median"] / max(max_median, 1) * 40)
+        for bucket in result["buckets"]:
+            bar_len = int(bucket["median"] / max(max_median, 1) * 40)
             bar = "█" * bar_len
             table.add_row(
-                f"{b['age_start']}-{b['age_end']}d",
-                str(b["count"]),
-                str(b["median"]),
-                str(b["p10"]),
-                str(b["p90"]),
+                f"{bucket['age_start']}-{bucket['age_end']}d",
+                str(bucket["count"]),
+                str(bucket["median"]),
+                str(bucket["p10"]),
+                str(bucket["p90"]),
                 f"[white]{bar}[/white]",
             )
 
@@ -901,7 +901,7 @@ class DaemonManagerScreen(Screen):
                 # already gone needs nothing done to it.
                 logging.debug("Daemon control %s is not on screen", button_id)
 
-    def _begin_transition(self, gerund: str, action) -> None:
+    def _begin_transition(self, action_label: str, transition) -> None:
         """Run a daemon transition on a worker so the interface keeps running.
 
         Every controller transition blocks: ``stop`` polls the process every half
@@ -920,23 +920,23 @@ class DaemonManagerScreen(Screen):
             return
         self._transitioning = True
         self._set_controls_enabled(False)
-        self.query_one("#dm-status", Static).update(f"[yellow]{gerund}...[/yellow]")
+        self.query_one("#dm-status", Static).update(f"[yellow]{action_label}...[/yellow]")
 
         def work():
             try:
-                changed, message = action()
+                changed, message = transition()
             except Exception as exc:
                 # A controller fault must not leave the screen with its controls
                 # disabled and no way back.
-                changed, message = False, f"{gerund} failed: {exc}"
+                changed, message = False, f"{action_label} failed: {exc}"
             try:
                 self.app.call_from_thread(self._transition_finished, changed, message)
             except RuntimeError:
                 # The app stopped while the transition was in flight; there is no
                 # UI left to report to, and the transition itself happened.
-                logging.debug("Daemon %s finished with no app to report to", gerund)
+                logging.debug("Daemon %s finished with no app to report to", action_label)
 
-        self.run_worker(work, name=f"daemon-{gerund.lower()}", group="daemon",
+        self.run_worker(work, name=f"daemon-{action_label.lower()}", group="daemon",
                         thread=True, exclusive=True, exit_on_error=False)
 
     def _transition_finished(self, changed: bool, message: str) -> None:
@@ -1084,7 +1084,7 @@ class SubscriptionQueueScreen(ModalScreen):
             line.append(status, style=colour or "white")
         return line
 
-    def _step_seconds(self) -> float:
+    def _seed_item_seconds(self) -> float:
         """The initial per-item guess: two gated page reads.
 
         The engine reads the item page before the POST and again to confirm, and
@@ -1108,7 +1108,7 @@ class SubscriptionQueueScreen(ModalScreen):
         deliberately not used -- the pane is transient, and the items of the pass
         in front of it are the only evidence worth pricing the rest of it with.
         """
-        seed = self._step_seconds()
+        seed = self._seed_item_seconds()
         observed = self._observed_seconds
         if not observed:
             return seed
@@ -1130,7 +1130,7 @@ class SubscriptionQueueScreen(ModalScreen):
         remaining = waiting_before * self._estimated_item_seconds() - spent_on_current
         return max(0, math.ceil(remaining))
 
-    def _row_state(self, index: int, elapsed: float):
+    def _row_display(self, index: int, elapsed: float):
         """``(countdown, status, colour)`` for the row at ``index``.
 
         The engine takes the queue in order, so the item it is reading now is
@@ -1163,7 +1163,7 @@ class SubscriptionQueueScreen(ModalScreen):
         if self._pass_started_at is not None:
             elapsed = max(0.0, time.monotonic() - self._pass_started_at)
         for index, item in enumerate(self._items):
-            countdown, status, colour = self._row_state(index, elapsed)
+            countdown, status, colour = self._row_display(index, elapsed)
             try:
                 row = self.query_one(f"#sub-item-{item['workshop_id']}", Static)
             except Exception:
@@ -1341,16 +1341,16 @@ def load_tui_state(path: str) -> dict:
     if not os.path.exists(path):
         return {}
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f) or {}
+        with open(path, 'r', encoding='utf-8') as handle:
+            return yaml.safe_load(handle) or {}
     except Exception:
         return {}
 
 def save_tui_state(path: str, state: dict) -> None:
     """Saves the TUI state to a YAML file."""
     try:
-        with open(path, 'w', encoding='utf-8') as f:
-            yaml.dump(state, f, default_flow_style=False)
+        with open(path, 'w', encoding='utf-8') as handle:
+            yaml.dump(state, handle, default_flow_style=False)
     except Exception:
         logging.debug("Failed to save TUI state")
         pass
@@ -1744,12 +1744,12 @@ class SearchRow(Horizontal):
         # and round-trips it. It is never added to a fresh row's choices.
         init_field = self.initial_filter.get("field")
         init_value = self.initial_filter.get("value")
-        self._enum_pending = (
+        self._restored_enum_value = (
             init_value if _FIELD_TYPES.get(init_field) == "enum"
             and isinstance(init_value, str) and init_value else None
         )
-        self._enum_value = self._enum_pending
-        self._extra_enum_values = {self._enum_pending} if self._enum_pending else set()
+        self._enum_value = self._restored_enum_value
+        self._extra_enum_values = {self._restored_enum_value} if self._restored_enum_value else set()
 
     def _ops_for_field(self, field: str) -> list[str]:
         return self.field_ops_map.get(field, ["contains", "does_not_contain"])
@@ -1802,23 +1802,23 @@ class SearchRow(Horizontal):
         try:
             field = self.query_one("#field-select", Select).value
             op = self.query_one("#op-select", Select).value
-            inp = self.query_one("#value-input", Input)
-            sel = self.query_one("#value-select", Select)
+            value_input = self.query_one("#value-input", Input)
+            value_select = self.query_one("#value-select", Select)
         except Exception:
             return
         is_enum = _FIELD_TYPES.get(field) == "enum"
-        inp.display = not is_enum
-        sel.display = is_enum
+        value_input.display = not is_enum
+        value_select.display = is_enum
         if not is_enum:
             return
-        if self._enum_pending is not None:
+        if self._restored_enum_value is not None:
             # A restored value wins until the mount-time sync has applied it,
             # even if a Change message beats on_mount to this handler.
-            desired = self._enum_pending
+            desired = self._restored_enum_value
             if restoring:
-                self._enum_pending = None
+                self._restored_enum_value = None
         else:
-            current = sel.value
+            current = value_select.value
             desired = current if isinstance(current, str) and current else self._enum_value
         options = _enum_value_options(field, op)
         offered = [v for _, v in options]
@@ -1826,12 +1826,12 @@ class SearchRow(Horizontal):
             if extra not in offered:
                 options.append((extra, extra))
                 offered.append(extra)
-        sel.set_options(options)
+        value_select.set_options(options)
         if desired is not None and desired in offered:
-            sel.value = desired
+            value_select.value = desired
         elif offered:
-            sel.value = offered[0]
-        self._enum_value = sel.value if isinstance(sel.value, str) else None
+            value_select.value = offered[0]
+        self._enum_value = value_select.value if isinstance(value_select.value, str) else None
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "field-select":
@@ -1869,10 +1869,10 @@ class SearchRow(Horizontal):
         if op_select.value != "percentile":
             return
         try:
-            inp = self.query_one("#value-input", Input)
-            v = int(float(inp.value))
+            value_input = self.query_one("#value-input", Input)
+            v = int(float(value_input.value))
             v = max(0, min(99, v))
-            inp.value = str(v)
+            value_input.value = str(v)
         # Empty or non-numeric user input is left exactly as typed; clamping happens
         # once it parses.
         except (ValueError, TypeError):
@@ -1883,11 +1883,11 @@ class SearchBuilder(VerticalScroll):
     def compose(self) -> ComposeResult:
         self.fields = ALL_FILTER_FIELDS
         # field_name -> [ops] lookup from the central schema
-        self.field_ops = {f["field"]: f["ops"] for f in FILTER_SCHEMA}
-        yield SearchRow(self.fields, self.field_ops, is_first=True)
+        self.field_ops_map = {f["field"]: f["ops"] for f in FILTER_SCHEMA}
+        yield SearchRow(self.fields, self.field_ops_map, is_first=True)
 
     def add_row(self, logic: str) -> None:
-        new_row = SearchRow(self.fields, self.field_ops)
+        new_row = SearchRow(self.fields, self.field_ops_map)
         self.mount(new_row)
         new_row.logic = logic
         self._sync_overlay_state()
@@ -1910,13 +1910,13 @@ class SearchBuilder(VerticalScroll):
             row.remove()
             
         if not filters:
-            self.mount(SearchRow(self.fields, self.field_ops, is_first=True))
+            self.mount(SearchRow(self.fields, self.field_ops_map, is_first=True))
             self._sync_overlay_state()
             return
 
         for i, f in enumerate(filters):
             is_first = (i == 0)
-            row = SearchRow(self.fields, self.field_ops, is_first=is_first, initial_filter=f)
+            row = SearchRow(self.fields, self.field_ops_map, is_first=is_first, initial_filter=f)
             if not is_first:
                 row.logic = f.get("logic", "AND")
             self.mount(row)
@@ -2045,7 +2045,7 @@ class ScraperApp(App):
         width: 60%;
         padding: 1;
     }
-    .stats-chunk {
+    .stats-section {
         height: auto;
         margin-bottom: 1;
     }
@@ -2297,7 +2297,7 @@ class ScraperApp(App):
         self.current_offset = 0
         self.has_more_results = True
         self.is_loading = False
-        self.is_single_creator_mode = False
+        self.is_author_mode = False
         # Filters that the last "Jump to Author" replaced, kept in memory so the
         # Return button can put them back without depending on a state file read.
         self._pre_jump_filters: list[dict] | None = None
@@ -2308,7 +2308,7 @@ class ScraperApp(App):
         self._initial_state = load_tui_state(self.state_file)
         self._restored_scroll_y = self._initial_state.get("scroll_y", 0)
         self._restored_selected_id = self._initial_state.get("selected_workshop_id", None)
-        self._has_restored_state = False
+        self._initial_load_done = False
 
     def _handle_exception(self, error: Exception) -> None:
         """Write a crash dump before Textual renders the error and exits.
@@ -2329,7 +2329,7 @@ class ScraperApp(App):
 
     def save_state(self) -> None:
         """Saves current UI state to disk."""
-        if not self.is_mounted or not self._has_restored_state or self.is_single_creator_mode:
+        if not self.is_mounted or not self._initial_load_done or self.is_author_mode:
             return
             
         try:
@@ -2676,7 +2676,7 @@ class ScraperApp(App):
         # which decides whether the overlay is usable.
         self._sync_subscribed_overlay()
         # Save state when sort/filter changes, but don't auto-search
-        if event.value is not None and self._has_restored_state:
+        if event.value is not None and self._initial_load_done:
             self.save_state()
 
     async def execute_search(self) -> None:
@@ -2762,8 +2762,8 @@ class ScraperApp(App):
             
         self.is_loading = False
 
-        if not self._has_restored_state:
-            self._has_restored_state = True
+        if not self._initial_load_done:
+            self._initial_load_done = True
             
             def restore_state():
                 try:
@@ -2815,8 +2815,8 @@ class ScraperApp(App):
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses (e.g., Jump to Author, Translation, Search Builder buttons)."""
         if event.button.id == "btn-fetch-new":
-            with open('.fetch_new', 'w') as f:
-                f.write('1')
+            with open('.fetch_new', 'w') as handle:
+                handle.write('1')
             self.notify("Fetch-new triggered! The daemon will scan recently-updated items on its next cycle.")
         elif event.button.id == "btn-update-visible":
             await self.action_update_visible()
@@ -2836,11 +2836,11 @@ class ScraperApp(App):
             self._sync_subscribed_overlay()
 
         elif event.button.id == "btn-return":
-            self.action_return_from_creator()
+            self.action_return_from_author_mode()
 
         elif event.button.id == "btn-jump-author" and self.current_item_creator:
             # Save state before switching to single creator mode
-            if not self.is_single_creator_mode:
+            if not self.is_author_mode:
                 self.save_state()
                 # Snapshot what the jump is about to throw away so Return can
                 # restore it. This is in memory on purpose: the on-disk snapshot
@@ -2850,7 +2850,7 @@ class ScraperApp(App):
                     "#search-builder", SearchBuilder
                 ).get_filters()
 
-            self.is_single_creator_mode = True
+            self.is_author_mode = True
             self.query_one("#btn-save-filter", Button).display = False
             self.query_one("#btn-return", Button).display = True
 
@@ -2865,7 +2865,7 @@ class ScraperApp(App):
             # text field before that handler ran.
             new_row = SearchRow(
                 builder.fields,
-                builder.field_ops,
+                builder.field_ops_map,
                 is_first=True,
                 initial_filter={
                     "field": "Author ID",
@@ -2894,7 +2894,7 @@ class ScraperApp(App):
         elif event.button.id == "btn-toggle-translation":
             self.action_toggle_translation()
 
-    def action_return_from_creator(self) -> None:
+    def action_return_from_author_mode(self) -> None:
         """Leaves single-creator mode and puts back the filters the jump replaced.
 
         The filter snapshot is the one the jump took in memory. Restoring it is
@@ -2907,7 +2907,7 @@ class ScraperApp(App):
         filters = self._pre_jump_filters
         self._pre_jump_filters = None
 
-        self.is_single_creator_mode = False
+        self.is_author_mode = False
         self.query_one("#btn-save-filter", Button).display = True
         self.query_one("#btn-return", Button).display = False
 
@@ -3049,14 +3049,14 @@ class ScraperApp(App):
 
         # Compute viewport-visible items from scroll position
         scroll_y = list_view.scroll_y
-        visible_h = list_view.size.height
-        child_h = 2  # each WorkshopItem is 2 lines
+        visible_height = list_view.size.height
+        child_height = 2  # each WorkshopItem is 2 lines
         visible_ids = []
         for i, child in enumerate(list_view.children):
             if hasattr(child, 'item_data') and child.item_data:
-                top = i * child_h
-                bot = top + child_h
-                if bot > scroll_y and top < scroll_y + visible_h:
+                top = i * child_height
+                bottom = top + child_height
+                if bottom > scroll_y and top < scroll_y + visible_height:
                     visible_ids.append(child.item_data["workshop_id"])
                     if hasattr(child, 'refresh_item'):
                         # refresh_item is async (every other call site awaits it);

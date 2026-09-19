@@ -587,11 +587,11 @@ def _fake_iter_metrics(record=None):
 
 
 #: Metrics the TUI deliberately draws through a widget other than a
-#: `CONTENT_IDS` Static. An exemption needs a reason here, so a new metric
+#: `METRIC_CONTENT_IDS` Static. An exemption needs a reason here, so a new metric
 #: cannot be left unwired by silence -- the guard test below walks the catalogue
 #: and names any other metric that is missing its label or content id.
 TUI_RENDER_EXEMPTIONS = {
-    "app_tracking": "special-cased onto a DataTable in `_compose_chunk`",
+    "app_tracking": "special-cased onto a DataTable in `_compose_metric_section`",
     "tag_counts": "owns the right-hand column, not a scrolling chunk",
 }
 
@@ -601,8 +601,8 @@ def test_every_registered_metric_has_the_wiring_both_front_ends_need():
 
     The web panel discovers metrics from the catalogue and falls back to a JSON
     dump for a value it has no renderer for, so its requirement is the catalogue
-    entry itself (name and note). The TUI has no such fallback: `_compose_chunk`
-    indexes `CONTENT_IDS`, so a registered metric without an entry raises
+    entry itself (name and note). The TUI has no such fallback: `_compose_metric_section`
+    indexes `METRIC_CONTENT_IDS`, so a registered metric without an entry raises
     `KeyError` inside `compose` and takes the whole statistics screen down. A
     missing renderer branch is quieter -- the chunk simply stays at its
     "Computing…" placeholder -- and is caught by the render test below.
@@ -618,11 +618,11 @@ def test_every_registered_metric_has_the_wiring_both_front_ends_need():
             gaps.append(f"{name}: no web catalogue entry with a note")
         if name in TUI_RENDER_EXEMPTIONS:
             continue
-        if name not in StatsScreen.LABELS:
-            gaps.append(f"{name}: no StatsScreen.LABELS heading")
-        if name not in StatsScreen.CONTENT_IDS:
+        if name not in StatsScreen.METRIC_LABELS:
+            gaps.append(f"{name}: no StatsScreen.METRIC_LABELS heading")
+        if name not in StatsScreen.METRIC_CONTENT_IDS:
             gaps.append(
-                f"{name}: no StatsScreen.CONTENT_IDS entry "
+                f"{name}: no StatsScreen.METRIC_CONTENT_IDS entry "
                 "(stats compose would raise KeyError)")
     assert not gaps, (
         "registered metric(s) a front end cannot draw -- add the missing wiring "
@@ -654,7 +654,7 @@ async def test_every_registered_metric_renders_in_its_tui_chunk(mock_config):
             for name in metrics.all_names():
                 if name in TUI_RENDER_EXEMPTIONS:
                     continue
-                widget_id = StatsScreen.CONTENT_IDS.get(name)
+                widget_id = StatsScreen.METRIC_CONTENT_IDS.get(name)
                 if widget_id is None:
                     continue  # the static guard above names this gap
                 text = str(screen.query_one(f"#{widget_id}", Static).render())
@@ -705,7 +705,7 @@ async def test_stats_screen_puts_every_metric_in_its_own_chunk(mock_config):
             # grouping, and each shows its cost. Tags are the exception: they are
             # a long table and keep a column of their own to the right, so they
             # own a widget without owning a chunk in the scrolling list.
-            assert len(screen.query(".stats-chunk")) == len(metrics.all_names()) - 1
+            assert len(screen.query(".stats-section")) == len(metrics.all_names()) - 1
             assert len(screen.query("#tier-costs")) == 0
             label = str(screen.query_one("#stats-label-totals", Label).render())
             assert "1.0 ms" in label
@@ -745,7 +745,7 @@ async def test_stats_screen_renders_the_handoff_counters(mock_config):
     """The handoff detectors are registered metrics, so the TUI must draw them.
 
     This is the seam that catches a metric added to ``src/metrics.py`` without a
-    matching ``CONTENT_IDS``/render branch: composing the screen would raise.
+    matching ``METRIC_CONTENT_IDS``/render branch: composing the screen would raise.
     """
     with patch('src.tui.load_config', return_value=mock_config), \
          patch('src.tui.metrics.iter_metrics', side_effect=_fake_iter_metrics([])):

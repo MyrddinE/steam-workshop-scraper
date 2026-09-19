@@ -80,7 +80,7 @@ def test_daemon_does_not_requeue_a_current_translation(db_path, tmp_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト", "title_en": "Test"})
     daemon = _daemon(db_path, tmp_path)
 
-    daemon._flag_translations(_merged(), 1, enriched=True, inherited_prio=0)
+    daemon._queue_translations(_merged(), 1, enriched=True, inherited_priority=0)
 
     assert _queue_rows(db_path) == []
 
@@ -89,9 +89,9 @@ def test_daemon_requeues_when_the_source_was_edited(db_path, tmp_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト", "title_en": "Test"})
     daemon = _daemon(db_path, tmp_path)
 
-    daemon._flag_translations(
+    daemon._queue_translations(
         _merged(translate_version=100, steam_updated_at=200), 1,
-        enriched=True, inherited_prio=0)
+        enriched=True, inherited_priority=0)
 
     rows = _queue_rows(db_path)
     assert [(r["item_id"], r["field"]) for r in rows] == [(1, "title_en")]
@@ -102,9 +102,9 @@ def test_daemon_queues_a_field_that_has_never_been_translated(db_path, tmp_path)
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト"})
     daemon = _daemon(db_path, tmp_path)
 
-    daemon._flag_translations(
+    daemon._queue_translations(
         _merged(title_en=None, translate_version=None), 1,
-        enriched=True, inherited_prio=0)
+        enriched=True, inherited_priority=0)
 
     assert [(r["item_id"], r["field"]) for r in _queue_rows(db_path)] == [(1, "title_en")]
 
@@ -113,9 +113,9 @@ def test_daemon_ignores_ascii_text(db_path, tmp_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "Plain"})
     daemon = _daemon(db_path, tmp_path)
 
-    daemon._flag_translations(
+    daemon._queue_translations(
         _merged(title="Plain", title_en=None, translate_version=None), 1,
-        enriched=True, inherited_prio=0)
+        enriched=True, inherited_priority=0)
 
     assert _queue_rows(db_path) == []
 
@@ -124,9 +124,9 @@ def test_daemon_ignores_unqueued_items(db_path, tmp_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト"})
     daemon = _daemon(db_path, tmp_path)
 
-    daemon._flag_translations(
+    daemon._queue_translations(
         _merged(title_en=None, translate_version=None), 1,
-        enriched=False, inherited_prio=0)
+        enriched=False, inherited_priority=0)
 
     assert _queue_rows(db_path) == []
 

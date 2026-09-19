@@ -74,7 +74,7 @@ def _capture(function, *args, **kwargs):
 
 
 def _dump_path(config, function, *, process="tui"):
-    return crash.record_exception(*_capture(function), process=process,
+    return crash.record_exception(*_capture(function), process_name=process,
                                   config=config, config_path="config.yaml")
 
 
@@ -283,7 +283,7 @@ def test_no_outbox_writes_beside_the_log_file_and_prints_the_path(tmp_path, caps
     def explode():
         raise RuntimeError("fallback probe")
 
-    path = crash.record_exception(*_capture(explode), process="tui", config=config)
+    path = crash.record_exception(*_capture(explode), process_name="tui", config=config)
 
     assert path is not None
     assert os.path.dirname(path) == str(log_file.parent)
@@ -299,7 +299,7 @@ def test_no_outbox_and_no_log_file_uses_the_working_directory(tmp_path, monkeypa
     def explode():
         raise RuntimeError("cwd probe")
 
-    path = crash.record_exception(*_capture(explode), process="web", config=config)
+    path = crash.record_exception(*_capture(explode), process_name="web", config=config)
 
     assert path is not None
     assert os.path.dirname(os.path.abspath(path)) == str(tmp_path)
@@ -317,7 +317,7 @@ def test_the_dumper_never_raises_when_the_destination_is_unwritable(tmp_path, ca
         raise RuntimeError("unwritable probe")
 
     with caplog.at_level(logging.ERROR):
-        path = crash.record_exception(*_capture(explode), process="tui",
+        path = crash.record_exception(*_capture(explode), process_name="tui",
                                       config=config)
 
     assert path is None, "an unwritable destination returns None, it does not raise"

@@ -90,13 +90,13 @@ _app_version_cache = None
 # collect the evidence twice because a sample was thinned before anyone looked
 # at it. The failure capture above is the opposite case: it runs for weeks, so
 # its caps and its size limits stay.
-_web_download_capture = False
+_capture_web_downloads = False
 
 # Every image download saved while `capture_image_downloads` is set, one
 # metadata-only record each. Separate from `capture_web_downloads` because that
 # switch keeps whole bodies unbounded; an owner reviewing images should not have
 # to collect pages to do it.
-_image_capture = False
+_capture_image_downloads = False
 
 WEB_DOWNLOADS_DIR_NAME = "web_downloads"
 IMAGE_DOWNLOADS_DIR_NAME = "image_downloads"
@@ -168,7 +168,7 @@ _TITLE_RE = re.compile(rb"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _NOISE_RE = re.compile(rb"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
 
 
-def _strip_noise(raw: bytes) -> bytes:
+def _strip_script_and_style(raw: bytes) -> bytes:
     """Drop script and style bodies, leaving the markup around them.
 
     Purely a size measure: the elements are replaced by an empty pair so the
@@ -182,36 +182,36 @@ def _strip_noise(raw: bytes) -> bytes:
 
 # ── configuration ────────────────────────────────────────────────────────────
 
-def configure(outbox_dir, web_download_capture=False, image_capture=False):
+def configure(outbox_dir, capture_web_downloads=False, capture_image_downloads=False):
     """Enable capture under ``<outbox_dir>/failures``. ``None`` disables it.
 
-    ``web_download_capture`` additionally saves *every* Steam community web pull
+    ``capture_web_downloads`` additionally saves *every* Steam community web pull
     -- the item page, the subscriptions page and the server-side subscribe --
     into ``<outbox_dir>/web_downloads``, request and response both, with the
     body kept whole. That answers a question the failure capture cannot: what a
     *working* exchange looks like, which is what identifies the signed-in markup
     and what the subscribe path actually sends.
 
-    ``image_capture`` additionally saves *every* image download, into
+    ``capture_image_downloads`` additionally saves *every* image download, into
     ``<outbox_dir>/image_downloads``, as metadata and headers only — never the
     image bytes, which already live in the images bucket.
     """
-    global _outbox_dir, _web_download_capture, _image_capture
+    global _outbox_dir, _capture_web_downloads, _capture_image_downloads
     with _lock:
         _outbox_dir = outbox_dir or None
-        _web_download_capture = bool(web_download_capture) and bool(_outbox_dir)
-        _image_capture = bool(image_capture) and bool(_outbox_dir)
+        _capture_web_downloads = bool(capture_web_downloads) and bool(_outbox_dir)
+        _capture_image_downloads = bool(capture_image_downloads) and bool(_outbox_dir)
         _groups.clear()
         if _outbox_dir:
             logging.info("Failure capture enabled: %s", failures_dir(_outbox_dir))
-            if _web_download_capture:
+            if _capture_web_downloads:
                 logging.info(
                     "Web-download capture enabled: saving every Steam community pull "
                     "(item page, subscriptions page, subscribe), request and response, "
                     "whole body, to %s. This is a debugging switch — turn it off when done.",
                     web_downloads_dir(_outbox_dir),
                 )
-            if _image_capture:
+            if _capture_image_downloads:
                 logging.info(
                     "Image-download capture enabled: saving every image download's "
                     "metadata (status, headers, saved path — never the bytes) to %s. "
@@ -263,7 +263,7 @@ def web_download_capture_active() -> bool:
     discards it by default, and there is nothing to capture without it.
     """
     with _lock:
-        return bool(_outbox_dir) and _web_download_capture
+        return bool(_outbox_dir) and _capture_web_downloads
 
 
 def elide_secrets(cookies=None, data=None, headers=None):
@@ -291,7 +291,7 @@ def elide_secrets(cookies=None, data=None, headers=None):
     except Exception as exc:  # noqa: BLE001 - see docstring
         logging.warning("Secret elision failed; falling back to wholesale redaction: %s", exc)
     try:
-        return (_redact_all(cookies), _redact_all(data), _redact_all(headers),
+        return (_elide_values(cookies), _elide_values(data), _elide_values(headers),
                 _ordered_secrets(_fallback_secret_values(cookies, data, headers)))
     except Exception as exc:  # noqa: BLE001 - see docstring
         logging.warning("Secret elision fallback failed (%s); refusing to record", exc)
@@ -308,11 +308,11 @@ def _elide_secrets(cookies, data, headers):
         if str(name).lower() in _SECRET_FORM_FIELDS and value not in (None, ""):
             secrets.append(str(value))
     secrets.extend(header_secrets)
-    return (_redact_all(cookies), _elide_form_data(data), elided_headers,
+    return (_elide_values(cookies), _elide_form_data(data), elided_headers,
             _ordered_secrets(secrets))
 
 
-def _redact_all(values) -> dict:
+def _elide_values(values) -> dict:
     """Every value redacted and every name kept."""
     return {name: REDACTED for name in dict(values or {})}
 
@@ -426,14 +426,14 @@ def _scrub_bytes(raw: bytes, secrets) -> bytes:
     return raw
 
 
-def record_web_download(kind, workshop_id, url, data, *, appid=None, page=None,
-                        ok=None) -> bool:
+def record_web_download(kind, workshop_id, url, exchange, *, appid=None, page=None,
+                        succeeded=None) -> bool:
     """Save one Steam community web pull, request and answer both. Unbounded.
 
     ``kind`` names which pull it was -- :data:`ITEM_PAGE_KIND`,
     :data:`SUBSCRIPTIONS_PAGE_KIND` or :data:`SUBSCRIBE_KIND` -- because one
     switch now covers all three and a reviewer has to be able to tell them
-    apart. ``data`` is the caller's record of what actually went on the wire:
+    apart. ``exchange`` is the caller's record of what actually went on the wire:
 
     * ``request`` -- the ``method``, ``url``, ``headers``, ``cookies`` and form
       ``data`` passed to the session, not re-derived guesses. A caller that
@@ -456,16 +456,16 @@ def record_web_download(kind, workshop_id, url, data, *, appid=None, page=None,
     Never raises: capture is diagnostic, and a diagnostic that can break the
     request it is describing is worse than no diagnostic.
     """
-    if not data:
+    if not exchange:
         return False
     with _lock:
-        if not _outbox_dir or not _web_download_capture:
+        if not _outbox_dir or not _capture_web_downloads:
             return False
         outbox = _outbox_dir
 
     try:
-        return _write_web_download(outbox, kind, workshop_id, url, data,
-                                   appid, page, ok)
+        return _write_web_download(outbox, kind, workshop_id, url, exchange,
+                                   appid, page, succeeded)
     except Exception as exc:  # noqa: BLE001 - see docstring
         logging.warning("Web-download capture failed (request unaffected): %s", exc)
         return False
@@ -548,7 +548,7 @@ def _write_web_download(outbox, kind, workshop_id, url, data, appid, page, ok) -
 
 # ── image downloads ──────────────────────────────────────────────────────────
 
-def record_image_download(workshop_id, url, ok, *, http_status=None, final_url=None,
+def record_image_download(workshop_id, url, succeeded, *, http_status=None, final_url=None,
                           headers=None, content_type=None, content_length=None,
                           bytes_written=None, saved_path=None,
                           error=None, error_type=None) -> bool:
@@ -575,7 +575,7 @@ def record_image_download(workshop_id, url, ok, *, http_status=None, final_url=N
         return False
     try:
         now = _utc_now_iso()
-        if ok:
+        if succeeded:
             return _record_image_success(
                 workshop_id, url, http_status, final_url, headers, content_type,
                 content_length, bytes_written, saved_path, now)
@@ -605,7 +605,7 @@ def _record_image_failure(workshop_id, url, http_status, final_url, headers,
     digest = hashlib.sha256(signature.encode("utf-8", "replace")).hexdigest()
     gid = group_id(IMAGE_FAILURE_KIND, None, IMAGE_STAGE)
     with _lock:
-        sample_number = _select_variant(gid, digest, now)
+        sample_number = _select_sample_slot(gid, digest, now)
         if sample_number is None:
             _flush_group(gid)
             return False
@@ -663,7 +663,7 @@ def _record_image_success(workshop_id, url, http_status, final_url, headers,
                           content_type, content_length, bytes_written, saved_path,
                           now) -> bool:
     with _lock:
-        if not _outbox_dir or not _image_capture:
+        if not _outbox_dir or not _capture_image_downloads:
             return False
         outbox = _outbox_dir
 
@@ -928,7 +928,7 @@ def _reconstruct_from_samples(gid, group) -> None:
         group["sample_count"] += 1
 
 
-def _select_variant(gid, digest, now):
+def _select_sample_slot(gid, digest, now):
     """Pick the sample slot for this shape, counting the miss either way.
 
     Returns the 1-based sample number to write, or ``None`` when the per-shape
@@ -1033,7 +1033,7 @@ def _record_failure(kind, stage, workshop_id, selector, http_status,
         raw = body.encode("utf-8", "replace")
     else:
         raw = bytes(body)
-    stripped = _strip_noise(raw)
+    stripped = _strip_script_and_style(raw)
     retained = stripped[:MAX_BODY_BYTES]
     retention = {
         "truncated": len(stripped) > MAX_BODY_BYTES,
@@ -1045,7 +1045,7 @@ def _record_failure(kind, stage, workshop_id, selector, http_status,
     now = _utc_now_iso()
 
     with _lock:
-        sample_number = _select_variant(gid, digest, now)
+        sample_number = _select_sample_slot(gid, digest, now)
         if sample_number is None:
             _flush_group(gid)
             return None

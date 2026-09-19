@@ -109,7 +109,7 @@ def _discover_one_item(db_path: str) -> int:
             "items": [{"publishedfileid": "4242"}],
             "next_cursor": "",
         }
-        Daemon(_config(db_path)).seed_database(target_new=100)
+        Daemon(_config(db_path)).seed_database(fill_target=100)
     return 4242
 
 

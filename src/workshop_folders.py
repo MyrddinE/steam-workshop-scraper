@@ -62,7 +62,7 @@ DOWNLOAD_SCAN_INTERVAL_SECONDS = 60
 
 #: Where the config override lives. Entries are workshop *content* roots
 #: (``<library>/steamapps/workshop/content``), added to discovery's own list.
-CONFIG_KEY = "steam"
+CONFIG_SECTION = "steam"
 CONFIG_DIRS_KEY = "workshop_content_dirs"
 
 #: The registry key and value Steam writes its install path to.
@@ -82,7 +82,7 @@ WORKSHOP_CONTENT_PARTS = ("steamapps", "workshop", "content")
 
 #: One ``"path" "..."`` value, with the value kept whole (escapes included) so a
 #: backslash-escaped path is not cut at the first backslash.
-_PATH_RE = re.compile(r'"path"\s*"((?:[^"\\]|\\.)*)"')
+_VDF_PATH_RE = re.compile(r'"path"\s*"((?:[^"\\]|\\.)*)"')
 
 
 def is_windows(platform: str | None = None) -> bool:
@@ -122,7 +122,7 @@ def parse_libraryfolders_vdf(text: str) -> list[str]:
     that is the only field this project needs, and a full VDF parser would be a
     dependency or a lot of code for it.
     """
-    return [_unescape_vdf(match.group(1)) for match in _PATH_RE.finditer(text)]
+    return [_unescape_vdf(match.group(1)) for match in _VDF_PATH_RE.finditer(text)]
 
 
 def read_library_paths(vdf_path: str) -> list[str]:
@@ -250,7 +250,7 @@ class WorkshopFolders:
         self._launcher = launcher or _default_launcher
         self._registry = registry
         self._discover = discover or self._discover_default
-        self._dirs: list[str] | None = None
+        self._discovered_dirs: list[str] | None = None
 
     # --- platform and resolution -------------------------------------------
 
@@ -265,14 +265,14 @@ class WorkshopFolders:
                 registry=self._registry, platform=self._platform)
         return _discovered_dirs
 
-    def _config_dirs(self) -> list[str]:
+    def _configured_dirs(self) -> list[str]:
         """The ``steam.workshop_content_dirs`` override, always included.
 
         A bare string is accepted as a one-entry list so a hand-written config
         that forgot the dash still works; anything else is ignored rather than
         raising, because a bad override must not stop the feature.
         """
-        value = (self.config.get(CONFIG_KEY) or {}).get(CONFIG_DIRS_KEY)
+        value = (self.config.get(CONFIG_SECTION) or {}).get(CONFIG_DIRS_KEY)
         if isinstance(value, str):
             value = [value]
         if not isinstance(value, (list, tuple)):
@@ -285,9 +285,9 @@ class WorkshopFolders:
         Cached per instance; ``refresh`` (and a miss, see :meth:`item_folder`)
         forces discovery again.
         """
-        if self._dirs is None or refresh:
-            self._dirs = list(self._discover())
-        return _dedupe(self._config_dirs() + list(self._dirs))
+        if self._discovered_dirs is None or refresh:
+            self._discovered_dirs = list(self._discover())
+        return _dedupe(self._configured_dirs() + list(self._discovered_dirs))
 
     def expected_folders(self, consumer_appid, workshop_id) -> list[str]:
         """Every path the item's folder would have, for naming in a warning."""
@@ -297,7 +297,7 @@ class WorkshopFolders:
                 for root in self.content_dirs()]
 
     @staticmethod
-    def _folder_in(dirs, consumer_appid, workshop_id) -> str | None:
+    def _find_folder_in(dirs, consumer_appid, workshop_id) -> str | None:
         if consumer_appid in (None, ""):
             return None
         for root in dirs:
@@ -318,9 +318,9 @@ class WorkshopFolders:
         if not self.enabled():
             return None
         dirs = self.content_dirs()
-        folder = self._folder_in(dirs, consumer_appid, workshop_id)
+        folder = self._find_folder_in(dirs, consumer_appid, workshop_id)
         if folder is None and dirs:
-            self._dirs = None
+            self._discovered_dirs = None
             reset_discovery_cache()
         return folder
 
@@ -350,7 +350,7 @@ class WorkshopFolders:
                 "WHERE own_subscribed = 1 AND downloaded_at IS NULL"
             ).fetchall()
             for row in rows:
-                if self._folder_in(dirs, row["consumer_appid"], row["workshop_id"]):
+                if self._find_folder_in(dirs, row["consumer_appid"], row["workshop_id"]):
                     stamped_ids.append(row["workshop_id"])
                 else:
                     missed += 1
@@ -374,7 +374,7 @@ class WorkshopFolders:
             # again. A scan whose candidates were all found keeps the cache, and
             # so does one with no candidate root at all (nothing to re-resolve
             # toward, and re-reading the registry every minute would be churn).
-            self._dirs = None
+            self._discovered_dirs = None
             reset_discovery_cache()
         if stamped_ids:
             logging.info(

@@ -12,7 +12,7 @@ The TUI is built with Textual (async terminal UI framework). It provides search,
 2. Initializes database (runs migrations)
 3. Starts embedded web server in a daemon thread (`_start_webserver`)
 4. Loads TUI state from `.tui_state.yaml` (filters, sort, scroll position, selected workshop ID)
-5. Sets up initial state flags: `_has_restored_state = False`, `_wilson_cutoffs = {}`
+5. Sets up initial state flags: `_initial_load_done = False`, `_wilson_cutoffs = {}`
 
 ### `on_mount`
 
@@ -28,11 +28,11 @@ The TUI is built with Textual (async terminal UI framework). It provides search,
 
 ### State Restoration
 
-After the first `load_more_items` completes, `_has_restored_state` is set to True and a deferred callback restores the scroll position and highlights the previously-selected item. Subsequent `on_select_changed` events (triggered by user interaction with sort/filter selects) save state and re-execute the search.
+After the first `load_more_items` completes, `_initial_load_done` is set to True and a deferred callback restores the scroll position and highlights the previously-selected item. Subsequent `on_select_changed` events (triggered by user interaction with sort/filter selects) save state and re-execute the search.
 
 ### `on_select_changed` Guard
 
-During initial mount, setting default values on Select widgets fires `on_select_changed` which would trigger redundant searches. The guard `if self._has_restored_state:` prevents searches during restoration — only the `call_after_refresh(self.execute_search)` call runs the initial query. After state is restored, user-triggered changes fire searches and save state.
+During initial mount, setting default values on Select widgets fires `on_select_changed` which would trigger redundant searches. The guard `if self._initial_load_done:` prevents searches during restoration — only the `call_after_refresh(self.execute_search)` call runs the initial query. After state is restored, user-triggered changes fire searches and save state.
 
 ### Crash dumps
 
@@ -288,7 +288,7 @@ the reference for the translation's edges.
 
 Each bar's population is the flagging rule, mirrored in SQL, so the bar and the work cannot
 disagree. **Translations** is per *field*, not per item, over `title` and `short_description`;
-`_flag_translations` returns early unless the item was enriched, so its population is the
+`_queue_translations` returns early unless the item was enriched, so its population is the
 non-ASCII API fields of the **filter-selected** items. **Extended Web** is the scrape's
 coverage — live items with a non-empty `extended_description` — renamed from the old
 Description bar so the name is about the stage rather than the one field it carries today;
@@ -399,7 +399,7 @@ Starts a Waitress server in a daemon thread serving the Flask app. Waitress bind
 
 The chosen port is stored as an `int` (Waitress reports it as a string). If startup fails after the socket was bound, the server is closed so the port is not left occupied.
 
-The server shares the TUI's database connection path (set via `init_webserver`). It also shares the `_sessionid` global for subscribe operations.
+The server shares the TUI's database connection path (set via `init_webserver`). It also shares the `_pushed_sessionid` global for subscribe operations.
 
 ### Subscribe Action (Ctrl+B)
 
@@ -445,7 +445,7 @@ Opened by Ctrl+?. Shows a view-window analysis table grouping items by time buck
 
 The "Jump to Author" button replaces the current filter set with a single `Author ID is <creator>` filter, built as the row's initial filter rather than by assigning the Select widgets after mount (the field's Change handler is what populates the operator list, so assigning `is` first was rejected for the default text field).
 
-Before replacing the rows, the app saves state to disk and snapshots the current filters in memory. `is_single_creator_mode` is then set, which hides "Save Filter for Scraper" and makes `save_state` a no-op so the author filter is not persisted.
+Before replacing the rows, the app saves state to disk and snapshots the current filters in memory. `is_author_mode` is then set, which hides "Save Filter for Scraper" and makes `save_state` a no-op so the author filter is not persisted.
 
 The `btn-return` button leaves single-creator mode: it clears the flag, shows the save button again, restores the in-memory filter snapshot (replacing the author row and re-running the search), and lets state saving apply once more. The snapshot is in memory rather than re-read from `.tui_state.yaml` so that a state write between the jump and the Return cannot lose the filters the jump replaced.
 

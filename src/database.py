@@ -96,7 +96,7 @@ SUBSCRIBED_FILTER_COLUMNS = (
 )
 
 
-def _flag_column(item: dict, column: str) -> int:
+def _bool_column(item: dict, column: str) -> int:
     """A boolean/queue column read as 0 or 1, with NULL and a missing key both 0.
 
     The SQL side wraps the same columns in COALESCE, so a stored NULL and a row
@@ -112,7 +112,7 @@ def _flag_column(item: dict, column: str) -> int:
 # the SELECT path uses; `matches` is the same predicate over an in-memory row.
 # `columns` names the real columns the value reads, so a caller that has to load
 # a partial row (the demotion walk) can load all of them.
-SUBSCRIBED_FILTERS = {
+SUBSCRIBED_VALUE_SPECS = {
     "any": {
         "sql": "1 = 1",
         "columns": (),
@@ -126,7 +126,7 @@ SUBSCRIBED_FILTERS = {
     "currently": {
         "sql": "COALESCE(own_subscribed, 0) = 1",
         "columns": ("own_subscribed",),
-        "matches": lambda item: _flag_column(item, "own_subscribed") == 1,
+        "matches": lambda item: _bool_column(item, "own_subscribed") == 1,
     },
     # `previously` is the complement of `never OR currently`, so its negation is
     # exactly `never OR currently` -- see _build_subscribed_clause.
@@ -135,13 +135,13 @@ SUBSCRIBED_FILTERS = {
         "columns": ("own_subscribed", "own_first_subscribed_at"),
         "matches": lambda item: (
             item.get("own_first_subscribed_at") is not None
-            and _flag_column(item, "own_subscribed") == 0
+            and _bool_column(item, "own_subscribed") == 0
         ),
     },
     "queued": {
         "sql": "COALESCE(is_queued_for_subscription, 0) = 1",
         "columns": ("is_queued_for_subscription",),
-        "matches": lambda item: _flag_column(item, "is_queued_for_subscription") == 1,
+        "matches": lambda item: _bool_column(item, "is_queued_for_subscription") == 1,
     },
     "downloaded": {
         "sql": "downloaded_at IS NOT NULL",
@@ -176,7 +176,7 @@ FIELD_NAME_MAP["Filename"] = "filename"
 
 # Fields that have a translated _en counterpart; these are dual-searched
 # when the operator is a text-matching one (contains, is, etc.)
-_EN_FIELDS = {
+_EN_COLUMN_FOR = {
     "title": "title_en",
     "short_description": "short_description_en",
     "extended_description": "extended_description_en",
@@ -212,9 +212,9 @@ USER_PRIORITY_FLOOR = 5
 # number that will be wrong after the next migration.
 EXPECTED_VERSION = 29
 
-def _build_text_search_clauses(sql: str, params: list, q_str: str, cols: list[str]) -> tuple[str, list]:
+def _build_text_search_clauses(sql: str, params: list, query_string: str, cols: list[str]) -> tuple[str, list]:
     """Applies positive/negative text search tokens to SQL via LIKE clauses."""
-    pos_tokens, neg_tokens = _parse_query(q_str)
+    pos_tokens, neg_tokens = _parse_query(query_string)
     for token in pos_tokens:
         clauses = [f"{col} LIKE ?" for col in cols]
         sql += f" AND ({' OR '.join(clauses)})"
@@ -237,7 +237,7 @@ def _build_subscribed_clause(op: str, val) -> tuple[str, list]:
     """
     if op not in ("is", "is_not"):
         return ("", [])
-    spec = SUBSCRIBED_FILTERS.get(str(val))
+    spec = SUBSCRIBED_VALUE_SPECS.get(str(val))
     if spec is None:
         return ("0 = 1", []) if op == "is" else ("1 = 1", [])
     clause = spec["sql"]
@@ -257,13 +257,13 @@ def subscribed_overlay_clause(value) -> tuple[str, list]:
     """
     if value is None or value == "any":
         return ("", [])
-    spec = SUBSCRIBED_FILTERS.get(str(value))
+    spec = SUBSCRIBED_VALUE_SPECS.get(str(value))
     if spec is None:
         return ("", [])
     return (spec["sql"], [])
 
 
-def _build_filter_clause(db_col: str, op: str, val) -> tuple[str, list]:
+def _build_single_filter_clause(db_col: str, op: str, val) -> tuple[str, list]:
     """Converts an operator and value into a SQL clause string and param list."""
     if db_col == SUBSCRIBED_DB_COL:
         return _build_subscribed_clause(op, val)
@@ -303,19 +303,19 @@ def _build_fts_clause(op: str, val) -> tuple[str, list]:
     return ("", [])
 
 
-def _compute_percentile_threshold(db_path: str, db_col: str, percentile_val, base_filters: list[dict] = None) -> float | None:
+def _compute_percentile_threshold(db_path: str, db_col: str, percentile, base_filters: list[dict] = None) -> float | None:
     """Computes the threshold score for items above the given percentile.
-    percentile_val: 0-99 (clamped). 0 returns None (no filter).
+    percentile: 0-99 (clamped). 0 returns None (no filter).
     base_filters: non-percentile filters for the base dataset."""
     try:
-        p = int(float(percentile_val)) if percentile_val is not None else 0
+        percentile = int(float(percentile)) if percentile is not None else 0
     except (ValueError, TypeError):
         return None
-    p = max(0, min(99, p))
-    if p == 0:
+    percentile = max(0, min(99, percentile))
+    if percentile == 0:
         return None
 
-    tile = 100 - p
+    tile = 100 - percentile
     conn = get_connection(db_path)
 
     where_sql = ""
@@ -329,15 +329,15 @@ def _compute_percentile_threshold(db_path: str, db_col: str, percentile_val, bas
             val = f.get("value")
             if not field or not op:
                 continue
-            f_db_col = FIELD_NAME_MAP.get(field, field)
-            if f_db_col == "tags":
+            filter_db_col = FIELD_NAME_MAP.get(field, field)
+            if filter_db_col == "tags":
                 if op in ("is", "is_not"):
                     continue
                 clause, clause_params = _build_tag_clause(op, val)
-            elif f_db_col == "full_text":
+            elif filter_db_col == "full_text":
                 continue  # FTS5 virtual column, not a real column
             else:
-                clause, clause_params = _build_filter_clause(f_db_col, op, val)
+                clause, clause_params = _build_single_filter_clause(filter_db_col, op, val)
             if clause:
                 params.extend(clause_params)
                 clauses.append((logic, clause))
@@ -389,7 +389,7 @@ def build_filter_clause_sql(filters: list[dict]) -> tuple[str, list]:
 
     The translation is **not** identical to the daemon's in-memory
     :func:`_evaluate_filters`, and deliberately so: a text operator searches
-    each field's ``_en`` counterpart as well (:data:`_EN_FIELDS`), while the
+    each field's ``_en`` counterpart as well (:data:`_EN_COLUMN_FOR`), while the
     in-memory evaluator reads the original column alone. They can therefore
     disagree on an item whose original text does not match but whose translation
     does. Where they disagree, this is the search builder's answer.
@@ -429,20 +429,20 @@ def build_filter_clause_sql(filters: list[dict]) -> tuple[str, list]:
                     clause_params = fts_params
                 else:
                     clause, clause_params = "", []
-        elif db_col in _EN_FIELDS and op in _TEXT_OPS:
-            en_col = _EN_FIELDS[db_col]
-            c1, p1 = _build_filter_clause(db_col, op, val)
-            c2, p2 = _build_filter_clause(en_col, op, val)
+        elif db_col in _EN_COLUMN_FOR and op in _TEXT_OPS:
+            en_col = _EN_COLUMN_FOR[db_col]
+            clause_original, params_original = _build_single_filter_clause(db_col, op, val)
+            clause_translated, params_translated = _build_single_filter_clause(en_col, op, val)
             joiner = " AND " if op in _TEXT_NEG_OPS else " OR "
-            if c1 and c2:
-                clause = f"({c1}{joiner}{c2})"
-                clause_params = p1 + p2
-            elif c1:
-                clause, clause_params = c1, p1
+            if clause_original and clause_translated:
+                clause = f"({clause_original}{joiner}{clause_translated})"
+                clause_params = params_original + params_translated
+            elif clause_original:
+                clause, clause_params = clause_original, params_original
             else:
-                clause, clause_params = c2, p2
+                clause, clause_params = clause_translated, params_translated
         else:
-            clause, clause_params = _build_filter_clause(db_col, op, val)
+            clause, clause_params = _build_single_filter_clause(db_col, op, val)
         if clause:
             params.extend(clause_params)
             clauses.append((logic, clause))
@@ -516,19 +516,19 @@ def compact_tag_ids(db_path: str, tag_counts: dict = None):
     # Tags that SHOULD be in the low range but currently aren't
     misplaced = [(n, current_map[n]) for n in top_names if current_map.get(n, 9999) > PIVOT]
     # Tags currently in the low range that DON'T belong there (available slots)
-    available = [(n, current_map[n]) for n, cid in current_map.items()
+    low_slot_tags = [(n, current_map[n]) for n, cid in current_map.items()
                  if cid <= PIVOT and n not in top_names]
 
     swaps = 0
-    for (hi_name, hi_id), (lo_name, lo_id) in zip(misplaced, available):
+    for (hi_name, hi_id), (lo_name, lo_id) in zip(misplaced, low_slot_tags):
         swap_tag_ids(db_path, hi_id, lo_id)
         current_map[hi_name] = lo_id
         current_map[lo_name] = hi_id
         swaps += 1
-        logging.debug(f"  compact_tags: swapped '{hi_name}' (id {hi_id}) ↔ '{lo_name}' (id {lo_id})")
+        logging.debug(f"  compact_tag_ids: swapped '{hi_name}' (id {hi_id}) ↔ '{lo_name}' (id {lo_id})")
     conn.close()
     if swaps:
-        logging.info(f"compact_tags: {swaps} tag IDs reordered for space efficiency")
+        logging.info(f"compact_tag_ids: {swaps} tag IDs reordered for space efficiency")
 
 def _evaluate_subscribed_filter(item: dict, op: str, val) -> bool:
     """The in-memory half of the Subscribed field, from the same value table.
@@ -539,7 +539,7 @@ def _evaluate_subscribed_filter(item: dict, op: str, val) -> bool:
     """
     if op not in ("is", "is_not"):
         return True
-    spec = SUBSCRIBED_FILTERS.get(str(val))
+    spec = SUBSCRIBED_VALUE_SPECS.get(str(val))
     matched = spec["matches"](item) if spec is not None else False
     return not matched if op == "is_not" else matched
 
@@ -714,17 +714,17 @@ def get_image_subdirs(workshop_id) -> tuple[str, str, str]:
     except (ValueError, TypeError):
         return "0", "0", "0"
     
-    char1 = HEX_CHARS[wid & 0xF]
-    char2 = HEX_CHARS[(wid >> 4) & 0xF]
-    char3 = HEX_CHARS[(wid >> 8) & 0xF]
-    return char1, char2, char3
+    bucket1 = HEX_CHARS[wid & 0xF]
+    bucket2 = HEX_CHARS[(wid >> 4) & 0xF]
+    bucket3 = HEX_CHARS[(wid >> 8) & 0xF]
+    return bucket1, bucket2, bucket3
 
 def get_image_path(base_dir: str, workshop_id, ext: str) -> str:
     """
     Returns the full nested path to an image file.
     """
-    char1, char2, char3 = get_image_subdirs(workshop_id)
-    return os.path.join(base_dir, char1, char2, char3, f"{workshop_id}.{ext}")
+    bucket1, bucket2, bucket3 = get_image_subdirs(workshop_id)
+    return os.path.join(base_dir, bucket1, bucket2, bucket3, f"{workshop_id}.{ext}")
 
 def _demote_filtered_out_queue_priorities(conn) -> tuple[int, int]:
     """Move filter-excluded items back to backlog priority. Returns (web, image).
@@ -1495,8 +1495,8 @@ def _migration_12_to_13(cursor, conn, db_path):
 
         old_path = os.path.join(base_images_dir, f"{wid}.{ext}")
 
-        char1, char2, char3 = get_image_subdirs(wid)
-        new_dir = os.path.join(base_images_dir, char1, char2, char3)
+        bucket1, bucket2, bucket3 = get_image_subdirs(wid)
+        new_dir = os.path.join(base_images_dir, bucket1, bucket2, bucket3)
         new_path = os.path.join(new_dir, f"{wid}.{ext}")
 
         if os.path.exists(old_path):
@@ -2624,7 +2624,7 @@ def insert_or_update_item(db_path: str, item_data: dict) -> bool:
 
     placeholders = ",".join(["?"] * len(columns))
     # Build the values list using the FILTERED column order
-    vals = [item_data[col] for col in columns]
+    values = [item_data[col] for col in columns]
 
     # We update all columns EXCEPT the primary key if there's a conflict
     update_cols = [col for col in columns if col != "workshop_id"]
@@ -2643,7 +2643,7 @@ def insert_or_update_item(db_path: str, item_data: dict) -> bool:
             ON CONFLICT(workshop_id) DO UPDATE SET {updates}
         """
 
-    conn.execute(sql, vals)
+    conn.execute(sql, values)
     conn.commit()
     conn.close()
     return is_new
@@ -2676,7 +2676,7 @@ def api_fetch_queue_predicate() -> str:
 def web_scrape_queue_predicate() -> str:
     """API fetch → web scrape: the web scrape queue's entry condition.
 
-    The producer is ``_flag_scrape_and_image``; the worker's own success test is
+    The producer is ``_raise_scrape_and_image_priorities``; the worker's own success test is
     that it stored a description, not merely that it cleared the flag, which is
     issue 19's shape.
     """
@@ -2686,7 +2686,7 @@ def web_scrape_queue_predicate() -> str:
 def image_queue_predicate() -> str:
     """API fetch → image: the image queue's entry condition.
 
-    The producer is ``_flag_scrape_and_image``; ``image_extension`` records the
+    The producer is ``_raise_scrape_and_image_priorities``; ``image_extension`` records the
     answer, so a permanent 404 or a non-image type also settles the stage.
     """
     return "needs_image > 0"
@@ -2833,9 +2833,9 @@ def _parse_query(query: str) -> tuple[list[str], list[str]]:
             positive.append(token)
     return positive, negative
 
-def _apply_numeric_filter(sql: str, params: list, col: str, filter_str: str) -> tuple[str, list]:
+def _apply_numeric_filter(sql: str, params: list, col: str, filter_value: str) -> tuple[str, list]:
     """Parses operators from a string and applies them to the SQL."""
-    match = re.match(r'^\s*([<>!=]=?|>|<)?\s*(\d+(?:\.\d+)?)\s*$', str(filter_str))
+    match = re.match(r'^\s*([<>!=]=?|>|<)?\s*(\d+(?:\.\d+)?)\s*$', str(filter_value))
     if match:
         op = match.group(1) or '='
         val = float(match.group(2))
@@ -2923,9 +2923,9 @@ def search_items(db_path: str, query: str = "", appid: int = None,
 
     if numeric_filters:
         valid_cols = {"file_size", "subscriptions", "favorited", "views"}
-        for col, f_str in numeric_filters.items():
-            if col in valid_cols and f_str:
-                sql, params = _apply_numeric_filter(sql, params, col, f_str)
+        for col, filter_value in numeric_filters.items():
+            if col in valid_cols and filter_value:
+                sql, params = _apply_numeric_filter(sql, params, col, filter_value)
 
     if filters:
         pct_filters = [f for f in filters if f.get("op") == "percentile"]
@@ -2990,7 +2990,7 @@ def _compute_tag_frequencies(cursor) -> dict:
     """)
     return {row["tag_name"]: row["cnt"] for row in cursor.fetchall()}
 
-_STAT_METRICS = (
+_LEGACY_STAT_KEYS = (
     ("status_counts", "status_counts"),
     ("translation_status", "translation_status"),
     ("tag_counts", "tag_counts"),
@@ -3016,10 +3016,10 @@ def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
 
     result = metrics.compute(
         db_path,
-        [metric_name for _, metric_name in _STAT_METRICS],
+        [metric_name for _, metric_name in _LEGACY_STAT_KEYS],
         {"staleness_days": staleness_days},
     )
-    return {key: result[metric_name]["value"] for key, metric_name in _STAT_METRICS}
+    return {key: result[metric_name]["value"] for key, metric_name in _LEGACY_STAT_KEYS}
 
 
 def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None,
@@ -3053,7 +3053,7 @@ def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None,
                     continue
                 clause, clause_params = _build_tag_clause(op, val)
             else:
-                clause, clause_params = _build_filter_clause(db_col, op, val)
+                clause, clause_params = _build_single_filter_clause(db_col, op, val)
             if clause:
                 params.extend(clause_params)
                 filter_clauses.append((f.get("logic", "AND").upper(), clause))

@@ -88,16 +88,16 @@ class ScrapeOutcome(enum.Enum):
     # so clear the queue flag; neutral for pacing.
     ITEM_PAGE_WITHOUT_DESCRIPTION = "item_page_without_description"
     # An age check, a sign-in wall, or Steam's error shell: a session or wall
-    # problem that ``_refresh_login_cookie_if_gated`` already re-reads the login
+    # problem that ``_refresh_login_cookie_if_gated_or_signed_out`` already re-reads the login
     # cookie for. Not a pacing problem.
-    GATE = "gate"
+    GATED = "gate"
     # An outcome we cannot attribute: a transport failure or a page that is
     # neither the item's nor a recognised condition. The only served outcome
     # that grows ``web_delay``.
     UNKNOWN = "unknown"
 
 
-def classify_scrape(scrape_data: dict | None) -> ScrapeOutcome:
+def classify_scrape(scrape_result: dict | None) -> ScrapeOutcome:
     """Name one scrape attempt's outcome.
 
     The order encodes precedence, and each step exists for a reason:
@@ -118,13 +118,13 @@ def classify_scrape(scrape_data: dict | None) -> ScrapeOutcome:
     * Anything left is a page that is not the item's and matches no recognised
       condition, i.e. unknown.
     """
-    if scrape_data is None:
+    if scrape_result is None:
         return ScrapeOutcome.UNKNOWN
-    if scrape_data.get("description") is not None:
+    if scrape_result.get("description") is not None:
         return ScrapeOutcome.SUCCESS
 
-    status = scrape_data.get("http_status")
-    body = scrape_data.get("body") or ""
+    status = scrape_result.get("http_status")
+    body = scrape_result.get("body") or ""
     if status in ITEM_MISSING_HTTP_STATUSES:
         return ScrapeOutcome.ITEM_MISSING
     if isinstance(status, int) and status >= 500:
@@ -136,7 +136,7 @@ def classify_scrape(scrape_data: dict | None) -> ScrapeOutcome:
     if looks_like_item_page_without_description(body):
         return ScrapeOutcome.ITEM_PAGE_WITHOUT_DESCRIPTION
     if looks_gated(body):
-        return ScrapeOutcome.GATE
+        return ScrapeOutcome.GATED
     return ScrapeOutcome.UNKNOWN
 
 
@@ -146,7 +146,7 @@ class WebScraperThread(threading.Thread):
         super().__init__(daemon=True)
         self.db_path = db_path
         self.pause_lock_file = pause_lock_file
-        self._save_cb = save_callback
+        self._save_callback = save_callback
         # Re-reads the browser login cookie and reports whether it changed. None
         # when no browser source is configured.
         self._session_refresh = session_refresh
@@ -154,13 +154,13 @@ class WebScraperThread(threading.Thread):
         self.web_delay = float((daemon_config or {}).get("web_delay_seconds") or WEB_DELAY_DEFAULT)
         self.web_successes = 0
         self.web_failures = 0
-        self.web_had_streak = False
+        self.web_had_success_streak = False
         # In memory only: a daemon restarted after a day resumes at the delay it
         # had reached rather than treating the downtime as healthy operation.
         self._clock = pacing.Clock()
         self._persisted_web_delay = self.web_delay
 
-    def _refresh_login_cookie_if_gated(self, item: dict, scrape_data: dict | None) -> None:
+    def _refresh_login_cookie_if_gated_or_signed_out(self, item: dict, scrape_result: dict | None) -> None:
         """Refresh the login cookie when a failed scrape looks gated.
 
         A gated page and a changed layout are indistinguishable from the selector
@@ -179,16 +179,16 @@ class WebScraperThread(threading.Thread):
         definitive HTTP 404/410 is exempt from the refresh: the item is gone and
         no credential changes that.
         """
-        if not scrape_data or scrape_data.get("description") is not None:
+        if not scrape_result or scrape_result.get("description") is not None:
             return
         # A definitive HTTP 404/410 is not a gate and no cookie refresh can
         # materialise the item, so it is not worth the file read. The HTTP 200
         # item-error page is not caught here: its status proves nothing, so a
         # stale session is still worth ruling out before the outcome is read as
         # "the item is gone".
-        if scrape_data.get("http_status") in ITEM_MISSING_HTTP_STATUSES:
+        if scrape_result.get("http_status") in ITEM_MISSING_HTTP_STATUSES:
             return
-        body = scrape_data.get("body") or ""
+        body = scrape_result.get("body") or ""
 
         # Both conditions are evaluated, and neither shadows the other. They
         # overlap by construction -- a throttle page is not the item page, so it
@@ -206,9 +206,9 @@ class WebScraperThread(threading.Thread):
         # direction. Every other miss does: this records the problem, or clears
         # one the fresh page disproves.
         if not looks_rate_limited(body):
-            self._note_session_from(body)
+            self._record_session_health_from(body)
 
-    def _note_session_from(self, body: str) -> None:
+    def _record_session_health_from(self, body: str) -> None:
         """Record or clear the login problem a failed scrape is evidence of.
 
         The predicate is :func:`looks_signed_out`, the specific one, rather than
@@ -249,13 +249,13 @@ class WebScraperThread(threading.Thread):
         The decay runs on every success now, so without a step of its own it
         would rewrite config.yaml once per scrape.
         """
-        if not self._save_cb:
+        if not self._save_callback:
             return
         if not force and not pacing.needs_persist(
                 self.web_delay, self._persisted_web_delay):
             return
         self._persisted_web_delay = self.web_delay
-        self._save_cb("web_delay_seconds", pacing.persistable(self.web_delay))
+        self._save_callback("web_delay_seconds", pacing.persistable(self.web_delay))
 
     def _record_web_failure(self) -> None:
         """Count one scrape whose outcome we cannot attribute, and grow the delay.
@@ -265,19 +265,19 @@ class WebScraperThread(threading.Thread):
         outcome has a response that a slower pace cannot improve -- a throttle
         has its own pause, a missing item and a description-less item page are
         answers the item itself gave, and a gate is a session problem
-        ``_refresh_login_cookie_if_gated`` already re-reads the login cookie for
+        ``_refresh_login_cookie_if_gated_or_signed_out`` already re-reads the login cookie for
         -- so none of them buys a back-off.
         """
         self.web_failures += 1
         self.web_successes = 0
-        if self.web_failures >= 2 and self.web_had_streak:
+        if self.web_failures >= 2 and self.web_had_success_streak:
             old = self.web_delay
             self.web_delay = pacing.backoff(self.web_delay)
             logging.info(f"Multiple consecutive web scrape failures! Increasing web delay from {old} to {self.web_delay}s.")
             # Always written: a restart during an outage must not resume at the
             # pace that was just refused.
             self._persist_delay(force=True)
-            self.web_had_streak = False
+            self.web_had_success_streak = False
 
     def _clear_web_scrape_flag(self, workshop_id: int) -> None:
         """Take an item out of the web queue without touching any other flag."""
@@ -289,28 +289,28 @@ class WebScraperThread(threading.Thread):
         conn.commit()
         conn.close()
 
-    def _capture_scrape_failure(self, item: dict, url: str, scrape_data: dict,
-                                kind: str) -> None:
+    def _capture_scrape_failure(self, item: dict, url: str, scrape_result: dict,
+                                failure_kind: str) -> None:
         """Record the served page as evidence for whichever miss it was.
 
-        ``kind`` is required: a default here filed three unrelated misses under
+        ``failure_kind`` is required: a default here filed three unrelated misses under
         ``web_selector_miss``, which is exactly the distinction the failure tree
         exists to preserve. The selector is recorded only for the kind that is
         about the selector.
         """
         capture.record_failure(
-            kind=kind,
+            kind=failure_kind,
             stage="web_scrape",
             workshop_id=item["workshop_id"],
-            selector=DESCRIPTION_SELECTOR if kind == "web_selector_miss" else None,
-            http_status=scrape_data.get("http_status"),
-            final_url=scrape_data.get("final_url") or url,
-            body=scrape_data.get("body"),
+            selector=DESCRIPTION_SELECTOR if failure_kind == "web_selector_miss" else None,
+            http_status=scrape_result.get("http_status"),
+            final_url=scrape_result.get("final_url") or url,
+            body=scrape_result.get("body"),
             content_type="text/html",
         )
 
     def _handle_item_page_without_description(self, item: dict, url: str,
-                                              scrape_data: dict) -> None:
+                                              scrape_result: dict) -> None:
         """Handle an item page that was served but carries no description.
 
         ``scrape_extended_details`` returns ``{"description": None, "tags": []}``
@@ -326,14 +326,14 @@ class WebScraperThread(threading.Thread):
         off from, but it yielded nothing, so it must not reset the failure streak
         either.
         """
-        self._capture_scrape_failure(item, url, scrape_data,
-                                     kind="web_description_absent")
+        self._capture_scrape_failure(item, url, scrape_result,
+                                     failure_kind="web_description_absent")
         logging.warning(
             "[W:%s] Item page has no extended description; clearing needs_web_scrape",
             item["workshop_id"])
         self._clear_web_scrape_flag(item["workshop_id"])
 
-    def _handle_missing_item(self, item: dict, url: str, scrape_data: dict) -> None:
+    def _handle_missing_item(self, item: dict, url: str, scrape_result: dict) -> None:
         """Handle the Workshop saying the item is not there.
 
         Steam serves this from its ordinary error shell, and a live probe shows
@@ -350,9 +350,9 @@ class WebScraperThread(threading.Thread):
         longer backs off.
         """
         workshop_id = item["workshop_id"]
-        status = scrape_data.get("http_status")
-        reason = missing_item_reason(scrape_data.get("body") or "")
-        self._capture_scrape_failure(item, url, scrape_data, kind="web_item_missing")
+        status = scrape_result.get("http_status")
+        reason = missing_item_reason(scrape_result.get("body") or "")
+        self._capture_scrape_failure(item, url, scrape_result, failure_kind="web_item_missing")
         status_text = f"HTTP {status}" if status is not None else "no status code"
         evidence = f"; page said {reason!r}" if reason else ""
         logging.warning(
@@ -362,10 +362,10 @@ class WebScraperThread(threading.Thread):
             workshop_id, status_text, evidence)
         self._clear_web_scrape_flag(workshop_id)
 
-    def _handle_gate(self, item: dict, url: str, scrape_data: dict) -> None:
+    def _handle_gate(self, item: dict, url: str, scrape_result: dict) -> None:
         """Handle a wall, an age check, or Steam's error shell.
 
-        ``_refresh_login_cookie_if_gated`` has already re-read the login cookie
+        ``_refresh_login_cookie_if_gated_or_signed_out`` has already re-read the login cookie
         when the page looked gated or signed out, so the next attempt carries a
         fresher credential. Nothing was re-scraped immediately: the miss takes
         this ordinary path, the item keeps its queue place because it is not at
@@ -373,22 +373,22 @@ class WebScraperThread(threading.Thread):
         request rate cannot fix a session that is not working, so the delay is
         left alone.
         """
-        self._capture_scrape_failure(item, url, scrape_data, kind="web_gated")
+        self._capture_scrape_failure(item, url, scrape_result, failure_kind="web_gated")
         logging.warning(
             "[W:%s] Page looks gated (no item markup; HTTP %s); leaving the item "
             "queued and the delay unchanged.",
-            item["workshop_id"], scrape_data.get("http_status"))
+            item["workshop_id"], scrape_result.get("http_status"))
 
-    def _handle_unknown(self, item: dict, url: str, scrape_data: dict | None) -> None:
+    def _handle_unknown(self, item: dict, url: str, scrape_result: dict | None) -> None:
         """Handle an outcome we cannot attribute, and back off.
 
-        A transport failure (``scrape_data`` is ``None``) also raises
+        A transport failure (``scrape_result`` is ``None``) also raises
         ``api_priority`` to 2 so the metadata is re-fetched before the web scrape
         is tried again. For a page that did reach us, the request got through, so
         only the pacing changes.
         """
         workshop_id = item["workshop_id"]
-        if scrape_data is None:
+        if scrape_result is None:
             logging.warning(
                 "[W:%s] Web scrape failed with no response (transport failure); "
                 "backing off.", workshop_id)
@@ -400,11 +400,11 @@ class WebScraperThread(threading.Thread):
             conn.commit()
             conn.close()
         else:
-            self._capture_scrape_failure(item, url, scrape_data, kind="web_unknown")
+            self._capture_scrape_failure(item, url, scrape_result, failure_kind="web_unknown")
             logging.warning(
                 "[W:%s] Page was not the item's and matched no known condition "
                 "(HTTP %s); leaving needs_web_scrape unchanged and backing off.",
-                workshop_id, scrape_data.get("http_status"))
+                workshop_id, scrape_result.get("http_status"))
         self._record_web_failure()
 
     def run(self):
@@ -428,19 +428,19 @@ class WebScraperThread(threading.Thread):
             # would read the whole outage as elapsed time and collapse the delay
             # at once.
             elapsed = self._clock.since()
-            keeping = capture.web_download_capture_active()
-            scrape_data = scrape_extended_details(url, keep_body=keeping)
-            self._refresh_login_cookie_if_gated(item, scrape_data)
-            if keeping and scrape_data:
+            capture_body = capture.web_download_capture_active()
+            scrape_result = scrape_extended_details(url, keep_body=capture_body)
+            self._refresh_login_cookie_if_gated_or_signed_out(item, scrape_result)
+            if capture_body and scrape_result:
                 capture.record_web_download(
-                    capture.ITEM_PAGE_KIND, workshop_id, url, scrape_data,
-                    ok=scrape_data.get("description") is not None)
+                    capture.ITEM_PAGE_KIND, workshop_id, url, scrape_result,
+                    succeeded=scrape_result.get("description") is not None)
 
-            outcome = classify_scrape(scrape_data)
+            outcome = classify_scrape(scrape_result)
             if outcome is ScrapeOutcome.SUCCESS:
-                update = {
+                item_update = {
                     "workshop_id": workshop_id,
-                    "extended_description": scrape_data.get("description"),
+                    "extended_description": scrape_result.get("description"),
                     "needs_web_scrape": 0,
                     "scrape_version": item.get("steam_updated_at", 0),
                     # Our clock, taken now that the page is in hand -- not the
@@ -449,23 +449,23 @@ class WebScraperThread(threading.Thread):
                     # leaves the previous completion time, or NULL, alone.
                     "web_scraped_at": int(time.time()),
                 }
-                insert_or_update_item(self.db_path, update)
+                insert_or_update_item(self.db_path, item_update)
 
                 # Flag extended description for translation, unless the stored
                 # translation was taken at the item's current Steam revision.
-                desc = scrape_data.get("description") or ""
+                desc = scrape_result.get("description") or ""
                 if desc and not translation_is_current(
                         item.get("extended_description_en"),
                         item.get("translate_version"),
                         item.get("steam_updated_at")):
                     flag_field_for_translation(self.db_path, "item", workshop_id, "extended_description_en", desc, 3)
 
-                display = item.get("title_en") or item.get("title") or str(workshop_id)
-                logging.info(f"[W:{workshop_id}] Scraped \"{display}\"")
+                title = item.get("title_en") or item.get("title") or str(workshop_id)
+                logging.info(f"[W:{workshop_id}] Scraped \"{title}\"")
                 self.web_successes += 1
                 self.web_failures = 0
                 if self.web_successes >= 5:
-                    self.web_had_streak = True
+                    self.web_had_success_streak = True
                 self._decay_delay(elapsed)
             elif outcome is ScrapeOutcome.RATE_LIMITED:
                 # Not a bad item and not necessarily a stale cookie: the page
@@ -492,13 +492,13 @@ class WebScraperThread(threading.Thread):
                 self.web_failures += 1
                 self.web_successes = 0
             elif outcome is ScrapeOutcome.ITEM_MISSING:
-                self._handle_missing_item(item, url, scrape_data)
+                self._handle_missing_item(item, url, scrape_result)
             elif outcome is ScrapeOutcome.ITEM_PAGE_WITHOUT_DESCRIPTION:
-                self._handle_item_page_without_description(item, url, scrape_data)
-            elif outcome is ScrapeOutcome.GATE:
-                self._handle_gate(item, url, scrape_data)
+                self._handle_item_page_without_description(item, url, scrape_result)
+            elif outcome is ScrapeOutcome.GATED:
+                self._handle_gate(item, url, scrape_result)
             else:  # ScrapeOutcome.UNKNOWN
-                self._handle_unknown(item, url, scrape_data)
+                self._handle_unknown(item, url, scrape_result)
             # Responsive, so a long backoff cannot make the worker deaf to a
             # stop or a pause. It serves the delay in full; it does not shorten it.
             pacing.wait(self.web_delay, lambda: self.running)

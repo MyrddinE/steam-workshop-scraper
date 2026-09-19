@@ -65,7 +65,7 @@ def _discover(db_path, tmp_path, workshop_id: int = 999) -> int:
             "items": [{"publishedfileid": str(workshop_id)}],
             "next_cursor": "",
         }
-        _daemon(db_path, tmp_path).seed_database(target_new=100)
+        _daemon(db_path, tmp_path).seed_database(fill_target=100)
     return workshop_id
 
 

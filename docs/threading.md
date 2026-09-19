@@ -22,7 +22,7 @@ loop never has to stop.
 It calls `_run_page_discovery` when page mode is worth checking and `seed_database`
 otherwise, then sets `_work_available` so an idling fetch loop wakes now rather
 than at the end of its poll. `seed_database`'s own guard decides whether anything
-is actually needed: it returns at once while at least `DISCOVERY_TARGET_NEW` (200)
+is actually needed: it returns at once while at least `DISCOVERY_FILL_TARGET` (200)
 items are fetchable, which is what keeps this thread cheap. The target sits above
 the level the fetch loop drains it to between passes, so an unskipped pass leads
 the drain rather than racing it.
@@ -199,4 +199,4 @@ On shutdown, threads are stopped in order: web_worker first, image_worker second
 
 The TUI starts a Waitress web server in a daemon thread during `ScraperApp.__init__`. The thread uses `waitress.serve()` which blocks until the process exits. The port is persisted to `config.yaml` on first run and reused on subsequent launches. `action_quit` calls `self.exit()`, which terminates the main thread, and the daemon web thread dies with the process.
 
-The web server and the TUI share the same `_db_path` (global variable in webserver module, set by `init_webserver`). They also share `_config` and `_sessionid` globals. No explicit locking exists; Flask handles request concurrency internally. Database reads use their own connections via `get_connection`.
+The web server and the TUI share the same `_db_path` (global variable in webserver module, set by `init_webserver`). They also share `_config` and `_pushed_sessionid` globals. No explicit locking exists; Flask handles request concurrency internally. Database reads use their own connections via `get_connection`.

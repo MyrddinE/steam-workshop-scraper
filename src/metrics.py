@@ -98,7 +98,7 @@ def catalogue() -> list[dict]:
     ]
 
 
-def _resolve(names: list[str] | None) -> list[str]:
+def _resolve_names(names: list[str] | None) -> list[str]:
     wanted = list(names) if names is not None else all_names()
     unknown = [n for n in wanted if n not in REGISTRY]
     if unknown:
@@ -138,16 +138,16 @@ def iter_metrics(db_path: str, names: list[str] | None = None,
     than the fastest metrics do. This is a generator so a caller can render each
     chunk as it lands rather than holding everything until the last one is done.
     """
-    ctx = dict(params or {})
+    metric_context = dict(params or {})
     # The runner knows the database path, and a metric that reads the
     # restart-surviving state kept beside it (`queue_eta` and the pause record)
     # needs it. It travels in the params dict every metric already receives
     # rather than widening the ``(conn, params)`` signature for one caller.
-    ctx["db_path"] = db_path
+    metric_context["db_path"] = db_path
     conn = get_connection(db_path)
     try:
-        for name in _resolve(names):
-            yield name, _run_one(conn, name, ctx)
+        for name in _resolve_names(names):
+            yield name, _run_one(conn, name, metric_context)
     finally:
         conn.close()
 
@@ -281,7 +281,7 @@ _DRAIN_QUEUES = (
     ("translation", "translated_at", translation_priority_predicate(), False, False),
 )
 
-_LIVE_ITEM = "(status IS NULL OR status <> -1)"
+_LIVE_ITEM_UNALIASED = "(status IS NULL OR status <> -1)"
 
 
 def _drain_estimate(outstanding: int, completed: int, active_seconds: float) -> dict:
@@ -377,7 +377,7 @@ def _queue_eta(conn, params) -> dict:
         completed = max(0, gross - subtracted)
         outstanding = conn.execute(
             f"SELECT COUNT(*) AS n FROM workshop_items "
-            f"WHERE ({predicate}) AND {_LIVE_ITEM}"
+            f"WHERE ({predicate}) AND {_LIVE_ITEM_UNALIASED}"
         ).fetchone()["n"]
         entry = _drain_estimate(outstanding, completed,
                                 active if honours_pause else float(window))
@@ -559,13 +559,13 @@ def _fetch_recency(conn, params) -> dict:
 NOTHING_TO_TRANSLATE = "Nothing to translate"
 
 #: Live items only: dead items can never be covered.
-_LIVE_ITEMS = "(w.status IS NULL OR w.status <> -1)"
+_LIVE_ITEM_ALIASED = "(w.status IS NULL OR w.status <> -1)"
 
 
 def _ascii_sql(column: str) -> str:
     """SQL for Python's ``str.isascii()`` on a column, NULL/empty reading ASCII.
 
-    The same UTF-8-bytes-equals-characters test ``_IS_ASCII`` uses: the two
+    The same UTF-8-bytes-equals-characters test ``_ASCII_SQL_TEMPLATE`` uses: the two
     lengths agree exactly when every character is single-byte, control
     characters included. ``COALESCE`` makes NULL and '' ASCII, which is what
     ``is_ascii`` does with a falsy value, so the flagging rule and this
@@ -708,7 +708,7 @@ def _coverage_bar(key: str, label: str, subsidiary: bool, done: int, maximum: in
     }
 
 
-def _care_about_population(conn, target_appids) -> tuple[str, list, dict]:
+def _enrichment_scope_predicate(conn, target_appids) -> tuple[str, list, dict]:
     """The SQL predicate for "what I care about": the target AppIDs' filters.
 
     Each target AppID contributes ``consumer_appid = ? AND <its filters>`` and
@@ -857,7 +857,7 @@ def _coverage(conn, params) -> dict:
     three different scopes, because the code that feeds them does:
 
     * **Translations** is per *field*, not per item, over ``title`` and
-      ``short_description``. ``_flag_translations`` returns early unless the item
+      ``short_description``. ``_queue_translations`` returns early unless the item
       was enriched, so its population is the non-ASCII API fields of the
       **filter-selected** items. It is the one population that does not follow
       the displayed scope: the same absolute figures appear in both blocks, only
@@ -894,7 +894,7 @@ def _coverage(conn, params) -> dict:
     filter has no fixed predicate and is skipped by both, since it is relative to
     the result set it is computed over. The same caveat the old filtered figure
     carried now applies to the Translations bar's population, whose rule
-    (``_flag_translations``) is Python today and whose metric is this SQL, and to
+    (``_queue_translations``) is Python today and whose metric is this SQL, and to
     the Creator Translation bar's population, whose rule is the ``is_ascii`` test
     in the daemon's ``_store_user_record`` and whose metric is
     :func:`_creator_current_sql`.
@@ -912,12 +912,12 @@ def _coverage(conn, params) -> dict:
     the bar permanently short of the truth. What is still outstanding is an item
     with no answer at all.
     """
-    overall_counts = _coverage_scan(conn, _LIVE_ITEMS, [])
-    predicate, predicate_params, detail = _care_about_population(
+    overall_counts = _coverage_scan(conn, _LIVE_ITEM_ALIASED, [])
+    predicate, predicate_params, detail = _enrichment_scope_predicate(
         conn, params.get("target_appids"))
     if predicate:
         filtered_counts = _coverage_scan(
-            conn, f"{_LIVE_ITEMS} AND {predicate}", list(predicate_params))
+            conn, f"{_LIVE_ITEM_ALIASED} AND {predicate}", list(predicate_params))
     else:
         filtered_counts = dict(overall_counts)
 
@@ -943,13 +943,13 @@ def _coverage(conn, params) -> dict:
 # so they agree exactly when every character is single-byte -- that is, when the
 # text is ASCII. Python's str.isascii() is the same test, and this reproduces it
 # for control characters too, which a GLOB over printable ASCII would not.
-_IS_ASCII = "length(CAST(COALESCE({c}, '') AS BLOB)) = length(COALESCE({c}, ''))"
+_ASCII_SQL_TEMPLATE = "length(CAST(COALESCE({c}, '') AS BLOB)) = length(COALESCE({c}, ''))"
 
 
 @metric("translation_status", 255, "Translation state, classified in SQL rather than per row in Python.")
 def _translation_status(conn, params) -> dict:
     all_ascii = " AND ".join(
-        _IS_ASCII.format(c=c)
+        _ASCII_SQL_TEMPLATE.format(c=c)
         for c in ("title", "short_description", "extended_description")
     )
     counts = {

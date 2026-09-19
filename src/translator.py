@@ -151,10 +151,10 @@ def _create_openai_client(openai_config: dict) -> OpenAI:
     )
 
 
-def is_ascii(s: str) -> bool:
-    if not s:
+def is_ascii(text: str) -> bool:
+    if not text:
         return True
-    return all(ord(c) < 128 for c in s)
+    return all(ord(c) < 128 for c in text)
 
 
 class TranslationResponseError(ValueError):
@@ -185,15 +185,15 @@ PHRASE_ATTEMPTS = 8
 # A word in the phrase, and a field label. Both allow an internal hyphen (`yo-yo`
 # is one of the list's words) and neither allows digits, which is what separates
 # the phrase from the id that follows it.
-PHRASE_WORD = r"[a-z]+(?:-[a-z]+)*"
-FIELD_LABEL = r"[a-z]+(?:_[a-z]+)*"
+PHRASE_WORD_RE = r"[a-z]+(?:-[a-z]+)*"
+FIELD_LABEL_RE = r"[a-z]+(?:_[a-z]+)*"
 
 # A boundary whose phrase the model mangled: some short words, then an id and a
 # field label. Consulted only after the phrase-anchored split has failed to produce
 # one block per row, so a false positive cannot cost a reply that was otherwise
 # well formed.
 TOLERANT_BOUNDARY_RE = re.compile(
-    rf"^\s*(?:{PHRASE_WORD}\s+){{2,6}}(\d+)\s+({FIELD_LABEL})\s*:?\s*$", re.IGNORECASE
+    rf"^\s*(?:{PHRASE_WORD_RE}\s+){{2,6}}(\d+)\s+({FIELD_LABEL_RE})\s*:?\s*$", re.IGNORECASE
 )
 
 
@@ -238,7 +238,7 @@ def field_label(field: str) -> str:
     A field with no alias is returned unchanged rather than raising: there is no
     fifth field today, but a future one must not break alignment. The fallback name
     is still unique per field and the reader accepts any lowercase label
-    (``FIELD_LABEL``), so such a field round-trips -- it is simply labelled with a
+    (``FIELD_LABEL_RE``), so such a field round-trips -- it is simply labelled with a
     longer word than the aliases.
     """
     return FIELD_LABELS.get(field, field)
@@ -281,7 +281,7 @@ def choose_phrase(batch: list[dict], rng=None) -> str:
 def boundary_re(phrase: str) -> re.Pattern:
     """The boundary line for one request: that request's phrase, then id and label."""
     return re.compile(
-        rf"^\s*{re.escape(phrase)}\s+(\d+)\s+({FIELD_LABEL})\s*:?\s*$", re.IGNORECASE
+        rf"^\s*{re.escape(phrase)}\s+(\d+)\s+({FIELD_LABEL_RE})\s*:?\s*$", re.IGNORECASE
     )
 
 
@@ -317,7 +317,7 @@ def build_wire_request(rows: list[dict], phrase: str) -> str:
     )
 
 
-def _split_on(content: str, pattern: re.Pattern) -> list[tuple[int, str, str]]:
+def _blocks_from_reply(content: str, pattern: re.Pattern) -> list[tuple[int, str, str]]:
     """Split a reply into ``(item_id, field_label, text)`` blocks on ``pattern``.
 
     A block opens at a boundary line and runs to the next one. Its text is kept
@@ -343,7 +343,7 @@ def _split_on(content: str, pattern: re.Pattern) -> list[tuple[int, str, str]]:
 
 def split_blocks(content: str, phrase: str) -> list[tuple[int, str, str]]:
     """Split a reply on this request's phrase."""
-    return _split_on(content, boundary_re(phrase))
+    return _blocks_from_reply(content, boundary_re(phrase))
 
 
 def _positional(blocks: list[tuple[int, str, str]]) -> dict[int, str]:
@@ -387,7 +387,7 @@ def match_translations(content: str, batch: list[dict], phrase: str) -> dict[int
     if len(on_phrase) == len(batch):
         return _positional(on_phrase)
 
-    tolerant = _split_on(content, TOLERANT_BOUNDARY_RE)
+    tolerant = _blocks_from_reply(content, TOLERANT_BOUNDARY_RE)
     if len(tolerant) == len(batch):
         return _positional(tolerant)
 
@@ -679,21 +679,21 @@ class TranslatorThread(threading.Thread):
                     table, id_col = "users", "steamid"
                     # Users have no steam_updated_at, so this column holds OUR
                     # wall-clock time and is named translated_at, not a version.
-                    version_col = "translated_at"
-                    version_ts = now_ts
+                    stamp_column = "translated_at"
+                    stamp_value = now_ts
                 else:
                     table, id_col = "workshop_items", "workshop_id"
                     # Look up steam_updated_at for version tracking
-                    version_col = "translate_version"
-                    ver = conn.execute(
+                    stamp_column = "translate_version"
+                    revision_row = conn.execute(
                         "SELECT steam_updated_at FROM workshop_items WHERE workshop_id = ?",
                         (row["item_id"],)
                     ).fetchone()
-                    version_ts = ver["steam_updated_at"] if ver and ver["steam_updated_at"] else now_ts
+                    stamp_value = revision_row["steam_updated_at"] if revision_row and revision_row["steam_updated_at"] else now_ts
 
                 conn.execute(
-                    f"UPDATE {table} SET {row['field']} = ?, {version_col} = ? WHERE {id_col} = ?",
-                    (trans_text, version_ts, row["item_id"])
+                    f"UPDATE {table} SET {row['field']} = ?, {stamp_column} = ? WHERE {id_col} = ?",
+                    (trans_text, stamp_value, row["item_id"])
                 )
                 conn.execute("DELETE FROM translation_queue WHERE id = ?", (row["id"],))
                 translated_count += 1
@@ -723,11 +723,11 @@ class TranslatorThread(threading.Thread):
                         (item_id,)
                     )
                     continue
-                ver = conn.execute(
+                revision_row = conn.execute(
                     "SELECT steam_updated_at FROM workshop_items WHERE workshop_id = ?",
                     (item_id,)
                 ).fetchone()
-                version_ts = ver["steam_updated_at"] if ver and ver["steam_updated_at"] else now_ts
+                stamp_value = revision_row["steam_updated_at"] if revision_row and revision_row["steam_updated_at"] else now_ts
                 # translated_at is OUR clock, stamped when the item's last
                 # queued field is gone -- the point at which the stage is
                 # actually complete for this item. It is written in the same
@@ -740,7 +740,7 @@ class TranslatorThread(threading.Thread):
                 conn.execute(
                     "UPDATE workshop_items SET translation_priority = 0, "
                     "translate_version = ?, translated_at = ? WHERE workshop_id = ?",
-                    (version_ts, int(time.time()), item_id)
+                    (stamp_value, int(time.time()), item_id)
                 )
 
             conn.commit()

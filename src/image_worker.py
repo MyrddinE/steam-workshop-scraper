@@ -46,12 +46,12 @@ class ImageScraperThread(threading.Thread):
         super().__init__(daemon=True)
         self.db_path = db_path
         self.pause_lock_file = pause_lock_file
-        self._save_cb = save_callback
+        self._save_callback = save_callback
         self.running = True
         self.image_delay = float((daemon_config or {}).get("image_delay_seconds") or 2.0)
         self.image_successes = 0
         self.image_failures = 0
-        self.image_had_streak = False
+        self.image_had_success_streak = False
         # The decay is measured in time, from a clock that exists only in this
         # process: a daemon restarted after a day must resume where it left off,
         # not treat the day as healthy operation.
@@ -95,8 +95,8 @@ class ImageScraperThread(threading.Thread):
                 if resp.status_code != 200:
                     raise Exception(f"HTTP {resp.status_code}")
 
-                ct = resp.headers.get("Content-Type", "")
-                mime = ct.split(";")[0].strip().lower()
+                content_type = resp.headers.get("Content-Type", "")
+                mime = content_type.split(";")[0].strip().lower()
                 ext = MIME_MAP.get(mime, "")
                 magic_header = b""
 
@@ -124,7 +124,7 @@ class ImageScraperThread(threading.Thread):
                     conn = self._get_conn()
                     conn.execute(
                         "UPDATE workshop_items SET needs_image=0, image_extension=? WHERE workshop_id=?",
-                        (images.served_type_marker(ct), wid))
+                        (images.served_type_marker(content_type), wid))
                     conn.commit()
                     conn.close()
                     time.sleep(self.image_delay)
@@ -132,14 +132,14 @@ class ImageScraperThread(threading.Thread):
 
                 img_path = get_image_path("images", wid, ext)
                 os.makedirs(os.path.dirname(img_path), exist_ok=True)
-                written = 0
-                with open(img_path, "wb") as f:
+                bytes_written = 0
+                with open(img_path, "wb") as image_file:
                     if magic_header:
-                        f.write(magic_header)
-                        written += len(magic_header)
+                        image_file.write(magic_header)
+                        bytes_written += len(magic_header)
                     for chunk in resp.iter_content(8192):
-                        f.write(chunk)
-                        written += len(chunk)
+                        image_file.write(chunk)
+                        bytes_written += len(chunk)
 
                 insert_or_update_item(self.db_path, {
                     "workshop_id": wid,
@@ -165,14 +165,14 @@ class ImageScraperThread(threading.Thread):
                 # are the file just written, never a second copy in the outbox.
                 capture.record_image_download(
                     wid, url, True, **_response_metadata(resp),
-                    bytes_written=written, saved_path=img_path)
+                    bytes_written=bytes_written, saved_path=img_path)
 
                 title = item.get("title_en") or item.get("title") or str(wid)
                 logging.info(f"[I:{wid}] Downloaded preview ({ext}) for \"{title}\"")
                 self.image_successes += 1
                 self.image_failures = 0
                 if self.image_successes >= 5:
-                    self.image_had_streak = True
+                    self.image_had_success_streak = True
                 self._decay_delay(elapsed)
 
             except Exception as e:
@@ -218,14 +218,14 @@ class ImageScraperThread(threading.Thread):
                     conn.close()
                     self.image_failures += 1
                     self.image_successes = 0
-                    if self.image_failures >= 2 and self.image_had_streak:
+                    if self.image_failures >= 2 and self.image_had_success_streak:
                         old = self.image_delay
                         self.image_delay = pacing.backoff(self.image_delay)
                         logging.info(f"Multiple consecutive image failures! Increasing delay from {old} to {self.image_delay}s.")
                         # Always written: a restart during an outage must not
                         # resume at the pace that was just refused.
                         self._persist_delay(force=True)
-                        self.image_had_streak = False
+                        self.image_had_success_streak = False
 
             # Responsive, so a long backoff cannot make the worker deaf to a
             # stop or a pause. It serves the delay in full; it does not shorten it.
@@ -253,13 +253,13 @@ class ImageScraperThread(threading.Thread):
         Without a step the decay -- which now runs on every success -- would
         rewrite config.yaml per download.
         """
-        if not self._save_cb:
+        if not self._save_callback:
             return
         if not force and not pacing.needs_persist(
                 self.image_delay, self._persisted_image_delay):
             return
         self._persisted_image_delay = self.image_delay
-        self._save_cb("image_delay_seconds", pacing.persistable(self.image_delay))
+        self._save_callback("image_delay_seconds", pacing.persistable(self.image_delay))
 
     def _get_conn(self):
         from src.database import get_connection
