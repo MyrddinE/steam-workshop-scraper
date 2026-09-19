@@ -2292,6 +2292,23 @@ def _ensure_indexes(cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_wilson_subscription_score ON workshop_items (wilson_subscription_score)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_wilson_favorite_score ON workshop_items (wilson_favorite_score)")
 
+    # The translation poll (`get_next_batch_for_translation`) orders the whole
+    # outstanding queue by priority then queue time on every pass, so that sort
+    # belongs in an index. It has to be created here rather than in
+    # `_create_schema`: on a fresh database `_create_schema` runs while the
+    # column is still called `dt_queued` (migration 13->14 renames it to
+    # `queued_at`), so an index naming `queued_at` there fails with
+    # "no such column". `_ensure_indexes` runs after the migration chain, which
+    # is the reason it exists at all.
+    #
+    # The directions are the query's -- `priority DESC, queued_at ASC`. A
+    # mixed-direction sort cannot be satisfied by a single-direction index
+    # scanned in reverse, so the DESC on `priority` is not optional.
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_translation_queue_poll "
+        "ON translation_queue (priority DESC, queued_at ASC)"
+    )
+
 # Ordered schema migrations: (target user_version, function). The functions
 # above are defined in this same order, and each one runs only when the file's
 # recorded version is below its target. Add a new migration at the end and a
@@ -3315,7 +3332,7 @@ def queue_field_for_translation(db_path: str, item_type: str, item_id: int, fiel
     else:
         # queued_at is our queue clock (Unix epoch INTEGER). It is written here
         # for NEW rows only; pre-v14 rows keep it NULL because we genuinely do
-        # not know when they were queued. The explicit NULL ordering in
+        # not know when they were queued. SQLite's NULL-first ascending order in
         # get_next_batch_for_translation keeps that legacy backlog ahead of
         # newly queued work.
         conn.execute(
@@ -3378,17 +3395,19 @@ def raise_translation_priority_for_detail(db_path: str, workshop_id: int):
 def get_next_batch_for_translation(db_path: str, limit: int = 20) -> list[dict]:
     """Returns up to `limit` highest-priority fields for translation.
 
-    Ordering is ``priority DESC`` then oldest-queued first. The
-    ``queued_at IS NOT NULL`` term (0 for NULL, 1 otherwise) deliberately puts
-    legacy rows whose ``queued_at`` is unknown BEFORE any dated row at the same
-    priority: unknown queue time must not jump the backlog, and SQLite's
-    implicit NULL-first sort is now made explicit and self-documenting.
+    Ordering is ``priority DESC`` then oldest-queued first, with rows whose
+    ``queued_at`` is unknown ahead of dated rows at the same priority: SQLite
+    sorts NULL first in ascending order, so ``queued_at ASC`` already puts the
+    legacy backlog ahead of newly queued work. The former
+    ``queued_at IS NOT NULL`` term was redundant with that, and it prevented
+    ``idx_translation_queue_poll`` from serving the sort because a term that
+    matches no index forces a temp B-tree.
     """
     conn = get_connection(db_path)
     cursor = conn.execute(
         "SELECT * FROM translation_queue "
         f"WHERE {translation_queue_predicate()} "
-        "ORDER BY priority DESC, queued_at IS NOT NULL, queued_at ASC LIMIT ?",
+        "ORDER BY priority DESC, queued_at ASC LIMIT ?",
         (limit,)
     )
     rows = [dict(row) for row in cursor.fetchall()]
