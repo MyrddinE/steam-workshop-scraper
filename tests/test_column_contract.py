@@ -85,7 +85,9 @@ def test_migrated_from_old_schema_matches_fresh(fresh_columns, tmp_path):
     workshop_items columns as a brand-new one.
 
     The old schema uses the historical column names (and TEXT timestamps) so the
-    whole migration chain, including 13->14, has to run.
+    whole migration chain, including 13->14, has to run. The hand-built file
+    records `user_version = 0`, which the driver now treats as *fresh* and
+    builds with the current schema, so the chain is requested explicitly.
     """
     old_path = str(tmp_path / "old_schema.db")
     conn = sqlite3.connect(old_path)
@@ -126,7 +128,7 @@ def test_migrated_from_old_schema_matches_fresh(fresh_columns, tmp_path):
     conn.commit()
     conn.close()
 
-    initialize_database(old_path)
+    initialize_database(old_path, legacy_chain=True)
 
     conn = get_connection(old_path)
     migrated_columns = {row[1] for row in conn.execute(f"PRAGMA table_info({ITEM_TABLE})")}

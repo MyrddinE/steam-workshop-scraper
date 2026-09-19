@@ -78,7 +78,10 @@ def deterministic_db(tmp_path_factory):
     Uses a fixed seed (42) for reproducible test data. Session-scoped so all
     filter tests share the same pre-built database."""
     db_path = str(tmp_path_factory.mktemp("data") / "test.db")
-    initialize_database(db_path)
+    # The shared fixture deliberately builds through the *legacy* path, so the
+    # whole suite keeps replaying the migration chain (see
+    # tests/test_fresh_schema_path.py for the default current-schema path).
+    initialize_database(db_path, legacy_chain=True)
     rng = random.Random(_DET_SEED)
     now = int(time.time())  # used for first_seen_at in insert_or_update_item
 
@@ -184,9 +187,14 @@ def mock_config_with_api(db_path):
 
 @pytest.fixture
 def db_path(tmp_path):
-    """Fixture providing a temporary initialized database."""
+    """Fixture providing a temporary initialized database.
+
+    Built through the legacy path on purpose: it keeps the migration chain
+    exercised across the suite. A current-schema database is available from
+    the ``fresh_db_path`` fixture in tests/test_fresh_schema_path.py.
+    """
     path = str(tmp_path / "test_workshop.db")
-    initialize_database(path)
+    initialize_database(path, legacy_chain=True)
     return path
 
 @pytest.fixture(autouse=True)

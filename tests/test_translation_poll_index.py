@@ -127,7 +127,7 @@ def test_the_poll_index_is_created_after_the_column_rename(tmp_path):
     assert "dt_queued" in columns and "queued_at" not in columns, columns
     assert INDEX not in _index_sql(path), "_create_legacy_schema must not create it before the rename"
 
-    database.initialize_database(path)
+    database.initialize_database(path, legacy_chain=True)
 
     assert INDEX in _index_sql(path)
     conn = database.get_connection(path)

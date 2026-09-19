@@ -1,6 +1,12 @@
 # Schema & Migrations
 
-The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_version` increment pattern. Each migration is its own function in `src/database.py`, named `_migration_<from>_to_<to>`, and the ordered `MIGRATIONS` table maps each target version to its function. `initialize_database` is a short driver: it creates the schema, reads `PRAGMA user_version`, and runs every pending entry in ascending order on startup. Fresh databases run all migrations; existing databases run only pending ones.
+The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_version` increment pattern. Each migration is its own function in `src/database.py`, named `_migration_<from>_to_<to>`, and the ordered `MIGRATIONS` table maps each target version to its function. `initialize_database` is a short driver, and the path it takes is decided by the database's **recorded version**, never by whether the file exists:
+
+- a **fresh** database (`user_version = 0`) is built directly at `EXPECTED_VERSION` by `_create_current_schema`, with no migrations replayed;
+- a fresh database built with `legacy_chain=True` takes the historical shape from `_create_legacy_schema` and runs every migration — this is how the chain stays exercised;
+- an **existing** database (`user_version > 0`) always takes `_create_legacy_schema` followed by its pending migrations, whatever the flag says, because the chain is the only thing that can carry it forward.
+
+The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v31) for what that means when you add one.
 
 ---
 
@@ -42,11 +48,14 @@ Primary key: `workshop_id INTEGER PRIMARY KEY` (aliased from rowid). Columns:
 | own_first_subscribed_at | INTEGER | When we first *saw* the owner subscribed; sticky, and the only source of the `previously` state |
 | downloaded_at | INTEGER | Local latch: when this app first saw Steam's downloaded copy of a subscribed item on disk (v26). Set only by `src/workshop_folders`, cleared only beside `own_subscribed` when the item leaves the subscription list. NULL means not confirmed on disk |
 
-The `CREATE TABLE` statement still declares the historical names (`dt_found`, `dt_updated`,
-`dt_attempted`, `dt_translated`, `time_created`, `time_updated`) and a legacy `tags` column. A fresh
-database starts at `user_version = 0` and runs the entire migration chain, whose earlier steps read
-those names, so the statement is deliberately historical; after the chain runs, the table has the
-v14 columns above.
+The columns above are what the database holds at v30, and they are reached two ways.
+`_create_current_schema` creates them directly, so a fresh database starts at `EXPECTED_VERSION`
+with these names. `_create_legacy_schema`'s `CREATE TABLE` instead declares the historical names
+(`dt_found`, `dt_updated`, `dt_attempted`, `dt_translated`, `time_created`, `time_updated`) and a
+legacy `tags` column, because a `legacy_chain` database starts at `user_version = 0` and runs the
+entire migration chain, whose earlier steps read those names; migration 13→14 renames them and 5→6
+drops `tags`. The two endpoints must agree, which
+`tests/test_fresh_schema_path.py::test_schema_equivalence` enforces.
 
 ### `creators` — creator profiles
 
@@ -69,8 +78,8 @@ v14 columns above.
 | priority | INTEGER | Priority level |
 | queued_at | INTEGER | Our clock: when queued (epoch). NULL on pre-v14 rows, where the time is unknown |
 
-Indexed by `idx_translation_queue_lookup` on `(item_type, item_id, field)`, created in
-`_create_legacy_schema` rather than by a migration (see [Indexes](#indexes) for why).
+Indexed by `idx_translation_queue_lookup` on `(item_type, item_id, field)`, created by both schema
+builders rather than by a migration (see [Indexes](#indexes) for why).
 
 ### `tags` — normalized tag names
 
@@ -135,7 +144,7 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 | idx_wilson_subscription_score | wilson_subscription_score | "Subscriber Score" sort |
 | idx_wilson_favorite_score | wilson_favorite_score | "Favorite Score" sort |
 | idx_translation_priority | translation_priority | Translation queue scanning |
-| idx_translation_queue_lookup | translation_queue (item_type, item_id, field) | Per-field queue lookup and the 22→23 repair's two-column `NOT EXISTS`. Created in `_create_legacy_schema` (unversioned), so the index exists when the repair runs |
+| idx_translation_queue_lookup | translation_queue (item_type, item_id, field) | Per-field queue lookup and the 22→23 repair's two-column `NOT EXISTS`. Created in `_create_legacy_schema` (unversioned) and mirrored in `_create_current_schema`, so the index exists when the repair runs |
 | idx_translation_queue_poll | translation_queue (priority DESC, queued_at ASC) | Translation poll (`get_next_batch_for_translation`) ordering. Created in `_ensure_indexes`, which runs after 13→14 renames `dt_queued` to `queued_at` |
 | idx_web_scrape_queue | (needs_web_scrape DESC, api_fetched_at ASC) WHERE needs_web_scrape > 0 | Web scrape worker poll and web queue breakdown (v25) |
 | idx_image_queue | (needs_image DESC, api_fetched_at ASC) WHERE needs_image > 0 | Image worker poll and image queue breakdown (v25) |
@@ -155,10 +164,16 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 `initialize_database` (`src/database.py`) is a short driver. It:
 
 1. opens the connection and sets `PRAGMA journal_mode=WAL`;
-2. calls `_create_legacy_schema(cursor, conn)`, which creates the tables and the
-   unversioned baseline columns every database history shares;
-3. reads `PRAGMA user_version` and runs every entry in the module-level
-   `MIGRATIONS` table whose target version is above it, in ascending order;
+2. reads `PRAGMA user_version`;
+3. branches on the recorded version:
+   - a fresh file (`user_version = 0`) with `legacy_chain=False` calls
+     `_create_current_schema(cursor, conn)`, which builds the v30 schema directly
+     and records `EXPECTED_VERSION`;
+   - otherwise it calls `_create_legacy_schema(cursor, conn)` and then runs every
+     entry in the module-level `MIGRATIONS` table whose target version is above
+     the recorded one, in ascending order. `legacy_chain=True` is the only way a
+     fresh file arrives here; an existing database (`user_version > 0`) always
+     does;
 4. calls `_ensure_indexes(cursor)`, then commits and closes.
 
 `MIGRATIONS` is an ordered list of `(target version, function)` pairs, from
@@ -184,7 +199,7 @@ independently, allowing crash recovery on a per-migration basis.
 from 1 to `EXPECTED_VERSION`, that each entry names the function for its own
 version, and that a fresh database reaches `EXPECTED_VERSION`.
 
-**Adding the next migration (target v31):**
+### Adding the next migration (target v31)
 
 1. bump `EXPECTED_VERSION` in `src/database.py` to `31`;
 2. append `def _migration_30_to_31(cursor, conn, db_path): ...` immediately
@@ -193,14 +208,25 @@ version, and that a fresh database reaches `EXPECTED_VERSION`.
    `PRAGMA user_version = N` target);
 3. append `(31, _migration_30_to_31)` as the last entry of `MIGRATIONS`;
 4. add a `### v30 → v31: ...` entry below, in the same shape as the others;
-5. if the step adds a column or table that a fresh database must also start
-   with, add it to `_create_legacy_schema` too — a fresh database begins at
-   `user_version = 0` and runs the whole table, so the two paths must agree on
-   the terminal schema.
+5. **mirror the step in `_create_current_schema`.** It is the shape a fresh
+   database is created at now, so a schema change that lands only in the chain
+   moves the legacy endpoint and not the fresh one. Update the table, index or
+   trigger definition there to the step's terminal shape, exactly as the step
+   leaves it. A pure data migration (no DDL) needs no change here;
+6. if the step adds a column or table that the historical schema must also
+   start with, add it to `_create_legacy_schema` too — a `legacy_chain`
+   database begins at `user_version = 0` and runs the whole table, so the two
+   builders must agree on the terminal schema;
+7. run `tests/test_fresh_schema_path.py::test_schema_equivalence`, which builds
+   one database each way and fails while the two endpoints disagree. This is
+   the check that makes the forward rule mechanical rather than a habit.
 
 `tests/test_migration_table.py` fails if the table and `EXPECTED_VERSION`
 disagree, so a step cannot be half-added (function without entry, or entry
-without function) silently.
+without function) silently. `test_schema_equivalence` fails if the step is
+added to the chain without being mirrored in the current builder, and
+`test_default_fresh_path_does_not_replay_the_chain` fails if the chain leaks
+back into the fresh default.
 
 ### v0 → v1: Wilson scores
 
@@ -905,13 +931,15 @@ Opens a new SQLite connection with `row_factory = sqlite3.Row` for dict-like row
 
 ### `initialize_database` (database)
 
-The driver described under [Migration system](#migration-system-initialize_database): sets WAL mode, calls `_create_legacy_schema`, runs the pending entries of `MIGRATIONS` in ascending order, calls `_ensure_indexes`, and commits. This is called on every startup by the daemon, TUI, and web runner — before anything reads or writes — so the one call covers every later connection. Idempotent and safe to call on an existing database: on a database already in WAL the statement is a no-op.
+The driver described under [Migration system](#migration-system-initialize_database): sets WAL mode, reads the recorded version, then builds a fresh file at `EXPECTED_VERSION` with `_create_current_schema` or runs `_create_legacy_schema` plus the pending entries of `MIGRATIONS` in ascending order, calls `_ensure_indexes`, and commits. The keyword-only `legacy_chain` (default `False`) selects the chain for a fresh file only; every existing `initialize_database(db_path)` call site keeps working untouched. This is called on every startup by the daemon, TUI, and web runner — before anything reads or writes — so the one call covers every later connection. Idempotent and safe to call on an existing database: on a database already in WAL the statement is a no-op.
 
-### `_create_legacy_schema`, `_ensure_indexes`, `MIGRATIONS` (database)
+### `_create_current_schema`, `_create_legacy_schema`, `_ensure_indexes`, `MIGRATIONS` (database)
 
-`_create_legacy_schema(cursor, conn)` creates the tables (`IF NOT EXISTS`) and the baseline columns, and runs the legacy data conversions every database history shares. It is the unversioned part of the schema, run before the versioned steps. Because it runs on every startup, it also runs on both sides of migration 29→30: it resolves the creator and discovery table names once with `_current_table_name` (new name if it exists, else the historical one, else the historical one for a brand-new file) and routes its `CREATE TABLE`, `_safe_add_columns`, populate step and legacy-filter conversion through the resolved name.
+`_create_current_schema(cursor, conn)` creates a brand-new database directly at `EXPECTED_VERSION`. Every table, index and trigger definition it holds was dumped from `sqlite_master` of a database the migration chain itself produced at v30 — not written from reading the migrations — so the index SQL it creates is the exact text SQLite stores. It deliberately does **not** repeat the query indexes `_ensure_indexes` owns, because that runs after it on both paths; those are the ones with historical names such as `idx_time_created`, whose definitions a `RENAME COLUMN` rewrote. It does create the indexes a *migration* owns, because no migration runs on this path.
 
-`_ensure_indexes(cursor)` creates the query indexes. It is separate from `_create_legacy_schema` because several index columns (`api_fetched_at`, `scrape_version`) only exist after migration 13→14's renames, so it must run last; every statement is `IF NOT EXISTS`. One queue index is the exception and lives in `_create_legacy_schema` instead: `idx_translation_queue_lookup` on `translation_queue (item_type, item_id, field)`, because migration 22→23's repair runs *inside* the `MIGRATIONS` loop and an index created here would be too late to serve it. Its columns have existed since the table was created, so it is safe at every version.
+`_create_legacy_schema(cursor, conn)` creates the tables (`IF NOT EXISTS`) and the baseline columns in their historical form, and runs the legacy data conversions every database history shares. It is the unversioned part of the schema, run before the versioned steps. Because it runs on every startup for an existing database, it also runs on both sides of migration 29→30: it resolves the creator and discovery table names once with `_current_table_name` (new name if it exists, else the historical one, else the historical one for a brand-new file) and routes its `CREATE TABLE`, `_safe_add_columns`, populate step and legacy-filter conversion through the resolved name.
+
+`_ensure_indexes(cursor)` creates the query indexes. It is separate from the schema builders because several index columns (`api_fetched_at`, `scrape_version`) only exist after migration 13→14's renames, so it must run last; every statement is `IF NOT EXISTS`. One queue index is the exception and lives in both schema builders instead: `idx_translation_queue_lookup` on `translation_queue (item_type, item_id, field)`, because migration 22→23's repair runs *inside* the `MIGRATIONS` loop and an index created here would be too late to serve it. Its columns have existed since the table was created, so it is safe at every version.
 
 `MIGRATIONS` is the ordered `[(target version, function), ...]` table the driver walks. The functions are `_migration_<from>_to_<to>(cursor, conn, db_path)` and sit above the table in ascending order. See [Migration system](#migration-system-initialize_database) for the shape and for how to add the next one.
 

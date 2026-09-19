@@ -138,8 +138,9 @@ The database is designed for high-concurrency and complex querying. See
   * **`creators`**: Creator information, keyed by `steamid`, with translated name fields.
   * **`app_discovery`**: Per-AppID discovery state (`last_cursor`) and the
     enrichment filters that gate web scraping.
-* **Schema evolution**: Built-in migration logic adds and renames columns on existing databases
-  without data loss. See [schema-migrations.md](schema-migrations.md).
+* **Schema evolution**: A brand-new database is created directly at the current schema version; an
+  existing one is carried forward by built-in migration logic that adds and renames columns without
+  data loss. See [schema-migrations.md](schema-migrations.md).
 
 ### The Translator
 
