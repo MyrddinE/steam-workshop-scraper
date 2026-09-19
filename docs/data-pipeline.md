@@ -428,17 +428,19 @@ It replaced a JSON envelope (`[{id, field, text}]` in, `[{id, translated}]` out)
 
 **Partial replies and failures**: a reply covering only part of the batch is a **partial success**. The fields it resolved are committed, the fields it missed keep their `translation_queue` rows for a later pass, and the failure streak behind the backoff is not grown — the model did answer, so backing off would slow work it did return. A reply yielding **no usable block at all** is a failure instead: it raises, which is what puts the backoff in charge rather than re-sending the same request in a tight loop. API failures log an error and retry on the next cycle.
 
-### `flag_for_translation` (database)
+### The superseded flag-as-queue producer (removed)
 
-Sets `translation_priority` on a `workshop_items` or `users` row and nothing else.
-It is the **superseded producer** from the era when the mirror *was* the queue:
-`get_next_translation_item` scanned both tables by that flag, so raising it was a
-complete producer and `_build_user_record` calling it directly was correct. Nothing
-in `src/` calls either function now — only `tests/test_database.py` exercises them —
-because the current design queues a field with `flag_field_for_translation` and
-derives the mirror from the queue. Raising the mirror without a queue row is exactly
-the stranded state migrations 22→23 and 27→28 repair, so these two are traps rather
-than tools; see [code-issues.md](code-issues.md) entry 45.
+The mirror was once the queue itself. `flag_for_translation` set
+`translation_priority` on a `workshop_items` or `users` row and nothing else, and
+`get_next_translation_item` scanned both tables by that flag, so raising the flag
+was a complete producer and `_build_user_record` calling it directly was correct.
+The per-field `translation_queue` replaced that scan, and once nothing in `src/`
+called either function — only their own tests did — both were deleted. The current
+design queues a field with `flag_field_for_translation` and derives the mirror
+from the queue, so raising the mirror without a queue row is the stranded state
+migrations 22→23 and 27→28 repair. The regression that followed from leaving the
+producer unported is why migration 27→28 exists; see
+[schema-migrations.md](schema-migrations.md).
 
 ### `flag_field_for_translation` (database)
 
@@ -462,7 +464,7 @@ priority. The fifth, a creator's name, is the exception and says why below.
 | Web scrape succeeds | `web_worker.py`, `WebScraperThread` | `extended_description_en` | 3 | Yes |
 | Item appears in a list | `bump_translation_for_list` (TUI list load, `POST /api/search`) | all three | 5 | Yes |
 | Item opened in the detail pane | `bump_translation_for_detail` (TUI selection, `GET /api/item/<id>`) | all three | 10 | Yes |
-| Daemon refreshes a creator's profile | `daemon.py`, `_store_user_record` (from `_refresh_creators` and `expand_user_discovery`) | `personaname_en` | 1 | **No** |
+| Daemon refreshes a creator's profile | `daemon.py`, `_store_user_record` (from `_refresh_creators`) | `personaname_en` | 1 | **No** |
 
 Two conditions apply to every trigger:
 

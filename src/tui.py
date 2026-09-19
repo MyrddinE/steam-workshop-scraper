@@ -3,14 +3,14 @@ import logging
 import math
 import time
 from functools import partial
-from textual.app import App, ComposeResult, SystemCommand
+from textual.app import App, ComposeResult
 from textual import on, events
 from textual.command import Provider, Hit, DiscoveryHit
 from textual.system_commands import SystemCommandsProvider
 from typing import Iterable
 from textual.screen import Screen, ModalScreen
 from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button, Markdown, DataTable, RichLog
-from textual.containers import Horizontal, Vertical, VerticalScroll, Center, Grid
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.worker import Worker, WorkerState
 from src.database import search_items, get_all_authors, initialize_database, get_item_details, save_app_filter, clear_pending_items, toggle_subscription_queue_status, get_queued_items, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, get_connection, FILTER_SCHEMA, ALL_FILTER_FIELDS, bump_api_priority_for_list, bump_api_priority_for_detail, get_subscription_states, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES
@@ -30,7 +30,6 @@ from src.daemon_control import DaemonController
 import os
 import yaml
 import threading
-import webbrowser
 import datetime
 
 # Field types and enum values from the central schema. The builder's value
@@ -887,18 +886,12 @@ class DaemonManagerScreen(Screen):
             self._log_timer.stop()
             self._log_timer = None
 
-    def _daemon_is_running(self) -> bool:
-        return self.controller.is_running()
-
     def _update_status(self) -> None:
         status = self.controller.status()
         if status["running"]:
             self.query_one("#dm-status", Static).update(f"[green]Running (PID: {status['pid']})[/green]")
         else:
             self.query_one("#dm-status", Static).update("[red]Not running[/red]")
-
-    def _read_pid(self) -> int | None:
-        return self.controller.read_pid()
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         for button_id in ("dm-start", "dm-stop", "dm-restart"):

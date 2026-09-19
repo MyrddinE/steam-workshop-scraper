@@ -128,29 +128,6 @@ def test_clear_pending_items(db_path):
     
     assert ids == [3, 4, 5]
 
-def test_translation_columns_and_priority(db_path):
-    """Test that translation-related columns and priority queries work correctly."""
-    # Insert an item
-    insert_or_update_item(db_path, {"workshop_id": 101, "title": "Test Title"})
-    
-    # Flag it for translation (Priority 1 - Auto)
-    from src.database import flag_for_translation, get_next_translation_item
-    flag_for_translation(db_path, 101, 1, table="workshop_items")
-    
-    # Flag a user with higher priority (Priority 10 - User)
-    from src.database import insert_or_update_user
-    insert_or_update_user(db_path, {"steamid": 76561198000000000, "personaname": "안녕하세요"})
-    flag_for_translation(db_path, 76561198000000000, 10, table="users")
-    
-    # get_next_translation_item should return the user first because of higher priority
-    next_item = get_next_translation_item(db_path)
-    assert next_item == ("user", 76561198000000000, 10)
-    
-    # After translating user, should return the mod
-    flag_for_translation(db_path, 76561198000000000, 0, table="users")
-    next_item = get_next_translation_item(db_path)
-    assert next_item == ("workshop_item", 101, 1)
-
 def test_user_table_operations(db_path):
     """Tests basic CRUD for the users table."""
     from src.database import insert_or_update_user, get_user
@@ -222,11 +199,6 @@ def test_concurrent_read_write(db_path):
     count = conn.execute("SELECT COUNT(*) as c FROM workshop_items").fetchone()["c"]
     conn.close()
     assert count == 20
-
-def test_get_next_translation_item_none(db_path):
-    from src.database import get_next_translation_item
-    # No items flagged
-    assert get_next_translation_item(db_path) is None
 
 def test_search_items_advanced_queries(db_path):
     from src.database import insert_or_update_item, search_items

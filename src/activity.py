@@ -213,13 +213,6 @@ def paused_seconds(db_path: str, window_start: int, now: int | None = None) -> f
     return _merge(intervals, window_start, reference)
 
 
-def active_seconds(db_path: str, window_start: int, now: int | None = None) -> float:
-    """Seconds of ``[window_start, now]`` the queues were not paused."""
-    reference = _now(now)
-    wall = max(0, reference - int(window_start))
-    return max(0.0, wall - paused_seconds(db_path, window_start, reference))
-
-
 # --------------------------------------------------------------------------
 # the staleness sweep's inflow into the API queue
 # --------------------------------------------------------------------------

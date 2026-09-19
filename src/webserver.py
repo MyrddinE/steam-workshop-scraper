@@ -620,12 +620,8 @@ def _ensure_image_flagged(workshop_id, priority):
     return False
 
 
-# The remedy both pre-flight refusals name: the operator reading it is holding a
-# browser, so it points at the two things that put a credential where this
-# process can find it, not at the branch that noticed one was missing. The
-# sentences and the request shape live in `src/subscribe_engine.py`, which the
+# The sentences and the request shape live in `src/subscribe_engine.py`, which the
 # TUI's queue drives too, so the two front ends cannot drift apart.
-_SUBSCRIBE_REMEDY = subscribe_engine.SUBSCRIBE_REMEDY
 _SUBSCRIBE_NO_SESSION_MESSAGE = subscribe_engine.NO_SESSION_MESSAGE
 _SUBSCRIBE_NO_LOGIN_MESSAGE = subscribe_engine.NO_LOGIN_MESSAGE
 _SUBSCRIBE_SESSION_REJECTED_DETAIL = subscribe_engine.SUBSCRIBE_SESSION_REJECTED_DETAIL

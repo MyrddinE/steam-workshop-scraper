@@ -1,7 +1,6 @@
 import logging
 import signal
 import atexit
-import io
 import sys
 import os
 from src.daemon import Daemon

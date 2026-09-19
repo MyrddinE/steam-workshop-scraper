@@ -266,12 +266,6 @@ def web_download_capture_active() -> bool:
         return bool(_outbox_dir) and _web_download_capture
 
 
-def image_capture_active() -> bool:
-    """Whether every image download is being saved. Read before each download."""
-    with _lock:
-        return bool(_outbox_dir) and _image_capture
-
-
 def elide_secrets(cookies=None, data=None, headers=None):
     """Replace the credential values in one request with ``***``.
 

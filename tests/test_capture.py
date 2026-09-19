@@ -392,9 +392,22 @@ def test_different_image_failures_do_not_collapse_into_one_sample(outbox):
     assert len(state["digests"]) == 2
 
 
+def _image_capture_active():
+    """The image-capture switch, read the way the recorder reads it.
+
+    This accessor used to live in `src/capture.py` as `image_capture_active`.
+    Only these tests called it, so it moved here and the test now reads the
+    switch directly. `web_download_capture_active` stays in `src/` because the
+    web path has to decide *before* the pull; an image is downloaded either way,
+    so the recorder's own guard is the only thing that needs to consult this one.
+    """
+    with capture._lock:
+        return bool(capture._outbox_dir) and capture._image_capture
+
+
 def test_an_image_success_is_captured_only_with_the_switch_on(outbox):
     """The switch is the config key `capture_image_downloads`, not the web one."""
-    assert capture.image_capture_active() is False
+    assert _image_capture_active() is False
 
     assert capture.record_image_download(
         42, "https://cdn.example.invalid/42.jpg", True, http_status=200,
@@ -404,7 +417,7 @@ def test_an_image_success_is_captured_only_with_the_switch_on(outbox):
 
     capture.configure(outbox, image_capture=True)
     try:
-        assert capture.image_capture_active() is True
+        assert _image_capture_active() is True
         assert capture.record_image_download(
             42, "https://cdn.example.invalid/42.jpg", True, http_status=200,
             headers={"Content-Type": "image/jpeg"}, content_type="image/jpeg",

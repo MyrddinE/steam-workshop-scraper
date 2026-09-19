@@ -509,10 +509,10 @@ class Daemon:
         caller of this method holds one.
 
         This is the producer issue 45 restored: before the per-field queue was
-        introduced, `get_next_translation_item` scanned `users` by
-        `translation_priority`, so raising the mirror in the record was the whole
-        producer. The drain reads `translation_queue` now, so the name has to be
-        queued as a field like any other.
+        introduced, the (since removed) `get_next_translation_item` scanned
+        `users` by `translation_priority`, so raising the mirror in the record was
+        the whole producer. The drain reads `translation_queue` now, so the name
+        has to be queued as a field like any other.
         """
         insert_or_update_user(self.db_path, self._build_user_record(steamid, personaname))
         if not is_ascii(personaname):
@@ -597,38 +597,6 @@ class Daemon:
     def _discovery_alive(self) -> bool:
         """Whether a discovery pass should keep going rather than abandon a wait."""
         return self.running and not self._pid_file_removed()
-
-    def expand_user_discovery(self):
-        """
-        Scans workshop_items for creators who are not in the users table 
-        and fetches their summaries.
-        """
-        conn = get_connection(self.db_path)
-        # Find creators in workshop_items that aren't in users table
-        sql = """
-            SELECT DISTINCT creator FROM workshop_items 
-            WHERE creator IS NOT NULL 
-            AND creator NOT IN (SELECT steamid FROM users)
-            LIMIT 100
-        """
-        cursor = conn.execute(sql)
-        missing_ids = [int(row["creator"]) for row in cursor.fetchall() if row["creator"]]
-        conn.close()
-
-        if missing_ids:
-            logging.info(f"Proactively fetching {len(missing_ids)} missing user profiles...")
-            try:
-                summaries = get_player_summaries(missing_ids, self.api_key)
-                for sid in missing_ids:
-                    if sid in summaries:
-                        pdata = summaries[sid]
-                        personaname = pdata.get("personaname")
-                        self._store_user_record(sid, personaname)
-                        logging.info(f"Updated profile for user {sid}: '{personaname}'")
-                    else:
-                        self._store_user_record(sid, f"SteamID:{sid}")
-            except Exception as e:
-                logging.error(f"Error expanding user discovery: {e}")
 
     def process_batch(self):
         """Process one batch: housekeeping, acquire work, then process each item."""
