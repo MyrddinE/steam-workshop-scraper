@@ -594,7 +594,7 @@ before continuing, the same rule migrations 13→14 and 14→15 follow.
 
 `language` is removed from `WORKSHOP_ITEM_COLUMNS`, so it is no longer in the
 API merge allow-list either, and the `Language ID` filter alias is gone
-(`FIELD_NAME_MAP`). A saved filter that named it now falls through as an unknown
+(`FILTER_FIELD_TO_COLUMN`). A saved filter that named it now falls through as an unknown
 field and is ignored rather than erroring, which is what it effectively did
 already: no row ever matched.
 

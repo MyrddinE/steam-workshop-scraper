@@ -167,12 +167,12 @@ SEARCH_FILTER_SCHEMA = [
     {"field": SUBSCRIBED_FIELD,   "db_col": SUBSCRIBED_DB_COL,           "type": "enum",   "values": SUBSCRIBED_VALUES, "ops": ["is", "is_not"]},
 ]
 
-# Build FIELD_NAME_MAP and ALL_FILTER_FIELDS from the schema
+# Build FILTER_FIELD_TO_COLUMN and ALL_FILTER_FIELDS from the schema
 ALL_FILTER_FIELDS = [f["field"] for f in SEARCH_FILTER_SCHEMA]
-FIELD_NAME_MAP = {f["field"]: f["db_col"] for f in SEARCH_FILTER_SCHEMA}
+FILTER_FIELD_TO_COLUMN = {f["field"]: f["db_col"] for f in SEARCH_FILTER_SCHEMA}
 # AppID backwards-compat alias
-FIELD_NAME_MAP["AppID"] = "consumer_appid"
-FIELD_NAME_MAP["Filename"] = "filename"
+FILTER_FIELD_TO_COLUMN["AppID"] = "consumer_appid"
+FILTER_FIELD_TO_COLUMN["Filename"] = "filename"
 
 # Fields that have a translated _en counterpart; these are dual-searched
 # when the operator is a text-matching one (contains, is, etc.)
@@ -329,7 +329,7 @@ def _compute_percentile_threshold(db_path: str, db_col: str, percentile, base_fi
             val = f.get("value")
             if not field or not op:
                 continue
-            filter_db_col = FIELD_NAME_MAP.get(field, field)
+            filter_db_col = FILTER_FIELD_TO_COLUMN.get(field, field)
             if filter_db_col == "tags":
                 if op in ("is", "is_not"):
                     continue
@@ -410,8 +410,8 @@ def build_filters_sql(filters: list[dict]) -> tuple[str, list]:
         val = f.get("value")
         if not field or not op:
             continue
-        db_col = FIELD_NAME_MAP.get(field, field)
-        if db_col not in FIELD_NAME_MAP.values() and db_col not in ("tags", "full_text"):
+        db_col = FILTER_FIELD_TO_COLUMN.get(field, field)
+        if db_col not in FILTER_FIELD_TO_COLUMN.values() and db_col not in ("tags", "full_text"):
             continue
         if db_col == "tags":
             if op in ("is", "is_not"):
@@ -671,7 +671,7 @@ def _evaluate_filters(item: dict, filters: list[dict]) -> bool:
         val = f.get("value")
         if not field or not op:
             continue
-        db_col = FIELD_NAME_MAP.get(field, field)
+        db_col = FILTER_FIELD_TO_COLUMN.get(field, field)
         if not _evaluate_single_filter(item, db_col, op, val):
             return False
     return True
@@ -774,7 +774,7 @@ def _demote_filtered_out_queue_priorities(conn) -> tuple[int, int]:
     for appid, filters in rules:
         # Only the columns these filters actually read, plus the two priorities:
         # the candidate set is large and the rows carry long text.
-        referenced = {FIELD_NAME_MAP.get(f.get("field"), f.get("field"))
+        referenced = {FILTER_FIELD_TO_COLUMN.get(f.get("field"), f.get("field"))
                       for f in filters if isinstance(f, dict) and f.get("field")}
         referenced.discard("tags")
         # The Subscribed field's virtual column spans four real ones. The row
@@ -2943,7 +2943,7 @@ def search_items(db_path: str, query: str = "", appid: int = None,
             val = f.get("value")
             if not field or not val:
                 continue
-            db_col = FIELD_NAME_MAP.get(field, field)
+            db_col = FILTER_FIELD_TO_COLUMN.get(field, field)
             if db_col == "tags":
                 continue
             threshold = _compute_percentile_threshold(db_path, db_col, val, regular_filters)
@@ -3040,14 +3040,14 @@ def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None,
         for f in filters:
             if f.get("op") == "percentile":
                 continue
-            if FIELD_NAME_MAP.get(f.get("field", "")) == "full_text":
+            if FILTER_FIELD_TO_COLUMN.get(f.get("field", "")) == "full_text":
                 continue  # FTS5 MATCH can't be applied to Wilson score computation
             field = f.get("field")
             op = f.get("op")
             val = f.get("value")
             if not field or not op:
                 continue
-            db_col = FIELD_NAME_MAP.get(field, field)
+            db_col = FILTER_FIELD_TO_COLUMN.get(field, field)
             if db_col == "tags":
                 if op in ("is", "is_not"):
                     continue

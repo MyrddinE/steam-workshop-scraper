@@ -97,7 +97,7 @@ def test_migration_is_idempotent(db_path):
 
 def test_word_language_id_is_no_longer_a_filter_alias():
     """The alias pointed at a column that never held a value; it is gone with it."""
-    from src.database import FIELD_NAME_MAP
+    from src.database import FILTER_FIELD_TO_COLUMN
 
-    assert "Language ID" not in FIELD_NAME_MAP
-    assert "language" not in FIELD_NAME_MAP.values()
+    assert "Language ID" not in FILTER_FIELD_TO_COLUMN
+    assert "language" not in FILTER_FIELD_TO_COLUMN.values()
