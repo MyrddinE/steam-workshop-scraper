@@ -515,7 +515,7 @@ Reads `.tui_state.yaml` for filter/sort state restoration. The client uses this 
 
 ### `/api/clear_pending` — POST
 
-Deletes every pending item — those with no status or a 404 status and no successful API fetch (`delete_never_fetched_items`, `src/database.py:2354`) — and returns `{ok, deleted}` with the number of rows removed. This is the same predicate and the same delete as the TUI's `action_clear_pending`; there is deliberately no dry-run mode. The UI asks for confirmation first, naming what will be deleted.
+Deletes every pending item — those with no status or a 404 status and no successful API fetch (`delete_never_fetched_items`, `src/database.py:3414`) — and returns `{ok, deleted}` with the number of rows removed. This is the same predicate and the same delete as the TUI's `action_clear_pending`; there is deliberately no dry-run mode. The UI asks for confirmation first, naming what will be deleted.
 
 ### `/api/save_filter` — POST
 
