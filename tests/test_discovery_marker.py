@@ -152,8 +152,8 @@ def test_a_rejected_item_with_nothing_to_queue_is_marked_current(db_path, tmp_pa
 def test_an_enriched_item_with_only_the_image_queued_is_still_enriching(
         db_path, tmp_path, caplog):
     """A queued image is queued work, even when the description is current."""
-    with mock.patch("src.daemon.flag_for_web_scrape") as web, \
-            mock.patch("src.daemon.flag_for_image") as image:
+    with mock.patch("src.daemon.raise_web_scrape_priority") as web, \
+            mock.patch("src.daemon.raise_image_priority") as image:
         line = _discovery_line(db_path, tmp_path, caplog, enrich=True,
                                existing={**_CURRENT_ITEM, "image_extension": None},
                                api_data=_CURRENT_API)

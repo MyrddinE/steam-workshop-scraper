@@ -100,7 +100,7 @@ Tags are not a column on `workshop_items`. They live in `tags(tag_id, tag_name)`
 | `api_priority` | Steam API fetch queue. |
 | `needs_web_scrape` | HTML scrape queue. |
 | `needs_image` | Preview image download queue. |
-| `translation_priority` | Translation queue mirror. Raised together with the `translation_queue` row by `flag_field_for_translation` (which takes the `MAX` of the stored and new priority) **in one transaction**, and zeroed by the translator when the item's last queue row is deleted. A priority above `0` therefore means the item has at least one queued field; migration 22→23 cleared the rows that disagreed. |
+| `translation_priority` | Translation queue mirror. Raised together with the `translation_queue` row by `queue_field_for_translation` (which takes the `MAX` of the stored and new priority) **in one transaction**, and zeroed by the translator when the item's last queue row is deleted. A priority above `0` therefore means the item has at least one queued field; migration 22→23 cleared the rows that disagreed. |
 
 ## `users`
 
@@ -113,7 +113,7 @@ One row per Steam creator whose profile has been fetched, keyed by `steamid`.
 | `personaname_en` | TRANSLATED | Translated display name, written by the translator when it drains the creator's `personaname_en` queue row. |
 | `api_fetched_at` | STATE (ours) | Our clock: when the profile was last refreshed. |
 | `translated_at` | TRANSLATED/STATE | Our wall-clock time of the last translation. This is **not** a Steam version key: users have no `steam_updated_at`. |
-| `translation_priority` | QUEUE | Translation queue mirror, exactly as on `workshop_items`: raised by `flag_field_for_translation` in the same transaction as the `translation_queue` row and zeroed by the translator when the creator's last queue row is deleted. A priority above `0` therefore means the creator has at least one queued field. Migration 27→28 queued the flags that had no row behind them and cleared the ones with nothing left to translate. |
+| `translation_priority` | QUEUE | Translation queue mirror, exactly as on `workshop_items`: raised by `queue_field_for_translation` in the same transaction as the `translation_queue` row and zeroed by the translator when the creator's last queue row is deleted. A priority above `0` therefore means the creator has at least one queued field. Migration 27→28 queued the flags that had no row behind them and cleared the ones with nothing left to translate. |
 
 ## `translation_queue`
 

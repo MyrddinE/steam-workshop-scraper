@@ -37,7 +37,7 @@ from src.steam_api import (
 )
 from src.translator import TranslatorThread, is_ascii
 from src.config import login_secure_value, save_config
-from src.database import flag_for_web_scrape, flag_field_for_translation, flag_for_image, translation_is_current
+from src.database import raise_web_scrape_priority, queue_field_for_translation, raise_image_priority, translation_is_current
 from src.firefox_cookies import steam_login_secure
 from src.web_worker import WebScraperThread
 from src.image_worker import ImageScraperThread
@@ -178,7 +178,7 @@ class ScrapeImageOutcome(NamedTuple):
     * ``enriched`` -- the item matched its AppID's enrichment filters. This is
       what gates translation and the creator-persona refresh, and it says
       nothing about whether anything was queued.
-    * ``queued`` -- at least one of `flag_for_web_scrape` / `flag_for_image` was
+    * ``queued`` -- at least one of `raise_web_scrape_priority` / `raise_image_priority` was
       actually called. An enriched item whose description is current and whose
       preview needs no attempt matches the filters and queues nothing, and the
       discovery line must say so rather than claim it is ``enriching``.
@@ -193,9 +193,9 @@ class ScrapeImageOutcome(NamedTuple):
 # API merge. They must NOT survive a merge: a stale value would clobber a flag
 # just set, or resurrect one whose queue has already drained.
 #
-# flag_for_web_scrape / flag_for_image set their columns explicitly between the
+# raise_web_scrape_priority / raise_image_priority set their columns explicitly between the
 # merge and the insert. translation_priority is different only in timing: it is
-# written by flag_field_for_translation, which _queue_translations calls after
+# written by queue_field_for_translation, which _queue_translations calls after
 # the insert. Carrying the pre-fetch snapshot through the merge would write that
 # snapshot back over it, so a translator drain that landed while the API fetch
 # was in flight would be undone and leave a priority with no queue row behind
@@ -496,7 +496,7 @@ class Daemon:
         """Upsert a creator profile, then queue a non-ASCII name for translation.
 
         The write comes **before** the queue call on purpose.
-        `flag_field_for_translation` inserts the `translation_queue` row and
+        `queue_field_for_translation` inserts the `translation_queue` row and
         raises `users.translation_priority` in one transaction, so it needs the
         `users` row to exist: on a creator's first sighting there is nothing for
         the mirror to land on, and queueing first would leave a queue row whose
@@ -512,7 +512,7 @@ class Daemon:
         """
         insert_or_update_user(self.db_path, self._build_user_record(steamid, personaname))
         if not is_ascii(personaname):
-            flag_field_for_translation(
+            queue_field_for_translation(
                 self.db_path, "user", steamid, "personaname_en", personaname, 1)
 
     def _merge_and_clean_api_data(self, api_data: dict, stored_item: dict, item_id: int, now_ts: int) -> dict:
@@ -1048,7 +1048,7 @@ class Daemon:
             if description_is_current:
                 merged_data["extended_description"] = stored_item["extended_description"]
             else:
-                flag_for_web_scrape(self.db_path, item_id, max(3, requested_priority))
+                raise_web_scrape_priority(self.db_path, item_id, max(3, requested_priority))
                 queued = True
             enriched = True
         elif not description_is_current:
@@ -1059,7 +1059,7 @@ class Daemon:
             # unless a person asked for the item, so a newly discovered one is
             # queued at 1 rather than carrying its discovery priority (3) into
             # this queue and outranking an item the filters did select.
-            flag_for_web_scrape(self.db_path, item_id, max(1, requested_priority))
+            raise_web_scrape_priority(self.db_path, item_id, max(1, requested_priority))
             queued = True
 
         # Image work, on the same revision test. Without it every API fetch
@@ -1073,7 +1073,7 @@ class Daemon:
         if merged_data.get("preview_url") and not (
                 images.blocks_retry(existing_ext)
                 or (revision_unchanged and images.can_render_image(existing_ext))):
-            flag_for_image(self.db_path, item_id,
+            raise_image_priority(self.db_path, item_id,
                            max(3, requested_priority) if enriched else max(1, requested_priority))
             queued = True
         return ScrapeImageOutcome(enriched=enriched, queued=queued)
@@ -1082,7 +1082,7 @@ class Daemon:
                            enriched: bool, inherited_priority: int) -> None:
         """Flag title and short description for translation.
 
-        The non-ASCII test lives in flag_field_for_translation. What this adds is
+        The non-ASCII test lives in queue_field_for_translation. What this adds is
         the freshness test: a field whose translation was taken at the item's
         current Steam revision is left alone, so the staleness sweep does not
         re-translate unchanged text, while a field left behind by a source edit
@@ -1099,7 +1099,7 @@ class Daemon:
              merged_data.get("short_description_en")),
         ]:
             if text and not translation_is_current(translated, translate_version, steam_updated_at):
-                flag_field_for_translation(self.db_path, "item", item_id, field, text, translation_priority)
+                queue_field_for_translation(self.db_path, "item", item_id, field, text, translation_priority)
 
     def _creator_to_refresh(self, merged_data: dict, enriched: bool) -> int | None:
         """Return the creator id this item proposes for a persona refresh.

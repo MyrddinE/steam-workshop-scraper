@@ -60,7 +60,7 @@ def test_daemon_init_missing_appids():
 @patch('src.daemon.get_user')
 @patch('src.daemon.insert_or_update_user')
 @patch('src.daemon.insert_or_update_item')
-@patch('src.daemon.flag_for_web_scrape')
+@patch('src.daemon.raise_web_scrape_priority')
 @patch('time.sleep')
 def test_daemon_process_batch_success(mock_sleep, mock_flag_web, mock_insert, mock_insert_user, mock_get_user, mock_api, mock_get_items, mock_count, mock_config):
     mock_count.return_value = 1000
@@ -147,7 +147,7 @@ def test_daemon_process_batch_exit_early(mock_api, mock_get_items, mock_count, m
 @patch('src.daemon.get_user')
 @patch('src.daemon.insert_or_update_user')
 @patch('src.daemon.insert_or_update_item')
-@patch('src.daemon.flag_for_web_scrape')
+@patch('src.daemon.raise_web_scrape_priority')
 @patch('time.sleep')
 def test_api_delay_decays_on_every_healthy_request(mock_sleep, mock_flag_web, mock_insert, mock_insert_user, mock_get_user, mock_api, mock_get_items, mock_count, mock_config):
     """Every healthy request shaves one step off the delay.
@@ -367,8 +367,8 @@ def test_the_api_merge_never_carries_the_downloaded_latch(mock_config):
 @patch('src.daemon.count_never_fetched_items', return_value=0)
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
-@patch('src.daemon.flag_for_web_scrape')
-@patch('src.daemon.flag_for_image')
+@patch('src.daemon.raise_web_scrape_priority')
+@patch('src.daemon.raise_image_priority')
 @patch('src.daemon.get_connection')
 @patch('src.daemon.get_user')
 def test_process_batch_404_status_marker(
@@ -395,8 +395,8 @@ def test_process_batch_404_status_marker(
 @patch('src.daemon.count_never_fetched_items', return_value=0)
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
-@patch('src.daemon.flag_for_web_scrape')
-@patch('src.daemon.flag_for_image')
+@patch('src.daemon.raise_web_scrape_priority')
+@patch('src.daemon.raise_image_priority')
 @patch('src.daemon.get_connection')
 @patch('src.daemon.get_user')
 @patch('src.daemon.get_player_summaries', return_value={})
@@ -405,7 +405,7 @@ def test_process_batch_inherits_priority(
     mock_track, mock_summaries, mock_user, mock_conn, mock_img, mock_web, mock_insert,
     mock_api, mock_count, mock_items, mock_save, mock_init, mock_config
 ):
-    """flag_for_web_scrape and flag_for_image keep a priority the user asked for.
+    """raise_web_scrape_priority and raise_image_priority keep a priority the user asked for.
 
     api_priority 5 is "visible in a list" -- a person asked for this item -- so
     the dependent stages inherit it rather than falling back to their own
@@ -431,8 +431,8 @@ def test_process_batch_inherits_priority(
 @patch('src.daemon.count_never_fetched_items', return_value=0)
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
-@patch('src.daemon.flag_for_web_scrape')
-@patch('src.daemon.flag_for_image')
+@patch('src.daemon.raise_web_scrape_priority')
+@patch('src.daemon.raise_image_priority')
 @patch('src.daemon.get_connection')
 @patch('src.daemon.get_user')
 @patch('src.daemon.get_player_summaries', return_value={})

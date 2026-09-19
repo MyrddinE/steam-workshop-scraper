@@ -43,7 +43,7 @@ from src.daemon import MERGE_EXCLUDED_KEYS, MERGE_ITEM_KEYS
 from src.database import (
     EXPECTED_VERSION,
     WORKSHOP_ITEM_COLUMNS,
-    flag_field_for_translation,
+    queue_field_for_translation,
     get_connection,
     initialize_database,
     insert_or_update_item,
@@ -531,7 +531,7 @@ def _translate(db_path, item_id, fields, returned, on_call=None):
 def test_the_translator_stamps_our_clock_when_the_items_last_field_completes(db_path, monkeypatch):
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "テキスト",
                                     "status": 200, "steam_updated_at": 1710000000})
-    flag_field_for_translation(db_path, "item", 1, "title_en", "テキスト", 10)
+    queue_field_for_translation(db_path, "item", 1, "title_en", "テキスト", 10)
 
     clock = {"now": 1000.0}
     monkeypatch.setattr(time, "time", lambda: clock["now"])
@@ -550,8 +550,8 @@ def test_a_partial_translation_does_not_stamp(db_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "テキスト",
                                     "short_description": "テキスト", "status": 200,
                                     "steam_updated_at": 1710000000})
-    flag_field_for_translation(db_path, "item", 1, "title_en", "テキスト", 10)
-    flag_field_for_translation(db_path, "item", 1, "short_description_en", "テキスト", 10)
+    queue_field_for_translation(db_path, "item", 1, "title_en", "テキスト", 10)
+    queue_field_for_translation(db_path, "item", 1, "short_description_en", "テキスト", 10)
 
     _translate(db_path, 1, ["title_en", "short_description_en"], ["title_en"])
 
@@ -571,7 +571,7 @@ def test_a_reply_with_no_text_is_a_failure_and_does_not_stamp(db_path):
 
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "テキスト",
                                     "status": 200, "steam_updated_at": 1710000000})
-    flag_field_for_translation(db_path, "item", 1, "title_en", "テキスト", 10)
+    queue_field_for_translation(db_path, "item", 1, "title_en", "テキスト", 10)
 
     with pytest.raises(TranslationResponseError):
         _translate(db_path, 1, ["title_en"], [])

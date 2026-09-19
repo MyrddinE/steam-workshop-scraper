@@ -61,7 +61,7 @@ def test_daemon_pipeline_mocked(db_path):
          patch("src.daemon.get_workshop_details_batch") as mock_api, \
          patch("src.daemon.get_user") as mock_get_user, \
          patch("src.daemon.insert_or_update_user") as mock_ins_user, \
-         patch("src.daemon.flag_for_web_scrape") as mock_flag_web, \
+         patch("src.daemon.raise_web_scrape_priority") as mock_flag_web, \
          patch("time.sleep"):
 
         mock_api.return_value = {

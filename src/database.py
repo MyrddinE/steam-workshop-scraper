@@ -1950,7 +1950,7 @@ def _migration_22_to_23(cursor, conn, db_path):
     # `translation_priority` is a mirror of `translation_queue`: it is raised
     # when a field is queued and the translator zeroes it when the item's
     # last queue row is deleted. Before this version
-    # `flag_field_for_translation` wrote the queue row and the mirror on two
+    # `queue_field_for_translation` wrote the queue row and the mirror on two
     # separate connections, so a translator drain landing between them could
     # delete the row and zero the mirror, after which the helper's second
     # statement raised the mirror again from `MAX(0, priority)`. The item was
@@ -2707,7 +2707,7 @@ def translation_queue_predicate() -> str:
 def translation_priority_predicate() -> str:
     """The item-level reading of the translation queue's mirror flag.
 
-    ``flag_field_for_translation`` raises ``translation_priority`` with MAX when
+    ``queue_field_for_translation`` raises ``translation_priority`` with MAX when
     it queues a field and the translator clears it when the queue empties, so
     the mirror is the row-level answer to "queued for translation" that the
     handoff invariant (``queued_nowhere``/``dead_queued``) counts. The worker's
@@ -3143,7 +3143,7 @@ def get_next_web_scrape_item(db_path: str) -> dict | None:
     return dict(row) if row else None
 
 
-def flag_for_web_scrape(db_path: str, workshop_id: int, priority: int):
+def raise_web_scrape_priority(db_path: str, workshop_id: int, priority: int):
     """Sets needs_web_scrape to MAX(current, priority). Never downgrades."""
     conn = get_connection(db_path)
     conn.execute(
@@ -3154,7 +3154,7 @@ def flag_for_web_scrape(db_path: str, workshop_id: int, priority: int):
     conn.close()
 
 
-def bump_web_priority_for_list(db_path: str, workshop_id: int):
+def raise_web_scrape_priority_for_list(db_path: str, workshop_id: int):
     """Bumps web scrape priority to 5 for list items if currently < 5 and > 0."""
     conn = get_connection(db_path)
     conn.execute(
@@ -3166,7 +3166,7 @@ def bump_web_priority_for_list(db_path: str, workshop_id: int):
     conn.close()
 
 
-def bump_web_priority_for_detail(db_path: str, workshop_id: int):
+def raise_web_scrape_priority_for_detail(db_path: str, workshop_id: int):
     """Bumps web scrape priority to 10 for detail items if currently < 10 and > 0."""
     conn = get_connection(db_path)
     conn.execute(
@@ -3192,7 +3192,7 @@ def get_next_image_item(db_path: str) -> dict | None:
     return dict(row) if row else None
 
 
-def flag_for_image(db_path: str, workshop_id: int, priority: int):
+def raise_image_priority(db_path: str, workshop_id: int, priority: int):
     """Sets needs_image to MAX(current, priority). Never downgrades."""
     conn = get_connection(db_path)
     conn.execute(
@@ -3203,7 +3203,7 @@ def flag_for_image(db_path: str, workshop_id: int, priority: int):
     conn.close()
 
 
-def bump_image_priority_for_list(db_path: str, workshop_id: int):
+def raise_image_priority_for_list(db_path: str, workshop_id: int):
     conn = get_connection(db_path)
     conn.execute(
         "UPDATE workshop_items SET needs_image = 5 "
@@ -3214,7 +3214,7 @@ def bump_image_priority_for_list(db_path: str, workshop_id: int):
     conn.close()
 
 
-def bump_image_priority_for_detail(db_path: str, workshop_id: int):
+def raise_image_priority_for_detail(db_path: str, workshop_id: int):
     conn = get_connection(db_path)
     conn.execute(
         "UPDATE workshop_items SET needs_image = 10 "
@@ -3252,7 +3252,7 @@ def translation_is_current(translated_text, translate_version, steam_updated_at)
     return translate_version >= steam_updated_at
 
 
-def flag_field_for_translation(db_path: str, item_type: str, item_id: int, field: str, text: str, priority: int):
+def queue_field_for_translation(db_path: str, item_type: str, item_id: int, field: str, text: str, priority: int):
     """Inserts a field into translation_queue, or bumps its priority. Never downgrades.
     Also bumps translation_priority on the parent item/user table.
 
@@ -3303,7 +3303,7 @@ def flag_field_for_translation(db_path: str, item_type: str, item_id: int, field
     conn.close()
 
 
-def bump_translation_for_list(db_path: str, workshop_id: int):
+def raise_translation_priority_for_list(db_path: str, workshop_id: int):
     """For enriched items in the list view: flag non-ASCII fields at priority 5."""
     conn = get_connection(db_path)
     row = conn.execute(
@@ -3320,10 +3320,10 @@ def bump_translation_for_list(db_path: str, workshop_id: int):
         ("extended_description_en", row["extended_description"] or "", row["extended_description_en"]),
     ]:
         if text and not text.isascii() and not translated:
-            flag_field_for_translation(db_path, "item", workshop_id, field, text, 5)
+            queue_field_for_translation(db_path, "item", workshop_id, field, text, 5)
 
 
-def bump_translation_for_detail(db_path: str, workshop_id: int):
+def raise_translation_priority_for_detail(db_path: str, workshop_id: int):
     """For detail view: flag ALL non-ASCII fields at priority 10, regardless of enrichment."""
     conn = get_connection(db_path)
     row = conn.execute(
@@ -3340,7 +3340,7 @@ def bump_translation_for_detail(db_path: str, workshop_id: int):
         ("extended_description_en", row["extended_description"] or "", row["extended_description_en"]),
     ]:
         if text and not text.isascii() and not translated:
-            flag_field_for_translation(db_path, "item", workshop_id, field, text, 10)
+            queue_field_for_translation(db_path, "item", workshop_id, field, text, 10)
 
 
 def get_next_batch_for_translation(db_path: str, limit: int = 20) -> list[dict]:
@@ -3427,7 +3427,7 @@ def delete_never_fetched_items(db_path: str) -> int:
     return count
 
 
-def bump_api_priority_for_list(db_path: str, workshop_id: int):
+def raise_api_priority_for_list(db_path: str, workshop_id: int):
     """Bumps api_priority to 5 for list items if currently < 5."""
     conn = get_connection(db_path)
     conn.execute(
@@ -3439,7 +3439,7 @@ def bump_api_priority_for_list(db_path: str, workshop_id: int):
     conn.close()
 
 
-def bump_api_priority_for_detail(db_path: str, workshop_id: int):
+def raise_api_priority_for_detail(db_path: str, workshop_id: int):
     """Bumps api_priority to 10 for detail items if currently < 10."""
     conn = get_connection(db_path)
     conn.execute(

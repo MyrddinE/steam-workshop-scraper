@@ -6,7 +6,7 @@ import os
 import logging
 import threading
 from datetime import datetime, timezone
-from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, flag_field_for_translation, translation_is_current
+from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, queue_field_for_translation, translation_is_current
 from src import pacing
 from src import session_health
 from src.web_scraper import (DESCRIPTION_SELECTOR, ITEM_MISSING_HTTP_STATUSES, looks_gated,
@@ -458,7 +458,7 @@ class WebScraperThread(threading.Thread):
                         item.get("extended_description_en"),
                         item.get("translate_version"),
                         item.get("steam_updated_at")):
-                    flag_field_for_translation(self.db_path, "item", workshop_id, "extended_description_en", desc, 3)
+                    queue_field_for_translation(self.db_path, "item", workshop_id, "extended_description_en", desc, 3)
 
                 title = item.get("title_en") or item.get("title") or str(workshop_id)
                 logging.info(f"[W:{workshop_id}] Scraped \"{title}\"")

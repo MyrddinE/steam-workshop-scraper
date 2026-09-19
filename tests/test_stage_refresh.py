@@ -39,8 +39,8 @@ def _item(**over):
 
 
 def _flag(daemon, existing, merged):
-    with patch("src.daemon.flag_for_image") as img, \
-         patch("src.daemon.flag_for_web_scrape") as web:
+    with patch("src.daemon.raise_image_priority") as img, \
+         patch("src.daemon.raise_web_scrape_priority") as web:
         daemon._raise_scrape_and_image_priorities(merged, existing, 1, 5)
     return img, web
 
@@ -141,8 +141,8 @@ def test_a_real_image_is_still_refetched_when_the_revision_changes(db_path):
 def _flag_unenriched(daemon, existing, merged, inherited_priority=10):
     """Drive `_raise_scrape_and_image_priorities` down the non-matching branch."""
     with patch.object(daemon, "_should_enrich", return_value=False), \
-         patch("src.daemon.flag_for_image") as img, \
-         patch("src.daemon.flag_for_web_scrape") as web:
+         patch("src.daemon.raise_image_priority") as img, \
+         patch("src.daemon.raise_web_scrape_priority") as web:
         daemon._raise_scrape_and_image_priorities(merged, existing, 1, inherited_priority)
     return img, web
 
@@ -177,8 +177,8 @@ def test_a_user_request_still_reaches_the_scrape_queue_on_that_path(db_path):
     """
     daemon = _daemon(db_path)
     with patch.object(daemon, "_should_enrich", return_value=False), \
-         patch("src.daemon.flag_for_image"), \
-         patch("src.daemon.flag_for_web_scrape") as web:
+         patch("src.daemon.raise_image_priority"), \
+         patch("src.daemon.raise_web_scrape_priority") as web:
         daemon._raise_scrape_and_image_priorities(_item(extended_description=None),
                                       _item(extended_description=None), 1, 10)
     web.assert_called_once_with(daemon.db_path, 1, 10)
@@ -216,8 +216,8 @@ def test_the_discovery_priority_is_not_a_user_request(db_path):
     daemon = _daemon(db_path)
     item = _item(extended_description=None, image_extension=None)
     with patch.object(daemon, "_should_enrich", return_value=False), \
-         patch("src.daemon.flag_for_image") as img, \
-         patch("src.daemon.flag_for_web_scrape") as web:
+         patch("src.daemon.raise_image_priority") as img, \
+         patch("src.daemon.raise_web_scrape_priority") as web:
         daemon._raise_scrape_and_image_priorities(item, item, 1, 3)
     web.assert_called_once_with(daemon.db_path, 1, 1)
     img.assert_called_once_with(daemon.db_path, 1, 1)
@@ -227,8 +227,8 @@ def test_the_retry_priority_is_not_a_user_request_either(db_path):
     """2 is `api_priority` only, per the scale, and belongs to the daemon."""
     daemon = _daemon(db_path)
     with patch.object(daemon, "_should_enrich", return_value=False), \
-         patch("src.daemon.flag_for_image"), \
-         patch("src.daemon.flag_for_web_scrape") as web:
+         patch("src.daemon.raise_image_priority"), \
+         patch("src.daemon.raise_web_scrape_priority") as web:
         daemon._raise_scrape_and_image_priorities(_item(extended_description=None),
                                       _item(extended_description=None), 1, 2)
     web.assert_called_once_with(daemon.db_path, 1, 1)

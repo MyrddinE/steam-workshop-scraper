@@ -6,7 +6,7 @@ import time
 import re
 import logging
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue, clear_subscription_queue, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, bump_api_priority_for_detail, delete_never_fetched_items
+from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, clear_subscription_queue, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items
 from src.analysis import view_window_analysis
 from src import capture
 from src import crash
@@ -229,11 +229,11 @@ def api_search():
             image_flagged_count = 0
             for item in results:
                 wid = item['workshop_id']
-                bump_web_priority_for_list(_db_path, wid)
-                bump_image_priority_for_list(_db_path, wid)
+                raise_web_scrape_priority_for_list(_db_path, wid)
+                raise_image_priority_for_list(_db_path, wid)
                 if _ensure_image_flagged(wid, 5):
                     image_flagged_count += 1
-                bump_translation_for_list(_db_path, wid)
+                raise_translation_priority_for_list(_db_path, wid)
 
             ids = [row['workshop_id'] for row in results]
             conn = get_connection(_db_path)
@@ -337,11 +337,11 @@ def api_item_open(workshop_id):
     Separate from the read-only route so the frequent caller cannot re-queue an
     item by accident, and so the behaviour is directly testable.
     """
-    bump_web_priority_for_detail(_db_path, workshop_id)
-    bump_image_priority_for_detail(_db_path, workshop_id)
+    raise_web_scrape_priority_for_detail(_db_path, workshop_id)
+    raise_image_priority_for_detail(_db_path, workshop_id)
     _ensure_image_flagged(workshop_id, 10)
-    bump_translation_for_detail(_db_path, workshop_id)
-    bump_api_priority_for_detail(_db_path, workshop_id)
+    raise_translation_priority_for_detail(_db_path, workshop_id)
+    raise_api_priority_for_detail(_db_path, workshop_id)
 
     item = _detail_payload(workshop_id)
     if item is None:
@@ -573,7 +573,7 @@ def _ensure_image_flagged(workshop_id, priority):
     ).fetchone()
     conn.close()
     if row and row["preview_url"] and not images.is_resolved(row["image_extension"]):
-        flag_for_image(_db_path, workshop_id, max(row["needs_image"] or 1, priority))
+        raise_image_priority(_db_path, workshop_id, max(row["needs_image"] or 1, priority))
         return True
     return False
 

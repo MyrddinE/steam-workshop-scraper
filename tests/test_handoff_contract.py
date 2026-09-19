@@ -38,7 +38,7 @@ import pytest
 from src import database
 from src.daemon import Daemon
 from src.database import (
-    flag_field_for_translation,
+    queue_field_for_translation,
     get_connection,
     insert_or_update_item,
 )
@@ -332,7 +332,7 @@ def test_a_stored_translation_settles_the_handoff(db_path):
 def test_the_translation_contract_catches_a_mirror_with_no_queue_row(db_path):
     """The mirror is up, the queue is empty and nothing is stored.
 
-    This is the drift `flag_field_for_translation` documents: the mirror and the
+    This is the drift `queue_field_for_translation` documents: the mirror and the
     queue row must move together, so a raised mirror with no row behind it is a
     field queued nowhere.
     """
@@ -349,7 +349,7 @@ def test_a_flipped_translation_predicate_is_caught(db_path):
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "Caf\u00e9", "status": 200, "api_fetched_at": 1000,
     })
-    flag_field_for_translation(db_path, "item", 1, "title_en", "Caf\u00e9", 3)
+    queue_field_for_translation(db_path, "item", 1, "title_en", "Caf\u00e9", 3)
 
     with mock.patch.object(database, "translation_queue_predicate",
                            return_value="priority > 100"):
@@ -432,7 +432,7 @@ def test_each_worker_poll_builds_its_query_from_the_named_predicate(db_path):
         "api_priority": 1, "needs_web_scrape": 1, "needs_image": 1,
         "translation_priority": 1,
     })
-    flag_field_for_translation(db_path, "item", 1, "title_en", "Caf\u00e9", 3)
+    queue_field_for_translation(db_path, "item", 1, "title_en", "Caf\u00e9", 3)
 
     # (what, predicate name, a valid-but-distinctive replacement, table, call)
     probes = [

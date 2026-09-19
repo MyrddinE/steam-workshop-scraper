@@ -54,7 +54,7 @@ def test_tags_survive_the_merge_but_are_not_a_column(fresh_columns):
 
 
 def test_queue_owned_columns_never_survive_a_merge(fresh_columns):
-    """flag_for_web_scrape / flag_for_image set these between the merge and the
+    """raise_web_scrape_priority / raise_image_priority set these between the merge and the
     insert, so a stale value carried through the merge would clobber the flag."""
     for column in MERGE_EXCLUDED_KEYS:
         assert column not in MERGE_ITEM_KEYS, f"{column} must not survive the API merge"

@@ -61,7 +61,7 @@ def test_translate_batch_writes_translation_and_resets_priority(tmp_path):
     """Verify _translate_batch updates _en columns, stamps translate_version,
     deletes from translation_queue, and resets translation_priority."""
     import sqlite3
-    from src.database import initialize_database, insert_or_update_item, flag_field_for_translation
+    from src.database import initialize_database, insert_or_update_item, queue_field_for_translation
 
     db_path = str(tmp_path / "test_trans.db")
     initialize_database(db_path)
@@ -71,7 +71,7 @@ def test_translate_batch_writes_translation_and_resets_priority(tmp_path):
         "subscriptions": 10, "lifetime_subscriptions": 20, "favorited": 5,
         "views": 100, "status": 200,
     })
-    flag_field_for_translation(db_path, "item", 1, "title_en", "\u30c6\u30b9\u30c8", 10)
+    queue_field_for_translation(db_path, "item", 1, "title_en", "\u30c6\u30b9\u30c8", 10)
 
     conn = sqlite3.connect(db_path)
     prio = conn.execute(
@@ -115,7 +115,7 @@ def test_translate_batch_writes_translation_and_resets_priority(tmp_path):
 def test_translate_batch_stamps_steam_updated_at(tmp_path):
     """translate_version is set to steam_updated_at (version marker), not wall-clock."""
     import sqlite3
-    from src.database import initialize_database, insert_or_update_item, flag_field_for_translation
+    from src.database import initialize_database, insert_or_update_item, queue_field_for_translation
 
     db_path = str(tmp_path / "test_trans.db")
     initialize_database(db_path)
@@ -125,7 +125,7 @@ def test_translate_batch_stamps_steam_updated_at(tmp_path):
         "subscriptions": 10, "lifetime_subscriptions": 20, "favorited": 5,
         "views": 100, "status": 200, "steam_updated_at": known_ts,
     })
-    flag_field_for_translation(db_path, "item", 1, "title_en", "\u30c6\u30b9\u30c8", 10)
+    queue_field_for_translation(db_path, "item", 1, "title_en", "\u30c6\u30b9\u30c8", 10)
 
     config = {"database": {"path": db_path}, "openai": {"api_key": "SK-TEST", "endpoint": "https://test/v1", "model": "gpt-test"}}
     from src.translator import TranslatorThread
@@ -153,7 +153,7 @@ def test_translate_batch_stamps_steam_updated_at(tmp_path):
 def test_translate_batch_falls_back_when_no_steam_updated_at(tmp_path):
     """When steam_updated_at is NULL, translate_version falls back to a reasonable epoch."""
     import sqlite3
-    from src.database import initialize_database, insert_or_update_item, flag_field_for_translation
+    from src.database import initialize_database, insert_or_update_item, queue_field_for_translation
 
     db_path = str(tmp_path / "test_trans.db")
     initialize_database(db_path)
@@ -162,7 +162,7 @@ def test_translate_batch_falls_back_when_no_steam_updated_at(tmp_path):
         "subscriptions": 10, "lifetime_subscriptions": 20, "favorited": 5,
         "views": 100, "status": 200,  # no steam_updated_at
     })
-    flag_field_for_translation(db_path, "item", 1, "title_en", "\u30c6\u30b9\u30c8", 10)
+    queue_field_for_translation(db_path, "item", 1, "title_en", "\u30c6\u30b9\u30c8", 10)
 
     config = {"database": {"path": db_path}, "openai": {"api_key": "SK-TEST", "endpoint": "https://test/v1", "model": "gpt-test"}}
     from src.translator import TranslatorThread

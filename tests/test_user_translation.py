@@ -23,7 +23,7 @@ from unittest.mock import MagicMock, patch
 from src.daemon import Daemon
 from src.database import (
     EXPECTED_VERSION,
-    flag_field_for_translation,
+    queue_field_for_translation,
     get_connection,
     initialize_database,
     insert_or_update_item,
@@ -147,7 +147,7 @@ def _seed_creator_with_a_namesake_item(db_path):
     insert_or_update_user(db_path, {
         "steamid": CREATOR, "personaname": "作者", "translation_priority": 1,
     })
-    flag_field_for_translation(db_path, "user", CREATOR, "personaname_en", "作者", 1)
+    queue_field_for_translation(db_path, "user", CREATOR, "personaname_en", "作者", 1)
 
 
 def _translate_the_creator(db_path, text="Author"):
@@ -191,8 +191,8 @@ def test_the_item_completion_path_is_unchanged(db_path):
     insert_or_update_item(db_path, {
         "workshop_id": 7, "status": 200, "steam_updated_at": 1000,
     })
-    flag_field_for_translation(db_path, "item", 7, "title_en", "テスト", 3)
-    flag_field_for_translation(db_path, "item", 7, "short_description_en", "説明", 3)
+    queue_field_for_translation(db_path, "item", 7, "title_en", "テスト", 3)
+    queue_field_for_translation(db_path, "item", 7, "short_description_en", "説明", 3)
 
     _translate(
         db_path,

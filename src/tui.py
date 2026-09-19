@@ -13,7 +13,7 @@ from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, L
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.worker import Worker, WorkerState
-from src.database import search_items, get_all_creator_ids, initialize_database, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, bump_api_priority_for_list, bump_api_priority_for_detail, get_subscription_states, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES
+from src.database import search_items, get_all_creator_ids, initialize_database, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, raise_api_priority_for_list, raise_api_priority_for_detail, get_subscription_states, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES
 from src.analysis import view_window_analysis
 from src import metrics
 from src import db_poll
@@ -1510,10 +1510,10 @@ class DetailsPane(VerticalScroll):
         self.item_data = None
         if workshop_id:
             db_path = self.app.db_path
-            bump_web_priority_for_detail(db_path, workshop_id)
-            bump_translation_for_detail(db_path, workshop_id)
-            bump_image_priority_for_detail(db_path, workshop_id)
-            bump_api_priority_for_detail(db_path, workshop_id)
+            raise_web_scrape_priority_for_detail(db_path, workshop_id)
+            raise_translation_priority_for_detail(db_path, workshop_id)
+            raise_image_priority_for_detail(db_path, workshop_id)
+            raise_api_priority_for_detail(db_path, workshop_id)
             await self.refresh_data()
 
     def watch_item_data(self, item_data: dict) -> None:
@@ -2749,11 +2749,11 @@ class ScraperApp(App):
 
         for item in results:
             if item.get("needs_web_scrape", 0) > 0:
-                bump_web_priority_for_list(self.db_path, item["workshop_id"])
-                bump_translation_for_list(self.db_path, item["workshop_id"])
+                raise_web_scrape_priority_for_list(self.db_path, item["workshop_id"])
+                raise_translation_priority_for_list(self.db_path, item["workshop_id"])
             if item.get("needs_image", 0) > 0:
-                bump_image_priority_for_list(self.db_path, item["workshop_id"])
-            bump_api_priority_for_list(self.db_path, item["workshop_id"])
+                raise_image_priority_for_list(self.db_path, item["workshop_id"])
+            raise_api_priority_for_list(self.db_path, item["workshop_id"])
             
         self.current_offset += len(results)
         
