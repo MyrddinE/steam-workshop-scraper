@@ -34,8 +34,8 @@ def test_search_and_details_pipeline(db_path):
         "consumer_appid": 294100, "status": 200,
         "short_description": "A test mod", "tags": json.dumps([{"tag": "test"}])
     })
-    from src.database import insert_or_update_user
-    insert_or_update_user(db_path, {"steamid": 100, "personaname": "Test Author"})
+    from src.database import insert_or_update_creator
+    insert_or_update_creator(db_path, {"steamid": 100, "personaname": "Test Author"})
 
     results = search_items(db_path, query="Test Mod")
     assert len(results) == 1
@@ -59,15 +59,15 @@ def test_daemon_pipeline_mocked(db_path):
 
     with patch("src.daemon.count_never_fetched_items", return_value=100), \
          patch("src.daemon.get_workshop_details_batch") as mock_api, \
-         patch("src.daemon.get_user") as mock_get_user, \
-         patch("src.daemon.insert_or_update_user") as mock_ins_user, \
+         patch("src.daemon.get_creator") as mock_get_creator, \
+         patch("src.daemon.insert_or_update_creator") as mock_ins_creator, \
          patch("src.daemon.raise_web_scrape_priority") as mock_flag_web, \
          patch("time.sleep"):
 
         mock_api.return_value = {
             555: {"title": "Pipeline Mod", "creator": 200, "status": 200, "tags": [{"tag": "test"}]}
         }
-        mock_get_user.return_value = {"steamid": 200, "api_fetched_at": 1767225600}
+        mock_get_creator.return_value = {"steamid": 200, "api_fetched_at": 1767225600}
 
         daemon = Daemon(config)
         daemon.process_batch()

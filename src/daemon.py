@@ -12,8 +12,8 @@ from src.database import (
     insert_or_update_item, 
     count_never_fetched_items, 
     count_fetchable_items, 
-    insert_or_update_user, 
-    get_user, 
+    insert_or_update_creator, 
+    get_creator, 
     get_app_tracking,
     update_app_tracking_cursor,
     save_enrichment_filters,
@@ -517,7 +517,7 @@ class Daemon:
         the whole producer. The drain reads `translation_queue` now, so the name
         has to be queued as a field like any other.
         """
-        insert_or_update_user(self.db_path, self._build_user_record(steamid, personaname))
+        insert_or_update_creator(self.db_path, self._build_user_record(steamid, personaname))
         if not is_ascii(personaname):
             queue_field_for_translation(
                 self.db_path, "user", steamid, "personaname_en", personaname, 1)
@@ -1145,7 +1145,7 @@ class Daemon:
                 continue
             seen.add(creator_id)
             try:
-                existing_user = get_user(self.db_path, creator_id)
+                existing_user = get_creator(self.db_path, creator_id)
                 if existing_user and existing_user.get("api_fetched_at"):
                     if now - existing_user["api_fetched_at"] < stale_after:
                         continue

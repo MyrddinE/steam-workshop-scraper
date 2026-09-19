@@ -57,16 +57,16 @@ def test_daemon_init_missing_appids():
 @patch('src.daemon.count_never_fetched_items')
 @patch('src.daemon.get_next_items_to_fetch')
 @patch('src.daemon.get_workshop_details_batch')
-@patch('src.daemon.get_user')
-@patch('src.daemon.insert_or_update_user')
+@patch('src.daemon.get_creator')
+@patch('src.daemon.insert_or_update_creator')
 @patch('src.daemon.insert_or_update_item')
 @patch('src.daemon.raise_web_scrape_priority')
 @patch('time.sleep')
-def test_daemon_process_batch_success(mock_sleep, mock_flag_web, mock_insert, mock_insert_user, mock_get_user, mock_api, mock_get_items, mock_count, mock_config):
+def test_daemon_process_batch_success(mock_sleep, mock_flag_web, mock_insert, mock_insert_creator, mock_get_creator, mock_api, mock_get_items, mock_count, mock_config):
     mock_count.return_value = 1000
     mock_get_items.return_value = [{'workshop_id': 123}]
     mock_api.return_value = {123: {"title": "Test Mod", "creator": "111", "status": 200}}
-    mock_get_user.return_value = {"steamid": 111, "api_fetched_at": 1767225600}
+    mock_get_creator.return_value = {"steamid": 111, "api_fetched_at": 1767225600}
 
     daemon = Daemon(mock_config)
     daemon.process_batch()
@@ -144,12 +144,12 @@ def test_daemon_process_batch_exit_early(mock_api, mock_get_items, mock_count, m
 @patch('src.daemon.count_never_fetched_items')
 @patch('src.daemon.get_next_items_to_fetch')
 @patch('src.daemon.get_workshop_details_batch')
-@patch('src.daemon.get_user')
-@patch('src.daemon.insert_or_update_user')
+@patch('src.daemon.get_creator')
+@patch('src.daemon.insert_or_update_creator')
 @patch('src.daemon.insert_or_update_item')
 @patch('src.daemon.raise_web_scrape_priority')
 @patch('time.sleep')
-def test_api_delay_decays_on_every_healthy_request(mock_sleep, mock_flag_web, mock_insert, mock_insert_user, mock_get_user, mock_api, mock_get_items, mock_count, mock_config):
+def test_api_delay_decays_on_every_healthy_request(mock_sleep, mock_flag_web, mock_insert, mock_insert_creator, mock_get_creator, mock_api, mock_get_items, mock_count, mock_config):
     """Every healthy request shaves one step off the delay.
 
     One request carries the whole batch, so a batch of five successful items is
@@ -161,7 +161,7 @@ def test_api_delay_decays_on_every_healthy_request(mock_sleep, mock_flag_web, mo
     # response, so a shared mock object loses its "status" after the first item.
     mock_api.side_effect = lambda ids, key: {
         i: {"title": "Mod", "creator": "111", "status": 200} for i in ids}
-    mock_get_user.return_value = {"steamid": 111, "api_fetched_at": 1767225600}
+    mock_get_creator.return_value = {"steamid": 111, "api_fetched_at": 1767225600}
 
     daemon = Daemon(mock_config)
     daemon.api_batch_size = 5
@@ -370,7 +370,7 @@ def test_the_api_merge_never_carries_the_downloaded_latch(mock_config):
 @patch('src.daemon.raise_web_scrape_priority')
 @patch('src.daemon.raise_image_priority')
 @patch('src.daemon.get_connection')
-@patch('src.daemon.get_user')
+@patch('src.daemon.get_creator')
 def test_process_batch_404_permanent_status_marker(
     mock_user, mock_conn, mock_img, mock_web, mock_insert,
     mock_api, mock_count, mock_items, mock_save, mock_init, mock_config
@@ -398,7 +398,7 @@ def test_process_batch_404_permanent_status_marker(
 @patch('src.daemon.raise_web_scrape_priority')
 @patch('src.daemon.raise_image_priority')
 @patch('src.daemon.get_connection')
-@patch('src.daemon.get_user')
+@patch('src.daemon.get_creator')
 @patch('src.daemon.get_player_summaries', return_value={})
 @patch('src.daemon.get_app_tracking', return_value=None)
 def test_process_batch_inherits_priority(
@@ -434,7 +434,7 @@ def test_process_batch_inherits_priority(
 @patch('src.daemon.raise_web_scrape_priority')
 @patch('src.daemon.raise_image_priority')
 @patch('src.daemon.get_connection')
-@patch('src.daemon.get_user')
+@patch('src.daemon.get_creator')
 @patch('src.daemon.get_player_summaries', return_value={})
 @patch('src.daemon.get_app_tracking')
 def test_process_batch_does_not_inherit_the_discovery_priority(
@@ -665,11 +665,11 @@ def test_merge_remaps_steam_api_time_fields(db_path):
 
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.get_next_items_to_fetch')
-@patch('src.daemon.insert_or_update_user')
-@patch('src.daemon.get_user')
+@patch('src.daemon.insert_or_update_creator')
+@patch('src.daemon.get_creator')
 @patch('src.daemon.get_player_summaries')
 def test_creator_refresh_makes_one_call_for_several_creators(
-    mock_summaries, mock_get_user, mock_insert_user, mock_items, mock_batch,
+    mock_summaries, mock_get_creator, mock_insert_creator, mock_items, mock_batch,
     db_path, tmp_path
 ):
     """Distinct stale creators share a single GetPlayerSummaries request.
@@ -690,7 +690,7 @@ def test_creator_refresh_makes_one_call_for_several_creators(
         4: {"title": "d", "creator": "111", "status": 200},
     }
     fresh = int(time.time())
-    mock_get_user.side_effect = lambda path, cid: (
+    mock_get_creator.side_effect = lambda path, cid: (
         {"steamid": cid, "api_fetched_at": fresh} if cid == 111 else None)
     mock_summaries.return_value = {
         111: {"personaname": "One"},
@@ -702,7 +702,7 @@ def test_creator_refresh_makes_one_call_for_several_creators(
 
     mock_summaries.assert_called_once()
     assert sorted(mock_summaries.call_args[0][0]) == [222, 333]
-    assert mock_insert_user.call_count == 2
+    assert mock_insert_creator.call_count == 2
 
 
 @patch('src.daemon.get_workshop_details_batch')
@@ -719,10 +719,10 @@ def test_only_enriched_items_propose_a_creator(mock_batch, db_path, tmp_path):
          patch("src.daemon.get_next_items_to_fetch",
                return_value=[{"workshop_id": 1, "api_priority": 5, "status": 200}]), \
          patch("src.daemon.get_player_summaries") as mock_summaries, \
-         patch("src.daemon.get_user") as mock_get_user:
+         patch("src.daemon.get_creator") as mock_get_creator:
         daemon.process_batch()
     mock_summaries.assert_not_called()
-    mock_get_user.assert_not_called()
+    mock_get_creator.assert_not_called()
 
 
 @patch.object(Daemon, '_promote_stale_items')

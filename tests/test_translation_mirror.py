@@ -25,7 +25,7 @@ from src.database import (
     get_connection,
     initialize_database,
     insert_or_update_item,
-    insert_or_update_user,
+    insert_or_update_creator,
 )
 
 
@@ -225,7 +225,7 @@ def test_migration_queues_a_creator_name_and_keeps_its_mirror(db_path):
     the queue row it was owed.
     """
     steamid = 76561198000000000
-    insert_or_update_user(db_path, {
+    insert_or_update_creator(db_path, {
         "steamid": steamid, "personaname": "テスト", "translation_priority": 1,
     })
     _age_to_v22(db_path)

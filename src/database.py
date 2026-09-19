@@ -31,7 +31,7 @@ WORKSHOP_ITEM_COLUMNS = frozenset({
 # ``users.dt_translated`` was renamed to ``translated_at`` (not
 # ``translate_version``) because it holds our wall-clock time for users, not a
 # Steam ``steam_updated_at`` version key: users have no ``steam_updated_at``.
-USER_COLUMNS = frozenset({
+CREATOR_COLUMNS = frozenset({
     "steamid", "personaname", "personaname_en",
     "api_fetched_at", "translated_at", "translation_priority",
 })
@@ -2833,10 +2833,10 @@ def count_fetchable_items(db_path: str) -> int:
     conn.close()
     return row["count"] if row else 0
 
-def insert_or_update_user(db_path: str, user_data: dict):
+def insert_or_update_creator(db_path: str, user_data: dict):
     """Inserts or updates a user in the users table."""
     conn = get_connection(db_path)
-    columns = [col for col in user_data.keys() if col in USER_COLUMNS]
+    columns = [col for col in user_data.keys() if col in CREATOR_COLUMNS]
     placeholders = ",".join(["?"] * len(columns))
     updates = ",".join([f"{col}=excluded.{col}" for col in columns if col != "steamid"])
     
@@ -2849,7 +2849,7 @@ def insert_or_update_user(db_path: str, user_data: dict):
     conn.commit()
     conn.close()
 
-def get_user(db_path: str, steamid: int) -> dict | None:
+def get_creator(db_path: str, steamid: int) -> dict | None:
     """Fetches a user by steamid."""
     conn = get_connection(db_path)
     cursor = conn.execute("SELECT * FROM users WHERE steamid = ?", (steamid,))

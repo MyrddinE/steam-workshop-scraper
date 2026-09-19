@@ -885,9 +885,9 @@ Adds columns to an existing table, catching `OperationalError` for duplicates. U
 
 Upserts an item row using `INSERT ... ON CONFLICT(workshop_id) DO UPDATE SET`. Filters keys against `WORKSHOP_ITEM_COLUMNS` frozenset before building the SQL. Handles tags via junction table (parses JSON, calls `_ensure_tag_ids`, updates `workshop_tags`). Tags are excluded from the INSERT column list since they're no longer a workshop_items column.
 
-### `insert_or_update_user` (database)
+### `insert_or_update_creator` (database)
 
-Same upsert pattern for `users` table, using `USER_COLUMNS` frozenset for filtering.
+Same upsert pattern for `users` table, using `CREATOR_COLUMNS` frozenset for filtering.
 
 ### `get_item_details` (database)
 
