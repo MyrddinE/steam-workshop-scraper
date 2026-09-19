@@ -337,12 +337,13 @@ def test_coverage_counts_each_stage(db_path):
     insert_or_update_item(db_path, {"workshop_id": 2, "title": "bare", "status": 200})
 
     cov = metrics.values(metrics.compute(db_path, ["coverage"]))["coverage"]
+    bars = {bar["key"]: bar for bar in cov["bars"]}
     assert cov["total"] == 2
-    assert cov["api_fetched"] == 1
-    assert cov["described"] == 1
-    assert cov["imaged"] == 1
-    assert cov["translated"] == 1
-    assert cov["attributed"] == 1
+    assert bars["api_fetched"]["done"] == 1
+    assert bars["described"]["done"] == 1
+    assert bars["imaged"]["done"] == 1
+    assert bars["attributed"]["done"] == 1
+    assert "translated" not in bars, "the old item-level count is gone"
 
 
 def test_coverage_ignores_dead_items(db_path):
@@ -357,8 +358,9 @@ def test_coverage_ignores_dead_items(db_path):
     })
 
     cov = metrics.values(metrics.compute(db_path, ["coverage"]))["coverage"]
+    bars = {bar["key"]: bar for bar in cov["bars"]}
     assert cov["total"] == 1
-    assert cov["api_fetched"] == 0
+    assert bars["api_fetched"]["done"] == 0
 
 
 def test_dead_items_are_not_counted_as_outstanding_work(db_path):

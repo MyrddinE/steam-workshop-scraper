@@ -255,7 +255,7 @@ metrics and what each section renders:
 | `stuck_work` | the stuck-work callout |
 | `queued_nowhere` | the items-in-no-queue counter, with an all-clear at zero |
 | `fetch_recency` | fresh / stale / never-attempted counts |
-| `coverage` | coverage bars over live items, at two scopes: the whole library, and the target AppIDs' enrichment filters |
+| `coverage` | seven coverage bars (API Data, Translations, Extended Web, Extended Web Translation, Images, Creator, Creator Translation) over live items, at two scopes: the whole library, and the target AppIDs' enrichment filters |
 | `translation_status` | the translation classification |
 | `tag_counts` | the tag table |
 | `priority_breakdowns` | per-queue waiting counts by priority |
@@ -268,22 +268,46 @@ it. Tags are the one metric that is a long list rather than a handful of numbers
 the same column pushed every section below it off the screen. Where a chunk is drawn has nothing to
 do with when it is requested: the ordering below is unaffected.
 
-Coverage (`_format_coverage`, `src/tui.py:396`) is drawn as a labelled progress bar per
-stage — API data, description, image, translation, creator — **at two scopes**. The first
-block is every live item, with dead items excluded because they can never be covered. The
-second block is the same bars over *what the owner cares about*: the live items the target
-AppIDs' stored `enrichment_filters` select, which is the population the daemon calls
-enriched. The two are separately headed, and a scope note under the second says which
-AppIDs were used and why the two figures may coincide: an AppID with no readable filter set
-(including a malformed one) excludes nothing, so its items are all counted
-(`enrichment_filters_for`'s contract: `None` and `[]` both mean no exclusion). The second
-figure is the **search builder's SQL translation** of the filters, not a re-derivation of
-the daemon's per-item check: the builder also searches each text field's `_en` counterpart
-while `_evaluate_filters` does not, so the two can disagree on an item whose stored
-translation matches and whose original text does not. Where they disagree, the search
-builder's answer is the one shown. With more than one target AppID the population is the
-**union** of what any target's filters select. The metric's own docstring
-(`src/metrics.py`, `_coverage`) is the reference for the translation's edges.
+Coverage (`_format_coverage`, `_coverage_block`, `src/tui.py`) is drawn as seven labelled
+progress bars on **one width** — API Data, Translations, Extended Web, Extended Web
+Translation, Images, Creator and Creator Translation — **at two scopes**. The first block
+is every live item, with dead items excluded because they can never be covered. The second
+block is the same bars over *what the owner cares about*: the live items the target AppIDs'
+stored `enrichment_filters` select, which is the population the daemon calls enriched. The
+two are separately headed, and a scope note under the second says which AppIDs were used and
+why the two figures may coincide: an AppID with no readable filter set (including a
+malformed one) excludes nothing, so its items are all counted (`enrichment_filters_for`'s
+contract: `None` and `[]` both mean no exclusion). The second figure is the **search
+builder's SQL translation** of the filters, not a re-derivation of the daemon's per-item
+check: the builder also searches each text field's `_en` counterpart while
+`_evaluate_filters` does not, so the two can disagree on an item whose stored translation
+matches and whose original text does not. Where they disagree, the search builder's answer
+is the one shown. With more than one target AppID the population is the **union** of what
+any target's filters select. The metric's own docstring (`src/metrics.py`, `_coverage`) is
+the reference for the translation's edges.
+
+Each bar's population is the flagging rule, mirrored in SQL, so the bar and the work cannot
+disagree. **Translations** is per *field*, not per item, over `title` and `short_description`;
+`_flag_translations` returns early unless the item was enriched, so its population is the
+non-ASCII API fields of the **filter-selected** items. **Extended Web** is the scrape's
+coverage — live items with a non-empty `extended_description` — renamed from the old
+Description bar so the name is about the stage rather than the one field it carries today;
+its maximum excludes the pages that answered with no description, and that legitimate-blank
+count and ceiling are printed with the bar, so a low figure does not read as a defect.
+**Extended Web Translation** hangs off it, is filled by the completed share, and can never be
+longer, because a non-ASCII description is a description; its population is **any scraped
+item**, not only the filter-selected ones. **Creator Translation** counts items attributed to
+a creator whose name is non-ASCII — the name lives on `users` and is shared by every item
+that creator made — and is filled by the share whose stored translation is current.
+
+The three translation bars are **subsidiary** to their parent, and the terminal says so with
+both properties: each child line immediately follows its parent line (no blank line, no
+explanation, no separator between them) and is drawn with lower-half/lower-eighth block
+glyphs (`▄`/`▁`) where the standard bar uses a full cell and a shade (`█`/`░`). A line of
+text has no height to shrink, and shrinking the bar's *length* would be read as a coverage
+figure, so the glyph carries the subordination. Every bar still starts in the same column, so
+a shorter bar means less coverage. A bar whose reachable population is zero is not a divide
+by zero and not a stuck 0.0%: it shows its empty track and reads "Nothing to translate".
 
 Time to drain (`_format_queue_eta`) is one row per work queue: outstanding depth,
 the rate in `per_day`, and the time to drain as `53d ± 30%`. The uncertainty is
