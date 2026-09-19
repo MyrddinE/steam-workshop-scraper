@@ -30,7 +30,7 @@ def test_live_web_scraper_contract():
 @pytest.mark.integration
 def test_search_and_details_pipeline(db_path):
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "Test Mod", "creator": 100,
+        "workshop_id": 1, "title": "Test Mod", "creator_steamid": 100,
         "consumer_appid": 294100, "fetch_status": 200,
         "short_description": "A test mod", "tags": json.dumps([{"tag": "test"}])
     })

@@ -10,7 +10,7 @@ def mock_results_with_bbcode():
         {
             "workshop_id": 12345,
             "title": "[b]Bold Title[/b]",
-            "creator": "Author [X]",
+            "creator_steamid": "Author [X]",
             "consumer_appid": 294100,
             "short_description": "Short [i]Italic[/i] description.",
             "extended_description": """

@@ -531,7 +531,7 @@ Items become visible in search once they have `fetch_status = 200` (API details 
 
 ### Summary fields
 
-The `summary_only` SELECT returns: `workshop_id, title, title_en, creator, consumer_appid, translate_version, is_queued_for_subscription, needs_web_scrape, needs_image, translation_priority, file_size, image_extension, wilson_subscription_score, wilson_favorite_score, personaname, personaname_en`. Tags are returned via a subquery joining `workshop_tags` and `tags` as a comma-separated string.
+The `summary_only` SELECT returns: `workshop_id, title, title_en, creator_steamid, consumer_appid, translate_version, is_queued_for_subscription, needs_web_scrape, needs_image, translation_priority, file_size, image_extension, wilson_subscription_score, wilson_favorite_score, personaname, personaname_en`. Tags are returned via a subquery joining `workshop_tags` and `tags` as a comma-separated string.
 
 ### Detail fields
 

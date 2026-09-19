@@ -34,7 +34,7 @@ One row per Steam Workshop item, keyed by `workshop_id` (the Steam `publishedfil
 | Column | Source | Notes |
 |---|---|---|
 | `workshop_id` | `publishedfileid` | Primary key. The API key supplied alongside it is dropped before storage. |
-| `creator` | `creator` | SteamID of the author. No foreign key is declared: items are discovered before their creator is fetched, and the join to `creators` is a `LEFT JOIN`. |
+| `creator_steamid` | `creator` | SteamID of the author. No foreign key is declared: items are discovered before their creator is fetched, and the join to `creators` is a `LEFT JOIN`. |
 | `creator_appid` | `creator_app_id` | Renamed in `_merge_and_clean_api_data`. |
 | `consumer_appid` | `consumer_app_id` | The game the item belongs to. |
 | `filename` | `filename` | |

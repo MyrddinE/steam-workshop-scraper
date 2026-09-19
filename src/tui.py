@@ -1590,13 +1590,13 @@ class DetailsPane(VerticalScroll):
         
         creator_name = item.get("personaname_en") if display_translated and item.get("personaname_en") else item.get("personaname")
         if not creator_name:
-            creator_name = str(item.get("creator", "N/A"))
+            creator_name = str(item.get("creator_steamid", "N/A"))
             
         self.query_one("#item-title", Label).update(f"[b]{escape_markup(title)}[/b]")
         self.query_one("#item-creator", Label).update(escape_markup(creator_name))
         
         jump_btn = self.query_one("#btn-jump-author", Button)
-        if item.get("creator"):
+        if item.get("creator_steamid"):
             jump_btn.display = True
         else:
             jump_btn.display = False
@@ -1723,7 +1723,7 @@ class WorkshopItem(ListItem):
     def compose(self) -> ComposeResult:
         wid = self.item_data.get("workshop_id", "N/A")
         title = self.item_data.get("title_en") or self.item_data.get("title", "Untitled")
-        creator = self.item_data.get("personaname_en") or self.item_data.get("personaname") or self.item_data.get("creator", "Unknown Creator")
+        creator = self.item_data.get("personaname_en") or self.item_data.get("personaname") or self.item_data.get("creator_steamid", "Unknown Creator")
         spin = self._spinner()
         marker = self._subscription_marker()
 
@@ -2798,7 +2798,7 @@ class ScraperApp(App):
                 
             if event.item and hasattr(event.item, 'item_data'):
                 item_data = event.item.item_data
-                self.current_item_creator = item_data.get('creator')
+                self.current_item_creator = item_data.get('creator_steamid')
                 # Detail priority is applied by DetailsPane when it adopts the
                 # item, not here: this handler fires on every highlight move.
                 detail_pane = self.query_one("#detail-pane", DetailsPane)

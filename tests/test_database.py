@@ -157,7 +157,7 @@ def test_creator_join_in_queries(db_path):
     insert_or_update_item(db_path, {
         "workshop_id": 999,
         "title": "Awesome Mod",
-        "creator": steamid,
+        "creator_steamid": steamid,
         "fetch_status": 200
     })
     
@@ -209,7 +209,7 @@ def test_search_items_advanced_queries(db_path):
         "short_description": "Fruit mod", 
         "filename": "apple.zip", 
         "tags": "['fruit']",
-        "creator": 123,
+        "creator_steamid": 123,
         "file_size": 1000
     })
     
@@ -219,7 +219,7 @@ def test_search_items_advanced_queries(db_path):
         "short_description": "Fruit mod too", 
         "filename": "orange.zip", 
         "tags": "['fruit', 'citrus']",
-        "creator": 456,
+        "creator_steamid": 456,
         "file_size": 2000
     })
 
@@ -255,8 +255,8 @@ def test_search_items_advanced_queries(db_path):
 
 def test_get_all_creator_ids(db_path):
     from src.database import insert_or_update_item, get_all_creator_ids
-    insert_or_update_item(db_path, {"workshop_id": 1, "creator": 999})
-    insert_or_update_item(db_path, {"workshop_id": 2, "creator": 888})
+    insert_or_update_item(db_path, {"workshop_id": 1, "creator_steamid": 999})
+    insert_or_update_item(db_path, {"workshop_id": 2, "creator_steamid": 888})
     
     authors = get_all_creator_ids(db_path)
     assert 999 in authors
@@ -358,7 +358,7 @@ def test_get_creator_not_found(db_path):
 
 def test_get_item_details_missing_user(db_path):
     from src.database import insert_or_update_item, get_item_details
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Orphan Item", "creator": 99999})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Orphan Item", "creator_steamid": 99999})
     details = get_item_details(db_path, 1)
     assert details is not None
     assert details["title"] == "Orphan Item"

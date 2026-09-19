@@ -283,8 +283,8 @@ def _detail_payload(workshop_id):
     # JavaScript number represents exactly. It travels as a string so the
     # client's jump-to-author filter can name the same account it displays;
     # a numeric field would round silently in JSON.parse.
-    if item.get("creator") is not None:
-        item["creator_id"] = str(item["creator"])
+    if item.get("creator_steamid") is not None:
+        item["creator_id"] = str(item["creator_steamid"])
     # The four-state marker is derived here from `src/subscription.py`, once, so
     # the grid and the detail pane cannot disagree about the same item and the
     # page's rendering has a single source for the glyph, colour and tooltip.
@@ -359,14 +359,14 @@ def api_items():
     conn = get_connection(_db_path)
     placeholders = ','.join('?' * len(ids))
     sql = f"""
-        SELECT w.workshop_id, w.title, w.title_en, w.creator, w.consumer_appid,
+        SELECT w.workshop_id, w.title, w.title_en, w.creator_steamid, w.consumer_appid,
                w.translate_version, w.is_queued_for_subscription, w.needs_web_scrape,
                w.needs_image, w.translation_priority, w.file_size, w.image_extension,
                w.wilson_subscription_score, w.wilson_favorite_score,
                w.own_subscribed, w.own_first_subscribed_at, w.downloaded_at,
                w.api_priority,
                u.personaname, u.personaname_en
-        FROM workshop_items w LEFT JOIN creators u ON w.creator = u.steamid
+        FROM workshop_items w LEFT JOIN creators u ON w.creator_steamid = u.steamid
         WHERE w.workshop_id IN ({placeholders})
     """
     results = [_attach_subscription(row) for row in

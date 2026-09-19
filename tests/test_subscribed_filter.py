@@ -665,7 +665,7 @@ global._escapeHtml = (s) => String(s == null ? '' : s);
 global.showSubscriptionMarker = subFn;
 global._refreshOpenFolderButton = () => {};
 const base = {
-  workshop_id: 77, creator: 'Alice', creator_id: '76561198765432109',
+  workshop_id: 77, creator_steamid: 'Alice', creator_id: '76561198765432109',
   personaname: 'Alice', has_translation: false,
   display_title_original: 'Mod', title: 'Mod',
   subscription_state: 'subscribed', subscription_glyph: '\\u2605',

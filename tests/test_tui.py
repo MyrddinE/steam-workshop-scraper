@@ -14,7 +14,7 @@ def mock_results():
         {
             "workshop_id": 1,
             "title": "Amazing Mod",
-            "creator": "Author A",
+            "creator_steamid": "Author A",
             "consumer_appid": 294100,
             "extended_description": "This mod is truly amazing.",
             "tags": '["Graphic", "Utility"]'
@@ -249,7 +249,7 @@ async def test_tui_jump_to_author_clears_multiple_rows(mock_config, mock_results
         from textual.widgets import ListView
         from textual.scroll_view import ScrollView
 
-        mock_results = [{"workshop_id": i, "title": f"Item {i}", "creator": "A"} for i in range(100)]
+        mock_results = [{"workshop_id": i, "title": f"Item {i}", "creator_steamid": "A"} for i in range(100)]
         mock_total_count = 100
 
         # Mock search_items to paginate

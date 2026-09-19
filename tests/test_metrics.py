@@ -332,7 +332,7 @@ def test_coverage_counts_each_stage(db_path):
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "full", "fetch_status": 200,
         "api_fetched_at": 1000, "extended_description": "desc",
-        "image_extension": "jpg", "translate_version": 5, "creator": 42,
+        "image_extension": "jpg", "translate_version": 5, "creator_steamid": 42,
     })
     insert_or_update_item(db_path, {"workshop_id": 2, "title": "bare", "fetch_status": 200})
 

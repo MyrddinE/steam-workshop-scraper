@@ -133,7 +133,7 @@ def _seed_item(db_path: str, workshop_id: int = 123, title: str = "Fresh path it
         "workshop_id": workshop_id,
         "title": title,
         "short_description": "short",
-        "creator": 7,
+        "creator_steamid": 7,
         "consumer_appid": 4000,
         "fetch_status": 200,
         "steam_created_at": 1,

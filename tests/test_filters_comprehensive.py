@@ -290,19 +290,19 @@ def test_percentile_with_tag_filter(deterministic_db):
 
 def test_author_id_is(deterministic_db):
     conn = get_connection(deterministic_db)
-    author = conn.execute("SELECT creator FROM workshop_items LIMIT 1").fetchone()["creator"]
+    author = conn.execute("SELECT creator_steamid FROM workshop_items LIMIT 1").fetchone()["creator_steamid"]
     conn.close()
     result = search_items(deterministic_db, filters=[
         {"field": "Author ID", "op": "is", "value": author}
     ])
     assert len(result) > 0
     for r in result:
-        assert r["creator"] == author
+        assert r["creator_steamid"] == author
 
 
 def test_author_id_is_not(deterministic_db):
     conn = get_connection(deterministic_db)
-    author = conn.execute("SELECT creator FROM workshop_items LIMIT 1").fetchone()["creator"]
+    author = conn.execute("SELECT creator_steamid FROM workshop_items LIMIT 1").fetchone()["creator_steamid"]
     conn.close()
     all_items = search_items(deterministic_db)
     result = search_items(deterministic_db, filters=[
@@ -311,7 +311,7 @@ def test_author_id_is_not(deterministic_db):
     assert len(result) > 0
     assert len(result) < len(all_items)
     for r in result:
-        assert r["creator"] != author
+        assert r["creator_steamid"] != author
 
 
 def test_workshop_id_is(deterministic_db):
@@ -479,7 +479,7 @@ def test_random_filter_combinations_no_crash(deterministic_db):
     sample_title = conn.execute(
         "SELECT title FROM workshop_items WHERE title LIKE '%lorem%' LIMIT 1"
     ).fetchone()
-    sample_author = conn.execute("SELECT creator FROM workshop_items LIMIT 1").fetchone()
+    sample_author = conn.execute("SELECT creator_steamid FROM workshop_items LIMIT 1").fetchone()
     sample_wid = conn.execute("SELECT workshop_id FROM workshop_items LIMIT 1").fetchone()
     sample_appid = conn.execute("SELECT consumer_appid FROM workshop_items LIMIT 1").fetchone()
     conn.close()
@@ -498,7 +498,7 @@ def test_random_filter_combinations_no_crash(deterministic_db):
                 if field == "Title":
                     val = sample_title["title"] if sample_title else "lorem"
                 elif field == "Author ID":
-                    val = sample_author["creator"] if sample_author else 1_000_000_000
+                    val = sample_author["creator_steamid"] if sample_author else 1_000_000_000
                 elif field == "Workshop ID":
                     val = sample_wid["workshop_id"] if sample_wid else 1_000_000
                 elif field == "App ID":

@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 WORKSHOP_ITEM_COLUMNS = frozenset({
     "workshop_id", "first_seen_at", "api_fetched_at", "last_fetch_attempted_at",
     "scrape_version", "translate_version",
-    "fetch_status", "title", "title_en", "creator", "creator_appid", "consumer_appid",
+    "fetch_status", "title", "title_en", "creator_steamid", "creator_appid", "consumer_appid",
     "filename", "file_size", "preview_url", "hcontent_file", "hcontent_preview",
     "short_description", "short_description_en", "steam_created_at", "steam_updated_at",
     "visibility", "banned", "ban_reason", "app_name", "file_type",
@@ -170,7 +170,7 @@ SEARCH_FILTER_SCHEMA = [
     {"field": "Tags",             "db_col": "tags",                      "type": "string", "ops": ["contains", "does_not_contain"]},
     {"field": "Subscriber Score", "db_col": "wilson_subscription_score", "type": "number", "ops": ["gt", "lt", "gte", "lte", "percentile"]},
     {"field": "Favorite Score",   "db_col": "wilson_favorite_score",     "type": "number", "ops": ["gt", "lt", "gte", "lte", "percentile"]},
-    {"field": "Author ID",        "db_col": "creator",                   "type": "id",     "ops": ["is", "is_not"]},
+    {"field": "Author ID",        "db_col": "creator_steamid",           "type": "id",     "ops": ["is", "is_not"]},
     {"field": "Workshop ID",      "db_col": "workshop_id",               "type": "id",     "ops": ["is", "is_not"]},
     {"field": "App ID",           "db_col": "consumer_appid",            "type": "id",     "ops": ["is", "is_not"]},
     {"field": "Subs",             "db_col": "subscriptions",             "type": "number", "ops": ["gt", "lt", "gte", "lte", "percentile"]},
@@ -223,7 +223,7 @@ USER_PRIORITY_FLOOR = 5
 # than local to `initialize_database` because the migration tests assert that
 # the chain reaches it, and a magic number repeated in nine test files is a
 # number that will be wrong after the next migration.
-EXPECTED_VERSION = 31
+EXPECTED_VERSION = 32
 
 def _build_text_search_clauses(sql: str, params: list, query_string: str, cols: list[str]) -> tuple[str, list]:
     """Applies positive/negative text search tokens to SQL via LIKE clauses."""
@@ -1137,7 +1137,7 @@ def _create_current_schema(cursor, conn):
 
     The statements below are the *terminal* shape the migration chain leaves
     behind, dumped verbatim from ``sqlite_master`` of a database the chain
-    itself produced at ``user_version = 31`` -- no definition here was written
+    itself produced at ``user_version = 32`` -- no definition here was written
     by reading the migrations. The index SQL in particular is the exact text
     SQLite stores, so the fresh database's ``sqlite_master`` matches what the
     chain leaves, including the early indexes whose definitions a ``RENAME
@@ -1145,7 +1145,7 @@ def _create_current_schema(cursor, conn):
     owned by :func:`_ensure_indexes` and are not repeated below).
 
     A fresh database takes this path by default, so it never replays the
-    thirty-one migrations. An existing database always takes the legacy path,
+    thirty-two migrations. An existing database always takes the legacy path,
     because only the chain can carry it forward. The two endpoints must be
     identical. ``_ensure_indexes`` still runs after this function, exactly as
     it does after the chain, so the query indexes it owns are deliberately not
@@ -1174,7 +1174,7 @@ def _create_current_schema(cursor, conn):
         last_fetch_attempted_at INTEGER,
         fetch_status INTEGER,
         title TEXT,
-        creator INTEGER,
+        creator_steamid INTEGER,
         creator_appid INTEGER,
         consumer_appid INTEGER,
         filename TEXT,
@@ -2600,6 +2600,51 @@ def _migration_30_to_31(cursor, conn, db_path):
     conn.commit()
     logging.info("Migration 30->31 complete.")
 
+def _migration_31_to_32(cursor, conn, db_path):
+    logging.info("Running migration 31->32: renaming workshop_items.creator to creator_steamid...")
+
+    # `creator` holds the author's SteamID64 and joins `creators.steamid`, but
+    # the bare name reads as a display name or an object rather than the id it
+    # is -- the neighbouring `creator_appid` is a different column and
+    # `creators` is a different table. It becomes `creator_steamid`; the stored
+    # values are untouched.
+    #
+    # SQLite rewrites an index *definition* on RENAME COLUMN but keeps the index
+    # *name*, so the two indexes whose names embed the old column would be left
+    # named for a column that no longer exists. Drop and recreate each under a
+    # name that matches what it indexes. No other index on `workshop_items`
+    # embeds `creator` in its name.
+    #
+    # Guarded on the column that is present so a re-run is harmless: a crash
+    # between the DDL commit and the version bump leaves the column renamed
+    # under the old marker, and this step must then be a no-op rather than raise
+    # "no such column: creator". The index drop/create pairs are likewise
+    # idempotent.
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(workshop_items)").fetchall()}
+    if "creator_steamid" in columns:
+        logging.info("  workshop_items.creator_steamid already present; nothing to rename")
+    elif "creator" in columns:
+        cursor.execute("ALTER TABLE workshop_items RENAME COLUMN creator TO creator_steamid")
+        logging.info("  renamed workshop_items.creator -> creator_steamid")
+    else:
+        logging.info("  neither creator nor creator_steamid exists; nothing to rename")
+
+    for old_name, new_name, columns_sql in (
+        ("idx_creator", "idx_creator_steamid", "creator_steamid"),
+        ("idx_creator_api_fetched_at", "idx_creator_steamid_api_fetched_at",
+         "creator_steamid, api_fetched_at"),
+    ):
+        cursor.execute(f"DROP INDEX IF EXISTS {old_name}")
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS {new_name} ON workshop_items ({columns_sql})"
+        )
+        logging.info("  recreated %s as %s", old_name, new_name)
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 32")
+    conn.commit()
+    logging.info("Migration 31->32 complete.")
+
 def _ensure_indexes(cursor):
     """Create the query indexes, after the column renames migrations perform.
 
@@ -2613,12 +2658,12 @@ def _ensure_indexes(cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_fetched_at ON workshop_items (api_fetched_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_scraped_version ON workshop_items (scrape_version)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_title ON workshop_items (title)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator ON workshop_items (creator)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_steamid ON workshop_items (creator_steamid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_short_description ON workshop_items (short_description)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_extended_description ON workshop_items (extended_description)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_fetch_status_scraped_version ON workshop_items (fetch_status, scrape_version)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_appid_fetch_status ON workshop_items (consumer_appid, fetch_status)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_api_fetched_at ON workshop_items (creator, api_fetched_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_steamid_api_fetched_at ON workshop_items (creator_steamid, api_fetched_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_translation_priority ON workshop_items (translation_priority)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_is_queued ON workshop_items (is_queued_for_subscription)")
     # Sort-column indexes — avoid expensive full-table sorts. idx_time_created /
@@ -2686,6 +2731,7 @@ MIGRATIONS = [
     (29, _migration_28_to_29),
     (30, _migration_29_to_30),
     (31, _migration_30_to_31),
+    (32, _migration_31_to_32),
 ]
 
 def initialize_database(db_path: str, *, legacy_chain: bool = False):
@@ -3257,7 +3303,7 @@ def get_item_details(db_path: str, workshop_id: int) -> dict | None:
         SELECT w.*, u.personaname, u.personaname_en, u.translated_at as user_translated_at,
                (SELECT GROUP_CONCAT(t.tag_name, ', ') FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id = w.workshop_id) as tags
         FROM workshop_items w
-        LEFT JOIN creators u ON w.creator = u.steamid
+        LEFT JOIN creators u ON w.creator_steamid = u.steamid
         WHERE w.workshop_id = ?
     """
     cursor = conn.execute(sql, (workshop_id,))
@@ -3287,7 +3333,7 @@ def search_items(db_path: str, query: str = "", appid: int = None,
     conn = get_connection(db_path)
     
     if summary_only:
-        cols = ("w.workshop_id, w.title, w.title_en, w.creator, w.consumer_appid, "
+        cols = ("w.workshop_id, w.title, w.title_en, w.creator_steamid, w.consumer_appid, "
                 "w.translate_version, w.is_queued_for_subscription, w.needs_web_scrape, "
                 "w.needs_image, w.translation_priority, w.file_size, w.image_extension, "
                 "w.wilson_subscription_score, w.wilson_favorite_score, "
@@ -3304,7 +3350,7 @@ def search_items(db_path: str, query: str = "", appid: int = None,
         cols = ("w.*, u.personaname, u.personaname_en,"
                 "(SELECT GROUP_CONCAT(t.tag_name, ', ') FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id = w.workshop_id) as tags")
         
-    sql = f"SELECT {cols} FROM workshop_items w LEFT JOIN creators u ON w.creator = u.steamid WHERE 1=1"
+    sql = f"SELECT {cols} FROM workshop_items w LEFT JOIN creators u ON w.creator_steamid = u.steamid WHERE 1=1"
     params = []
 
     if query:
@@ -3321,7 +3367,7 @@ def search_items(db_path: str, query: str = "", appid: int = None,
         params.extend(clause_params)
 
     if creator:
-        sql += " AND creator = ?"
+        sql += " AND creator_steamid = ?"
         params.append(creator)
         
     if appid is not None:
@@ -3378,8 +3424,8 @@ def search_items(db_path: str, query: str = "", appid: int = None,
 def get_all_creator_ids(db_path: str) -> list[str]:
     """Returns a list of all unique creator IDs currently in the database."""
     conn = get_connection(db_path)
-    cursor = conn.execute("SELECT DISTINCT creator FROM workshop_items WHERE creator IS NOT NULL ORDER BY creator")
-    results = [row["creator"] for row in cursor.fetchall()]
+    cursor = conn.execute("SELECT DISTINCT creator_steamid FROM workshop_items WHERE creator_steamid IS NOT NULL ORDER BY creator_steamid")
+    results = [row["creator_steamid"] for row in cursor.fetchall()]
     conn.close()
     return results
 

@@ -7,8 +7,8 @@ from tests.conftest import ASYNC_PAUSE
 @pytest.mark.asyncio
 async def test_tui_toggle_subscription_queue(mock_config):
     mock_results = [
-        {"workshop_id": 1, "title": "Item 1", "creator": "A", "is_queued_for_subscription": 0},
-        {"workshop_id": 2, "title": "Item 2", "creator": "B", "is_queued_for_subscription": 0},
+        {"workshop_id": 1, "title": "Item 1", "creator_steamid": "A", "is_queued_for_subscription": 0},
+        {"workshop_id": 2, "title": "Item 2", "creator_steamid": "B", "is_queued_for_subscription": 0},
     ]
 
     with patch('src.tui.load_config', return_value=mock_config), \

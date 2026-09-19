@@ -541,6 +541,11 @@ class Daemon:
             merged["steam_created_at"] = merged.pop("time_created")
         if "time_updated" in merged:
             merged["steam_updated_at"] = merged.pop("time_updated")
+        # The Steam API still calls the author field `creator`; the database
+        # column it writes is now named `creator_steamid`, so it is remapped
+        # here like the other API names above rather than dropped as unknown.
+        if "creator" in merged:
+            merged["creator_steamid"] = merged.pop("creator")
 
         clean = {}
         for k, v in merged.items():
@@ -1115,7 +1120,7 @@ class Daemon:
         it needs a `creators` read, so the batch collects the distinct candidates
         first and asks about each one once.
         """
-        creator_id = merged_data.get("creator")
+        creator_id = merged_data.get("creator_steamid")
         if not (creator_id and enriched):
             return None
         try:

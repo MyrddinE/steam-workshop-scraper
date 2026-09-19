@@ -1045,7 +1045,7 @@ async function returnFromAuthor() {
 
 // ── the creator list ──────────────────────────────────────────────────────
 // `/api/authors` is the server's own list of every distinct creator, in the
-// order `src.database.get_all_creator_ids` returns them (`ORDER BY creator`). The
+// order `src.database.get_all_creator_ids` returns them (`ORDER BY creator_steamid`). The
 // item jump only reaches a creator whose item is already on screen; this is the
 // entry point for one that is not. The TUI has no list of its own, so this page
 // is the one place that endpoint is consumed.
@@ -1115,8 +1115,8 @@ function renderDetail(item) {
     ? (item.display_title || 'N/A')
     : (item.display_title_original || 'N/A');
   const creator = translated
-    ? (item.personaname_en || item.personaname || item.creator || 'N/A')
-    : (item.personaname || item.creator || 'N/A');
+    ? (item.personaname_en || item.personaname || item.creator_steamid || 'N/A')
+    : (item.personaname || item.creator_steamid || 'N/A');
   // The server sends the creator ID as a string: a SteamID64 runs to seventeen
   // digits, past the range a JavaScript number holds exactly, so a numeric
   // field would silently round and the filter would name a different account.
