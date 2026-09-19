@@ -276,7 +276,7 @@ block is the same bars over *what the owner cares about*: the live items the tar
 stored `enrichment_filters` select, which is the population the daemon calls enriched. The
 two are separately headed, and a scope note under the second says which AppIDs were used and
 why the two figures may coincide: an AppID with no readable filter set (including a
-malformed one) excludes nothing, so its items are all counted (`enrichment_filters_for`'s
+malformed one) excludes nothing, so its items are all counted (`get_enrichment_filters`'s
 contract: `None` and `[]` both mean no exclusion). The second figure is the **search
 builder's SQL translation** of the filters, not a re-derivation of the daemon's per-item
 check: the builder also searches each text field's `_en` counterpart while

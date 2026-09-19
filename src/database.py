@@ -612,7 +612,7 @@ def _evaluate_tag_filter(item: dict, op: str, val) -> bool:
         return len(tag_set) > 0
     return True
 
-def enrichment_filters_for(tracking: dict) -> list[dict] | None:
+def get_enrichment_filters(tracking: dict) -> list[dict] | None:
     """The enrichment filters stored for an AppID, or ``None`` when unreadable.
 
     One reader, because two things now have to agree: the daemon's per-item
@@ -761,7 +761,7 @@ def _demote_filtered_out_queue_priorities(conn) -> tuple[int, int]:
     rules = []
     for row in cursor.execute("SELECT * FROM app_tracking"):
         tracking = dict(row)
-        filters = enrichment_filters_for(tracking)
+        filters = get_enrichment_filters(tracking)
         if tracking.get("appid") is not None and filters:
             rules.append((tracking["appid"], filters))
     if not rules:

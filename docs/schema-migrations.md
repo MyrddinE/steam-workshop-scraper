@@ -473,7 +473,7 @@ themselves.
 The daemon no longer inherits a priority the daemon itself set (see
 `user_requested_priority` in `src/daemon.py`); this migration repairs the rows it
 had already written. For every AppID with a readable filter set
-(`enrichment_filters_for`), it walks the items above backlog priority and demotes
+(`get_enrichment_filters`), it walks the items above backlog priority and demotes
 the ones the filters exclude:
 
 | Stored | After | Why |

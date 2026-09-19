@@ -21,7 +21,7 @@ from src.database import (
     get_item_details,
     normalize_tags,
     _evaluate_filters,
-    enrichment_filters_for,
+    get_enrichment_filters,
     USER_PRIORITY_FLOOR,
     WORKSHOP_ITEM_COLUMNS,
 )
@@ -560,7 +560,7 @@ class Daemon:
         app_tracking = get_app_tracking(self.db_path, appid)
         if app_tracking is None:
             return True
-        filters = enrichment_filters_for(app_tracking)
+        filters = get_enrichment_filters(app_tracking)
         if not filters:
             # Either the AppID has no filters -- so everything matches -- or the
             # stored set could not be read, which must not be taken as "excludes
