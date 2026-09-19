@@ -429,7 +429,10 @@ shadowing the name with the `bytes` builtin.
 - < 1000: gray
 - 1000–999999: white with K suffix
 - ≥ 1M: yellow with M suffix
-Uses 3 significant digits with decimal places that reduce as numbers grow.
+Uses 3 significant digits with decimal places that reduce as numbers grow. A zero is a measured
+zero and prints `0` in the gray band, matching the web's `fmtCount(0)`, which returns `'0'`. Only a
+value that is missing (`None` or `""`) or cannot be coerced to a number falls back to "N/A"; the
+fallback no longer collapses "measured zero" and "no data" into one string.
 
 ### `parse_tags(tags)` — Parses comma-separated tag string (from junction table) or legacy JSON into a list of tag names. Used by the details pane for tag display.
 

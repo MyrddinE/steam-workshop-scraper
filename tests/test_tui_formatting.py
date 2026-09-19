@@ -7,7 +7,7 @@ pin the fallback, not the exception message.
 import datetime
 import logging
 
-from src.tui import format_size, format_ts
+from src.tui import format_count, format_size, format_ts
 
 
 def test_format_ts_returns_na_for_a_string_instead_of_raising():
@@ -38,3 +38,18 @@ def test_format_size_returns_na_and_logs_the_value_it_was_given(caplog):
 
     assert repr(bad) in caplog.text
     assert "<class 'bytes'>" not in caplog.text
+
+
+def test_format_count_reads_zero_as_measured_and_only_the_unknown_as_na():
+    """A zero is a measured zero, not missing data.
+
+    ``format_count`` treated every falsy value alike, so ``0`` read "N/A" while
+    the web's ``fmtCount(0)`` returns ``'0'`` -- the same count meant two
+    different things on the two front ends. Only a missing or unparsable value
+    is unknown.
+    """
+    assert format_count(0) == "[gray]0[/gray]"
+    assert format_count(0) != "[gray]N/A[/gray]"
+
+    for unknown in (None, "", "not a number"):
+        assert format_count(unknown) == "[gray]N/A[/gray]"
