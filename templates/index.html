@@ -1160,7 +1160,7 @@ function renderDetail(item) {
     `File Type: ${item.file_type ?? 'N/A'}`,
     `Visibility: ${item.visibility ?? 'N/A'}`,
     `Banned: ${item.banned ? 'Yes' + (item.ban_reason ? ' — ' + item.ban_reason : '') : 'No'}`,
-    `Status: ${item.status ?? 'N/A'}`,
+    `Status: ${item.fetch_status ?? 'N/A'}`,
     `Translation Priority: ${item.translation_priority || 0}`,
     `Needs Web Scrape: ${item.needs_web_scrape || 0}`,
     `Needs Image: ${item.needs_image || 0}`,
@@ -2263,7 +2263,7 @@ function _renderPriority(b) {
 function _renderStatusCounts(rows) {
   if (!rows || !rows.length) return '<p class="stat-label">(none)</p>';
   return '<ul>' + rows.map(function(r) {
-    return '<li>Status ' + r.status + ': ' + fmtCount(r.count) + '</li>';
+    return '<li>Status ' + r.fetch_status + ': ' + fmtCount(r.count) + '</li>';
   }).join('') + '</ul>';
 }
 

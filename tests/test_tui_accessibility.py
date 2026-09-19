@@ -37,7 +37,7 @@ async def test_details_pane_contrast(mock_config):
         "workshop_id": 1, "title": "Test Item", "creator": "123", 
         "personaname": "Author Name", "file_size": 1024,
         "steam_created_at": 1000, "views": 10, "subscriptions": 5, "favorited": 2,
-        "tags": '["Tag1"]', "api_fetched_at": None, "first_seen_at": "2023", "status": 200
+        "tags": '["Tag1"]', "api_fetched_at": None, "first_seen_at": "2023", "fetch_status": 200
     }]
     
     with patch('src.tui.load_config', return_value=mock_config), \

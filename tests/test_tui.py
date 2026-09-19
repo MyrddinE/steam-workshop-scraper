@@ -403,9 +403,9 @@ async def test_tui_delete_never_fetched_command(tmp_path):
     initialize_database(db_path)
     
     # 1. Pending (should be removed)
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": None, "api_fetched_at": None})
+    insert_or_update_item(db_path, {"workshop_id": 1, "fetch_status": None, "api_fetched_at": None})
     # 2. Not Pending (should remain)
-    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "api_fetched_at": 1672531200})
+    insert_or_update_item(db_path, {"workshop_id": 2, "fetch_status": 200, "api_fetched_at": 1672531200})
     
     mock_config = {
         "database": {"path": db_path},
@@ -528,7 +528,7 @@ _FAKE_METRIC_VALUES = {
     "high_water": 1_700_000_000,
     "item_counts": {"total": 3, "alive": 2, "dead": 1},
     "app_discovery": [{"appid": 294100, "last_cursor": "abc"}],
-    "status_counts": [{"status": 200, "count": 2}, {"status": -1, "count": 1}],
+    "status_counts": [{"fetch_status": 200, "count": 2}, {"fetch_status": -1, "count": 1}],
     "dead_items_by_queue": {"web": 1, "image": 0, "translation": 0, "api": 0},
     "dead_queued": 1,
     "queued_nowhere": 2,

@@ -78,7 +78,7 @@ Tags are not a column on `workshop_items`. They live in `tags(tag_id, tag_name)`
 |---|---|---|
 | `wilson_favorite_score` | DERIVED | `wilson_lower(favorited, lifetime_subscriptions)`. |
 | `wilson_subscription_score` | DERIVED | `wilson_lower(subscriptions, lifetime_subscriptions)`. |
-| `status` | STATE | Fetch outcome. `200` = fetched, `206` = partial (see gaps below), `-1` = dead, `500` = transient failure to retry, `NULL` = discovered but never fetched. Synthetic, not an actual HTTP response code. |
+| `fetch_status` | STATE | Fetch outcome. `200` = fetched, `206` = partial (see gaps below), `-1` = dead, `500` = transient failure to retry, `NULL` = discovered but never fetched. Synthetic, not an actual HTTP response code. |
 | `first_seen_at` | STATE (ours) | Set when the row is first inserted. |
 | `api_fetched_at` | STATE (ours) | Set only when the API returned content (see [timestamps.md](timestamps.md)). |
 | `last_fetch_attempted_at` | STATE (ours) | Set on every API attempt, success or failure. |
@@ -219,7 +219,7 @@ that is not there.
   working feature: the TUI (`s`) and the web UI toggle it, the userscript polls
   `GET /api/queued` and clears each entry once it has subscribed or failed. Because it is
   transient, an all-zero snapshot only means nothing was queued at that moment.
-* **`status = 206` has never occurred.** The schema and one migration query allow a partial-data
+* **`fetch_status = 206` has never occurred.** The schema and one migration query allow a partial-data
   status, but the production database contains zero rows with it.
 * **The completion clocks start empty and are never backfilled.** `web_scraped_at`,
   `image_fetched_at` and `translated_at` arrived in v27, so every item that completed its stage

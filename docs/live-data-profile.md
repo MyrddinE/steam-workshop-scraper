@@ -60,7 +60,7 @@ backlog was being filled, at discovery speed, with work on items the filters exc
 |---|---|
 | `language` | **Was NULL for all 1,725,544 rows; the column has since been dropped.** The API merge would have stored it if a Steam response included it, and none can: `GetPublishedFileDetails` has no language field, and the request protocol's `language` is the viewer's localization parameter, not an item property. Migration 23→24 removes the column and its index — see [schema-migrations.md](schema-migrations.md#v23--v24-drop-the-never-populated-language-column). |
 | `is_queued_for_subscription` | **`0` for every row in this snapshot.** That is the resting state, not disuse. The column backs the subscription queue: the TUI and web UI set it, the userscript polls `GET /api/queued` and clears each entry on success or failure. Do not read this snapshot as "the feature is unused". |
-| `status = 206` | **Zero occurrences.** The schema's "web scrape failed but API succeeded" status has never been written. |
+| `fetch_status = 206` | **Zero occurrences.** The schema's "web scrape failed but API succeeded" status has never been written. |
 
 ## The version key that used to hold two things
 
@@ -97,9 +97,9 @@ Queue composition at the time of measurement: `title_en` 87,658 · `short_descri
 
 * **1,016 rows** where the version key disagreed with `steam_updated_at` (all failed fetches; now
   resolved by the migration, as described above).
-* **148 rows** with `status IS NULL` but `first_seen_at` set and `api_fetched_at` NULL —
+* **148 rows** with `fetch_status IS NULL` but `first_seen_at` set and `api_fetched_at` NULL —
   discovered but never fetched. These match the `delete_never_fetched_items` deletion criteria.
-* **One row** (`workshop_id 2804549163`, status 200, title present) had `first_seen_at` NULL. The
+* **One row** (`workshop_id 2804549163`, fetch_status 200, title present) had `first_seen_at` NULL. The
   insert path is supposed to set it unconditionally; migration 13→14 repaired the row from
   `api_fetched_at`.
 * Data integrity is otherwise clean: `PRAGMA quick_check` = `ok`, **zero** duplicate

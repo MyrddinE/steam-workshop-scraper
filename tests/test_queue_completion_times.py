@@ -167,7 +167,7 @@ def test_upgrading_a_v26_database_adds_the_clocks_additively(db_path):
 
 def test_the_migration_backfills_nothing_on_a_pre_existing_row(db_path):
     """Historical rows keep NULL: the time was never recorded and cannot be invented."""
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "old", "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "old", "fetch_status": 200,
                                     "steam_updated_at": 1})
 
     _regress_to_v26(db_path)
@@ -215,7 +215,7 @@ def test_the_clocks_are_real_columns_but_never_api_merge_keys(db_path):
 
 @pytest.mark.parametrize("column", COMPLETION_COLUMNS)
 def test_a_queue_with_no_stamps_reports_no_history(db_path, column):
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "x", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "x", "fetch_status": 200})
 
     value = metrics.values(
         metrics.compute(db_path, [QUEUE_METRIC[column]]))[QUEUE_METRIC[column]]
@@ -226,7 +226,7 @@ def test_a_queue_with_no_stamps_reports_no_history(db_path, column):
 def test_a_stamped_but_stale_queue_reports_a_measured_zero(db_path):
     """Once one stamp exists a 0 is an answer, not missing data."""
     now = int(time.time())
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 1, "fetch_status": 200,
                                     "web_scraped_at": now - 3 * 86400})
 
     value = metrics.values(
@@ -241,15 +241,15 @@ def test_a_stamped_but_stale_queue_reports_a_measured_zero(db_path):
 def test_throughput_counts_only_rows_inside_the_window_and_skips_nulls(db_path, column):
     now = int(time.time())
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "in-hour",
-                                    "status": 200, column: now - 60})
+                                    "fetch_status": 200, column: now - 60})
     insert_or_update_item(db_path, {"workshop_id": 2, "title": "in-day",
-                                    "status": 200, column: now - 2 * 3600})
+                                    "fetch_status": 200, column: now - 2 * 3600})
     insert_or_update_item(db_path, {"workshop_id": 3, "title": "older-than-a-day",
-                                    "status": 200, column: now - 3 * 86400})
+                                    "fetch_status": 200, column: now - 3 * 86400})
     # The historical row: the stage ran before the column existed, so it holds
     # NULL and must not be counted in either window.
     insert_or_update_item(db_path, {"workshop_id": 4, "title": "historical",
-                                    "status": 200})
+                                    "fetch_status": 200})
 
     value = metrics.values(
         metrics.compute(db_path, [QUEUE_METRIC[column]]))[QUEUE_METRIC[column]]
@@ -264,7 +264,7 @@ def test_the_throughput_metric_reads_its_partial_index(db_path, column):
     """The plan the metric runs must not scan the item table."""
     conn = get_connection(db_path)
     conn.executemany(
-        "INSERT INTO workshop_items (workshop_id, status) VALUES (?, 200)",
+        "INSERT INTO workshop_items (workshop_id, fetch_status) VALUES (?, 200)",
         [(i,) for i in range(1, 401)],
     )
     conn.commit()
@@ -532,7 +532,7 @@ def _translate(db_path, item_id, fields, returned, on_call=None):
 
 def test_the_translator_stamps_our_clock_when_the_items_last_field_completes(db_path, monkeypatch):
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "テキスト",
-                                    "status": 200, "steam_updated_at": 1710000000})
+                                    "fetch_status": 200, "steam_updated_at": 1710000000})
     queue_field_for_translation(db_path, "item", 1, "title_en", "テキスト", 10)
 
     clock = {"now": 1000.0}
@@ -550,7 +550,7 @@ def test_the_translator_stamps_our_clock_when_the_items_last_field_completes(db_
 def test_a_partial_translation_does_not_stamp(db_path):
     """One field written while another is still queued is not a completion."""
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "テキスト",
-                                    "short_description": "テキスト", "status": 200,
+                                    "short_description": "テキスト", "fetch_status": 200,
                                     "steam_updated_at": 1710000000})
     queue_field_for_translation(db_path, "item", 1, "title_en", "テキスト", 10)
     queue_field_for_translation(db_path, "item", 1, "short_description_en", "テキスト", 10)
@@ -572,7 +572,7 @@ def test_a_reply_with_no_text_is_a_failure_and_does_not_stamp(db_path):
     from src.translator import TranslationResponseError
 
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "テキスト",
-                                    "status": 200, "steam_updated_at": 1710000000})
+                                    "fetch_status": 200, "steam_updated_at": 1710000000})
     queue_field_for_translation(db_path, "item", 1, "title_en", "テキスト", 10)
 
     with pytest.raises(TranslationResponseError):

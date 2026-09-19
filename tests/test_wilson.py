@@ -195,7 +195,7 @@ def test_subscriber_score_uses_retention_formula(db_path):
         "lifetime_subscriptions": 100,
         "wilson_subscription_score": 0.99,
         "wilson_favorite_score": 0.5,
-        "status": 200,
+        "fetch_status": 200,
     })
     conn = get_connection(db_path)
     row = conn.execute(

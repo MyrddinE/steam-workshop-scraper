@@ -144,7 +144,7 @@ def _cookie(expires_at, steamid="76561198000000000", encoded=True):
 
 def _items(db_path, *ids, appid=294100, **columns):
     for wid in ids:
-        record = {"workshop_id": wid, "title": f"Item {wid}", "status": 200,
+        record = {"workshop_id": wid, "title": f"Item {wid}", "fetch_status": 200,
                   "consumer_appid": appid}
         record.update(columns)
         insert_or_update_item(db_path, record)
@@ -648,7 +648,7 @@ def test_the_reported_steamid_comes_from_the_cookie_it_was_handed(sync_env, capl
 def test_mark_own_subscribed_reports_only_the_first_stamp(tmp_path):
     db_path = str(tmp_path / "mark.db")
     initialize_database(db_path)
-    insert_or_update_item(db_path, {"workshop_id": 5, "title": "T", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 5, "title": "T", "fetch_status": 200})
 
     assert mark_own_subscribed(db_path, 5, seen_at=1000) is True
     assert mark_own_subscribed(db_path, 5, seen_at=2000) is False

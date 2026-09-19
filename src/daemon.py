@@ -70,7 +70,7 @@ PERMANENT_API_STATUSES = frozenset({404})
 # a single overloaded call would be diluted by the results that were fine, and a
 # batch of "not found" results -- a perfectly successful call -- would read as a
 # run of failures. Only the request outcome moves the delay; per-item results
-# drive item state (status, priority, queue flags, death) and nothing else.
+# drive item state (fetch_status, priority, queue flags, death) and nothing else.
 #
 # The shape is TCP congestion control, not a safety net: every refusal doubles
 # the delay and healthy operation walks it back down, so the client converges on
@@ -782,8 +782,8 @@ class Daemon:
             conn = get_connection(self.db_path)
             cursor = conn.execute(
                 "UPDATE workshop_items SET api_priority = 1 "
-                "WHERE api_priority = 0 AND status = 200 AND api_fetched_at < ? "
-                "AND (status IS NULL OR status != -1)",
+                "WHERE api_priority = 0 AND fetch_status = 200 AND api_fetched_at < ? "
+                "AND (fetch_status IS NULL OR fetch_status != -1)",
                 (threshold,)
             )
             conn.commit()
@@ -864,7 +864,7 @@ class Daemon:
 
         if api_status not in HANDLED_API_STATUSES:
             # No branch below handles this code, so the item would be persisted as
-            # status 200 and counted as a success. Capture the evidence; changing
+            # fetch_status 200 and counted as a success. Capture the evidence; changing
             # that flow is a separate decision.
             capture.record_failure(
                 kind="api_unhandled_status",
@@ -889,7 +889,7 @@ class Daemon:
         # take it before the queue fields are rewritten below.
         previous_priority = stored_item.get("api_priority") or 0
         merged_data["api_priority"] = 0
-        merged_data["status"] = api_status
+        merged_data["fetch_status"] = api_status
 
         if api_status != 200:
             self._settle_api_failure(merged_data, item_id, api_status, previous_priority)
@@ -908,7 +908,7 @@ class Daemon:
         self._score_wilson(merged_data)
         outcome = self._raise_scrape_and_image_priorities(merged_data, stored_item, item_id, inherited_priority)
 
-        merged_data["status"] = 200
+        merged_data["fetch_status"] = 200
         insert_or_update_item(self.db_path, merged_data)
 
         self._queue_translations(merged_data, item_id, outcome.enriched, inherited_priority)
@@ -946,7 +946,7 @@ class Daemon:
 
         A temporary failure keeps the item queued one priority level lower rather
         than clearing its priority. Clearing it left the item in no queue at all,
-        and _promote_stale_items promotes only status 200, so a transient 500
+        and _promote_stale_items promotes only fetch_status 200, so a transient 500
         became permanent. The floor is 1 because priority 0 means "not queued".
 
         Statuses with no branch of their own reach here too, on purpose: falling
@@ -956,9 +956,9 @@ class Daemon:
         if api_status in PERMANENT_API_STATUSES:
             logging.warning(
                 f"[A:{item_id}] Item not found ({api_status}) via API. "
-                "Recording the failure and marking it dead (status=-1)."
+                "Recording the failure and marking it dead (fetch_status=-1)."
             )
-            merged_data["status"] = -1
+            merged_data["fetch_status"] = -1
             merged_data["api_priority"] = 0
             # A dead item can never complete, so clear the other three queue
             # flags as well. The web, image and translation polls select on

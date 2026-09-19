@@ -43,7 +43,7 @@ def _eta(db_path, window=WINDOW):
 
 def _item(db_path, workshop_id, **over):
     record = {"workshop_id": workshop_id, "title": f"item {workshop_id}",
-              "status": 200, "api_priority": 0}
+              "fetch_status": 200, "api_priority": 0}
     record.update(over)
     insert_or_update_item(db_path, record)
 
@@ -104,7 +104,7 @@ def test_an_empty_queue_is_drained_not_unmeasurable(db_path):
 def test_outstanding_depth_excludes_dead_items(db_path):
     """A dead item can never complete, so it must not promise a drain."""
     _item(db_path, 1, needs_web_scrape=5)
-    _item(db_path, 2, needs_web_scrape=5, status=-1)
+    _item(db_path, 2, needs_web_scrape=5, fetch_status=-1)
 
     assert _eta(db_path)["queues"]["web"]["outstanding"] == 1
 

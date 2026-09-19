@@ -64,7 +64,7 @@ def _translation_queue_row(db_path, workshop_id):
 
 def test_migration_17_clears_queue_flags_on_dead_rows(db_path):
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "status": -1, "api_priority": 0, **DEAD_FLAGS,
+        "workshop_id": 1, "fetch_status": -1, "api_priority": 0, **DEAD_FLAGS,
     })
     _age_to_v16(db_path)
 
@@ -82,7 +82,7 @@ def test_migration_17_clears_queue_flags_on_dead_rows(db_path):
 def test_migration_17_leaves_live_rows_queued(db_path):
     """A live item's queue flags are work, not debris: they must survive."""
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "status": 200, "api_priority": 0, **DEAD_FLAGS,
+        "workshop_id": 1, "fetch_status": 200, "api_priority": 0, **DEAD_FLAGS,
     })
     _translation_queue_row(db_path, 1)
     _age_to_v16(db_path)
@@ -94,10 +94,10 @@ def test_migration_17_leaves_live_rows_queued(db_path):
 
 def test_migration_17_logs_the_number_of_rows_it_cleared(db_path, caplog):
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "status": -1, "api_priority": 0, **DEAD_FLAGS,
+        "workshop_id": 1, "fetch_status": -1, "api_priority": 0, **DEAD_FLAGS,
     })
     insert_or_update_item(db_path, {
-        "workshop_id": 2, "status": -1, "api_priority": 0, **DEAD_FLAGS,
+        "workshop_id": 2, "fetch_status": -1, "api_priority": 0, **DEAD_FLAGS,
     })
     _age_to_v16(db_path)
 
@@ -114,7 +114,7 @@ def test_migration_17_is_idempotent(db_path):
     whose value changed, so the logged count is not asserted here; the effect is.
     """
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "status": -1, "api_priority": 0, **DEAD_FLAGS,
+        "workshop_id": 1, "fetch_status": -1, "api_priority": 0, **DEAD_FLAGS,
     })
     _age_to_v16(db_path)
     initialize_database(db_path)

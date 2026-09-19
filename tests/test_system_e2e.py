@@ -21,7 +21,7 @@ def system_config(tmp_path):
     
     # Add dummy items to suppress automatic seeding/discovery expansion during test
     for i in range(101):
-        insert_or_update_item(db_path, {"workshop_id": 99000 + i, "scrape_version": 1768233600, "status": 200})
+        insert_or_update_item(db_path, {"workshop_id": 99000 + i, "scrape_version": 1768233600, "fetch_status": 200})
     
     return {
         "database": {"path": db_path},
@@ -50,7 +50,7 @@ async def test_end_to_end_system_flow(system_config):
     from src.database import get_item_details
     item = get_item_details(system_config["database"]["path"], 2838181007)
     assert item is not None
-    assert item["status"] == 200
+    assert item["fetch_status"] == 200
     assert item["title"] is not None
 
     # 3. Spin up the TUI and search for what the Daemon just downloaded

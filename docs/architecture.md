@@ -128,7 +128,7 @@ The database is designed for high-concurrency and complex querying. See
   TUI poll took the session down (issue 43). The unattended TUI polls additionally skip a tick they
   could not read rather than ending the session; see [tui.md](tui.md).
 * **Schema**:
-  * **`workshop_items`**: Item metadata. Key columns include `workshop_id` (PK), `status`
+  * **`workshop_items`**: Item metadata. Key columns include `workshop_id` (PK), `fetch_status`
     (HTTP-like status code), `title`, `creator`, `extended_description`, the three timestamp
     clocks (`steam_created_at`, `steam_updated_at`, `first_seen_at`), and translation fields
     (`translation_priority`, `translate_version`, `title_en`, and so on). Lifetime stats live in

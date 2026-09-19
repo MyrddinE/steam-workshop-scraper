@@ -15,19 +15,19 @@ housekeeping — the staleness sweep (`_maybe_promote_stale_items`), the subscri
 the **first batch after a restart**, which is why a fresh daemon can be minutes away from its first API
 fetch while its scraper, image and discovery threads are already working. Each invocation then:
 
-1. Calls `get_next_items_to_fetch` to retrieve up to `api_batch_size` items due for processing. Selection is `api_priority > 0` and `status` not `-1`, ordered by `api_priority DESC, api_fetched_at ASC`, so never-successfully-fetched items (`api_fetched_at IS NULL`) come first within a priority band. The call takes `limit` alone: `item_staleness_days` is **not** a fetch argument. It is the window `_promote_stale_items` uses to put already-fetched items back in the queue, so it is applied by that sweep and not by this SELECT.
+1. Calls `get_next_items_to_fetch` to retrieve up to `api_batch_size` items due for processing. Selection is `api_priority > 0` and `fetch_status` not `-1`, ordered by `api_priority DESC, api_fetched_at ASC`, so never-successfully-fetched items (`api_fetched_at IS NULL`) come first within a priority band. The call takes `limit` alone: `item_staleness_days` is **not** a fetch argument. It is the window `_promote_stale_items` uses to put already-fetched items back in the queue, so it is applied by that sweep and not by this SELECT.
 2. If no items are available, waits for the discovery thread to refill the queue. Discovery is no longer the main loop's job: it runs on its own thread (see [threading.md](threading.md)) so that the queue is refilled while the loop is still draining it, rather than only after it has drained. The wait is woken by the thread's signal instead of polling the database, and still gives up after ten minutes so the outer loop re-checks.
 3. Fetches metadata for the whole batch in one Steam Web API request via `get_workshop_details_batch` (title, description, tags, file_size, preview_url, creator, subscriptions, etc.), then processes the items **in the order the queue returned them**, matching each to its result by `publishedfileid`. The batch is chunked into several requests only if `api_batch_size` exceeds the endpoint's per-request id ceiling (`STEAM_API_MAX_IDS_PER_REQUEST`, 100).
 4. Merges API data with existing DB row via `_merge_and_clean_api_data`, which filters to `MERGE_ITEM_KEYS` (derived from `WORKSHOP_ITEM_COLUMNS`), remaps `creator_app_id`/`consumer_app_id` to `creator_appid`/`consumer_appid`, remaps `description` to `short_description`, and remaps the API's `time_created`/`time_updated` to `steam_created_at`/`steam_updated_at`. Unknown API keys are discarded with a log message.
 5. Computes Wilson scores via `wilson_lower` (a binomial-proportion confidence interval using a 95% z-score of 1.96). Sets `wilson_favorite_score` from `(favorited, lifetime_subscriptions)` and `wilson_subscription_score` from `(subscriptions, lifetime_subscriptions)`.
 6. Evaluates enrichment filters via `_should_enrich`. Checks the stored `enrichment_filters` for each AppID against the item using `_evaluate_filters` (an in-memory filter evaluator that mirrors the SQL builder's semantics). If no filters are configured, all items are enriched.
-7. If enrichment is approved, calls `raise_web_scrape_priority` at `max(3, requested)` -- and `raise_image_priority` at the same priority if `preview_url` is present -- where `requested` is the part of the item's pre-fetch `api_priority` a *user* asked for (`user_requested_priority`; `5` and `10` only). An item the filters exclude is still scraped, but at `max(1, requested)`: the filters choose priority, not membership, and an excluded item must not outrank a selected one ([data-model.md](data-model.md#queue-priorities)). Sets `status = 200`. Calls `insert_or_update_item` to persist. The merge sets `api_fetched_at = now_ts` and `api_priority = 0`; `last_fetch_attempted_at` was already stamped on entry.
+7. If enrichment is approved, calls `raise_web_scrape_priority` at `max(3, requested)` -- and `raise_image_priority` at the same priority if `preview_url` is present -- where `requested` is the part of the item's pre-fetch `api_priority` a *user* asked for (`user_requested_priority`; `5` and `10` only). An item the filters exclude is still scraped, but at `max(1, requested)`: the filters choose priority, not membership, and an excluded item must not outrank a selected one ([data-model.md](data-model.md#queue-priorities)). Sets `fetch_status = 200`. Calls `insert_or_update_item` to persist. The merge sets `api_fetched_at = now_ts` and `api_priority = 0`; `last_fetch_attempted_at` was already stamped on entry.
 8. For enriched items, flags `title` and `short_description` for translation via `queue_field_for_translation` at `max(3, requested)`. That function inserts into `translation_queue` and also raises the parent row's `translation_priority` (using `MAX`, so it never downgrades); the translator clears it to 0 when the item has no queue entries left. Users with non-ASCII names get `translation_priority = 1` set via `_build_user_record`.
 9. After the batch, refreshes the batch's creator profiles in **one** `get_player_summaries` call: the distinct creators proposed by enriched items whose `creators` row is missing or older than `creator_staleness_days`. This was one request per item; the "only for enriched items" and staleness rules are unchanged.
 
 **Missing ids**: `get_workshop_details_batch` keys results by each entry's `publishedfileid`, never by position, and ignores duplicate or unrequested ids. A requested id the response omits is reported as a synthetic `500`, not a `404`: the response not covering an id is a different claim from Steam having deleted the item, and a `404` would mark it permanently dead. It is therefore settled as a temporary failure and retried, rather than being silently skipped at the front of the queue.
 
-**Error handling**: the batch helper returns `None` when the *request* failed — a transport error, a timeout, an HTTP error such as 429, or a body that is not JSON — and the daemon settles every id it carried as a temporary `500`. It returns a mapping (an empty successful response included) when the request returned and parsed. The daemon maps a per-item `404` to `status = -1` (dead), clears every queue flag so the item is in no queue, and persists a `500` as `status = 500` for a later attempt. Both paths stamp `last_fetch_attempted_at`; the `500` path leaves `api_fetched_at` untouched. `get_workshop_details(item_id)` remains the one-id spelling and returns the same shapes.
+**Error handling**: the batch helper returns `None` when the *request* failed — a transport error, a timeout, an HTTP error such as 429, or a body that is not JSON — and the daemon settles every id it carried as a temporary `500`. It returns a mapping (an empty successful response included) when the request returned and parsed. The daemon maps a per-item `404` to `fetch_status = -1` (dead), clears every queue flag so the item is in no queue, and persists a `500` as `fetch_status = 500` for a later attempt. Both paths stamp `last_fetch_attempted_at`; the `500` path leaves `api_fetched_at` untouched. `get_workshop_details(item_id)` remains the one-id spelling and returns the same shapes.
 
 **Dynamic delay**: `api_delay` is driven by **requests**, not items — one change per batched POST, never per item. A request that returns and parses is a success whatever its individual results say (a batch of 50 of which 10 are "not found" is a completely successful API call), and it resets the failure streak. The rule is TCP congestion control, not a safety net: every refused request doubles the delay and healthy operation walks it back down, so the client converges on the fastest rate Steam will sustain — a limit that is not published and may move. Steady state is a sawtooth around that rate.
 
@@ -97,7 +97,7 @@ scrapes and previews throughout and no API fetch until the walk finished.
 Cursor-based discovery using `IPublishedFileService/QueryFiles` with `query_type=1` (rank by publication date, newest first). For each target AppID:
 
 - Resumes from the last stored cursor (`app_discovery.last_cursor`), or `*` for the first page.
-- Fetches `numperpage=100` items per request. Each item's `publishedfileid` is inserted into `workshop_items` as a bare row at `api_priority = 3`, the documented new-item priority (status NULL, no metadata). The priority is passed explicitly rather than left to the column default, because that default is not stable across database histories: `CREATE TABLE` declares `DEFAULT 3` while the `ALTER TABLE` in migration 11→12 gives an existing database `DEFAULT 0`, so leaning on it queues discovered items on a fresh database and strands them on a migrated one (the fetch queue selects `api_priority > 0`). `_run_page_discovery` uses `5` because it handles new *and changed* items that should refresh as if visible; cursor discovery finds genuinely new items, so it uses the documented `3`.
+- Fetches `numperpage=100` items per request. Each item's `publishedfileid` is inserted into `workshop_items` as a bare row at `api_priority = 3`, the documented new-item priority (fetch_status NULL, no metadata). The priority is passed explicitly rather than left to the column default, because that default is not stable across database histories: `CREATE TABLE` declares `DEFAULT 3` while the `ALTER TABLE` in migration 11→12 gives an existing database `DEFAULT 0`, so leaning on it queues discovered items on a fresh database and strands them on a migrated one (the fetch queue selects `api_priority > 0`). `_run_page_discovery` uses `5` because it handles new *and changed* items that should refresh as if visible; cursor discovery finds genuinely new items, so it uses the documented `3`.
 - Stops when `fill_target` unscraped items are accumulated, or when the cursor returns empty (no more pages).
 - Persists the cursor after each page via `update_app_tracking_cursor`.
 - When the cursor is empty after a successful scan, sets `_cursor_exhausted = True`, enabling the page-based discovery mode.
@@ -166,7 +166,7 @@ all four when it selects the columns to load — see [search-filter.md](search-f
 
 ### Failure classification (daemon)
 
-`_settle_api_failure` turns a non-success outcome into a queue decision. `404` is permanent: the failure is logged, the item is marked dead (`status = -1`) and it is removed from **every** queue — `api_priority`, `needs_web_scrape`, `needs_image` and `translation_priority` are all cleared, because a dead item can never complete and a queue flag left set would strand it in a queue that never drains. Everything else is temporary — `500` (including every id of a request that failed and was settled as `500`), transport exceptions, and any status no branch handles. Those keep the item queued at one priority level lower, floored at `1`, because priority `0` means "not queued" and clearing it is what previously stranded transient failures with nothing able to bring them back. Unhandled statuses are captured as evidence and never fall through to the success path.
+`_settle_api_failure` turns a non-success outcome into a queue decision. `404` is permanent: the failure is logged, the item is marked dead (`fetch_status = -1`) and it is removed from **every** queue — `api_priority`, `needs_web_scrape`, `needs_image` and `translation_priority` are all cleared, because a dead item can never complete and a queue flag left set would strand it in a queue that never drains. Everything else is temporary — `500` (including every id of a request that failed and was settled as `500`), transport exceptions, and any status no branch handles. Those keep the item queued at one priority level lower, floored at `1`, because priority `0` means "not queued" and clearing it is what previously stranded transient failures with nothing able to bring them back. Unhandled statuses are captured as evidence and never fall through to the success path.
 
 These per-item outcomes never touch `api_delay`. A batch request that returned and parsed is a success even when some of its items settle here, so only `_fetch_details` — which counts the request once — moves the delay; see the delay rule above.
 
@@ -514,7 +514,7 @@ This replaced a pair of defects. The two background triggers used to check only 
 non-ASCII, while the two user-view triggers also checked for an existing translation. Since a
 successful translation **deletes** its queue row, `queue_field_for_translation`'s "already in the
 queue" check offered no protection afterwards — so with the staleness sweep returning every
-`status = 200` item to the fetch queue about monthly, an enriched item with a non-ASCII title was
+`fetch_status = 200` item to the fetch queue about monthly, an enriched item with a non-ASCII title was
 re-translated roughly monthly whether or not anything had changed. Meanwhile nothing compared the
 version keys, so *changed* text was never refreshed either. Both are fixed; the freshness rule is
 what keeps the two from contradicting each other.
@@ -527,7 +527,7 @@ granularity of the only version stamp that exists.
 
 ## Display & Search Visibility
 
-Items become visible in search once they have `status = 200` (API details fetched) and their metadata is in the database. The TUI and Web UI both call `search_items` with structured filters.
+Items become visible in search once they have `fetch_status = 200` (API details fetched) and their metadata is in the database. The TUI and Web UI both call `search_items` with structured filters.
 
 ### Summary fields
 
@@ -548,7 +548,7 @@ Every item is, at all times, in exactly one state:
 * queued for an image (`needs_image > 0`), or
 * queued for translation (`translation_priority > 0`), or
 * complete for the stage that owns it, or
-* deliberately dead (`status = -1`) and therefore in **no** queue.
+* deliberately dead (`fetch_status = -1`) and therefore in **no** queue.
 
 Each stage hands an item to the next by writing the column the next stage's own query selects on. The
 contract is enumerated here because it is otherwise written down only in the two functions that happen
@@ -556,11 +556,11 @@ to implement it — the producer that writes the column and the consumer that re
 
 | Handoff | Producer writes | Consumer selects on | Predicate function (`src/database.py`) |
 |---|---|---|---|
-| Discovery → API fetch | `api_priority = 3` for a cursor-discovered item, `5` for a page-discovered new or changed one, with `status` and `api_fetched_at` left NULL (`seed_database`, `_run_page_discovery`) | `get_next_items_to_fetch`: `api_priority > 0 AND (status IS NULL OR status != -1)` | `api_fetch_queue_predicate()` |
-| API fetch → web scrape | `status = 200`, `api_fetched_at = now`, then `raise_web_scrape_priority(max(3, requested))` — or `max(1, requested)` for an item the enrichment filters exclude (`_raise_scrape_and_image_priorities`) | `get_next_web_scrape_item`: `needs_web_scrape > 0`. The worker's own success test is that it stored a description, not merely that the flag is clear | `web_scrape_queue_predicate()` |
+| Discovery → API fetch | `api_priority = 3` for a cursor-discovered item, `5` for a page-discovered new or changed one, with `fetch_status` and `api_fetched_at` left NULL (`seed_database`, `_run_page_discovery`) | `get_next_items_to_fetch`: `api_priority > 0 AND (fetch_status IS NULL OR fetch_status != -1)` | `api_fetch_queue_predicate()` |
+| API fetch → web scrape | `fetch_status = 200`, `api_fetched_at = now`, then `raise_web_scrape_priority(max(3, requested))` — or `max(1, requested)` for an item the enrichment filters exclude (`_raise_scrape_and_image_priorities`) | `get_next_web_scrape_item`: `needs_web_scrape > 0`. The worker's own success test is that it stored a description, not merely that the flag is clear | `web_scrape_queue_predicate()` |
 | API fetch → image | `raise_image_priority(max(3, requested))`, or `max(1, requested)` when the filters exclude, whenever `preview_url` is present (`_raise_scrape_and_image_priorities`) | `get_next_image_item`: `needs_image > 0`; `image_extension` records the answer, so a permanent `404` or a non-image type also settles the stage | `image_queue_predicate()` |
 | API fetch and web scrape → translation | `queue_field_for_translation` raises the item's `translation_priority` with `MAX` and inserts a `translation_queue` row for each non-ASCII `title`/`short_description` (`_queue_translations`) or `extended_description` (`WebScraperThread`) | `get_next_batch_for_translation`: any `translation_queue` row; the translator clears the mirror to `0` when the item has no queue entries left | `translation_queue_predicate()` (the poll's; `translation_priority_predicate()` is the item-level mirror the invariant reads) |
-| any stage → dead | `_settle_api_failure` on a permanent `404`: `status = -1` and `api_priority`, `needs_web_scrape`, `needs_image` and `translation_priority` all cleared | every queue predicate. The web, image and translation polls have **no** dead-item guard, so that clear is what keeps a dead item out; the fetch queue also tests `status != -1` on its own | `queued_anywhere_predicate()` (built from the four above) |
+| any stage → dead | `_settle_api_failure` on a permanent `404`: `fetch_status = -1` and `api_priority`, `needs_web_scrape`, `needs_image` and `translation_priority` all cleared | every queue predicate. The web, image and translation polls have **no** dead-item guard, so that clear is what keeps a dead item out; the fetch queue also tests `fetch_status != -1` on its own | `queued_anywhere_predicate()` (built from the four above) |
 
 Each predicate is a named function, not a copy of its SQL: the worker poll
 interpolates the fragment into its statement and the tests in
@@ -716,7 +716,7 @@ completion indexes migration 26→27 added. No new index was required.
 ## Item Lifecycle State Machine
 
 ```
-[Discovered: status=NULL, api_fetched_at=NULL, last_fetch_attempted_at=NULL]
+[Discovered: fetch_status=NULL, api_fetched_at=NULL, last_fetch_attempted_at=NULL]
     │
     ▼ seed_database / _run_page_discovery
     │
@@ -724,7 +724,7 @@ completion indexes migration 26→27 added. No new index was required.
     │
     ▼ process_batch: get_workshop_details_batch
     │
-[Fetched: status=200, api_fetched_at=now, has title/tags/preview_url]
+[Fetched: fetch_status=200, api_fetched_at=now, has title/tags/preview_url]
     │
     ├─► Web Scraper (if enriched): scrape_extended_details
     │      │

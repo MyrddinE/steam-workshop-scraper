@@ -69,8 +69,8 @@ def _seed_both_tables(db_path) -> None:
     update_app_tracking_cursor(db_path, 294100, "saved_cursor")
 
 
-def test_a_fresh_database_reaches_v30_under_the_new_names(db_path):
-    assert EXPECTED_VERSION == 30
+def test_a_fresh_database_reaches_the_expected_version_under_the_new_names(db_path):
+    assert EXPECTED_VERSION == 31
     assert _version(db_path) == EXPECTED_VERSION
 
     names = _table_names(db_path)

@@ -138,7 +138,7 @@ def _capturing_client(payload: str):
 def _queued(db_path, fields, item_id: int = 1, priority: int = 10) -> list[dict]:
     """Queue `fields` on one item and return the rows the poll would hand over."""
     insert_or_update_item(db_path, {
-        "workshop_id": item_id, "title": SOURCE, "status": 200,
+        "workshop_id": item_id, "title": SOURCE, "fetch_status": 200,
     })
     for field in fields:
         queue_field_for_translation(db_path, "item", item_id, field, SOURCE, priority)

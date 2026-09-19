@@ -11,7 +11,7 @@ ASYNC_PAUSE = 0.25
 
 
 def restore_pre_rename_table_names(conn) -> None:
-    """Undo migration 29->30's table renames for a rewound version marker.
+    """Undo the current schema's renames for a rewound version marker.
 
     The migration tests age a current database by rewinding
     ``PRAGMA user_version`` alone. Before 29->30 renamed the two tables that
@@ -20,6 +20,12 @@ def restore_pre_rename_table_names(conn) -> None:
     chain's historical SQL (for example migration 27->28) still names
     ``users``. Rename them back so the database actually matches the version
     its marker claims.
+
+    Migration 30->31 renamed the ``status`` column to ``fetch_status`` for the
+    same reason: a marker rewound below 31 must present the pre-rename column,
+    because the replayed bodies of migrations 15->16 through 19->20 still name
+    ``status``. Migration 30->31 itself is guarded on the column and renames it
+    forward again, so the final shape is unchanged.
     """
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
@@ -27,6 +33,10 @@ def restore_pre_rename_table_names(conn) -> None:
         conn.execute("ALTER TABLE creators RENAME TO users")
     if "app_discovery" in tables and "app_tracking" not in tables:
         conn.execute("ALTER TABLE app_discovery RENAME TO app_tracking")
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(workshop_items)").fetchall()}
+    if "fetch_status" in columns and "status" not in columns:
+        conn.execute("ALTER TABLE workshop_items RENAME COLUMN fetch_status TO status")
 
 # Deterministic test database constants
 _DET_SEED = 42
@@ -151,7 +161,7 @@ def deterministic_db(tmp_path_factory):
             "tags": item_tags,
             "steam_created_at": created,
             "steam_updated_at": updated,
-            "status": 200,        }
+            "fetch_status": 200,        }
 
         if has_translation:
             item["title_en"] = _det_pick_words(rng, _DET_LOREM_WORDS, rng.randint(1, 10))

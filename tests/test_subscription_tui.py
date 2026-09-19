@@ -51,7 +51,7 @@ async def test_the_tui_list_row_draws_each_state(tmp_path, columns, state):
     db_path = str(tmp_path / "tui.db")
     from src.database import initialize_database, insert_or_update_item
     initialize_database(db_path)
-    insert_or_update_item(db_path, dict({"workshop_id": 5, "title": "Item", "status": 200},
+    insert_or_update_item(db_path, dict({"workshop_id": 5, "title": "Item", "fetch_status": 200},
                                         **columns))
     config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
 
@@ -83,7 +83,7 @@ async def test_the_tui_detail_pane_draws_each_state_before_the_title(tmp_path, c
     db_path = str(tmp_path / "detail.db")
     from src.database import initialize_database, insert_or_update_item
     initialize_database(db_path)
-    insert_or_update_item(db_path, dict({"workshop_id": 5, "title": "Item", "status": 200},
+    insert_or_update_item(db_path, dict({"workshop_id": 5, "title": "Item", "fetch_status": 200},
                                         **columns))
     config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
 
@@ -136,7 +136,7 @@ async def test_the_keyboard_toggle_updates_the_marker(tmp_path):
     db_path = str(tmp_path / "toggle.db")
     from src.database import initialize_database, insert_or_update_item
     initialize_database(db_path)
-    insert_or_update_item(db_path, {"workshop_id": 5, "title": "Item", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 5, "title": "Item", "fetch_status": 200})
     config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
 
     with patch('src.tui.load_config', return_value=config):
@@ -172,7 +172,7 @@ async def test_the_keyboard_toggle_updates_the_marker(tmp_path):
 def _seed_queued(db_path: str, workshop_id: int = 5, title: str = "Item") -> None:
     initialize_database(db_path)
     insert_or_update_item(
-        db_path, {"workshop_id": workshop_id, "title": title, "status": 200})
+        db_path, {"workshop_id": workshop_id, "title": title, "fetch_status": 200})
     toggle_subscription_queue(db_path, workshop_id)
 
 
@@ -222,7 +222,7 @@ async def test_the_poll_stops_when_no_rendered_row_is_queued(tmp_path):
     """A settled list costs no database reads: the poll must not stay armed."""
     db_path = str(tmp_path / "settled.db")
     initialize_database(db_path)
-    insert_or_update_item(db_path, {"workshop_id": 5, "title": "Item", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 5, "title": "Item", "fetch_status": 200})
     config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
 
     with patch('src.tui.load_config', return_value=config):
@@ -370,7 +370,7 @@ async def test_the_open_button_and_key_act_only_on_a_downloaded_item(tmp_path):
     folder = content / "294100" / "5"
     folder.mkdir(parents=True)
     insert_or_update_item(db_path, {
-        "workshop_id": 5, "title": "Item", "status": 200,
+        "workshop_id": 5, "title": "Item", "fetch_status": 200,
         "consumer_appid": 294100, "own_subscribed": 1,
     })
     config = {"database": {"path": db_path},
@@ -417,7 +417,7 @@ async def test_the_open_button_and_key_act_only_on_a_downloaded_item(tmp_path):
 @pytest.mark.asyncio
 async def test_the_queue_row_marker_follows_the_pass_outcome(tmp_path):
     """A completed subscribe must move the queue row's own glyph, not just its
-    status word and the final tally."""
+    fetch_status word and the final tally."""
     db_path = str(tmp_path / "queue_outcome.db")
     _seed_queued(db_path)
     config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}

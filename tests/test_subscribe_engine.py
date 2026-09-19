@@ -211,7 +211,7 @@ def engine_env(tmp_path, monkeypatch):
     """A queued item, healthy cookies, and both network seams replaced."""
     db_path = str(tmp_path / "engine.db")
     initialize_database(db_path)
-    insert_or_update_item(db_path, {"workshop_id": 7, "title": "T", "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 7, "title": "T", "fetch_status": 200,
                                     "consumer_appid": 294100})
     toggle_subscription_queue(db_path, 7)
     config = {"database": {"path": db_path}, "session": {"csrf_token": "TOK"}}

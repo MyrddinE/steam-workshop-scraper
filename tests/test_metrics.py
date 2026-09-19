@@ -106,7 +106,7 @@ def test_iter_metrics_yields_every_metric_as_it_finishes(db_path):
     # One fetched item, so `high_water` has a real answer rather than its
     # legitimate "no successful fetch yet" None.
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "x", "status": 200,
+        "workshop_id": 1, "title": "x", "fetch_status": 200,
         "api_fetched_at": int(time.time()),
     })
     seen = list(metrics.iter_metrics(db_path))
@@ -198,7 +198,7 @@ def test_translation_classification_matches_the_python_it_replaced(db_path, labe
     a printable character. Python's str.isascii() accepts it, so the SQL has to
     as well.
     """
-    insert_or_update_item(db_path, dict(item, workshop_id=100 + _case_index(label), status=200))
+    insert_or_update_item(db_path, dict(item, workshop_id=100 + _case_index(label), fetch_status=200))
 
     conn = get_connection(db_path)
     rows = conn.execute("SELECT * FROM workshop_items").fetchall()
@@ -218,7 +218,7 @@ def test_translation_counts_agree_over_many_rows_at_once(db_path):
     """The same equivalence, but with a mix that makes the counts interesting."""
     now = int(time.time())
     for i, (_label, item) in enumerate(TRANSLATION_CASES):
-        insert_or_update_item(db_path, dict(item, workshop_id=100 + i, status=200))
+        insert_or_update_item(db_path, dict(item, workshop_id=100 + i, fetch_status=200))
 
     conn = get_connection(db_path)
     rows = conn.execute("SELECT * FROM workshop_items").fetchall()
@@ -244,7 +244,7 @@ def test_fetch_recency_matches_the_python_it_replaced(db_path, offset_days, expe
     now = int(time.time())
     attempted = None if offset_days is None else now + offset_days * 86400
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "x", "status": 200,
+        "workshop_id": 1, "title": "x", "fetch_status": 200,
         "last_fetch_attempted_at": attempted,
     })
 
@@ -259,7 +259,7 @@ def test_fetch_recency_matches_the_python_it_replaced(db_path, offset_days, expe
 
 def test_fetch_recency_honours_a_non_default_staleness(db_path):
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "x", "status": 200,
+        "workshop_id": 1, "title": "x", "fetch_status": 200,
         "last_fetch_attempted_at": int(time.time()) - 40 * 86400,
     })
 
@@ -279,7 +279,7 @@ def test_fetch_recency_honours_a_non_default_staleness(db_path):
 
 def test_get_db_stats_still_returns_every_key_its_callers_use(db_path):
     """The TUI reads these names; the SQL underneath changed, not the contract."""
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Test", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Test", "fetch_status": 200})
 
     stats = get_db_stats(db_path)
     assert set(stats) == {
@@ -294,13 +294,13 @@ def test_get_db_stats_still_returns_every_key_its_callers_use(db_path):
         "No data (never scraped)": 0,
     }
     assert stats["fetch_recency_counts"] == {"fresh": 0, "stale": 0, "unknown": 1}
-    assert stats["status_counts"] == [{"status": 200, "count": 1}]
+    assert stats["status_counts"] == [{"fetch_status": 200, "count": 1}]
 
 
 def test_get_db_stats_matches_the_metrics_it_wraps(db_path):
     """It is a wrapper, so the two must not drift apart."""
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "テスト", "status": 200, "translation_priority": 4,
+        "workshop_id": 1, "title": "テスト", "fetch_status": 200, "translation_priority": 4,
     })
 
     stats = get_db_stats(db_path)
@@ -319,8 +319,8 @@ def test_get_db_stats_matches_the_metrics_it_wraps(db_path):
 
 
 def test_item_counts_separates_dead_items(db_path):
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "alive", "status": 200})
-    insert_or_update_item(db_path, {"workshop_id": 2, "title": "gone", "status": -1})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "alive", "fetch_status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": "gone", "fetch_status": -1})
 
     assert metrics.values(metrics.compute(db_path, ["item_counts"]))["item_counts"] == {
         "total": 2, "dead": 1, "alive": 1,
@@ -330,11 +330,11 @@ def test_item_counts_separates_dead_items(db_path):
 def test_coverage_counts_each_stage(db_path):
     """Coverage is the progress view: how far each stage has reached."""
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "full", "status": 200,
+        "workshop_id": 1, "title": "full", "fetch_status": 200,
         "api_fetched_at": 1000, "extended_description": "desc",
         "image_extension": "jpg", "translate_version": 5, "creator": 42,
     })
-    insert_or_update_item(db_path, {"workshop_id": 2, "title": "bare", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": "bare", "fetch_status": 200})
 
     cov = metrics.values(metrics.compute(db_path, ["coverage"]))["coverage"]
     bars = {bar["key"]: bar for bar in cov["bars"]}
@@ -352,9 +352,9 @@ def test_coverage_ignores_dead_items(db_path):
     Otherwise coverage would fall as the library is cleaned up, which is exactly
     backwards.
     """
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "live", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "live", "fetch_status": 200})
     insert_or_update_item(db_path, {
-        "workshop_id": 2, "title": "gone", "status": -1, "api_fetched_at": 1000,
+        "workshop_id": 2, "title": "gone", "fetch_status": -1, "api_fetched_at": 1000,
     })
 
     cov = metrics.values(metrics.compute(db_path, ["coverage"]))["coverage"]
@@ -366,10 +366,10 @@ def test_coverage_ignores_dead_items(db_path):
 def test_dead_items_are_not_counted_as_outstanding_work(db_path):
     """Regression: the backlog used to include items that could never complete."""
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "live", "status": 200, "needs_web_scrape": 5,
+        "workshop_id": 1, "title": "live", "fetch_status": 200, "needs_web_scrape": 5,
     })
     insert_or_update_item(db_path, {
-        "workshop_id": 2, "title": "gone", "status": -1, "needs_web_scrape": 5,
+        "workshop_id": 2, "title": "gone", "fetch_status": -1, "needs_web_scrape": 5,
     })
 
     breakdowns = metrics.values(
@@ -386,11 +386,11 @@ def test_dead_items_by_queue_surfaces_dead_items_still_queued(db_path):
     left untouched, which is what strands it.
     """
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "gone", "status": -1, "api_priority": 0,
+        "workshop_id": 1, "title": "gone", "fetch_status": -1, "api_priority": 0,
         "needs_web_scrape": 1, "needs_image": 1, "translation_priority": 1,
     })
     insert_or_update_item(db_path, {
-        "workshop_id": 2, "title": "live", "status": 200, "needs_web_scrape": 5,
+        "workshop_id": 2, "title": "live", "fetch_status": 200, "needs_web_scrape": 5,
     })
 
     stuck = metrics.values(metrics.compute(db_path, ["dead_items_by_queue"]))["dead_items_by_queue"]
@@ -411,7 +411,7 @@ def test_queued_nowhere_finds_a_discovered_item_with_no_queue(db_path):
 def test_queued_nowhere_finds_a_fetched_item_with_no_description(db_path):
     """Issue 19: dequeued as scraped while the description was never stored."""
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "fetched", "status": 200,
+        "workshop_id": 1, "title": "fetched", "fetch_status": 200,
         "api_fetched_at": 1000, "api_priority": 0, "needs_web_scrape": 0,
     })
 
@@ -425,7 +425,7 @@ def test_dead_queued_counts_a_dead_item_holding_a_flag(db_path):
     of the ``queued_nowhere`` population because it is deliberately dead.
     """
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "gone", "status": -1, "api_priority": 0,
+        "workshop_id": 1, "title": "gone", "fetch_status": -1, "api_priority": 0,
         "needs_web_scrape": 1, "needs_image": 1, "translation_priority": 1,
     })
 
@@ -442,26 +442,26 @@ def test_handoff_counters_read_zero_on_a_healthy_database(db_path):
     """
     # Complete: fetched, description stored, image answered, nothing queued.
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "complete", "status": 200, "api_fetched_at": 1000,
+        "workshop_id": 1, "title": "complete", "fetch_status": 200, "api_fetched_at": 1000,
         "extended_description": "the full page text", "image_extension": "jpg",
         "api_priority": 0,
     })
     # Queued for each stage in turn: legal, not stranded.
     insert_or_update_item(db_path, {"workshop_id": 2, "title": "fetch", "api_priority": 3})
     insert_or_update_item(db_path, {
-        "workshop_id": 3, "title": "scrape", "status": 200, "api_fetched_at": 1000,
+        "workshop_id": 3, "title": "scrape", "fetch_status": 200, "api_fetched_at": 1000,
         "api_priority": 0, "needs_web_scrape": 3,
     })
     insert_or_update_item(db_path, {
-        "workshop_id": 4, "title": "image", "status": 200, "api_fetched_at": 1000,
+        "workshop_id": 4, "title": "image", "fetch_status": 200, "api_fetched_at": 1000,
         "api_priority": 0, "needs_image": 3,
     })
     insert_or_update_item(db_path, {
-        "workshop_id": 5, "title": "translate", "status": 200, "api_fetched_at": 1000,
+        "workshop_id": 5, "title": "translate", "fetch_status": 200, "api_fetched_at": 1000,
         "api_priority": 0, "translation_priority": 3,
     })
     # Deliberately dead, in no queue.
-    insert_or_update_item(db_path, {"workshop_id": 6, "title": "gone", "status": -1, "api_priority": 0})
+    insert_or_update_item(db_path, {"workshop_id": 6, "title": "gone", "fetch_status": -1, "api_priority": 0})
 
     values = metrics.values(metrics.compute(db_path, ["queued_nowhere", "dead_queued"]))
     assert values == {"queued_nowhere": 0, "dead_queued": 0}
@@ -471,7 +471,7 @@ def test_handoff_counters_count_without_changing_the_rows(db_path):
     """The detectors report; they do not repair. No write may follow a read."""
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "discovered", "api_priority": 0})
     insert_or_update_item(db_path, {
-        "workshop_id": 2, "title": "gone", "status": -1, "api_priority": 0,
+        "workshop_id": 2, "title": "gone", "fetch_status": -1, "api_priority": 0,
         "needs_web_scrape": 1,
     })
 
@@ -489,11 +489,11 @@ def test_handoff_counters_count_without_changing_the_rows(db_path):
 
 def test_tag_counts_reads_the_junction_table(db_path):
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "x", "status": 200,
+        "workshop_id": 1, "title": "x", "fetch_status": 200,
         "tags": ["Alpha", "Beta"],
     })
     insert_or_update_item(db_path, {
-        "workshop_id": 2, "title": "y", "status": 200,
+        "workshop_id": 2, "title": "y", "fetch_status": 200,
         "tags": ["Alpha"],
     })
 
@@ -504,7 +504,7 @@ def test_tag_counts_reads_the_junction_table(db_path):
 
 def test_priority_breakdowns_report_each_queue(db_path):
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "x", "status": 200,
+        "workshop_id": 1, "title": "x", "fetch_status": 200,
         "needs_web_scrape": 5, "needs_image": 10, "translation_priority": 3,
     })
 
@@ -523,7 +523,7 @@ def test_every_metric_runs_against_a_real_database(db_path):
     pass silently.
     """
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "x", "status": 200,
+        "workshop_id": 1, "title": "x", "fetch_status": 200,
         "api_fetched_at": int(time.time()),
     })
 

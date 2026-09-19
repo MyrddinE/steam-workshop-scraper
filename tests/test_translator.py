@@ -69,7 +69,7 @@ def test_translate_batch_writes_translation_and_resets_priority(tmp_path):
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "\u30c6\u30b9\u30c8", "short_description": "test",
         "subscriptions": 10, "lifetime_subscriptions": 20, "favorited": 5,
-        "views": 100, "status": 200,
+        "views": 100, "fetch_status": 200,
     })
     queue_field_for_translation(db_path, "item", 1, "title_en", "\u30c6\u30b9\u30c8", 10)
 
@@ -123,7 +123,7 @@ def test_translate_batch_stamps_steam_updated_at(tmp_path):
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "\u30c6\u30b9\u30c8", "short_description": "test",
         "subscriptions": 10, "lifetime_subscriptions": 20, "favorited": 5,
-        "views": 100, "status": 200, "steam_updated_at": known_ts,
+        "views": 100, "fetch_status": 200, "steam_updated_at": known_ts,
     })
     queue_field_for_translation(db_path, "item", 1, "title_en", "\u30c6\u30b9\u30c8", 10)
 
@@ -160,7 +160,7 @@ def test_translate_batch_falls_back_when_no_steam_updated_at(tmp_path):
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "\u30c6\u30b9\u30c8", "short_description": "test",
         "subscriptions": 10, "lifetime_subscriptions": 20, "favorited": 5,
-        "views": 100, "status": 200,  # no steam_updated_at
+        "views": 100, "fetch_status": 200,  # no steam_updated_at
     })
     queue_field_for_translation(db_path, "item", 1, "title_en", "\u30c6\u30b9\u30c8", 10)
 

@@ -31,7 +31,7 @@ def test_live_web_scraper_contract():
 def test_search_and_details_pipeline(db_path):
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "Test Mod", "creator": 100,
-        "consumer_appid": 294100, "status": 200,
+        "consumer_appid": 294100, "fetch_status": 200,
         "short_description": "A test mod", "tags": json.dumps([{"tag": "test"}])
     })
     from src.database import insert_or_update_creator
@@ -75,7 +75,7 @@ def test_daemon_pipeline_mocked(db_path):
     item = get_item_details(db_path, 555)
     assert item["title"] == "Pipeline Mod"
     mock_flag_web.assert_called_once_with(db_path, 555, 3)
-    assert item["status"] == 200
+    assert item["fetch_status"] == 200
 
 @pytest.mark.integration
 def test_database_migration_compatibility(tmp_path):
@@ -155,7 +155,7 @@ def test_fts5_content_sync_tracks_writes(db_path):
             "workshop_id": i, "title": f"test item {i}",
             "short_description": "desc", "extended_description": "desc",
             "subscriptions": 100, "lifetime_subscriptions": 200,
-            "favorited": 10, "views": 1000, "status": 200,
+            "favorited": 10, "views": 1000, "fetch_status": 200,
         })
 
     # No rebuild anywhere in this test: the triggers are what make this work.

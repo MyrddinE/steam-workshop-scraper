@@ -29,10 +29,10 @@ def _config(db_path):
 
 
 def _insert(db_path, rows):
-    """rows: (workshop_id, status, api_priority, api_fetched_at)"""
+    """rows: (workshop_id, fetch_status, api_priority, api_fetched_at)"""
     conn = get_connection(db_path)
     conn.executemany(
-        "INSERT INTO workshop_items (workshop_id, status, api_priority, api_fetched_at) "
+        "INSERT INTO workshop_items (workshop_id, fetch_status, api_priority, api_fetched_at) "
         "VALUES (?, ?, ?, ?)",
         rows,
     )
@@ -171,7 +171,7 @@ def test_migration_16_requeues_stranded_transient_failures(db_path):
 
 
 def test_migration_16_leaves_successful_items_alone(db_path):
-    """A status 200 item sitting at priority 0 is resting, not stranded."""
+    """A fetch_status 200 item sitting at priority 0 is resting, not stranded."""
     _insert(db_path, [(1, 200, 0, 12345)])
     _age_to_v15(db_path)
 

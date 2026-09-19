@@ -88,7 +88,7 @@ def test_flag_is_atomic_against_a_translator_drain(db_path):
     import src.database as dbmod
 
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "テスト", "status": 200, "steam_updated_at": 1000,
+        "workshop_id": 1, "title": "テスト", "fetch_status": 200, "steam_updated_at": 1000,
     })
 
     real_get_connection = dbmod.get_connection
@@ -187,7 +187,7 @@ def test_migration_clears_a_mirror_with_no_queued_field(db_path):
     """The rows issue 29 measured: priority set, nothing left to translate."""
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "テスト", "title_en": "Test",
-        "status": 200, "steam_updated_at": 1000, "translate_version": 1000,
+        "fetch_status": 200, "steam_updated_at": 1000, "translate_version": 1000,
         "translation_priority": 5,
     })
     _age_to_v22(db_path)
@@ -205,7 +205,7 @@ def test_migration_clears_a_mirror_with_no_queued_field(db_path):
 def test_migration_leaves_a_genuinely_queued_item_alone(db_path):
     """A mirror with a queue row behind it is work, not debris."""
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "テスト", "status": 200,
+        "workshop_id": 1, "title": "テスト", "fetch_status": 200,
         "translation_priority": 5,
     })
     _raw_queue_row(db_path, 1)
@@ -262,7 +262,7 @@ def test_migration_only_repairs_the_high_direction(db_path):
 
 def test_migration_is_idempotent(db_path):
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "テスト", "status": 200, "translation_priority": 5,
+        "workshop_id": 1, "title": "テスト", "fetch_status": 200, "translation_priority": 5,
     })
     _age_to_v22(db_path)
     initialize_database(db_path)

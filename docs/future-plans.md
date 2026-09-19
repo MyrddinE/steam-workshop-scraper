@@ -277,7 +277,7 @@ much later as work that mysteriously never happened.
 
 | Issue | What the producing stage wrote | Why the consuming stage could not see it |
 |---|---|---|
-| 17 | `status = -1` and `api_priority = 0` | `needs_web_scrape` and `needs_image` were left set, so the worker polls kept selecting a dead item forever |
+| 17 | `fetch_status = -1` and `api_priority = 0` | `needs_web_scrape` and `needs_image` were left set, so the worker polls kept selecting a dead item forever |
 | 19 | `extended_description = NULL`, `needs_web_scrape = 0` | The consumer requires a description; the item was recorded as done and never retried |
 | 20 | `api_priority` left to the column default | On a migrated database that default is `0` and the fetch queue requires `> 0`, so a discovered item was queued nowhere |
 
@@ -294,7 +294,7 @@ Every item is, at all times, in **exactly one** of these states:
 * queued for an image (`needs_image > 0`), or
 * queued for translation (`translation_priority > 0`), or
 * complete for the stage that owns it, or
-* deliberately dead (`status = -1`) and therefore in **no** queue.
+* deliberately dead (`fetch_status = -1`) and therefore in **no** queue.
 
 Never in none of them by accident, and never in a queue the owning stage has finished with. Issue 19
 violates the first kind — recorded as complete while storing nothing; issue 20 is the same violation;
@@ -328,7 +328,7 @@ they did because every stage reported success, so the only signal was a coverage
 downwards over weeks.
 
 *Measured live* on 2026-09-17 against 2,497,545 rows, neither count is zero today: **28** items are
-`status = 200` with no description and in no queue at all, and **1** dead item is still queued for
+`fetch_status = 200` with no description and in no queue at all, and **1** dead item is still queued for
 translation. Both numbers came from running the two statements described above, which is the argument
 for putting them in the statistics rather than leaving them in a document: they are cheap, they are
 meant to be zero, and one query finds them.
