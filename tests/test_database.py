@@ -283,7 +283,7 @@ def test_search_items_pagination(db_path):
     assert results[0]["workshop_id"] == 106
 
 def test_app_tracking(db_path):
-    from src.database import get_app_tracking, update_app_tracking, save_app_filter
+    from src.database import get_app_tracking, update_app_tracking, save_enrichment_filters
     
     # Initially should be None
     assert get_app_tracking(db_path, 4000) is None
@@ -303,18 +303,18 @@ def test_app_tracking(db_path):
     assert tracking["last_historical_date_scanned"] == 1700000000
     assert tracking["window_size"] == 3600*24*30*2
 
-    # Test save_app_filter
-    save_app_filter(db_path, 4000, "test search", ["tag1", "tag2"], ["excl1"])
+    # Test save_enrichment_filters
+    save_enrichment_filters(db_path, 4000, "test search", ["tag1", "tag2"], ["excl1"])
     tracking = get_app_tracking(db_path, 4000)
     assert tracking["filter_text"] == "test search"
     assert tracking["required_tags"] == json.dumps(["tag1", "tag2"])
     assert tracking["excluded_tags"] == json.dumps(["excl1"])
     
-    # Ensure last_historical_date_scanned is NOT updated by save_app_filter
+    # Ensure last_historical_date_scanned is NOT updated by save_enrichment_filters
     assert tracking["last_historical_date_scanned"] == 1700000000
 
     # Test saving only some filters
-    save_app_filter(db_path, 4000, required_tags=["new_tag"])
+    save_enrichment_filters(db_path, 4000, required_tags=["new_tag"])
     tracking = get_app_tracking(db_path, 4000)
     assert tracking["filter_text"] == "" # Should revert to default if not provided
     assert tracking["required_tags"] == json.dumps(["new_tag"])
@@ -564,9 +564,9 @@ def test_build_fts_clause_operators(db_path):
         {"field": "Full Text", "op": "is_not_empty", "value": ""}])
     assert len(results) > 0
 
-def test_save_app_filter_defaults(db_path):
-    from src.database import save_app_filter, get_app_tracking
-    save_app_filter(db_path, 5000)
+def test_save_enrichment_filters_defaults(db_path):
+    from src.database import save_enrichment_filters, get_app_tracking
+    save_enrichment_filters(db_path, 5000)
     tracking = get_app_tracking(db_path, 5000)
     assert tracking["filter_text"] == ""
     assert tracking["required_tags"] == "[]"

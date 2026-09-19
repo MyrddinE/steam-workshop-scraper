@@ -3364,7 +3364,7 @@ def get_next_batch_for_translation(db_path: str, limit: int = 20) -> list[dict]:
     return rows
 
 
-def save_app_filter(db_path: str, appid: int, filter_text: str = "", required_tags: list[str] = None,
+def save_enrichment_filters(db_path: str, appid: int, filter_text: str = "", required_tags: list[str] = None,
                      excluded_tags: list[str] = None, enrichment_filters: str = None) -> None:
     """
     Saves the filter settings for a given appid in the app_tracking table.

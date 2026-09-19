@@ -6,7 +6,7 @@ import time
 import re
 import logging
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, mark_own_subscribed, get_subscription_queue_items, FILTER_SCHEMA, bump_api_priority_for_detail, clear_pending_items
+from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, mark_own_subscribed, get_subscription_queue_items, FILTER_SCHEMA, bump_api_priority_for_detail, clear_pending_items
 from src.analysis import view_window_analysis
 from src import capture
 from src import crash
@@ -554,7 +554,7 @@ def api_save_filter():
     appid = appids[0] if appids else None
     if appid is None:
         return jsonify({"error": "No target AppID configured"}), 400
-    save_app_filter(_db_path, appid, enrichment_filters=json.dumps(filters))
+    save_enrichment_filters(_db_path, appid, enrichment_filters=json.dumps(filters))
     return jsonify({"ok": True, "appid": appid})
 
 

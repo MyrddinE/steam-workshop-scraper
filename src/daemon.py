@@ -16,7 +16,7 @@ from src.database import (
     get_user, 
     get_app_tracking,
     update_app_tracking_cursor,
-    save_app_filter,
+    save_enrichment_filters,
     get_connection,
     get_item_details,
     normalize_tags,
