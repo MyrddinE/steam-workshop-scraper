@@ -48,7 +48,7 @@ def test_process_batch_with_db_locked(tmp_path):
     daemon = Daemon(config)
 
     import sqlite3
-    with patch("src.daemon.get_next_items_to_scrape", side_effect=sqlite3.OperationalError("database is locked")), \
+    with patch("src.daemon.get_next_items_to_fetch", side_effect=sqlite3.OperationalError("database is locked")), \
          patch("time.sleep") as mock_sleep:
         daemon.process_batch()
         mock_sleep.assert_called_once_with(5)

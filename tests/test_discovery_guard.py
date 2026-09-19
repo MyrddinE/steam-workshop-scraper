@@ -3,7 +3,7 @@
 Regression cover for a defect that stopped discovery permanently on production:
 the guard compared against items that had never been fetched successfully, a
 population disjoint from the fetch queue. Production read 890 "unscraped" while
-`get_next_items_to_scrape` could return exactly 1 item, so every discovery pass
+`get_next_items_to_fetch` could return exactly 1 item, so every discovery pass
 was skipped and the queue could never refill.
 """
 

@@ -2735,7 +2735,7 @@ def queued_anywhere_predicate() -> str:
     )
 
 
-def get_next_items_to_scrape(db_path: str, limit: int = 10) -> list[dict]:
+def get_next_items_to_fetch(db_path: str, limit: int = 10) -> list[dict]:
     """
     Retrieves the next batch of workshop items to be scraped.
     Prioritizes by api_priority (higher = more urgent), then oldest api_fetched_at
@@ -2768,7 +2768,7 @@ def count_unscraped_items(db_path: str) -> int:
 def count_fetchable_items(db_path: str) -> int:
     """Returns how many items the API fetch queue can actually hand out.
 
-    This is the population ``get_next_items_to_scrape`` selects: queued and not
+    This is the population ``get_next_items_to_fetch`` selects: queued and not
     dead. It is deliberately distinct from ``count_unscraped_items``, which
     counts items never successfully fetched regardless of whether they are
     queued. Those two populations do not overlap, and treating the second as a

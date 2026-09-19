@@ -613,7 +613,7 @@ SELECT * FROM workshop_items
 WHERE needs_web_scrape > 0
 ORDER BY needs_web_scrape DESC, api_fetched_at ASC LIMIT 1
 
--- get_next_items_to_scrape (plus `AND (status IS NULL OR status != -1)`)
+-- get_next_items_to_fetch (plus `AND (status IS NULL OR status != -1)`)
 SELECT * FROM workshop_items
 WHERE api_priority > 0
 ORDER BY api_priority DESC, api_fetched_at ASC LIMIT ?

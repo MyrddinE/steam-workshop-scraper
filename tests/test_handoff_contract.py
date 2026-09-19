@@ -438,7 +438,7 @@ def test_each_worker_poll_builds_its_query_from_the_named_predicate(db_path):
     probes = [
         ("api fetch", "api_fetch_queue_predicate", "workshop_id = -12345",
          "FROM workshop_items",
-         lambda: database.get_next_items_to_scrape(db_path, limit=1)),
+         lambda: database.get_next_items_to_fetch(db_path, limit=1)),
         ("fetchable count", "api_fetch_queue_predicate", "workshop_id = -12345",
          "FROM workshop_items",
          lambda: database.count_fetchable_items(db_path)),

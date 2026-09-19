@@ -44,7 +44,7 @@ def db(tmp_path):
 def test_an_empty_queue_returns_empty_instead_of_blocking(db):
     """The regression: this call used to run a whole discovery pass inline."""
     daemon = _daemon(db)
-    with patch("src.daemon.get_next_items_to_scrape", return_value=[]), \
+    with patch("src.daemon.get_next_items_to_fetch", return_value=[]), \
          patch.object(Daemon, "seed_database") as seed, \
          patch.object(Daemon, "_run_page_discovery") as page:
         assert daemon._acquire_batch() == []

@@ -55,7 +55,7 @@ def test_daemon_init_missing_appids():
         Daemon(invalid_config)
 
 @patch('src.daemon.count_unscraped_items')
-@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.get_next_items_to_fetch')
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.get_user')
 @patch('src.daemon.insert_or_update_user')
@@ -81,7 +81,7 @@ def test_daemon_process_batch_success(mock_sleep, mock_flag_web, mock_insert, mo
     assert inserted_data["title"] == "Test Mod"
 
 @patch('src.daemon.count_unscraped_items')
-@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.get_next_items_to_fetch')
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
 @patch('time.sleep')
@@ -113,7 +113,7 @@ def test_daemon_run_loop(mock_process, mock_config):
     mock_process.assert_called_once()
 
 @patch('src.daemon.count_unscraped_items')
-@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.get_next_items_to_fetch')
 @patch('src.daemon.Daemon.seed_database')
 @patch('time.sleep')
 def test_daemon_process_batch_empty(mock_sleep, mock_seed, mock_get_items, mock_count, mock_config):
@@ -130,7 +130,7 @@ def test_daemon_process_batch_empty(mock_sleep, mock_seed, mock_get_items, mock_
     assert mock_sleep.call_count == 600
 
 @patch('src.daemon.count_unscraped_items')
-@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.get_next_items_to_fetch')
 @patch('src.daemon.get_workshop_details_batch')
 def test_daemon_process_batch_exit_early(mock_api, mock_get_items, mock_count, mock_config):
     """Test behavior when shutdown signal is received mid-batch."""
@@ -142,7 +142,7 @@ def test_daemon_process_batch_exit_early(mock_api, mock_get_items, mock_count, m
     mock_api.assert_not_called()
 
 @patch('src.daemon.count_unscraped_items')
-@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.get_next_items_to_fetch')
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.get_user')
 @patch('src.daemon.insert_or_update_user')
@@ -174,7 +174,7 @@ def test_api_delay_decays_on_every_healthy_request(mock_sleep, mock_flag_web, mo
         "a half-life of healthy operation halves the delay, whatever the call count"
 
 @patch('src.daemon.count_unscraped_items')
-@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.get_next_items_to_fetch')
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
 @patch('time.sleep')
@@ -266,7 +266,7 @@ def test_mixed_outcome_batch_is_a_healthy_request_not_a_refusal(db_path, tmp_pat
     daemon.api_delay = API_DELAY_FLOOR
     initial = daemon.api_delay
 
-    with patch("src.daemon.get_next_items_to_scrape", return_value=[
+    with patch("src.daemon.get_next_items_to_fetch", return_value=[
             {"workshop_id": 1, "api_priority": 5, "status": 200},
             {"workshop_id": 2, "api_priority": 5, "status": 200}]), \
          patch("src.daemon.get_workshop_details_batch", return_value={
@@ -363,7 +363,7 @@ def test_the_api_merge_never_carries_the_downloaded_latch(mock_config):
 
 @patch('src.database.initialize_database')
 @patch('src.daemon.save_config')
-@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.get_next_items_to_fetch')
 @patch('src.daemon.count_unscraped_items', return_value=0)
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
@@ -391,7 +391,7 @@ def test_process_batch_404_status_marker(
 
 @patch('src.database.initialize_database')
 @patch('src.daemon.save_config')
-@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.get_next_items_to_fetch')
 @patch('src.daemon.count_unscraped_items', return_value=0)
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
@@ -427,7 +427,7 @@ def test_process_batch_inherits_priority(
 
 @patch('src.database.initialize_database')
 @patch('src.daemon.save_config')
-@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.get_next_items_to_fetch')
 @patch('src.daemon.count_unscraped_items', return_value=0)
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
@@ -664,7 +664,7 @@ def test_merge_remaps_steam_api_time_fields(db_path):
 # ── Batch-level creator refresh and timed staleness sweep ────────────────────
 
 @patch('src.daemon.get_workshop_details_batch')
-@patch('src.daemon.get_next_items_to_scrape')
+@patch('src.daemon.get_next_items_to_fetch')
 @patch('src.daemon.insert_or_update_user')
 @patch('src.daemon.get_user')
 @patch('src.daemon.get_player_summaries')
@@ -716,7 +716,7 @@ def test_only_enriched_items_propose_a_creator(mock_batch, db_path, tmp_path):
     daemon.batch_size = 1
     mock_batch.return_value = {1: {"title": "x", "creator": "111", "status": 200}}
     with patch.object(daemon, "_should_enrich", return_value=False), \
-         patch("src.daemon.get_next_items_to_scrape",
+         patch("src.daemon.get_next_items_to_fetch",
                return_value=[{"workshop_id": 1, "api_priority": 5, "status": 200}]), \
          patch("src.daemon.get_player_summaries") as mock_summaries, \
          patch("src.daemon.get_user") as mock_get_user:
@@ -740,7 +740,7 @@ def test_stale_sweep_runs_at_most_once_per_interval(mock_promote, mock_config):
 
 
 @patch.object(Daemon, '_promote_stale_items')
-@patch('src.daemon.get_next_items_to_scrape', return_value=None)
+@patch('src.daemon.get_next_items_to_fetch', return_value=None)
 def test_stale_sweep_runs_on_the_first_batch_after_startup(mock_items, mock_promote, mock_config):
     daemon = Daemon(mock_config)
     daemon.process_batch()

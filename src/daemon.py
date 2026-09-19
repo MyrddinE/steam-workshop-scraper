@@ -8,7 +8,7 @@ import threading
 from datetime import datetime, timezone
 from typing import NamedTuple
 from src.database import (
-    get_next_items_to_scrape, 
+    get_next_items_to_fetch, 
     insert_or_update_item, 
     count_unscraped_items, 
     count_fetchable_items, 
@@ -806,7 +806,7 @@ class Daemon:
     def _fetch_batch(self, failure_context: str = "Database error in process_batch"):
         """Read one batch from the database. Returns None on database error."""
         try:
-            return get_next_items_to_scrape(self.db_path, limit=self.batch_size)
+            return get_next_items_to_fetch(self.db_path, limit=self.batch_size)
         except Exception as e:
             logging.error(f"{failure_context}: {e}")
             time.sleep(5)
@@ -872,7 +872,7 @@ class Daemon:
         merged_data = stored_item.copy()
         # Attempt clock: set unconditionally, before the status branches, so a
         # 404, a 500 and a success all persist it. This is not optional
-        # bookkeeping: get_next_items_to_scrape orders by api_fetched_at ASC,
+        # bookkeeping: get_next_items_to_fetch orders by api_fetched_at ASC,
         # and api_fetched_at now only moves on success, so without the attempt
         # clock a just-failed item keeps its stale api_fetched_at and is retried
         # at the front of its priority band in a tight loop. get_db_stats also

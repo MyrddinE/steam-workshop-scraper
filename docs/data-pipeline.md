@@ -15,7 +15,7 @@ housekeeping — the staleness sweep (`_maybe_promote_stale_items`), the subscri
 the **first batch after a restart**, which is why a fresh daemon can be minutes away from its first API
 fetch while its scraper, image and discovery threads are already working. Each invocation then:
 
-1. Calls `get_next_items_to_scrape` to retrieve up to `batch_size` items due for processing. Selection is `api_priority > 0` and `status` not `-1`, ordered by `api_priority DESC, api_fetched_at ASC`, so never-successfully-fetched items (`api_fetched_at IS NULL`) come first within a priority band. The call takes `limit` alone: `item_staleness_days` is **not** a fetch argument. It is the window `_promote_stale_items` uses to put already-fetched items back in the queue, so it is applied by that sweep and not by this SELECT.
+1. Calls `get_next_items_to_fetch` to retrieve up to `batch_size` items due for processing. Selection is `api_priority > 0` and `status` not `-1`, ordered by `api_priority DESC, api_fetched_at ASC`, so never-successfully-fetched items (`api_fetched_at IS NULL`) come first within a priority band. The call takes `limit` alone: `item_staleness_days` is **not** a fetch argument. It is the window `_promote_stale_items` uses to put already-fetched items back in the queue, so it is applied by that sweep and not by this SELECT.
 2. If no items are available, waits for the discovery thread to refill the queue. Discovery is no longer the main loop's job: it runs on its own thread (see [threading.md](threading.md)) so that the queue is refilled while the loop is still draining it, rather than only after it has drained. The wait is woken by the thread's signal instead of polling the database, and still gives up after ten minutes so the outer loop re-checks.
 3. Fetches metadata for the whole batch in one Steam Web API request via `get_workshop_details_batch` (title, description, tags, file_size, preview_url, creator, subscriptions, etc.), then processes the items **in the order the queue returned them**, matching each to its result by `publishedfileid`. The batch is chunked into several requests only if `batch_size` exceeds the endpoint's per-request id ceiling (`STEAM_API_MAX_IDS_PER_REQUEST`, 100).
 4. Merges API data with existing DB row via `_merge_and_clean_api_data`, which filters to `MERGE_ITEM_KEYS` (derived from `WORKSHOP_ITEM_COLUMNS`), remaps `creator_app_id`/`consumer_app_id` to `creator_appid`/`consumer_appid`, remaps `description` to `short_description`, and remaps the API's `time_created`/`time_updated` to `steam_created_at`/`steam_updated_at`. Unknown API keys are discarded with a log message.
@@ -102,11 +102,11 @@ Cursor-based discovery using `IPublishedFileService/QueryFiles` with `query_type
 - Persists the cursor after each page via `update_app_tracking_cursor`.
 - When the cursor is empty after a successful scan, sets `_cursor_exhausted = True`, enabling the page-based discovery mode.
 
-This is called when `get_next_items_to_scrape` returns empty — meaning the processing queue is drained and new items need to be discovered.
+This is called when `get_next_items_to_fetch` returns empty — meaning the processing queue is drained and new items need to be discovered.
 
 Discovery is skipped while the daemon already has enough outstanding work: for each target AppID,
 `seed_database` returns early when at least `DISCOVERY_FILL_TARGET` (200) items are fetchable — queued
-and not dead, the population `get_next_items_to_scrape` selects. The same value is the per-run fill
+and not dead, the population `get_next_items_to_fetch` selects. The same value is the per-run fill
 target, so a pass that does run refills to 200. The guard exists so that a healthy backlog is not
 re-crawled, and the target was raised from 100 because the fetch loop drains the queue between
 discovery passes: at 100 every pass found the queue already at or above the threshold and skipped it,
@@ -556,7 +556,7 @@ to implement it — the producer that writes the column and the consumer that re
 
 | Handoff | Producer writes | Consumer selects on | Predicate function (`src/database.py`) |
 |---|---|---|---|
-| Discovery → API fetch | `api_priority = 3` for a cursor-discovered item, `5` for a page-discovered new or changed one, with `status` and `api_fetched_at` left NULL (`seed_database`, `_run_page_discovery`) | `get_next_items_to_scrape`: `api_priority > 0 AND (status IS NULL OR status != -1)` | `api_fetch_queue_predicate()` |
+| Discovery → API fetch | `api_priority = 3` for a cursor-discovered item, `5` for a page-discovered new or changed one, with `status` and `api_fetched_at` left NULL (`seed_database`, `_run_page_discovery`) | `get_next_items_to_fetch`: `api_priority > 0 AND (status IS NULL OR status != -1)` | `api_fetch_queue_predicate()` |
 | API fetch → web scrape | `status = 200`, `api_fetched_at = now`, then `flag_for_web_scrape(max(3, requested))` — or `max(1, requested)` for an item the enrichment filters exclude (`_raise_scrape_and_image_priorities`) | `get_next_web_scrape_item`: `needs_web_scrape > 0`. The worker's own success test is that it stored a description, not merely that the flag is clear | `web_scrape_queue_predicate()` |
 | API fetch → image | `flag_for_image(max(3, requested))`, or `max(1, requested)` when the filters exclude, whenever `preview_url` is present (`_raise_scrape_and_image_priorities`) | `get_next_image_item`: `needs_image > 0`; `image_extension` records the answer, so a permanent `404` or a non-image type also settles the stage | `image_queue_predicate()` |
 | API fetch and web scrape → translation | `flag_field_for_translation` raises the item's `translation_priority` with `MAX` and inserts a `translation_queue` row for each non-ASCII `title`/`short_description` (`_queue_translations`) or `extended_description` (`WebScraperThread`) | `get_next_batch_for_translation`: any `translation_queue` row; the translator clears the mirror to `0` when the item has no queue entries left | `translation_queue_predicate()` (the poll's; `translation_priority_predicate()` is the item-level mirror the invariant reads) |

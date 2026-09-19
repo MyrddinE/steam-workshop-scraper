@@ -7,7 +7,7 @@ import json
 from datetime import datetime, timezone, timedelta
 from src.database import (
     insert_or_update_item,
-    get_next_items_to_scrape,
+    get_next_items_to_fetch,
     search_items,
     get_connection,
     count_unscraped_items,
@@ -67,13 +67,13 @@ def test_insert_or_update_item(db_path):
     assert cursor.fetchone()[0] == "Updated Item"
     conn.close()
 
-def test_get_next_items_to_scrape(db_path):
+def test_get_next_items_to_fetch(db_path):
     """Tests that items are fetched in order of oldest api_fetched_at (NULLs first)."""
     insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "api_fetched_at": 1696118400})
     insert_or_update_item(db_path, {"workshop_id": 2, "status": None}) # NULL status, should come first
     insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "api_fetched_at": 1696204800})
     
-    items = get_next_items_to_scrape(db_path, limit=3)
+    items = get_next_items_to_fetch(db_path, limit=3)
     assert len(items) == 3
     assert isinstance(items[0], dict)
     
@@ -321,8 +321,8 @@ def test_app_tracking(db_path):
     assert tracking["excluded_tags"] == '[]'
 
 
-def test_get_next_items_to_scrape_priority(db_path):
-    from src.database import get_next_items_to_scrape, insert_or_update_item
+def test_get_next_items_to_fetch_priority(db_path):
+    from src.database import get_next_items_to_fetch, insert_or_update_item
     import time
     
     # 1. Successfully scraped items, stalest first (status = 200)
@@ -342,7 +342,7 @@ def test_get_next_items_to_scrape_priority(db_path):
     # 4. Old items (older than 7 days)
     insert_or_update_item(db_path, {"workshop_id": 7, "status": 200, "api_fetched_at": 1640995200})
 
-    items = get_next_items_to_scrape(db_path, limit=7)
+    items = get_next_items_to_fetch(db_path, limit=7)
     item_ids = [item['workshop_id'] for item in items]
     
     # All items have api_priority=3 (default), ordered by api_fetched_at ASC
@@ -594,20 +594,20 @@ def test_stats_with_real_data(deterministic_db):
     assert sum(stats["tag_counts"].values()) > 0
 
 
-def test_get_next_items_to_scrape_priority_order(db_path):
+def test_get_next_items_to_fetch_priority_order(db_path):
     """Higher api_priority items are returned first."""
     insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 1, "api_fetched_at": 100})
     insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 10, "api_fetched_at": 200})
     insert_or_update_item(db_path, {"workshop_id": 3, "api_priority": 5, "api_fetched_at": 300})
-    items = get_next_items_to_scrape(db_path, limit=3)
+    items = get_next_items_to_fetch(db_path, limit=3)
     assert [i["workshop_id"] for i in items] == [2, 3, 1]
 
 
-def test_get_next_items_to_scrape_excludes_dead(db_path):
+def test_get_next_items_to_fetch_excludes_dead(db_path):
     """Items with status=-1 are not returned."""
     insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 10, "status": -1})
     insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 5, "status": 200})
-    items = get_next_items_to_scrape(db_path, limit=2)
+    items = get_next_items_to_fetch(db_path, limit=2)
     assert [i["workshop_id"] for i in items] == [2]
 
 
@@ -876,9 +876,9 @@ def test_the_dead_search_arguments_are_gone():
     """An argument with no reader reads as a control that does not exist."""
     import inspect
 
-    from src.database import _build_tag_clause, get_next_items_to_scrape, search_items
+    from src.database import _build_tag_clause, get_next_items_to_fetch, search_items
 
-    assert "staleness_days" not in inspect.signature(get_next_items_to_scrape).parameters
+    assert "staleness_days" not in inspect.signature(get_next_items_to_fetch).parameters
     search_params = inspect.signature(search_items).parameters
     for dead in ("tags_query", "required_tags", "excluded_tags"):
         assert dead not in search_params, f"{dead} has no reader in the body"
