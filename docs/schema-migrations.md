@@ -70,7 +70,7 @@ v14 columns above.
 | queued_at | INTEGER | Our clock: when queued (epoch). NULL on pre-v14 rows, where the time is unknown |
 
 Indexed by `idx_translation_queue_lookup` on `(item_type, item_id, field)`, created in
-`_create_schema` rather than by a migration (see [Indexes](#indexes) for why).
+`_create_legacy_schema` rather than by a migration (see [Indexes](#indexes) for why).
 
 ### `tags` — normalized tag names
 
@@ -135,7 +135,7 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 | idx_wilson_subscription_score | wilson_subscription_score | "Subscriber Score" sort |
 | idx_wilson_favorite_score | wilson_favorite_score | "Favorite Score" sort |
 | idx_translation_priority | translation_priority | Translation queue scanning |
-| idx_translation_queue_lookup | translation_queue (item_type, item_id, field) | Per-field queue lookup and the 22→23 repair's two-column `NOT EXISTS`. Created in `_create_schema` (unversioned), so the index exists when the repair runs |
+| idx_translation_queue_lookup | translation_queue (item_type, item_id, field) | Per-field queue lookup and the 22→23 repair's two-column `NOT EXISTS`. Created in `_create_legacy_schema` (unversioned), so the index exists when the repair runs |
 | idx_translation_queue_poll | translation_queue (priority DESC, queued_at ASC) | Translation poll (`get_next_batch_for_translation`) ordering. Created in `_ensure_indexes`, which runs after 13→14 renames `dt_queued` to `queued_at` |
 | idx_web_scrape_queue | (needs_web_scrape DESC, api_fetched_at ASC) WHERE needs_web_scrape > 0 | Web scrape worker poll and web queue breakdown (v25) |
 | idx_image_queue | (needs_image DESC, api_fetched_at ASC) WHERE needs_image > 0 | Image worker poll and image queue breakdown (v25) |
@@ -155,7 +155,7 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 `initialize_database` (`src/database.py`) is a short driver. It:
 
 1. opens the connection and sets `PRAGMA journal_mode=WAL`;
-2. calls `_create_schema(cursor, conn)`, which creates the tables and the
+2. calls `_create_legacy_schema(cursor, conn)`, which creates the tables and the
    unversioned baseline columns every database history shares;
 3. reads `PRAGMA user_version` and runs every entry in the module-level
    `MIGRATIONS` table whose target version is above it, in ascending order;
@@ -194,7 +194,7 @@ version, and that a fresh database reaches `EXPECTED_VERSION`.
 3. append `(31, _migration_30_to_31)` as the last entry of `MIGRATIONS`;
 4. add a `### v30 → v31: ...` entry below, in the same shape as the others;
 5. if the step adds a column or table that a fresh database must also start
-   with, add it to `_create_schema` too — a fresh database begins at
+   with, add it to `_create_legacy_schema` too — a fresh database begins at
    `user_version = 0` and runs the whole table, so the two paths must agree on
    the terminal schema.
 
@@ -879,13 +879,13 @@ committed the renaming DDL but not the version bump. Neither table carries an in
 trigger, so the rename needs nothing recreated (measured with `PRAGMA index_list` against the
 real v22 and v29 schemas).
 
-The unusual part is `_create_schema`, which runs on **every** startup before the versioned
+The unusual part is `_create_legacy_schema`, which runs on **every** startup before the versioned
 migrations and therefore sees both sides of this step. It must keep building a *fresh*
 database with the historical names, because the chain it is about to replay names them at
 6→7, 13→14, 21→22 and 27→28; it must not run `CREATE TABLE IF NOT EXISTS users` once the table has
 become `creators`, or every startup would grow an empty `users`; and `_safe_add_columns`
 re-raises anything that is not a duplicate-column error, so an `ALTER TABLE app_tracking`
-against a renamed database would break startup. `_create_schema` therefore resolves each name
+against a renamed database would break startup. `_create_legacy_schema` therefore resolves each name
 with `_current_table_name(cursor, new, old)` and routes the `CREATE TABLE`, the
 `_safe_add_columns` call, the populate step and the legacy-filter conversion through the
 resolved name. `_demote_filtered_out_queue_priorities`, which migration 21→22 calls and a test
@@ -905,13 +905,13 @@ Opens a new SQLite connection with `row_factory = sqlite3.Row` for dict-like row
 
 ### `initialize_database` (database)
 
-The driver described under [Migration system](#migration-system-initialize_database): sets WAL mode, calls `_create_schema`, runs the pending entries of `MIGRATIONS` in ascending order, calls `_ensure_indexes`, and commits. This is called on every startup by the daemon, TUI, and web runner — before anything reads or writes — so the one call covers every later connection. Idempotent and safe to call on an existing database: on a database already in WAL the statement is a no-op.
+The driver described under [Migration system](#migration-system-initialize_database): sets WAL mode, calls `_create_legacy_schema`, runs the pending entries of `MIGRATIONS` in ascending order, calls `_ensure_indexes`, and commits. This is called on every startup by the daemon, TUI, and web runner — before anything reads or writes — so the one call covers every later connection. Idempotent and safe to call on an existing database: on a database already in WAL the statement is a no-op.
 
-### `_create_schema`, `_ensure_indexes`, `MIGRATIONS` (database)
+### `_create_legacy_schema`, `_ensure_indexes`, `MIGRATIONS` (database)
 
-`_create_schema(cursor, conn)` creates the tables (`IF NOT EXISTS`) and the baseline columns, and runs the legacy data conversions every database history shares. It is the unversioned part of the schema, run before the versioned steps. Because it runs on every startup, it also runs on both sides of migration 29→30: it resolves the creator and discovery table names once with `_current_table_name` (new name if it exists, else the historical one, else the historical one for a brand-new file) and routes its `CREATE TABLE`, `_safe_add_columns`, populate step and legacy-filter conversion through the resolved name.
+`_create_legacy_schema(cursor, conn)` creates the tables (`IF NOT EXISTS`) and the baseline columns, and runs the legacy data conversions every database history shares. It is the unversioned part of the schema, run before the versioned steps. Because it runs on every startup, it also runs on both sides of migration 29→30: it resolves the creator and discovery table names once with `_current_table_name` (new name if it exists, else the historical one, else the historical one for a brand-new file) and routes its `CREATE TABLE`, `_safe_add_columns`, populate step and legacy-filter conversion through the resolved name.
 
-`_ensure_indexes(cursor)` creates the query indexes. It is separate from `_create_schema` because several index columns (`api_fetched_at`, `scrape_version`) only exist after migration 13→14's renames, so it must run last; every statement is `IF NOT EXISTS`. One queue index is the exception and lives in `_create_schema` instead: `idx_translation_queue_lookup` on `translation_queue (item_type, item_id, field)`, because migration 22→23's repair runs *inside* the `MIGRATIONS` loop and an index created here would be too late to serve it. Its columns have existed since the table was created, so it is safe at every version.
+`_ensure_indexes(cursor)` creates the query indexes. It is separate from `_create_legacy_schema` because several index columns (`api_fetched_at`, `scrape_version`) only exist after migration 13→14's renames, so it must run last; every statement is `IF NOT EXISTS`. One queue index is the exception and lives in `_create_legacy_schema` instead: `idx_translation_queue_lookup` on `translation_queue (item_type, item_id, field)`, because migration 22→23's repair runs *inside* the `MIGRATIONS` loop and an index created here would be too late to serve it. Its columns have existed since the table was created, so it is safe at every version.
 
 `MIGRATIONS` is the ordered `[(target version, function), ...]` table the driver walks. The functions are `_migration_<from>_to_<to>(cursor, conn, db_path)` and sit above the table in ascending order. See [Migration system](#migration-system-initialize_database) for the shape and for how to add the next one.
 

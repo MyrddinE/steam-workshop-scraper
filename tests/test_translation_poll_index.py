@@ -6,8 +6,8 @@ translating. Without an index that is a full scan plus a temp B-tree over every
 queue row on each pass.
 
 `idx_translation_queue_poll` on `(priority DESC, queued_at ASC)` serves it. It is
-created by `_ensure_indexes` and not by `_create_schema`, because a fresh
-database calls the column `dt_queued` while `_create_schema` runs -- migration
+created by `_ensure_indexes` and not by `_create_legacy_schema`, because a fresh
+database calls the column `dt_queued` while `_create_legacy_schema` runs -- migration
 13->14 renames it -- so `CREATE INDEX ... (queued_at)` there raises "no such
 column". `test_the_poll_index_is_created_after_the_column_rename` pins that
 ordering; the `EXPLAIN QUERY PLAN` test captures the poll's real SQL with a trace
@@ -108,24 +108,24 @@ def test_a_fresh_database_has_the_poll_index(db_path):
 
 
 def test_the_poll_index_is_created_after_the_column_rename(tmp_path):
-    """`_create_schema` alone cannot create it: the column is still `dt_queued`.
+    """`_create_legacy_schema` alone cannot create it: the column is still `dt_queued`.
 
     This is the placement argument, not just the outcome. On a fresh file the
     unversioned schema creates `translation_queue.dt_queued`; only migration
     13->14 renames it to `queued_at`, and `_ensure_indexes` runs after that
-    chain. An index naming `queued_at` in `_create_schema` would raise
+    chain. An index naming `queued_at` in `_create_legacy_schema` would raise
     "no such column: queued_at" here.
     """
     path = str(tmp_path / "fresh_schema.db")
     conn = database.get_connection(path)
     conn.execute("PRAGMA journal_mode=WAL;")
-    database._create_schema(conn.cursor(), conn)
+    database._create_legacy_schema(conn.cursor(), conn)
     columns = {row[1] for row in conn.execute("PRAGMA table_info(translation_queue)")}
     conn.commit()
     conn.close()
 
     assert "dt_queued" in columns and "queued_at" not in columns, columns
-    assert INDEX not in _index_sql(path), "_create_schema must not create it before the rename"
+    assert INDEX not in _index_sql(path), "_create_legacy_schema must not create it before the rename"
 
     database.initialize_database(path)
 

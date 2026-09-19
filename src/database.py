@@ -742,7 +742,7 @@ def get_image_path(base_dir: str, workshop_id, ext: str) -> str:
 def _current_table_name(cursor, new_name: str, old_name: str) -> str:
     """Resolve a table's current name across the Batch 6 rename.
 
-    ``_create_schema`` runs on every startup, before the versioned migrations,
+    ``_create_legacy_schema`` runs on every startup, before the versioned migrations,
     so it sees a database on both sides of migration 29->30. It has to keep
     building a *fresh* database with the historical name -- the chain it is
     about to replay names these tables at earlier versions (13->14, 22->23,
@@ -874,7 +874,7 @@ def _demote_filtered_out_queue_priorities(conn) -> tuple[int, int]:
     return web_demoted, image_demoted
 
 
-def _create_schema(cursor, conn):
+def _create_legacy_schema(cursor, conn):
     """Create every table and baseline column that predates v1.
 
     This is the unversioned part of the schema: the tables and columns that
@@ -2303,7 +2303,7 @@ def _migration_29_to_30(cursor, conn, db_path):
     # `app_discovery`.
     #
     # The rename satisfies three constraints that pull in opposite directions,
-    # all handled by `_create_schema`'s `_current_table_name` probe:
+    # all handled by `_create_legacy_schema`'s `_current_table_name` probe:
     #   * a fresh database still builds `users`/`app_tracking`, because the
     #     chain this file replays from 0 names them at earlier versions
     #     (6->7, 13->14, 21->22, 27->28);
@@ -2340,7 +2340,7 @@ def _migration_29_to_30(cursor, conn, db_path):
 def _ensure_indexes(cursor):
     """Create the query indexes, after the column renames migrations perform.
 
-    Separate from :func:`_create_schema` because several of these name columns
+    Separate from :func:`_create_legacy_schema` because several of these name columns
     that only exist once migration 13->14 has renamed them (``api_fetched_at``,
     ``scrape_version``), so they must run last. Idempotent: every statement is
     ``IF NOT EXISTS``.
@@ -2373,7 +2373,7 @@ def _ensure_indexes(cursor):
     # The translation poll (`get_next_batch_for_translation`) orders the whole
     # outstanding queue by priority then queue time on every pass, so that sort
     # belongs in an index. It has to be created here rather than in
-    # `_create_schema`: on a fresh database `_create_schema` runs while the
+    # `_create_legacy_schema`: on a fresh database `_create_legacy_schema` runs while the
     # column is still called `dt_queued` (migration 13->14 renames it to
     # `queued_at`), so an index naming `queued_at` there fails with
     # "no such column". `_ensure_indexes` runs after the migration chain, which
@@ -2444,7 +2444,7 @@ def initialize_database(db_path: str):
     cursor = conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL;")
 
-    _create_schema(cursor, conn)
+    _create_legacy_schema(cursor, conn)
 
     # Schema versioning: run migrations cumulatively from current to expected version
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]

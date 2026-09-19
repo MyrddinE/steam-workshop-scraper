@@ -138,14 +138,14 @@ and it forced a temp B-tree; it was dropped so `idx_translation_queue_poll` can 
 `idx_translation_queue_lookup` on `(item_type, item_id, field)` serves both the per-field lookup
 `queue_field_for_translation` runs before every queue write and migration 22→23's correlated
 `NOT EXISTS` repair, which constrains only the first two columns. Unlike the other query indexes it
-is created by `_create_schema` rather than `_ensure_indexes`: the repair runs inside the migration
+is created by `_create_legacy_schema` rather than `_ensure_indexes`: the repair runs inside the migration
 loop, before `_ensure_indexes` does, so an index created there would not exist yet when the repair
 scans. Creating it in the unversioned schema also means an existing database picks it up on the next
 startup without a migration step.
 
 `idx_translation_queue_poll` on `(priority DESC, queued_at ASC)` serves that poll's ordering. It is
-created by `_ensure_indexes` and not by `_create_schema`, the opposite placement for a concrete
-reason: on a fresh database `_create_schema` runs while the column is still called `dt_queued`
+created by `_ensure_indexes` and not by `_create_legacy_schema`, the opposite placement for a concrete
+reason: on a fresh database `_create_legacy_schema` runs while the column is still called `dt_queued`
 (migration 13→14 renames it), so an index naming `queued_at` there fails with "no such column".
 `_ensure_indexes` runs after the migration chain.
 

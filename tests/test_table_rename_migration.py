@@ -4,7 +4,7 @@
 becomes `creators`; `app_tracking`'s live columns are the discovery cursor and
 the enrichment filters, so it becomes `app_discovery`.
 
-The rename is the one migration whose two sides `_create_schema` sees on every
+The rename is the one migration whose two sides `_create_legacy_schema` sees on every
 startup, and it has to satisfy three constraints at once:
 
 * a fresh database must still be *built* with the historical names, because the
@@ -14,7 +14,7 @@ startup, and it has to satisfy three constraints at once:
 * `_safe_add_columns` re-raises anything that is not a duplicate-column error,
   so it too must be pointed at whichever table exists.
 
-`_create_schema` resolves each name with `_current_table_name` and routes every
+`_create_legacy_schema` resolves each name with `_current_table_name` and routes every
 reference through it. These tests pin the fresh path, the v29 upgrade, the
 re-initialisation and the "already renamed under the old marker" crash window.
 """

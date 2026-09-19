@@ -12,7 +12,7 @@ correlates a `NOT EXISTS` over `(item_type, item_id)` for every raised mirror.
 because SQLite can seek an index on a leftmost-columns prefix.
 
 The repair runs *inside* the `MIGRATIONS` loop, so the index has to be created by
-`_create_schema` (which runs before the loop for every caller and every version)
+`_create_legacy_schema` (which runs before the loop for every caller and every version)
 rather than by `_ensure_indexes` (which runs after it). A migration step cannot
 help either: it would run after 22->23. `test_the_index_exists_when_the_repair_runs`
 pins that ordering directly; the `EXPLAIN QUERY PLAN` tests below prove the
@@ -178,7 +178,7 @@ def test_initialize_database_is_still_idempotent(db_path):
 
 
 def test_the_index_exists_when_the_repair_runs(db_path, monkeypatch):
-    """`_create_schema` must create the index before the migration loop reaches 22->23.
+    """`_create_legacy_schema` must create the index before the migration loop reaches 22->23.
 
     An index created by `_ensure_indexes` (which runs after the loop) would leave
     this assertion False while every schema test still passed, so this is the
