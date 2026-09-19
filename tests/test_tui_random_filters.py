@@ -9,9 +9,9 @@ async def test_random_filters_save_load(mock_config):
     from unittest.mock import patch
     
     # Generate 5 random 5-part filters from the central schema
-    from src.database import FILTER_SCHEMA
-    fields = [f["field"] for f in FILTER_SCHEMA]
-    field_ops_map = {f["field"]: f["ops"] for f in FILTER_SCHEMA}
+    from src.database import SEARCH_FILTER_SCHEMA
+    fields = [f["field"] for f in SEARCH_FILTER_SCHEMA]
+    field_ops_map = {f["field"]: f["ops"] for f in SEARCH_FILTER_SCHEMA}
     
     random_filters = []
     for _ in range(5):

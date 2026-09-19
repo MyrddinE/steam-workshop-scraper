@@ -8,7 +8,7 @@ from the queue — throwing away the work the drain had queued up.
 
 import pytest
 
-from src.database import get_queued_items, insert_or_update_item, initialize_database
+from src.database import get_subscription_queue_items, insert_or_update_item, initialize_database
 from src.webserver import app, init_webserver
 
 
@@ -29,14 +29,14 @@ def client(tmp_path):
 
 
 def _queue(db_path):
-    return [row["workshop_id"] for row in get_queued_items(db_path)]
+    return [row["workshop_id"] for row in get_subscription_queue_items(db_path)]
 
 
 def test_a_throttled_subscription_stays_queued(client):
     """The retry path: nothing was attempted, so nothing should be discarded."""
     c, db_path = client
-    from src.database import toggle_subscription_queue_status
-    toggle_subscription_queue_status(db_path, 4242)
+    from src.database import toggle_subscription_queue
+    toggle_subscription_queue(db_path, 4242)
     assert _queue(db_path) == [4242]
 
     resp = c.post("/api/subscribe_throttled/4242")
@@ -48,8 +48,8 @@ def test_a_throttled_subscription_stays_queued(client):
 def test_a_failed_subscription_is_cleared_for_contrast(client):
     """The old path, kept deliberately different: a real failure is cleared."""
     c, db_path = client
-    from src.database import toggle_subscription_queue_status
-    toggle_subscription_queue_status(db_path, 4242)
+    from src.database import toggle_subscription_queue
+    toggle_subscription_queue(db_path, 4242)
 
     c.post("/api/subscribe_failed/4242")
     assert _queue(db_path) == []

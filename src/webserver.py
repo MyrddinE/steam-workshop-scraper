@@ -6,7 +6,7 @@ import time
 import re
 import logging
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, mark_own_subscribed, get_queued_items, FILTER_SCHEMA, bump_api_priority_for_detail, clear_pending_items
+from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue, clear_subscription_queue, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, bump_api_priority_for_detail, delete_never_fetched_items
 from src.analysis import view_window_analysis
 from src import capture
 from src import crash
@@ -173,7 +173,7 @@ def index():
     # render it at all: off Windows the button and the `o` shortcut are absent,
     # not merely inert.
     return render_template('index.html', web_delay=web_delay,
-                           filter_schema_json=_json.dumps(FILTER_SCHEMA),
+                           filter_schema_json=_json.dumps(SEARCH_FILTER_SCHEMA),
                            open_folder_enabled=bool(
                                _workshop_folders and _workshop_folders.enabled()))
 
@@ -446,12 +446,12 @@ def api_clear_pending():
     """Delete every never-successfully-fetched item.
 
     Deliberately the same predicate and the same delete as the TUI's
-    ``action_clear_pending``, both through ``clear_pending_items``: the web
+    ``action_clear_pending``, both through ``delete_never_fetched_items``: the web
     route must not grow its own idea of what "pending" means, and there is no
     dry-run because the TUI has none. The count is returned so the UI can say
     what was removed rather than claiming a generic success.
     """
-    deleted = clear_pending_items(_db_path)
+    deleted = delete_never_fetched_items(_db_path)
     logging.info("[Clear Pending] removed %d pending item(s)", deleted)
     return jsonify({"ok": True, "deleted": deleted})
 
@@ -472,7 +472,7 @@ def api_cutoffs():
 
 @app.route('/api/authors')
 def api_authors():
-    authors = get_all_authors(_db_path)
+    authors = get_all_creator_ids(_db_path)
     return jsonify(authors)
 
 
@@ -554,7 +554,7 @@ def api_save_filter():
     appid = appids[0] if appids else None
     if appid is None:
         return jsonify({"error": "No target AppID configured"}), 400
-    save_app_filter(_db_path, appid, enrichment_filters=json.dumps(filters))
+    save_enrichment_filters(_db_path, appid, enrichment_filters=json.dumps(filters))
     return jsonify({"ok": True, "appid": appid})
 
 
@@ -741,7 +741,7 @@ def api_sessionid():
 
 @app.route('/api/toggle_sub/<int:workshop_id>', methods=['POST'])
 def api_toggle_sub(workshop_id):
-    toggle_subscription_queue_status(_db_path, workshop_id)
+    toggle_subscription_queue(_db_path, workshop_id)
     return jsonify({"ok": True})
 
 
@@ -765,7 +765,7 @@ _sub_failures = set()  # in-memory set of workshop_ids that failed subscription
 
 @app.route('/api/subscribe_failed/<int:workshop_id>', methods=['POST'])
 def api_subscribe_failed(workshop_id):
-    clear_subscription_queue_status(_db_path, workshop_id)
+    clear_subscription_queue(_db_path, workshop_id)
     _sub_failures.add(workshop_id)
     return jsonify({"ok": True})
 
@@ -836,7 +836,7 @@ def api_queued():
     # The queue overlay draws each row's real marker from this payload, the same
     # table the grid and the TUI's queue screen read; without the derived fields
     # the overlay could not draw `downloaded` or any other state.
-    items = [_attach_subscription(item) for item in get_queued_items(_db_path)]
+    items = [_attach_subscription(item) for item in get_subscription_queue_items(_db_path)]
     return jsonify(items)
 
 

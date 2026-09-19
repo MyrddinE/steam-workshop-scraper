@@ -473,7 +473,7 @@ themselves.
 The daemon no longer inherits a priority the daemon itself set (see
 `user_requested_priority` in `src/daemon.py`); this migration repairs the rows it
 had already written. For every AppID with a readable filter set
-(`enrichment_filters_for`), it walks the items above backlog priority and demotes
+(`get_enrichment_filters`), it walks the items above backlog priority and demotes
 the ones the filters exclude:
 
 | Stored | After | Why |
@@ -594,7 +594,7 @@ before continuing, the same rule migrations 13→14 and 14→15 follow.
 
 `language` is removed from `WORKSHOP_ITEM_COLUMNS`, so it is no longer in the
 API merge allow-list either, and the `Language ID` filter alias is gone
-(`FIELD_NAME_MAP`). A saved filter that named it now falls through as an unknown
+(`FILTER_FIELD_TO_COLUMN`). A saved filter that named it now falls through as an unknown
 field and is ignored rather than erroring, which is what it effectively did
 already: no row ever matched.
 
@@ -613,7 +613,7 @@ SELECT * FROM workshop_items
 WHERE needs_web_scrape > 0
 ORDER BY needs_web_scrape DESC, api_fetched_at ASC LIMIT 1
 
--- get_next_items_to_scrape (plus `AND (status IS NULL OR status != -1)`)
+-- get_next_items_to_fetch (plus `AND (status IS NULL OR status != -1)`)
 SELECT * FROM workshop_items
 WHERE api_priority > 0
 ORDER BY api_priority DESC, api_fetched_at ASC LIMIT ?
@@ -886,10 +886,10 @@ Same upsert pattern for `users` table, using `USER_COLUMNS` frozenset for filter
 
 Returns all columns for a single workshop_id, joined with users table. Tags are returned as comma-separated via a correlated `GROUP_CONCAT` subquery against the junction table.
 
-### `count_unscraped_items` (database)
+### `count_never_fetched_items` (database)
 
 Counts items where `api_fetched_at IS NULL` (never successfully fetched) — used to determine if the processing queue needs more items.
 
-### `toggle_subscription_queue_status` / `get_queued_items` (database)
+### `toggle_subscription_queue` / `get_subscription_queue_items` (database)
 
 Simple toggle and retrieval for the subscription queue feature.

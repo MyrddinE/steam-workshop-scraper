@@ -112,7 +112,7 @@ async def test_detail_pane_poll_survives_a_locked_database(mock_config):
     with patch("src.tui.load_config", return_value=mock_config), \
          patch("src.tui.search_items", return_value=results), \
          patch("src.tui.get_item_details", return_value=results[0]), \
-         patch("src.tui.get_all_authors", return_value=["Author A"]):
+         patch("src.tui.get_all_creator_ids", return_value=["Author A"]):
         app = ScraperApp()
         async with app.run_test() as pilot:
             await pilot.pause(ASYNC_PAUSE)
@@ -142,7 +142,7 @@ async def test_subscription_marker_poll_survives_a_locked_database(mock_config):
     with patch("src.tui.load_config", return_value=mock_config), \
          patch("src.tui.search_items", return_value=results), \
          patch("src.tui.get_item_details", return_value=results[0]), \
-         patch("src.tui.get_all_authors", return_value=["Author A"]):
+         patch("src.tui.get_all_creator_ids", return_value=["Author A"]):
         app = ScraperApp()
         async with app.run_test() as pilot:
             await pilot.pause(ASYNC_PAUSE)

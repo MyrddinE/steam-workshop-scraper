@@ -7,29 +7,29 @@ import json
 from datetime import datetime, timezone, timedelta
 from src.database import (
     insert_or_update_item,
-    get_next_items_to_scrape,
+    get_next_items_to_fetch,
     search_items,
     get_connection,
-    count_unscraped_items,
-    clear_pending_items,
+    count_never_fetched_items,
+    delete_never_fetched_items,
     flag_for_web_scrape,
     flag_for_image,
     bump_api_priority_for_list,
     bump_api_priority_for_detail,
-    clear_subscription_queue_status,
-    get_queued_items,
+    clear_subscription_queue,
+    get_subscription_queue_items,
     EXPECTED_VERSION,
 )
 
 def test_count_unscraped_items(db_path):
     """Test counting items that have never been attempted."""
-    assert count_unscraped_items(db_path) == 0
+    assert count_never_fetched_items(db_path) == 0
     
     insert_or_update_item(db_path, {"workshop_id": 1}) # Unscraped
     insert_or_update_item(db_path, {"workshop_id": 2}) # Unscraped
     insert_or_update_item(db_path, {"workshop_id": 3, "api_fetched_at": 1672531200}) # Scraped
     
-    assert count_unscraped_items(db_path) == 2
+    assert count_never_fetched_items(db_path) == 2
 
 def test_initialize_database(db_path):
     """Tests that the database and table are created correctly."""
@@ -73,7 +73,7 @@ def test_get_next_items_to_scrape(db_path):
     insert_or_update_item(db_path, {"workshop_id": 2, "status": None}) # NULL status, should come first
     insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "api_fetched_at": 1696204800})
     
-    items = get_next_items_to_scrape(db_path, limit=3)
+    items = get_next_items_to_fetch(db_path, limit=3)
     assert len(items) == 3
     assert isinstance(items[0], dict)
     
@@ -118,7 +118,7 @@ def test_clear_pending_items(db_path):
 
     insert_or_update_item(db_path, {"workshop_id": 5, "status": 200, "api_fetched_at": 1672531200})
 
-    deleted_count = clear_pending_items(db_path)
+    deleted_count = delete_never_fetched_items(db_path)
     assert deleted_count == 2
     
     conn = get_connection(db_path)
@@ -254,11 +254,11 @@ def test_search_items_advanced_queries(db_path):
     assert results[0]["workshop_id"] == 2
 
 def test_get_all_authors(db_path):
-    from src.database import insert_or_update_item, get_all_authors
+    from src.database import insert_or_update_item, get_all_creator_ids
     insert_or_update_item(db_path, {"workshop_id": 1, "creator": 999})
     insert_or_update_item(db_path, {"workshop_id": 2, "creator": 888})
     
-    authors = get_all_authors(db_path)
+    authors = get_all_creator_ids(db_path)
     assert 999 in authors
     assert 888 in authors
     assert len(authors) >= 2
@@ -283,7 +283,7 @@ def test_search_items_pagination(db_path):
     assert results[0]["workshop_id"] == 106
 
 def test_app_tracking(db_path):
-    from src.database import get_app_tracking, update_app_tracking, save_app_filter
+    from src.database import get_app_tracking, update_app_tracking, save_enrichment_filters
     
     # Initially should be None
     assert get_app_tracking(db_path, 4000) is None
@@ -303,18 +303,18 @@ def test_app_tracking(db_path):
     assert tracking["last_historical_date_scanned"] == 1700000000
     assert tracking["window_size"] == 3600*24*30*2
 
-    # Test save_app_filter
-    save_app_filter(db_path, 4000, "test search", ["tag1", "tag2"], ["excl1"])
+    # Test save_enrichment_filters
+    save_enrichment_filters(db_path, 4000, "test search", ["tag1", "tag2"], ["excl1"])
     tracking = get_app_tracking(db_path, 4000)
     assert tracking["filter_text"] == "test search"
     assert tracking["required_tags"] == json.dumps(["tag1", "tag2"])
     assert tracking["excluded_tags"] == json.dumps(["excl1"])
     
-    # Ensure last_historical_date_scanned is NOT updated by save_app_filter
+    # Ensure last_historical_date_scanned is NOT updated by save_enrichment_filters
     assert tracking["last_historical_date_scanned"] == 1700000000
 
     # Test saving only some filters
-    save_app_filter(db_path, 4000, required_tags=["new_tag"])
+    save_enrichment_filters(db_path, 4000, required_tags=["new_tag"])
     tracking = get_app_tracking(db_path, 4000)
     assert tracking["filter_text"] == "" # Should revert to default if not provided
     assert tracking["required_tags"] == json.dumps(["new_tag"])
@@ -322,7 +322,7 @@ def test_app_tracking(db_path):
 
 
 def test_get_next_items_to_scrape_priority(db_path):
-    from src.database import get_next_items_to_scrape, insert_or_update_item
+    from src.database import get_next_items_to_fetch, insert_or_update_item
     import time
     
     # 1. Successfully scraped items, stalest first (status = 200)
@@ -342,7 +342,7 @@ def test_get_next_items_to_scrape_priority(db_path):
     # 4. Old items (older than 7 days)
     insert_or_update_item(db_path, {"workshop_id": 7, "status": 200, "api_fetched_at": 1640995200})
 
-    items = get_next_items_to_scrape(db_path, limit=7)
+    items = get_next_items_to_fetch(db_path, limit=7)
     item_ids = [item['workshop_id'] for item in items]
     
     # All items have api_priority=3 (default), ordered by api_fetched_at ASC
@@ -365,18 +365,18 @@ def test_get_item_details_missing_user(db_path):
     assert details.get("personaname") is None
 
 def test_toggle_and_query_queued_items(db_path):
-    from src.database import toggle_subscription_queue_status, get_queued_items
+    from src.database import toggle_subscription_queue, get_subscription_queue_items
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "Item A"})
     insert_or_update_item(db_path, {"workshop_id": 2, "title": "Item B"})
 
-    toggle_subscription_queue_status(db_path, 1)
-    queued = get_queued_items(db_path)
+    toggle_subscription_queue(db_path, 1)
+    queued = get_subscription_queue_items(db_path)
     assert len(queued) == 1
     assert queued[0]["workshop_id"] == 1
     assert queued[0]["title"] == "Item A"
 
-    toggle_subscription_queue_status(db_path, 1)
-    queued = get_queued_items(db_path)
+    toggle_subscription_queue(db_path, 1)
+    queued = get_subscription_queue_items(db_path)
     assert len(queued) == 0
 
 def test_get_db_stats_empty(db_path):
@@ -565,8 +565,8 @@ def test_build_fts_clause_operators(db_path):
     assert len(results) > 0
 
 def test_save_app_filter_defaults(db_path):
-    from src.database import save_app_filter, get_app_tracking
-    save_app_filter(db_path, 5000)
+    from src.database import save_enrichment_filters, get_app_tracking
+    save_enrichment_filters(db_path, 5000)
     tracking = get_app_tracking(db_path, 5000)
     assert tracking["filter_text"] == ""
     assert tracking["required_tags"] == "[]"
@@ -599,7 +599,7 @@ def test_get_next_items_to_scrape_priority_order(db_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 1, "api_fetched_at": 100})
     insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 10, "api_fetched_at": 200})
     insert_or_update_item(db_path, {"workshop_id": 3, "api_priority": 5, "api_fetched_at": 300})
-    items = get_next_items_to_scrape(db_path, limit=3)
+    items = get_next_items_to_fetch(db_path, limit=3)
     assert [i["workshop_id"] for i in items] == [2, 3, 1]
 
 
@@ -607,7 +607,7 @@ def test_get_next_items_to_scrape_excludes_dead(db_path):
     """Items with status=-1 are not returned."""
     insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 10, "status": -1})
     insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 5, "status": 200})
-    items = get_next_items_to_scrape(db_path, limit=2)
+    items = get_next_items_to_fetch(db_path, limit=2)
     assert [i["workshop_id"] for i in items] == [2]
 
 
@@ -659,10 +659,10 @@ def test_bump_api_priority_for_list_and_detail(db_path):
 
 
 def test_clear_subscription_queue_status(db_path):
-    """clear_subscription_queue_status sets flag to 0."""
+    """clear_subscription_queue sets flag to 0."""
     insert_or_update_item(db_path, {"workshop_id": 1, "is_queued_for_subscription": 1})
-    clear_subscription_queue_status(db_path, 1)
-    queued = get_queued_items(db_path)
+    clear_subscription_queue(db_path, 1)
+    queued = get_subscription_queue_items(db_path)
     assert not any(q["workshop_id"] == 1 for q in queued)
 
 
@@ -876,9 +876,9 @@ def test_the_dead_search_arguments_are_gone():
     """An argument with no reader reads as a control that does not exist."""
     import inspect
 
-    from src.database import _build_tag_clause, get_next_items_to_scrape, search_items
+    from src.database import _build_tag_clause, get_next_items_to_fetch, search_items
 
-    assert "staleness_days" not in inspect.signature(get_next_items_to_scrape).parameters
+    assert "staleness_days" not in inspect.signature(get_next_items_to_fetch).parameters
     search_params = inspect.signature(search_items).parameters
     for dead in ("tags_query", "required_tags", "excluded_tags"):
         assert dead not in search_params, f"{dead} has no reader in the body"

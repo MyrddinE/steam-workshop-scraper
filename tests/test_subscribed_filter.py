@@ -1,6 +1,6 @@
 """The Subscribed field, its overlay control and the `Subscribed at` sort.
 
-The field is the first enum in FILTER_SCHEMA and the first whose predicate spans
+The field is the first enum in SEARCH_FILTER_SCHEMA and the first whose predicate spans
 more than one column, so these tests pin the two things that field invites:
 
 * the SQL builder and the in-memory mirror answer the same question, including
@@ -21,7 +21,7 @@ from unittest.mock import patch
 from src.database import (
     initialize_database, insert_or_update_item, get_connection, search_items,
     _evaluate_filters, _build_sort_clause, _demote_filtered_out_queue_priorities,
-    save_app_filter, VALID_SORT_COLS,
+    save_enrichment_filters, VALID_SORT_COLS,
 )
 from tests.conftest import ASYNC_PAUSE
 
@@ -245,7 +245,7 @@ def test_daemon_reads_queued_from_the_prefetch_record(db_path):
     """`is_queued_for_subscription` is dropped by the merge, so the merged dict
     alone reads it as NULL and the daemon would answer "not queued"."""
     from src.daemon import MERGE_EXCLUDED_KEYS
-    save_app_filter(db_path, 294100, enrichment_filters=json.dumps(
+    save_enrichment_filters(db_path, 294100, enrichment_filters=json.dumps(
         [{"field": SUBSCRIBED_FIELD, "op": "is", "value": "queued"}]))
     daemon = _daemon_for(db_path)
 
@@ -261,7 +261,7 @@ def test_daemon_reads_queued_from_the_prefetch_record(db_path):
 def test_daemon_reads_downloaded_from_the_prefetch_record(db_path):
     """`downloaded_at` is excluded from the merge for the same reason."""
     from src.daemon import MERGE_EXCLUDED_KEYS
-    save_app_filter(db_path, 294100, enrichment_filters=json.dumps(
+    save_enrichment_filters(db_path, 294100, enrichment_filters=json.dumps(
         [{"field": SUBSCRIBED_FIELD, "op": "is", "value": "downloaded"}]))
     daemon = _daemon_for(db_path)
 
@@ -277,7 +277,7 @@ def test_daemon_reads_downloaded_from_the_prefetch_record(db_path):
 def test_demotion_walk_loads_the_columns_its_filter_reads(subscribed_db):
     """The migration walk selects only the referenced columns; the Subscribed
     field's virtual column expands to four, or the queue flag it reads is NULL."""
-    save_app_filter(subscribed_db, 294100, enrichment_filters=json.dumps(
+    save_enrichment_filters(subscribed_db, 294100, enrichment_filters=json.dumps(
         [{"field": SUBSCRIBED_FIELD, "op": "is", "value": "queued"}]))
     conn = get_connection(subscribed_db)
     conn.execute("UPDATE workshop_items SET needs_web_scrape = 2 WHERE workshop_id = 4")
@@ -396,7 +396,7 @@ async def test_tui_overlay_survives_a_builder_change_and_stays_out_of_the_saved_
             assert overlay.value == "previously", "a builder change must not clear the overlay"
             assert app._effective_subscribed_overlay() == "previously"
 
-            with patch('src.tui.save_app_filter') as save:
+            with patch('src.tui.save_enrichment_filters') as save:
                 await app.action_save_filter_for_scraper()
             written = json.loads(save.call_args.kwargs["enrichment_filters"])
             assert written == [{"field": "Title", "op": "contains", "value": "x"}], \

@@ -202,11 +202,11 @@ implementation.
 
 The route existed with no client before this. The item jump only reaches a creator whose item is
 already on screen; the list is the way to reach one that is not, and it needs only the IDs
-`/api/authors` already returns (`get_all_authors`, `ORDER BY creator`) — no new endpoint and no new
+`/api/authors` already returns (`get_all_creator_ids`, `ORDER BY creator`) — no new endpoint and no new
 query.
 
 The TUI has no equivalent list, and this is recorded rather than glossed: `src.tui` imports
-`get_all_authors` and never calls it (the only caller is `/api/authors` in `src/webserver.py`), so the
+`get_all_creator_ids` and never calls it (the only caller is `/api/authors` in `src/webserver.py`), so the
 TUI's only route to a creator is typing an `Author ID` into a filter row or jumping from one of that
 creator's items — both of which the browser has too. This is therefore not a function one side has and
 the other lacks; the picker is a third route to the same end, earned by the fact that a creator ID is
@@ -515,7 +515,7 @@ Reads `.tui_state.yaml` for filter/sort state restoration. The client uses this 
 
 ### `/api/clear_pending` — POST
 
-Deletes every pending item — those with no status or a 404 status and no successful API fetch (`clear_pending_items`, `src/database.py:2354`) — and returns `{ok, deleted}` with the number of rows removed. This is the same predicate and the same delete as the TUI's `action_clear_pending`; there is deliberately no dry-run mode. The UI asks for confirmation first, naming what will be deleted.
+Deletes every pending item — those with no status or a 404 status and no successful API fetch (`delete_never_fetched_items`, `src/database.py:2354`) — and returns `{ok, deleted}` with the number of rows removed. This is the same predicate and the same delete as the TUI's `action_clear_pending`; there is deliberately no dry-run mode. The UI asks for confirmation first, naming what will be deleted.
 
 ### `/api/save_filter` — POST
 

@@ -94,7 +94,7 @@ because the sweep makes work rather than doing it.
 
 ## Why `last_fetch_attempted_at` Exists
 
-`get_next_items_to_scrape` orders by `api_priority DESC, api_fetched_at ASC`. If
+`get_next_items_to_fetch` orders by `api_priority DESC, api_fetched_at ASC`. If
 `api_fetched_at` moved on every attempt, then a just-failed item would look freshly fetched and
 would be retried only after every other item in its priority band — which is why the old shared
 column was written before the API call, failures included. If it moved only on success without a

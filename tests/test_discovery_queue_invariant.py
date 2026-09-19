@@ -19,7 +19,7 @@ from unittest.mock import patch
 from src.daemon import Daemon
 from src.database import (
     get_connection,
-    get_next_items_to_scrape,
+    get_next_items_to_fetch,
     initialize_database,
 )
 
@@ -114,7 +114,7 @@ def _discover_one_item(db_path: str) -> int:
 
 
 def _queued_ids(db_path: str) -> list[int]:
-    return [item["workshop_id"] for item in get_next_items_to_scrape(db_path)]
+    return [item["workshop_id"] for item in get_next_items_to_fetch(db_path)]
 
 
 def test_the_two_database_histories_really_do_differ(tmp_path):

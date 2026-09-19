@@ -43,7 +43,7 @@ async def test_details_pane_contrast(mock_config):
     with patch('src.tui.load_config', return_value=mock_config), \
          patch('src.tui.search_items', return_value=results), \
          patch('src.tui.get_item_details', return_value=results[0]), \
-         patch('src.tui.get_all_authors', return_value=[]):
+         patch('src.tui.get_all_creator_ids', return_value=[]):
         
         app = ScraperApp()
         async with app.run_test() as pilot:

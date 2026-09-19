@@ -27,10 +27,10 @@ from src import capture, pacing, session_health, subscribe_engine as engine, web
 from src import web_worker
 from src.database import (
     get_connection,
-    get_queued_items,
+    get_subscription_queue_items,
     initialize_database,
     insert_or_update_item,
-    toggle_subscription_queue_status,
+    toggle_subscription_queue,
 )
 
 LIVE_CAPTURES = Path("/root/.dsh/live/scrapes")
@@ -213,7 +213,7 @@ def engine_env(tmp_path, monkeypatch):
     initialize_database(db_path)
     insert_or_update_item(db_path, {"workshop_id": 7, "title": "T", "status": 200,
                                     "consumer_appid": 294100})
-    toggle_subscription_queue_status(db_path, 7)
+    toggle_subscription_queue(db_path, 7)
     config = {"database": {"path": db_path}, "session": {"id": "TOK"}}
     monkeypatch.setattr(
         web_scraper, "_build_workshop_cookies",
@@ -271,7 +271,7 @@ def test_an_already_subscribed_item_sends_no_request(engine_env, monkeypatch):
 def test_the_already_subscribed_no_op_drains_the_subscription_queue(engine_env, monkeypatch):
     """An item the page already shows subscribed leaves the queue after a pass.
 
-    ``get_queued_items`` is the one query both front ends list through, so this
+    ``get_subscription_queue_items`` is the one query both front ends list through, so this
     pins the recorded symptom: the flag must be clear, not left for every later
     pass to list and re-read.
     """
@@ -281,13 +281,13 @@ def test_the_already_subscribed_no_op_drains_the_subscription_queue(engine_env, 
     session = _Session(payload={"success": 1})
     monkeypatch.setattr(web_scraper, "_get_session", lambda: session)
 
-    assert [item["workshop_id"] for item in get_queued_items(db_path)] == [7]
+    assert [item["workshop_id"] for item in get_subscription_queue_items(db_path)] == [7]
 
     engine.run_subscription_pass(
         [{"workshop_id": 7}], config=config, db_path=db_path,
         pause_lock_file=str(Path(db_path).with_suffix(".pauselock")))
 
-    assert get_queued_items(db_path) == []
+    assert get_subscription_queue_items(db_path) == []
     assert session.calls == [], "draining the queue still costs no POST"
 
 

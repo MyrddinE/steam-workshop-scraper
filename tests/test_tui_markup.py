@@ -43,7 +43,7 @@ async def test_tui_no_markup_error_on_bbcode(mock_config, mock_results_with_bbco
     with patch('src.tui.load_config', return_value=mock_config), \
          patch('src.tui.search_items', return_value=mock_results_with_bbcode), \
          patch('src.tui.get_item_details', side_effect=get_details_mock), \
-         patch('src.tui.get_all_authors', return_value=[]):
+         patch('src.tui.get_all_creator_ids', return_value=[]):
         
         app = ScraperApp()
         async with app.run_test() as pilot:
