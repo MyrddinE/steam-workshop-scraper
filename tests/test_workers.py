@@ -343,6 +343,37 @@ def test_no_image_capture_writes_the_bytes_into_the_outbox(db_path, tmp_path):
     assert not list(outbox.rglob("*.body"))
 
 
+def test_puremagic_detection_is_logged_at_debug_not_info(db_path, tmp_path, caplog):
+    """The successful magic-byte guess is diagnostic, not operational.
+
+    It fires for every response whose Content-Type is absent from ``MIME_MAP``
+    but whose body puremagic recognises, so at INFO it narrates a routine
+    fallback at the level reserved for things the owner may need to act on. The
+    level is the whole behaviour pinned here: DEBUG, and nothing louder.
+    """
+    import logging
+
+    from src.database import insert_or_update_item
+
+    image_bytes = b"\x89PNG\r\n\x1a\n" + b"PNG-PAYLOAD" * 16
+    insert_or_update_item(db_path, {"workshop_id": 5, "needs_image": 1,
+                                    "preview_url": "http://example.com/img.jpg"})
+
+    caplog.set_level(logging.DEBUG)
+    _run_image_worker(
+        db_path,
+        response=_FakeImageResponse(
+            headers={"Content-Type": "application/octet-stream"},
+            body=image_bytes),
+        images_root=str(tmp_path / "images"))
+
+    detected = [record for record in caplog.records
+                if "Puremagic detected" in record.getMessage()]
+    assert detected, "the detection line must be emitted"
+    assert [record.levelno for record in detected] == [logging.DEBUG]
+    assert "→ .png" in detected[0].getMessage()
+
+
 # ── Web worker: selector miss ────────────────────────────────────────────────
 # A selector miss returns {"description": None, "tags": []}, which is truthy. It
 # used to be taken as success, writing extended_description = NULL and
