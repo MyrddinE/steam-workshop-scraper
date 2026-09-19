@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 WORKSHOP_ITEM_COLUMNS = frozenset({
     "workshop_id", "first_seen_at", "api_fetched_at", "last_fetch_attempted_at",
-    "scrape_version", "translate_version",
+    "translate_version",
     "fetch_status", "title", "title_en", "creator_steamid", "creator_appid", "consumer_appid",
     "filename", "file_size", "preview_url", "hcontent_file", "hcontent_preview",
     "short_description", "short_description_en", "steam_created_at", "steam_updated_at",
@@ -23,8 +23,8 @@ WORKSHOP_ITEM_COLUMNS = frozenset({
     "own_subscribed", "own_first_subscribed_at", "steam_download_seen_at",
     # Our completion clocks for the three stages that had none: when *we*
     # scraped the page, fetched the image and finished translating the item.
-    # Distinct from scrape_version/translate_version, which store Steam's
-    # revision. See docs/timestamps.md.
+    # Distinct from translate_version, which stores Steam's revision. See
+    # docs/timestamps.md.
     "web_scraped_at", "image_fetched_at", "translated_at",
 })
 
@@ -223,7 +223,7 @@ USER_PRIORITY_FLOOR = 5
 # than local to `initialize_database` because the migration tests assert that
 # the chain reaches it, and a magic number repeated in nine test files is a
 # number that will be wrong after the next migration.
-EXPECTED_VERSION = 34
+EXPECTED_VERSION = 35
 
 def _build_text_search_clauses(sql: str, params: list, query_string: str, cols: list[str]) -> tuple[str, list]:
     """Applies positive/negative text search tokens to SQL via LIKE clauses."""
@@ -719,6 +719,17 @@ _RENAMED_COLUMN_NAMES = {
     "downloaded_at": "steam_download_seen_at",
 }
 
+# Historical column names a Batch 6 migration has *dropped*, mapped to the
+# version that dropped them. The mirror of ``_RENAMED_COLUMN_NAMES``:
+# ``_safe_add_columns`` runs on every startup through ``_create_legacy_schema``,
+# so once a database is past the drop it must not gain the column back on the
+# next start. The version gate is what lets a database rewound below the drop
+# (the migration tests age a current database by moving the marker) still
+# rebuild the shape its marker claims.
+_DROPPED_COLUMN_NAMES = {
+    "window_size": 35,
+}
+
 
 def _safe_add_columns(cursor, table: str, columns: list[tuple[str, str]]):
     """Safely adds columns to an existing table, ignoring duplicate-column errors.
@@ -727,11 +738,19 @@ def _safe_add_columns(cursor, table: str, columns: list[tuple[str, str]]):
     ``_create_legacy_schema`` runs on every startup, so without this a database
     already at the current version would gain a stray legacy column next to the
     renamed one.
+
+    A name a migration has dropped since is likewise skipped once the database
+    is at or past the dropping version, so re-initialising does not undo the
+    drop.
     """
     existing = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
+    version = cursor.execute("PRAGMA user_version").fetchone()[0]
     for col_name, col_type in columns:
         renamed_to = _RENAMED_COLUMN_NAMES.get(col_name)
         if renamed_to is not None and renamed_to in existing:
+            continue
+        dropped_at = _DROPPED_COLUMN_NAMES.get(col_name)
+        if dropped_at is not None and version >= dropped_at:
             continue
         try:
             cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}")
@@ -1007,11 +1026,10 @@ def _create_legacy_schema(cursor, conn):
         -- subscription (if any) has not been confirmed on disk.
         downloaded_at INTEGER DEFAULT NULL,
         -- Our clock: when the web worker last scraped this item's page
-        -- successfully (v27). Not scrape_version, which records Steam's
-        -- revision; these are the completion times throughput and freshness
-        -- are measured from. NULL means no completion has been recorded since
-        -- the column existed -- historical rows are deliberately not
-        -- backfilled, so a rate is not reported for them.
+        -- successfully (v27). These are the completion times throughput and
+        -- freshness are measured from. NULL means no completion has been
+        -- recorded since the column existed -- historical rows are
+        -- deliberately not backfilled, so a rate is not reported for them.
         web_scraped_at INTEGER DEFAULT NULL,
         -- Our clock: when the image worker last downloaded this item's preview
         -- successfully (v27).
@@ -1149,9 +1167,23 @@ def _create_legacy_schema(cursor, conn):
         # discovery table would reference a column that no longer exists).
         _cols_now = {r[1] for r in cursor.execute("PRAGMA table_info(workshop_items)").fetchall()}
         _steam_updated = "time_updated" if "time_updated" in _cols_now else "steam_updated_at"
+        # Migration 34->35 dropped `last_historical_date_scanned`, so a database
+        # past that step seeds the AppID rows alone; naming the gone column
+        # raises "no such column" on an empty table (a fresh current-schema
+        # database takes this block on its second start). A database rewound
+        # below 35 still has the column and keeps the historical write.
+        _discovery_cols = {r[1] for r in cursor.execute(
+            f"PRAGMA table_info({_app_discovery_table})").fetchall()}
+        if "last_historical_date_scanned" in _discovery_cols:
+            _seed_columns, _seed_select = (
+                "appid, last_historical_date_scanned",
+                f"consumer_appid, MAX({_steam_updated})",
+            )
+        else:
+            _seed_columns, _seed_select = "appid", "consumer_appid"
         cursor.execute(f"""
-            INSERT INTO {_app_discovery_table} (appid, last_historical_date_scanned)
-            SELECT consumer_appid, MAX({_steam_updated})
+            INSERT INTO {_app_discovery_table} ({_seed_columns})
+            SELECT {_seed_select}
             FROM workshop_items
             WHERE consumer_appid IS NOT NULL AND {_steam_updated} IS NOT NULL
             GROUP BY consumer_appid
@@ -1193,7 +1225,7 @@ def _create_current_schema(cursor, conn):
 
     The statements below are the *terminal* shape the migration chain leaves
     behind, dumped verbatim from ``sqlite_master`` of a database the chain
-    itself produced at ``user_version = 33`` -- no definition here was written
+    itself produced at ``user_version = 35`` -- no definition here was written
     by reading the migrations. The index SQL in particular is the exact text
     SQLite stores, so the fresh database's ``sqlite_master`` matches what the
     chain leaves, including the early indexes whose definitions a ``RENAME
@@ -1201,12 +1233,20 @@ def _create_current_schema(cursor, conn):
     owned by :func:`_ensure_indexes` and are not repeated below).
 
     A fresh database takes this path by default, so it never replays the
-    thirty-three migrations. An existing database always takes the legacy path,
+    thirty-five migrations. An existing database always takes the legacy path,
     because only the chain can carry it forward. The two endpoints must be
     identical. ``_ensure_indexes`` still runs after this function, exactly as
     it does after the chain, so the query indexes it owns are deliberately not
     repeated here; the indexes a *migration* owns are created below, because
     no migration runs on this path.
+
+    Migration 34->35 dropped three write-only columns (``scrape_version``,
+    ``app_discovery.last_historical_date_scanned`` and
+    ``app_discovery.window_size``) and the two indexes that embedded
+    ``scrape_version``, so the declarations here -- and the two statements
+    :func:`_ensure_indexes` used to run -- are gone. Those two indexes were
+    owned by ``_ensure_indexes`` rather than by this function, so the forward
+    rule for them is that removal.
 
     **Forward rule:** when a migration changes the schema, mirror it here as
     well -- update the definition below and bump :data:`EXPECTED_VERSION` --
@@ -1226,7 +1266,6 @@ def _create_current_schema(cursor, conn):
         workshop_id INTEGER PRIMARY KEY,
         first_seen_at INTEGER,
         api_fetched_at INTEGER,
-        scrape_version INTEGER,
         last_fetch_attempted_at INTEGER,
         fetch_status INTEGER,
         title TEXT,
@@ -1299,11 +1338,9 @@ def _create_current_schema(cursor, conn):
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS app_discovery (
         appid INTEGER PRIMARY KEY,
-        last_historical_date_scanned INTEGER,
         filter_text TEXT DEFAULT '',
         required_tags TEXT DEFAULT '[]',
         excluded_tags TEXT DEFAULT '[]',
-        window_size INTEGER DEFAULT 2592000,
         enrichment_filters TEXT DEFAULT '[]',
         last_cursor TEXT DEFAULT ''
     )
@@ -2793,23 +2830,70 @@ def _migration_33_to_34(cursor, conn, db_path):
     conn.commit()
     logging.info("Migration 33->34 complete.")
 
+def _migration_34_to_35(cursor, conn, db_path):
+    logging.info("Running migration 34->35: dropping the three write-only columns...")
+
+    # Three columns were written and never read (issue 30). `scrape_version` was
+    # written by the web worker and, until issue 7, overwritten by the image
+    # worker; no runtime code ever compared it, and only migration 13->14's
+    # cleanup read it. `app_discovery.last_historical_date_scanned` and its
+    # `window_size` sibling were written only by `update_app_tracking`, which
+    # nothing but a test called. A value nothing maintains on purpose is worse
+    # than an absent one: it invites a reader to trust it, which is exactly how
+    # `scrape_version` came to be overwritten by the image worker.
+    #
+    # SQLite refuses to drop an indexed column, and both `idx_scraped_version`
+    # and `idx_fetch_status_scraped_version` are defined on `scrape_version` on
+    # the v34 schema, so the indexes go first. They are not recreated:
+    # `_ensure_indexes` no longer names them, and migrations 13->14 and 30->31
+    # keep their historical creations byte-identical (the chain decides who
+    # starts with them; this step decides who ends with them).
+    #
+    # Each drop is guarded on the column that is present so a re-run is
+    # harmless: a crash between the DDL commit and the version bump leaves the
+    # columns dropped under the old marker, and this step must then be a no-op
+    # rather than raise "no such column".
+    for index in ("idx_scraped_version", "idx_fetch_status_scraped_version"):
+        cursor.execute(f"DROP INDEX IF EXISTS {index}")
+
+    item_columns = {row[1] for row in cursor.execute(
+        "PRAGMA table_info(workshop_items)").fetchall()}
+    if "scrape_version" in item_columns:
+        cursor.execute("ALTER TABLE workshop_items DROP COLUMN scrape_version")
+        logging.info("  dropped workshop_items.scrape_version")
+    else:
+        logging.info("  workshop_items.scrape_version already absent; nothing to drop")
+
+    discovery_columns = {row[1] for row in cursor.execute(
+        "PRAGMA table_info(app_discovery)").fetchall()}
+    for column in ("last_historical_date_scanned", "window_size"):
+        if column in discovery_columns:
+            cursor.execute(f"ALTER TABLE app_discovery DROP COLUMN {column}")
+            logging.info("  dropped app_discovery.%s", column)
+        else:
+            logging.info("  app_discovery.%s already absent; nothing to drop", column)
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 35")
+    conn.commit()
+    logging.info("Migration 34->35 complete.")
+
 def _ensure_indexes(cursor):
     """Create the query indexes, after the column renames migrations perform.
 
     Separate from :func:`_create_legacy_schema` because several of these name columns
-    that only exist once migration 13->14 has renamed them (``api_fetched_at``,
-    ``scrape_version``), so they must run last. Idempotent: every statement is
-    ``IF NOT EXISTS``.
+    that only exist once migration 13->14 has renamed them (``api_fetched_at``),
+    so they must run last. Idempotent: every statement is ``IF NOT EXISTS``.
+    The ``scrape_version`` indexes this function used to create were dropped
+    with the column in migration 34->35.
     """
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_fetch_status ON workshop_items (fetch_status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_fetched_at ON workshop_items (api_fetched_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_scraped_version ON workshop_items (scrape_version)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_title ON workshop_items (title)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_steamid ON workshop_items (creator_steamid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_short_description ON workshop_items (short_description)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_extended_description ON workshop_items (extended_description)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fetch_status_scraped_version ON workshop_items (fetch_status, scrape_version)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_appid_fetch_status ON workshop_items (consumer_appid, fetch_status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_steamid_api_fetched_at ON workshop_items (creator_steamid, api_fetched_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_translation_priority ON workshop_items (translation_priority)")
@@ -2882,6 +2966,7 @@ MIGRATIONS = [
     (32, _migration_31_to_32),
     (33, _migration_32_to_33),
     (34, _migration_33_to_34),
+    (35, _migration_34_to_35),
 ]
 
 def initialize_database(db_path: str, *, legacy_chain: bool = False):
@@ -3993,17 +4078,6 @@ def save_enrichment_filters(db_path: str, appid: int, filter_text: str = "", req
         "excluded_tags = excluded.excluded_tags, "
         "enrichment_filters = excluded.enrichment_filters",
         (appid, filter_text, json_required_tags, json_excluded_tags, enrichment)
-    )
-    conn.commit()
-    conn.close()
-
-def update_app_tracking(db_path: str, appid: int, last_date: int, window_size: int) -> None:
-    """Updates the last_historical_date_scanned for a given appid."""
-    conn = get_connection(db_path)
-    conn.execute(
-        "INSERT INTO app_discovery (appid, last_historical_date_scanned, window_size) VALUES (?, ?, ?) "
-        "ON CONFLICT(appid) DO UPDATE SET last_historical_date_scanned = excluded.last_historical_date_scanned, window_size = excluded.window_size",
-        (appid, last_date, window_size)
     )
     conn.commit()
     conn.close()

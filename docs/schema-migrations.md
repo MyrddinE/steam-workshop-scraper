@@ -6,11 +6,11 @@ The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_
 - a fresh database built with `legacy_chain=True` takes the historical shape from `_create_legacy_schema` and runs every migration — this is how the chain stays exercised;
 - an **existing** database (`user_version > 0`) always takes `_create_legacy_schema` followed by its pending migrations, whatever the flag says, because the chain is the only thing that can carry it forward.
 
-The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v35) for what that means when you add one.
+The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v36) for what that means when you add one.
 
 ---
 
-## Current Schema (v34)
+## Current Schema (v35)
 
 The application-level reference for every table and column is
 [data-model.md](data-model.md); the timestamp conventions are in
@@ -31,7 +31,7 @@ Primary key: `workshop_id INTEGER PRIMARY KEY` (aliased from rowid). Columns:
 | short_description, short_description_en | TEXT | Short description and translation |
 | extended_description, extended_description_en | TEXT | Full description (populated by web scraper) and translation |
 | steam_created_at, steam_updated_at | INTEGER | Steam's clock, Unix epoch seconds |
-| first_seen_at, api_fetched_at, last_fetch_attempted_at, scrape_version, translate_version | INTEGER | Our clocks and the two stored Steam version keys |
+| first_seen_at, api_fetched_at, last_fetch_attempted_at, translate_version | INTEGER | Our clocks and the stored Steam version key |
 | web_scraped_at, image_fetched_at, translated_at | INTEGER | Our completion clocks for the web scrape, image download and translation stages (v27). NULL on every row that predates v27 and on any stage that has not succeeded since |
 | subscriptions, lifetime_subscriptions | INTEGER | Current and lifetime subscriber counts |
 | favorited, lifetime_favorited, views | INTEGER | Engagement metrics |
@@ -48,7 +48,7 @@ Primary key: `workshop_id INTEGER PRIMARY KEY` (aliased from rowid). Columns:
 | own_first_subscribed_at | INTEGER | When we first *saw* the owner subscribed; sticky, and the only source of the `previously` state |
 | steam_download_seen_at | INTEGER | One-way local latch: when this app first saw Steam's downloaded copy of a subscribed item on disk (v26). Set only by `src/workshop_folders`, cleared only beside `own_subscribed` when the item leaves the subscription list. NULL means not confirmed on disk. Renamed from `downloaded_at` in v33: it is a sighting latch, not a completion clock |
 
-The columns above are what the database holds at v33, and they are reached two ways.
+The columns above are what the database holds at v35, and they are reached two ways.
 `_create_current_schema` creates them directly, so a fresh database starts at `EXPECTED_VERSION`
 with these names. `_create_legacy_schema`'s `CREATE TABLE` instead declares the historical names
 (`dt_found`, `dt_updated`, `dt_attempted`, `dt_translated`, `time_created`, `time_updated`) and a
@@ -110,7 +110,6 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 |---|---|---|
 | appid | INTEGER PK | Steam AppID |
 | last_cursor | TEXT | Cursor for cursor-based discovery |
-| window_size | INTEGER | View window size |
 | filter_text, required_tags, excluded_tags | TEXT | Legacy filter columns |
 | enrichment_filters | TEXT | JSON filter array for enrichment gating |
 
@@ -123,8 +122,6 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 | idx_time_created | steam_created_at | "Created Time" sort (historical index name) |
 | idx_time_updated | steam_updated_at | "Updated Time" sort (historical index name) |
 | idx_api_fetched_at | api_fetched_at | "Fetched Time" sort, user staleness |
-| idx_scraped_version | scrape_version | Scrape staleness, priority ordering |
-| idx_fetch_status_scraped_version | (fetch_status, scrape_version) | Scrape item selection |
 | idx_creator_steamid_api_fetched_at | (creator_steamid, api_fetched_at) | Author filtering with staleness |
 | idx_appid_fetch_status | (consumer_appid, fetch_status) | AppID + status filtering |
 | idx_consumer_appid | consumer_appid | AppID filtering |
@@ -199,24 +196,29 @@ independently, allowing crash recovery on a per-migration basis.
 from 1 to `EXPECTED_VERSION`, that each entry names the function for its own
 version, and that a fresh database reaches `EXPECTED_VERSION`.
 
-### Adding the next migration (target v35)
+### Adding the next migration (target v36)
 
-1. bump `EXPECTED_VERSION` in `src/database.py` to `35`;
-2. append `def _migration_34_to_35(cursor, conn, db_path): ...` immediately
-   after `_migration_33_to_34`, keeping the body self-contained and preserving
-   what the step meant at v34 (no tidying an older step, no changing a
+1. bump `EXPECTED_VERSION` in `src/database.py` to `36`;
+2. append `def _migration_35_to_36(cursor, conn, db_path): ...` immediately
+   after `_migration_34_to_35`, keeping the body self-contained and preserving
+   what the step meant at v35 (no tidying an older step, no changing a
    `PRAGMA user_version = N` target);
-3. append `(35, _migration_34_to_35)` as the last entry of `MIGRATIONS`;
-4. add a `### v34 → v35: ...` entry below, in the same shape as the others;
+3. append `(36, _migration_35_to_36)` as the last entry of `MIGRATIONS`;
+4. add a `### v35 → v36: ...` entry below, in the same shape as the others;
 5. **mirror the step in `_create_current_schema`.** It is the shape a fresh
    database is created at now, so a schema change that lands only in the chain
    moves the legacy endpoint and not the fresh one. Update the table, index or
    trigger definition there to the step's terminal shape, exactly as the step
-   leaves it. A pure data migration (no DDL) needs no change here;
+   leaves it. A pure data migration (no DDL) needs no change here. A step that
+   *drops* an object has two halves: remove the declaration from
+   `_create_current_schema`, and, if the object was created by
+   `_ensure_indexes`, remove it there too — 34→35 did both;
 6. if the step adds a column or table that the historical schema must also
    start with, add it to `_create_legacy_schema` too — a `legacy_chain`
    database begins at `user_version = 0` and runs the whole table, so the two
-   builders must agree on the terminal schema;
+   builders must agree on the terminal schema. A step that drops a column the
+   legacy builder still declares or `_safe_add_columns` still lists needs a
+   guard there as well — see `_DROPPED_COLUMN_NAMES`;
 7. run `tests/test_fresh_schema_path.py::test_schema_equivalence`, which builds
    one database each way and fails while the two endpoints disagree. This is
    the check that makes the forward rule mechanical rather than a habit.
@@ -926,7 +928,7 @@ already-renamed-under-the-old-marker case.
 
 ### v30 → v31: `status` → `fetch_status`
 
-`status` in a 47-column `workshop_items` table is unqualified: it competes with the HTTP
+`status` in `workshop_items` is unqualified: it competes with the HTTP
 status code, the subscribe outcome, the daemon-controller status and the `status_counts`
 metric, and a bare `status` does not say which one a reader means. The column holds this
 app's synthetic fetch outcome — `200` fetched, `206` partial, `-1` dead, `500` retry,
@@ -1115,6 +1117,67 @@ already-renamed-under-the-old-marker case, and both sides of the legacy builder 
 a `legacy_chain=True` fresh database that starts with the historical names and still reaches
 v34.
 
+### v34 → v35: the three write-only columns
+
+Three columns were written and never read (issue 30), so they are dropped:
+
+* `workshop_items.scrape_version` — written by the web worker, and (until issue 7)
+  overwritten by the image worker; no runtime code ever compared it, and only migration
+  13→14's cleanup read it;
+* `app_discovery.last_historical_date_scanned` and `app_discovery.window_size` — written
+  only by `update_app_tracking`, a function nothing but a test called, which this step
+  also removes.
+
+A column nothing maintains on purpose is worse than an absent one: it invites a reader to
+trust it, which is exactly how `scrape_version` came to be overwritten by the image worker
+(issue 7). The stored **data is discarded**, not moved — it had no reader.
+
+```sql
+DROP INDEX IF EXISTS idx_scraped_version;
+DROP INDEX IF EXISTS idx_fetch_status_scraped_version;
+
+ALTER TABLE workshop_items DROP COLUMN scrape_version;
+ALTER TABLE app_discovery DROP COLUMN last_historical_date_scanned;
+ALTER TABLE app_discovery DROP COLUMN window_size;
+```
+
+**The two indexes go first.** Both are defined on `scrape_version` at v34, and SQLite
+refuses to drop an indexed column, so `DROP INDEX` is a precondition, not tidying. They
+are not recreated: the column they indexed is gone, and `_ensure_indexes` no longer names
+them. Migrations 13→14 and 30→31 keep their historical creations of
+`idx_scraped_version` / `idx_status_scraped_version` / `idx_fetch_status_scraped_version`
+byte-identical — the chain decides who *starts* with them; this step decides who ends with
+them.
+
+Each drop is guarded on the column that is present, so a re-run is harmless: a crash
+between the DDL commit and the version bump leaves the columns dropped under the old
+marker, and this step must then be a no-op rather than raise `no such column`.
+
+`_create_current_schema` loses the three column declarations, so a fresh database is
+created at the new endpoint and `tests/test_fresh_schema_path.py::test_schema_equivalence`
+stays green. `_create_legacy_schema` **keeps** its historical declarations — a
+`legacy_chain` database starts at `user_version = 0` and the chain names them at earlier
+versions — which is exactly why the drop needs guards on that side:
+
+* `_safe_add_columns` runs on every startup, so `window_size` would be re-added to a v35
+  database on the next start. `_DROPPED_COLUMN_NAMES` is the mirror of
+  `_RENAMED_COLUMN_NAMES`: it maps a dropped name to the version that dropped it, and
+  `_safe_add_columns` skips it once the database is at or past that version.
+  `scrape_version` and `last_historical_date_scanned` are in no safe-add list, so
+  `window_size` is the only entry there.
+* the populate step (`INSERT INTO app_discovery (appid, last_historical_date_scanned) …`)
+  names the dropped column, so it now builds the column list from the table's actual
+  columns: a v35 database seeds the AppID rows alone, while a database rewound below 35
+  keeps the historical write. Naming the gone column raises `no such column` on any v35
+  database whose discovery table is empty — a fresh current-schema database takes that
+  branch on its second start.
+
+`tests/test_drop_write_only_columns_migration.py` pins the fresh path, the v34 upgrade
+(row counts across every app table and the two column sets), the two index removals, the
+re-initialisation, the `window_size` safe-add guard, the empty-discovery populate step,
+the already-dropped-under-the-old-marker case, and a `legacy_chain=True` fresh database
+that still reaches v35.
+
 ---
 
 ## Database Utility Functions
@@ -1129,17 +1192,17 @@ The driver described under [Migration system](#migration-system-initialize_datab
 
 ### `_create_current_schema`, `_create_legacy_schema`, `_ensure_indexes`, `MIGRATIONS` (database)
 
-`_create_current_schema(cursor, conn)` creates a brand-new database directly at `EXPECTED_VERSION`. Every table, index and trigger definition it holds was dumped from `sqlite_master` of a database the migration chain itself produced at v34 — not written from reading the migrations — so the index SQL it creates is the exact text SQLite stores. It deliberately does **not** repeat the query indexes `_ensure_indexes` owns, because that runs after it on both paths; those are the ones with historical names such as `idx_time_created`, whose definitions a `RENAME COLUMN` rewrote. It does create the indexes a *migration* owns, because no migration runs on this path.
+`_create_current_schema(cursor, conn)` creates a brand-new database directly at `EXPECTED_VERSION`. Every table, index and trigger definition it holds was dumped from `sqlite_master` of a database the migration chain itself produced at v35 — not written from reading the migrations — so the index SQL it creates is the exact text SQLite stores. It deliberately does **not** repeat the query indexes `_ensure_indexes` owns, because that runs after it on both paths; those are the ones with historical names such as `idx_time_created`, whose definitions a `RENAME COLUMN` rewrote. It does create the indexes a *migration* owns, because no migration runs on this path. It does not carry the three columns 34→35 dropped.
 
 `_create_legacy_schema(cursor, conn)` creates the tables (`IF NOT EXISTS`) and the baseline columns in their historical form, and runs the legacy data conversions every database history shares. It is the unversioned part of the schema, run before the versioned steps. Because it runs on every startup for an existing database, it also runs on both sides of migration 29→30: it resolves the creator and discovery table names once with `_current_table_name` (new name if it exists, else the historical one, else the historical one for a brand-new file) and routes its `CREATE TABLE`, `_safe_add_columns`, populate step and legacy-filter conversion through the resolved name.
 
-`_ensure_indexes(cursor)` creates the query indexes. It is separate from the schema builders because several index columns (`api_fetched_at`, `scrape_version`) only exist after migration 13→14's renames, so it must run last; every statement is `IF NOT EXISTS`. One queue index is the exception and lives in both schema builders instead: `idx_translation_queue_lookup` on `translation_queue (entity_type, entity_id, field)`, because migration 22→23's repair runs *inside* the `MIGRATIONS` loop and an index created here would be too late to serve it. Its columns have existed since the table was created, so it is safe at every version; after migration 33→34 renamed them, `_create_legacy_schema` resolves the current spelling with `_current_column_name` rather than hardcoding either pair.
+`_ensure_indexes(cursor)` creates the query indexes. It is separate from the schema builders because several index columns (`api_fetched_at`) only exist after migration 13→14's renames, so it must run last; every statement is `IF NOT EXISTS`. One queue index is the exception and lives in both schema builders instead: `idx_translation_queue_lookup` on `translation_queue (entity_type, entity_id, field)`, because migration 22→23's repair runs *inside* the `MIGRATIONS` loop and an index created here would be too late to serve it. Its columns have existed since the table was created, so it is safe at every version; after migration 33→34 renamed them, `_create_legacy_schema` resolves the current spelling with `_current_column_name` rather than hardcoding either pair. The two `scrape_version` indexes it used to create were removed in 34→35 with the column.
 
 `MIGRATIONS` is the ordered `[(target version, function), ...]` table the driver walks. The functions are `_migration_<from>_to_<to>(cursor, conn, db_path)` and sit above the table in ascending order. See [Migration system](#migration-system-initialize_database) for the shape and for how to add the next one.
 
 ### `_safe_add_columns` (database)
 
-Adds columns to an existing table, catching `OperationalError` for duplicates. Used by migrations 0→1 and others to add columns that may already exist from a previous partial run.
+Adds columns to an existing table, catching `OperationalError` for duplicates. It is the unversioned builder's half of the forward rule, since it runs on every startup: a historical name whose renamed current form is already present is skipped (`_RENAMED_COLUMN_NAMES`), and a name a migration has dropped is skipped once the database is at or past the dropping version (`_DROPPED_COLUMN_NAMES`). Without the second guard, re-initialising a v35 database would add `window_size` back beside the columns the migration left. `scrape_version` and `last_historical_date_scanned` are in no safe-add list, so `window_size` is the only dropped-name entry.
 
 ### `insert_or_update_item` (database)
 

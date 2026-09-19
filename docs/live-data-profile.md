@@ -59,12 +59,14 @@ backlog was being filled, at discovery speed, with work on items the filters exc
 | Column | Reality |
 |---|---|
 | `language` | **Was NULL for all 1,725,544 rows; the column has since been dropped.** The API merge would have stored it if a Steam response included it, and none can: `GetPublishedFileDetails` has no language field, and the request protocol's `language` is the viewer's localization parameter, not an item property. Migration 23→24 removes the column and its index — see [schema-migrations.md](schema-migrations.md#v23--v24-drop-the-never-populated-language-column). |
+| `scrape_version` | **Had no reader; dropped in migration 34→35.** It recorded `steam_updated_at` at scrape time, was overwritten by the image worker until issue 7, and was never compared by any code. |
+| `app_discovery.last_historical_date_scanned`, `app_discovery.window_size` | **Had no reader; dropped in migration 34→35.** Both were written only by `update_app_tracking`, which nothing but a test called. |
 | `is_queued_for_subscription` | **`0` for every row in this snapshot.** That is the resting state, not disuse. The column backs the subscription queue: the TUI and web UI set it, the userscript polls `GET /api/queued` and clears each entry on success or failure. Do not read this snapshot as "the feature is unused". |
 | `fetch_status = 206` | **Zero occurrences.** The schema's "web scrape failed but API succeeded" status has never been written. |
 
-## The version key that used to hold two things
+## The version key that used to hold two things (and has since been dropped)
 
-The column now called `scrape_version` was written from `steam_updated_at` whenever a Steam payload
+The column that became `scrape_version` was written from `steam_updated_at` whenever a Steam payload
 existed, but for a failed fetch there was no `steam_updated_at` to record, so the daemon wrote the
 attempt time instead. Measured on the pre-migration snapshot:
 
@@ -79,8 +81,9 @@ rows.
 
 Migration 13→14 separated the two meanings: the attempt time now lives in `last_fetch_attempted_at`
 (backfilled from the old shared column, whose history genuinely was attempt times), and
-`scrape_version` is set NULL where `steam_updated_at IS NULL`. The dual meaning no longer exists in
-the current schema.
+`scrape_version` was set NULL where `steam_updated_at IS NULL`. The dual meaning no longer existed in
+the schema after that. Migration 34→35 then dropped the column outright: nothing ever read it, and
+`web_scraped_at` is the scraper's completion clock.
 
 ## `translation_queue.queued_at`
 
