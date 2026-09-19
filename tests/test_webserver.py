@@ -737,7 +737,7 @@ def subscribe_env(tmp_path, monkeypatch):
     config = {"database": {"path": db_path}, "daemon": {"target_appids": [294100]},
               "session": {}}
     init_webserver(db_path, config)
-    monkeypatch.setattr(webserver, "_sessionid", "")
+    monkeypatch.setattr(webserver, "_pushed_sessionid", "")
     # The route's page read waits the shared interval; tests must not sleep.
     monkeypatch.setattr(pacing, "wait", lambda seconds, keep_running=None: True)
 
@@ -786,7 +786,7 @@ def test_subscribe_token_comes_from_the_built_cookie_set(subscribe_env, monkeypa
     _, state = subscribe_env
     state["cookies"] = {"sessionid": "FROM_COOKIES",
                         "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
-    monkeypatch.setattr(webserver, "_sessionid", "PUSHED_GLOBAL")
+    monkeypatch.setattr(webserver, "_pushed_sessionid", "PUSHED_GLOBAL")
     webserver._config.setdefault("session", {})["id"] = "CONFIG_ID"
     client = app.test_client()
 
@@ -802,7 +802,7 @@ def test_subscribe_pushed_global_is_the_fallback(subscribe_env, monkeypatch):
     """(b) A built set with no sessionid still uses the pushed global."""
     _, state = subscribe_env
     state["cookies"] = {"steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
-    monkeypatch.setattr(webserver, "_sessionid", "PUSHED_GLOBAL")
+    monkeypatch.setattr(webserver, "_pushed_sessionid", "PUSHED_GLOBAL")
 
     resp = _post_subscribe(app.test_client())
 
@@ -899,7 +899,7 @@ def test_a_refused_token_with_an_anonymous_page_read_is_still_a_session_problem(
     state["cookies"] = {"steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
     state["page"] = _synthetic_page(authenticated=False)
     state["payload"] = {"success": 2}
-    monkeypatch.setattr(webserver, "_sessionid", "PUSHED_TOKEN")
+    monkeypatch.setattr(webserver, "_pushed_sessionid", "PUSHED_TOKEN")
 
     resp = _post_subscribe(app.test_client())
 
@@ -922,7 +922,7 @@ def test_subscribe_token_comes_from_the_page_when_it_carries_one(subscribe_env, 
     state["cookies"] = {"sessionid": "COOKIE_TOKEN",
                         "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
     state["page"] = _synthetic_page("PAGE_SESSION_TOKEN")
-    monkeypatch.setattr(webserver, "_sessionid", "PUSHED_TOKEN")
+    monkeypatch.setattr(webserver, "_pushed_sessionid", "PUSHED_TOKEN")
 
     resp = _post_subscribe(app.test_client())
 
@@ -1062,7 +1062,7 @@ def test_the_subscribe_pull_is_captured(subscribe_env, tmp_path):
     state["body"] = json.dumps({"success": 1, "echo": secret})
     state["payload"] = {"success": 1, "echo": secret}
     outbox = tmp_path / "outbox"
-    capture.configure(str(outbox), web_download_capture=True)
+    capture.configure(str(outbox), capture_web_downloads=True)
     try:
         resp = _post_subscribe(app.test_client())
     finally:
@@ -1372,8 +1372,8 @@ def session_client(tmp_path, monkeypatch):
 
     saves = []
     monkeypatch.setattr(ws, "save_config", lambda path, cfg: saves.append(path))
-    # _sessionid is module state and would otherwise leak between tests.
-    monkeypatch.setattr(ws, "_sessionid", "")
+    # _pushed_sessionid is module state and would otherwise leak between tests.
+    monkeypatch.setattr(ws, "_pushed_sessionid", "")
 
     init_webserver(db_path, config, config_path=config_path)
     return app.test_client(), ws, saves, config_path
@@ -1385,7 +1385,7 @@ def test_sessionid_push_stores_the_login_cookie(session_client):
     resp = client.post('/api/sessionid', json={"sessionid": "abc123", "login_secure": "cookie-1"})
 
     assert resp.get_json() == {"ok": True}
-    assert ws._sessionid == "abc123"
+    assert ws._pushed_sessionid == "abc123"
     assert ws._config["session"]["login_secure"] == "cookie-1"
     assert saves == [config_path], "a changed cookie must be persisted for the daemon"
 
@@ -1416,7 +1416,7 @@ def test_sessionid_push_updates_the_token_even_when_the_cookie_is_unchanged(sess
     client.post('/api/sessionid', json={"sessionid": "first", "login_secure": "same"})
     client.post('/api/sessionid', json={"sessionid": "second", "login_secure": "same"})
 
-    assert ws._sessionid == "second"
+    assert ws._pushed_sessionid == "second"
 
 
 def test_sessionid_push_without_a_cookie_does_not_persist(session_client):
@@ -1426,7 +1426,7 @@ def test_sessionid_push_without_a_cookie_does_not_persist(session_client):
     resp = client.post('/api/sessionid', json={"sessionid": "abc"})
 
     assert resp.get_json() == {"ok": True}
-    assert ws._sessionid == "abc"
+    assert ws._pushed_sessionid == "abc"
     assert saves == []
 
 

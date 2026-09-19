@@ -77,7 +77,7 @@ async def test_return_button_leaves_single_creator_mode_and_restores_filters(
             await app.on_button_pressed(Button.Pressed(jump))
             await pilot.pause(ASYNC_PAUSE * 2)
 
-            assert app.is_single_creator_mode is True
+            assert app.is_author_mode is True
             assert app.query_one("#btn-save-filter", Button).display is False
             assert app.query_one("#btn-return", Button).display is True
             assert builder.get_filters()[0]["field"] == "Author ID"
@@ -88,7 +88,7 @@ async def test_return_button_leaves_single_creator_mode_and_restores_filters(
             await app.on_button_pressed(Button.Pressed(back))
             await pilot.pause(ASYNC_PAUSE * 3)
 
-            assert app.is_single_creator_mode is False
+            assert app.is_author_mode is False
             assert app.query_one("#btn-save-filter", Button).display is True
             assert app.query_one("#btn-return", Button).display is False
 

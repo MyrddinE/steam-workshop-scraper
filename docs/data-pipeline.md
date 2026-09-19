@@ -326,7 +326,7 @@ to say:
 * `sessionid` is a **session cookie**: Firefox keeps it in memory and never writes it to
   `cookies.sqlite`, so a profile read can never supply the current one. The page carries
   `g_sessionID` instead, which belongs to the session that served that page, and it is the token the
-  POST uses. The cookie set's `sessionid`, the pushed `_sessionid` global and `session.id` are only
+  POST uses. The cookie set's `sessionid`, the pushed `_pushed_sessionid` global and `session.id` are only
   fallbacks for a page that carries no token.
 
 So one run is:

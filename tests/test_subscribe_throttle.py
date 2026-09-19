@@ -17,8 +17,8 @@ def client(tmp_path):
     # The throttle timestamp is module state, so a test that reports one would
     # otherwise leak into the next.
     from src import webserver
-    webserver._sub_throttled_at = 0.0
-    webserver._sub_throttled_id = None
+    webserver._subscribe_throttled_at = 0.0
+    webserver._subscribe_throttled_id = None
 
     db_path = str(tmp_path / "test_web.db")
     initialize_database(db_path)

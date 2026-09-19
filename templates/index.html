@@ -940,8 +940,8 @@ function toggleTranslation() {
 }
 
 // ── author mode ───────────────────────────────────────────────────────────
-// The web half of the TUI's single-creator mode (`is_single_creator_mode`,
-// `action_return_from_creator`, `btn-return`). A jump replaces the filter rows
+// The web half of the TUI's single-creator mode (`is_author_mode`,
+// `action_return_from_author_mode`, `btn-return`). A jump replaces the filter rows
 // with one `Author ID is <creator>` row and re-runs the search; the sort menus,
 // which are not part of the filter builder, are left alone, exactly as the TUI
 // leaves its sort alone. Return puts back the snapshot the jump took, so a
@@ -1011,7 +1011,7 @@ function jumpToAuthor(creator) {
   doSearch(true);
 }
 
-// Return from author mode: the TUI's `action_return_from_creator`. The snapshot
+// Return from author mode: the TUI's `action_return_from_author_mode`. The snapshot
 // is applied through the same `_restoreView` a reload of a saved view uses, so
 // the return re-opens the item and the scroll position the jump interrupted and
 // not merely the filters. Clearing the flag first makes the view writable again,

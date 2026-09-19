@@ -403,7 +403,7 @@ async def test_tui_overlay_survives_a_builder_change_and_stays_out_of_the_saved_
                 "the scraper filter is the builder's rows, never the overlay"
 
             with patch('src.tui.save_tui_state') as save_state:
-                app._has_restored_state = True
+                app._initial_load_done = True
                 app.save_state()
             state = save_state.call_args.args[1]
             assert state["subscribed_overlay"] == "previously"

@@ -223,7 +223,7 @@ def test_a_read_that_succeeds_again_arms_the_warning_once_more(caplog):
 _TIMERS_WITHOUT_THEIR_OWN_READ = {
     ("ScraperApp", "_poll_pending_subscriptions"):
         "reads through refresh_subscription_rows, which is guarded",
-    ("StatsScreen", "_refresh_due_metrics"):
+    ("StatsScreen", "_on_scheduler_tick"):
         "reads on the stats worker, which catches a failed metric and retries",
     ("DaemonManagerScreen", "_poll_tail"):
         "reads the daemon log file, not the database",
