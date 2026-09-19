@@ -14,6 +14,24 @@ def test_main_custom_config():
         mock_load.assert_called_once_with('custom.yaml')
         mock_daemon.return_value.run.assert_called_once()
 
+
+def test_main_tells_the_daemon_a_pid_file_is_expected():
+    """The runner wrote the file, so a stop before the first check must count.
+
+    Passing this explicitly is what closes the race where the controller deletes
+    the file during config load or migrations: the daemon then already treats its
+    absence as the stop, instead of waiting to observe a file that is gone.
+    """
+    with patch('sys.argv', ['daemon_runner.py', 'custom.yaml']), \
+         patch('src.daemon_runner.load_config') as mock_load, \
+         patch('src.daemon_runner.initialize_database'), \
+         patch('src.daemon_runner.Daemon') as mock_daemon:
+
+        mock_load.return_value = {"database": {"path": "test.db"}}
+        main()
+
+        assert mock_daemon.call_args.kwargs.get("expect_pid_file") is True
+
 def test_main_config_not_found():
     with patch('sys.argv', ['daemon_runner.py']), \
          patch('src.daemon_runner.load_config', side_effect=FileNotFoundError), \

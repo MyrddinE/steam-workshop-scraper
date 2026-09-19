@@ -9,7 +9,6 @@ as the shutdown signal, so the path stays relative here too.
 import logging
 import os
 import platform
-import signal
 import subprocess
 import sys
 import time
@@ -25,7 +24,6 @@ TAIL_LINES = 500
 
 # Constants for the Windows liveness probe.
 _SYNCHRONIZE = 0x00100000
-_PROCESS_TERMINATE = 0x0001
 _WAIT_TIMEOUT = 0x00000102
 _ERROR_ACCESS_DENIED = 5
 
@@ -45,8 +43,6 @@ def _kernel32():
     k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     k.WaitForSingleObject.restype = wintypes.DWORD
     k.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-    k.TerminateProcess.restype = wintypes.BOOL
-    k.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
     k.CloseHandle.restype = wintypes.BOOL
     k.CloseHandle.argtypes = [wintypes.HANDLE]
     k.GetLastError.restype = wintypes.DWORD
@@ -173,41 +169,51 @@ class DaemonController:
             logging.warning("Failed to start daemon: %s", exc)
             return False, f"Failed to start daemon: {exc}"
 
+    def _owned_pid(self) -> int | None:
+        """The PID of a process this controller started, or None.
+
+        The Popen handle is the only evidence that a PID is ours to signal. A
+        PID read out of the file may be stale, hand-edited, or belong to a
+        different process altogether, so it is never treated as authorisation to
+        send a signal.
+        """
+        if self._proc is None or self._proc.poll() is not None:
+            return None
+        return self._proc.pid
+
     def stop(self) -> tuple[bool, str]:
         pid = self.read_pid()
+        owned_pid = self._owned_pid()
 
         if not self.is_running():
             if self._proc is not None:
                 self._proc = None
             return False, "Daemon not running"
 
-        # Graceful shutdown: signal the daemon first, then delete the PID file
-        # as a fallback the daemon also observes.
-        if platform.system() == 'Windows':
+        # Graceful shutdown. The PID file removal is the channel that reaches a
+        # daemon regardless of who launched it; the process handle is used only
+        # when the controller actually started the process and therefore knows
+        # the signal is going to the daemon. On Windows a terminate is a hard
+        # kill, so the file is removed first and the handle is held for the
+        # escalation below.
+        if owned_pid is not None and platform.system() != 'Windows':
             try:
-                os.remove(self.pid_file)
-            # Best-effort stop signal; an absent PID file is the goal, and the
-            # graceful-wait/force-kill path below follows regardless.
-            except OSError:
+                self._proc.terminate()
+            # Best-effort graceful signal; if the process is already gone the
+            # wait loop observes it.
+            except Exception:
                 pass
-        else:
-            if pid:
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                # Best-effort graceful signal; if the process is already gone the
-                # wait loop observes it, and SIGKILL is the fallback.
-                except OSError:
-                    pass
-            try:
-                os.remove(self.pid_file)
-            # Best-effort fallback after SIGTERM; removing an already-absent PID
-            # file is a no-op success.
-            except OSError:
-                pass
+        try:
+            os.remove(self.pid_file)
+        # Best-effort fallback; removing an already-absent PID file is a no-op
+        # success.
+        except OSError:
+            pass
 
         deadline = time.time() + STOP_TIMEOUT_SECONDS
         while time.time() < deadline:
-            if self._proc and self._proc.poll() is not None:
+            if owned_pid is not None and self._proc is not None \
+                    and self._proc.poll() is not None:
                 self._proc = None
                 return True, "Daemon stopped"
             if pid:
@@ -216,8 +222,10 @@ class DaemonController:
                     return True, "Daemon stopped"
             time.sleep(0.5)
 
-        # Timeout: escalate to a forced kill.
-        if self._proc:
+        # Timeout. Force-kill only the process this controller started. The PID
+        # file may name a process it did not launch, and signalling that would
+        # take down something that is not the daemon while reporting success.
+        if owned_pid is not None and self._proc is not None:
             try:
                 self._proc.terminate()
                 self._proc.wait(timeout=3)
@@ -228,29 +236,13 @@ class DaemonController:
                 # can be attempted in-process and the handle is cleared below.
                 except Exception:
                     pass
-        elif pid and platform.system() == 'Windows':
-            try:
-                kernel32 = _kernel32()
-                handle = kernel32.OpenProcess(_PROCESS_TERMINATE, False, pid)
-                if handle:
-                    try:
-                        kernel32.TerminateProcess(handle, 0)
-                    finally:
-                        kernel32.CloseHandle(handle)
-            # Best-effort Windows force-kill of a PID this process does not own;
-            # no further in-process remedy exists.
-            except Exception:
-                pass
-        elif pid:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            # Final Unix escalation; if SIGKILL is refused there is nothing else
-            # the controller can do for this PID.
-            except Exception:
-                pass
+            self._proc = None
+            return True, "Daemon stopped"
 
         self._proc = None
-        return True, "Daemon stopped"
+        return False, (
+            f"Daemon did not exit; PID {pid} was not started by this controller, "
+            "so it was left alone. The PID file was removed.")
 
     def restart(self) -> tuple[bool, str]:
         self.stop()

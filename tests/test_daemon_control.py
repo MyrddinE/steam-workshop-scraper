@@ -284,7 +284,13 @@ def test_start_reports_spawn_failure(tmp_path, monkeypatch):
     assert "Failed to start daemon" in message
 
 
-def test_stop_sends_sigterm_and_removes_pid_file(tmp_path, monkeypatch):
+def test_stop_removes_the_pid_file_without_signalling_a_pid_it_did_not_start(
+        tmp_path, monkeypatch):
+    """The PID file is the graceful channel for a daemon this instance did not launch.
+
+    With no Popen handle there is no way to know the number in the file is the
+    daemon's, so stop asks through the file and signals nothing.
+    """
     pid_file = _pid_file(tmp_path)
     with open(pid_file, "w") as f:
         f.write("4321")
@@ -296,7 +302,9 @@ def test_stop_sends_sigterm_and_removes_pid_file(tmp_path, monkeypatch):
     changed, message = controller.stop()
 
     assert changed is True
-    assert (4321, signal.SIGTERM) in kill.calls
+    assert [sig for _pid, sig in kill.calls] == [0, 0], (
+        "the file names a PID this controller did not start, so only liveness "
+        f"probes are allowed: {kill.calls}")
     assert not os.path.exists(pid_file)
     assert controller.proc is None
 
@@ -312,7 +320,13 @@ def test_stop_is_idempotent_when_not_running(tmp_path, monkeypatch):
     assert "not running" in message.lower()
 
 
-def test_stop_escalates_to_sigkill_after_timeout(tmp_path, monkeypatch):
+def test_stop_reports_failure_instead_of_killing_a_pid_it_did_not_start(
+        tmp_path, monkeypatch):
+    """A PID that outlives the grace is not this controller's to force-kill.
+
+    Regression: this used to SIGKILL whatever the file named and report the
+    daemon stopped.
+    """
     pid_file = _pid_file(tmp_path)
     with open(pid_file, "w") as f:
         f.write("9999")
@@ -320,13 +334,73 @@ def test_stop_escalates_to_sigkill_after_timeout(tmp_path, monkeypatch):
     kill = FakeKill(alive_probes=1000)
     monkeypatch.setattr(daemon_control.os, "kill", kill)
     monkeypatch.setattr(daemon_control.platform, "system", lambda: "Linux")
-    # Zero wait so the escalation path runs without a real 15-second sleep.
+    # Zero wait so the escalation decision runs without a real 15-second sleep.
     monkeypatch.setattr(daemon_control, "STOP_TIMEOUT_SECONDS", 0)
 
-    changed, _ = controller.stop()
+    changed, message = controller.stop()
 
-    assert changed is True
-    assert (9999, signal.SIGKILL) in kill.calls
+    assert changed is False
+    assert "not started by this controller" in message
+    assert not any(sig in (signal.SIGTERM, signal.SIGKILL)
+                   for _pid, sig in kill.calls), (
+        f"a PID from the file is not ours to signal: {kill.calls}")
+    assert not os.path.exists(pid_file)
+
+
+def test_stop_does_not_kill_the_process_named_by_a_wrong_pid_file(
+        tmp_path, monkeypatch):
+    """The exact hazard: ``.daemon.pid`` overwritten with an unrelated process.
+
+    The controller holds no Popen handle for the daemon (it did not start it),
+    so the file is its only evidence and the file can name anything. It must
+    remove the file -- the protocol's own graceful channel -- and report that
+    the daemon did not exit, instead of SIGTERM-ing the bystander and claiming
+    success.
+    """
+    pid_file = _pid_file(tmp_path)
+    with open(pid_file, "w") as f:
+        f.write("31337")  # an unrelated, long-lived process
+    controller = DaemonController(pid_file=pid_file)
+    kill = FakeKill(alive_probes=1000)  # the named process stays alive
+    monkeypatch.setattr(daemon_control.os, "kill", kill)
+    monkeypatch.setattr(daemon_control.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(daemon_control, "STOP_TIMEOUT_SECONDS", 0)
+
+    changed, message = controller.stop()
+
+    assert changed is False
+    assert "did not exit" in message
+    assert all(sig == 0 for _pid, sig in kill.calls), (
+        f"only a liveness probe may touch a PID from the file: {kill.calls}")
+    assert not os.path.exists(pid_file), (
+        "the file must still be removed so the real daemon notices the stop")
+
+
+def test_stop_does_not_signal_when_its_popen_handle_is_the_exited_fork_parent(
+        tmp_path, monkeypatch):
+    """On Unix the ``--daemon`` double-fork leaves the Popen handle on a corpse.
+
+    The real daemon is a grandchild whose PID only the file knows, so after the
+    fork the controller owns no process it can signal. It must not fall back to
+    the file -- that is the wrong-PID hazard -- and must report the truth.
+    """
+    pid_file = _pid_file(tmp_path)
+    with open(pid_file, "w") as f:
+        f.write("31337")
+    dead_fork_parent = FakeProc(pid=111, alive=False)
+    controller = DaemonController(pid_file=pid_file, proc=dead_fork_parent)
+    kill = FakeKill(alive_probes=1000)
+    monkeypatch.setattr(daemon_control.os, "kill", kill)
+    monkeypatch.setattr(daemon_control.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(daemon_control, "STOP_TIMEOUT_SECONDS", 0)
+
+    changed, message = controller.stop()
+
+    assert changed is False
+    assert "not started by this controller" in message
+    assert dead_fork_parent.terminated is False, (
+        "terminating the exited fork parent would not reach the daemon")
+    assert all(sig == 0 for _pid, sig in kill.calls)
 
 
 def test_stop_escalates_on_the_popen_handle(tmp_path, monkeypatch):

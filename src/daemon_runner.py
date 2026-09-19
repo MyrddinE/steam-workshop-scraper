@@ -146,8 +146,13 @@ def main():
     
     db_path = config.get("database", {}).get("path", "workshop.db")
     initialize_database(db_path)
-    
-    daemon = Daemon(config, config_path)
+
+    # The PID file was written above, before the (possibly slow) migrations, so
+    # this daemon must treat its absence as a stop from the very first check.
+    # Inferring "a PID file is expected" from having observed the file loses a
+    # stop that lands in the window before the first observation; see
+    # Daemon._saw_pid_file.
+    daemon = Daemon(config, config_path, expect_pid_file=True)
     daemon.run()
 
 if __name__ == "__main__":

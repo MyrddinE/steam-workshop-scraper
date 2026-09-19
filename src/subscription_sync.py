@@ -203,6 +203,13 @@ def collect_subscribed_ids(appid: int, config: dict,
     ends the walk early: the caller compares the result with the total and
     decides whether the read is complete. This function does not itself decide
     -- it reports what it saw and what the page claimed.
+
+    ``keep_running`` is the caller's stop protocol, and it is checked between
+    pages. A walk can run to :data:`MAX_PAGES` pages with an interval before
+    each, which outlasts the daemon's shutdown budget many times over; without
+    the check a walk in progress would keep requesting pages after the operator
+    had asked the daemon to stop. Breaking returns the ids collected so far, and
+    the caller treats that as the incomplete read it is.
     """
     collected: set[int] = set()
     declared_total: int | None = None
@@ -210,6 +217,13 @@ def collect_subscribed_ids(appid: int, config: dict,
 
     page_number = 1
     while page_number <= MAX_PAGES:
+        if keep_running is not None and not keep_running():
+            logging.info(
+                "Subscription page walk for appid %s stopped early: the daemon is "
+                "shutting down. %d pages were read.",
+                appid, pages_fetched,
+            )
+            break
         pages_fetched += 1
         body = _fetch_page(appid, page_number, config, keep_running=keep_running)
         if declared_total is None and pages_fetched == 1:
@@ -336,6 +350,14 @@ def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
                 appid, attempt, MAX_READ_ATTEMPTS, exc,
             )
             continue
+
+        # The walk was abandoned for a shutdown, not because the read came up
+        # short. Retrying would be pointless and applying a partial read would
+        # write subscription flags during shutdown for no benefit; the next
+        # start reconciles again. ``collect_subscribed_ids`` has already said why
+        # it stopped.
+        if keep_running is not None and not keep_running():
+            return None
 
         if best_read is None or len(ids) > len(best_read[0]):
             best_read = (ids, declared_total)

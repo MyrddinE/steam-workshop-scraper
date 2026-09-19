@@ -416,7 +416,12 @@ class WebScraperThread(threading.Thread):
 
             item = get_next_web_scrape_item(self.db_path)
             if not item:
-                time.sleep(10)
+                # Responsive, so an idle worker is not deaf to a stop for the
+                # whole nap. The blind ten-second sleep this replaced was why a
+                # shutdown with nothing queued had to wait out the daemon's join
+                # timeout: the stop flag was set, and the worker would not look
+                # at it until the sleep ended.
+                pacing.wait(10.0, lambda: self.running)
                 continue
 
             workshop_id = item["workshop_id"]
@@ -504,6 +509,8 @@ class WebScraperThread(threading.Thread):
             pacing.wait(self.web_delay, lambda: self.running)
 
         self._persist_delay(force=True)
-        logging.info("Web scraper thread stopped.")
+        # No "Web scraper thread stopped." here: the daemon logs one line per
+        # worker as it confirms the join, and this thread's own copy made the
+        # owner's log show the same sentence twice. See Daemon._join_workers.
 
 

@@ -68,7 +68,12 @@ class ImageDownloadThread(threading.Thread):
 
             item = get_next_image_item(self.db_path)
             if not item:
-                time.sleep(10)
+                # Responsive, so an idle worker is not deaf to a stop for the
+                # whole nap. The blind ten-second sleep this replaced was why a
+                # shutdown with nothing queued had to wait out the daemon's join
+                # timeout: the stop flag was set, and the worker would not look
+                # at it until the sleep ended.
+                pacing.wait(10.0, lambda: self.running)
                 continue
 
             wid = item["workshop_id"]
@@ -232,7 +237,9 @@ class ImageDownloadThread(threading.Thread):
             pacing.wait(self.image_delay, lambda: self.running)
 
         self._persist_delay(force=True)
-        logging.info("Image download thread stopped.")
+        # No "Image download thread stopped." here: the daemon logs one line per
+        # worker as it confirms the join, and this thread's own copy made the
+        # owner's log show the same sentence twice. See Daemon._join_workers.
 
     def _decay_delay(self, elapsed: float) -> None:
         """Shrink the delay for the healthy time since the previous attempt.
