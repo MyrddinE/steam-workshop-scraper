@@ -229,16 +229,16 @@ def _completion_window(conn, column: str) -> dict:
     now = int(time.time())
     row = conn.execute(
         f"""
-        SELECT (SELECT COUNT(*) FROM workshop_items WHERE {column} >= ?) AS hour,
-               (SELECT COUNT(*) FROM workshop_items WHERE {column} >= ?) AS day,
+        SELECT (SELECT COUNT(*) FROM workshop_items WHERE {column} >= ?) AS last_hour,
+               (SELECT COUNT(*) FROM workshop_items WHERE {column} >= ?) AS last_day,
                (SELECT MAX({column}) FROM workshop_items
                  WHERE {column} IS NOT NULL) AS last_success
         """,
         (now - 3600, now - 86400),
     ).fetchone()
     if row["last_success"] is None:
-        return {"hour": None, "day": None, "last_success": None}
-    return {"hour": row["hour"], "day": row["day"], "last_success": row["last_success"]}
+        return {"last_hour": None, "last_day": None, "last_success": None}
+    return {"last_hour": row["last_hour"], "last_day": row["last_day"], "last_success": row["last_success"]}
 
 
 @metric("web_throughput", 2, "Web scrapes completed in the last hour and day, and the last success.")

@@ -517,8 +517,8 @@ class StatsScreen(Screen):
                     "from here on.[/dim]")
         last = datetime.datetime.fromtimestamp(
             value["last_success"]).strftime("%Y-%m-%d %H:%M")
-        return (f"  Completed last hour: {value.get('hour', 0):,}\n"
-                f"  Completed last day: {value.get('day', 0):,}\n"
+        return (f"  Completed last hour: {value.get('last_hour', 0):,}\n"
+                f"  Completed last day: {value.get('last_day', 0):,}\n"
                 f"  Last success: {last}")
 
     #: Standard and subsidiary bar glyphs. A translation bar hangs off the bar

@@ -2309,8 +2309,8 @@ function _renderThroughput(t) {
   if (!t || t.last_success === null || t.last_success === undefined) {
     return '<p class="stat-label">No history yet &mdash; completion times are only recorded from here on.</p>';
   }
-  return '<ul><li>Completed last hour: ' + fmtCount(t.hour || 0) + '</li>'
-    + '<li>Completed last day: ' + fmtCount(t.day || 0) + '</li>'
+  return '<ul><li>Completed last hour: ' + fmtCount(t.last_hour || 0) + '</li>'
+    + '<li>Completed last day: ' + fmtCount(t.last_day || 0) + '</li>'
     + '<li>Last success: ' + _fmtTimestamp(t.last_success) + '</li></ul>';
 }
 
