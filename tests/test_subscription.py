@@ -1,7 +1,7 @@
 """The owner's subscription state: which of the five a row is in, and why.
 
 There are five answers to "does this account subscribe to this item?" --
-downloaded, subscribed, pending, previously, never -- and both front ends draw
+downloaded, subscribed, queued, previously, never -- and both front ends draw
 them with real Unicode glyphs from one table in `src/subscription.py`. The TUI
 renders that table into Textual markup and the web renders it into a positioned
 element, so the two mechanisms are not remotely alike; the shared table is what
@@ -9,7 +9,7 @@ stops them disagreeing about why the same row looks the way it does.
 
 The decisions pinned here are the ones easy to "fix" back:
 
-* **Precedence.** ``downloaded`` beats ``subscribed``, which beats ``pending``
+* **Precedence.** ``downloaded`` beats ``subscribed``, which beats ``queued``
   (there is nothing left to queue), which beats ``previously``, which beats
   ``never``.
 * **``downloaded`` needs both flags.** A stray ``downloaded_at`` beside a
@@ -61,9 +61,9 @@ def test_a_subscribed_downloaded_item_is_downloaded():
         _item(own_subscribed=1, downloaded_at=1000)) == subscription.DOWNLOADED
 
 
-def test_a_queued_item_is_pending():
+def test_a_queued_item_draws_queued():
     assert subscription.subscription_state(
-        _item(is_queued_for_subscription=1)) == subscription.PENDING
+        _item(is_queued_for_subscription=1)) == subscription.QUEUED
 
 
 def test_a_seen_but_unsubscribed_item_is_previously():
@@ -90,7 +90,7 @@ def test_a_stray_downloaded_timestamp_without_the_flag_is_not_downloaded():
     assert subscription.subscription_state(
         _item(downloaded_at=1000, own_first_subscribed_at=5)) == subscription.PREVIOUSLY
     assert subscription.subscription_state(
-        _item(downloaded_at=1000, is_queued_for_subscription=1)) == subscription.PENDING
+        _item(downloaded_at=1000, is_queued_for_subscription=1)) == subscription.QUEUED
 
 
 def test_a_subscribed_item_with_a_stale_queue_flag_is_subscribed():
@@ -100,10 +100,10 @@ def test_a_subscribed_item_with_a_stale_queue_flag_is_subscribed():
               is_queued_for_subscription=1)) == subscription.SUBSCRIBED
 
 
-def test_a_previously_seen_item_that_is_queued_is_pending():
+def test_the_queue_flag_beats_a_seen_timestamp():
     assert subscription.subscription_state(
         _item(own_subscribed=0, own_first_subscribed_at=1000,
-              is_queued_for_subscription=1)) == subscription.PENDING
+              is_queued_for_subscription=1)) == subscription.QUEUED
 
 
 def test_a_stale_timestamp_beside_a_set_flag_is_subscribed():
@@ -114,7 +114,7 @@ def test_a_stale_timestamp_beside_a_set_flag_is_subscribed():
 
 def test_the_precedence_order_is_declared_strongest_first():
     assert subscription.STATE_PRECEDENCE == (
-        subscription.DOWNLOADED, subscription.SUBSCRIBED, subscription.PENDING,
+        subscription.DOWNLOADED, subscription.SUBSCRIBED, subscription.QUEUED,
         subscription.PREVIOUSLY, subscription.NEVER)
 
 
@@ -125,14 +125,14 @@ def test_each_adjacent_pair_of_the_stated_precedence():
     assert (subscription.subscription_state(
         _item(own_subscribed=1, is_queued_for_subscription=1)) == subscription.SUBSCRIBED)
     assert (subscription.subscription_state(_item(is_queued_for_subscription=1, own_first_subscribed_at=9))
-            == subscription.PENDING)
+            == subscription.QUEUED)
     assert (subscription.subscription_state(_item(own_first_subscribed_at=9))
             == subscription.PREVIOUSLY)
 
 
 # --- the appearance table ---------------------------------------------------
 
-def test_every_state_has_a_spec_and_a_tooltip():
+def test_every_state_has_a_marker_spec_and_a_tooltip():
     assert set(subscription.MARKER_SPECS) == set(subscription.STATE_PRECEDENCE)
     assert set(subscription.MARKER_TOOLTIPS) == set(subscription.STATE_PRECEDENCE)
 
@@ -140,7 +140,7 @@ def test_every_state_has_a_spec_and_a_tooltip():
 def test_the_glyphs_are_the_real_unicode_characters():
     assert subscription.glyph(subscription.DOWNLOADED) == "\u2605"  # ★
     assert subscription.glyph(subscription.SUBSCRIBED) == "\u2605"  # ★
-    assert subscription.glyph(subscription.PENDING) == "\u2606"     # ☆
+    assert subscription.glyph(subscription.QUEUED) == "\u2606"     # ☆
     assert subscription.glyph(subscription.PREVIOUSLY) == "\u2606"  # ☆
     assert subscription.glyph(subscription.NEVER) == "\u25cb"       # ○
 
@@ -148,7 +148,7 @@ def test_the_glyphs_are_the_real_unicode_characters():
 def test_the_colours_follow_the_stated_table():
     assert subscription.colour(subscription.DOWNLOADED) == "#00a651"  # deep green
     assert subscription.colour(subscription.SUBSCRIBED) == "#ffd700"  # solid yellow
-    assert subscription.colour(subscription.PENDING) == "#2ecc40"     # green
+    assert subscription.colour(subscription.QUEUED) == "#2ecc40"     # green
     assert subscription.colour(subscription.PREVIOUSLY) == "#ffd700"  # yellow
     assert subscription.colour(subscription.NEVER) == "#808080"       # gray
 
@@ -158,35 +158,35 @@ def test_downloaded_is_a_solid_star_in_a_green_of_its_own():
     assert (subscription.glyph(subscription.DOWNLOADED)
             == subscription.glyph(subscription.SUBSCRIBED))
     assert (subscription.colour(subscription.DOWNLOADED)
-            != subscription.colour(subscription.PENDING))
+            != subscription.colour(subscription.QUEUED))
     assert (subscription.colour(subscription.DOWNLOADED)
             != subscription.colour(subscription.SUBSCRIBED))
 
 
 def test_the_downloaded_label_and_tooltip_say_what_it_means():
-    assert subscription.spec(subscription.DOWNLOADED)[3] == "Subscribed, and downloaded"
+    assert subscription.marker_spec(subscription.DOWNLOADED)[3] == "Subscribed, and downloaded"
     assert (subscription.tooltip(subscription.DOWNLOADED)
             == "You are subscribed to this item and Steam has downloaded it.")
 
 
-def test_pending_and_previously_share_a_glyph_but_not_a_colour():
+def test_queued_and_previously_share_a_glyph_but_not_a_colour():
     """☆ in green and ☆ in yellow are different states, and only colour says so."""
-    assert (subscription.glyph(subscription.PENDING)
+    assert (subscription.glyph(subscription.QUEUED)
             == subscription.glyph(subscription.PREVIOUSLY))
-    assert (subscription.colour(subscription.PENDING)
+    assert (subscription.colour(subscription.QUEUED)
             != subscription.colour(subscription.PREVIOUSLY))
 
 
-def test_the_spec_and_the_named_getters_agree():
+def test_the_marker_spec_and_the_named_getters_agree():
     for state in subscription.STATE_PRECEDENCE:
-        glyph, colour, css, label = subscription.spec(state)
+        glyph, colour, css, label = subscription.marker_spec(state)
         assert (glyph, colour) == (
             subscription.glyph(state), subscription.colour(state))
         assert css and label
 
 
 def test_only_the_three_actionable_states_are_clickable():
-    assert subscription.is_clickable(subscription.PENDING)
+    assert subscription.is_clickable(subscription.QUEUED)
     assert subscription.is_clickable(subscription.PREVIOUSLY)
     assert subscription.is_clickable(subscription.NEVER)
     # An accidental unsubscribe is not wanted, so subscribed does nothing; the
@@ -195,17 +195,17 @@ def test_only_the_three_actionable_states_are_clickable():
     assert not subscription.is_clickable(subscription.SUBSCRIBED)
     assert not subscription.is_clickable(subscription.DOWNLOADED)
     assert set(subscription.CLICKABLE_STATES) == {
-        subscription.PENDING, subscription.PREVIOUSLY, subscription.NEVER}
+        subscription.QUEUED, subscription.PREVIOUSLY, subscription.NEVER}
 
 
 def test_every_css_class_is_distinct():
-    assert len({subscription.spec(s)[2] for s in subscription.STATE_PRECEDENCE}) == len(
+    assert len({subscription.marker_spec(s)[2] for s in subscription.STATE_PRECEDENCE}) == len(
         subscription.STATE_PRECEDENCE)
 
 
 def test_an_unknown_state_is_a_loud_error():
     with pytest.raises(ValueError):
-        subscription.spec("nonsense")
+        subscription.marker_spec("nonsense")
     with pytest.raises(ValueError):
         subscription.glyph("nonsense")
     with pytest.raises(ValueError):
@@ -259,7 +259,7 @@ def test_the_template_renders_the_glyphs_and_colours_from_the_shared_table():
     for name in ("showSubscriptionMarker", "_applySub", "onSubMarkerClick"):
         body = _function_body(html, name)
         for state in subscription.STATE_PRECEDENCE:
-            _glyph, colour, _css, _label = subscription.spec(state)
+            _glyph, colour, _css, _label = subscription.marker_spec(state)
             assert colour not in body, \
                 f"{name} must take {state}'s colour from the payload"
         for glyph in ("\u2605", "\u2606", "\u25cb"):
@@ -274,7 +274,7 @@ def test_the_tui_draws_the_same_glyphs_and_colours():
     """The TUI's markers come from the table, not from literals."""
     source = TUI_SOURCE.read_text(encoding="utf-8")
     assert "subscription.subscription_state(" in source
-    assert "subscription.spec(" in source
+    assert "subscription.marker_spec(" in source
     # The old leading-`*` queue prefix must be gone: one indicator, not two.
     assert '"*"' not in source
     assert "[green]*[/green]" not in source

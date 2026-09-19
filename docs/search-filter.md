@@ -26,7 +26,7 @@ Maps user-facing field names (shown in TUI and Web UI dropdowns) to database col
 | Subscriber Score | wilson_subscription_score |
 | Favorite Score | wilson_favorite_score |
 | Full Text | full_text |
-| Subscribed | subscribed_state (virtual: the predicate spans `own_subscribed`, `own_first_subscribed_at`, `is_queued_for_subscription`, `downloaded_at`) |
+| Subscribed | subscription_state (virtual: the predicate spans `own_subscribed`, `own_first_subscribed_at`, `is_queued_for_subscription`, `downloaded_at`) |
 
 Fields not in the map fall through to the raw name (used by tests that pass DB column names directly).
 
@@ -35,7 +35,7 @@ Fields not in the map fall through to the raw name (used by tests that pass DB c
 Every other field takes free text. `Subscribed` is chosen from a list, so its
 schema entry carries `"type": "enum"` and `"values"`, and both front ends build a
 Select/`<select>` for its value control (`is`/`is_not` are the only operators).
-Its `db_col` is the virtual `subscribed_state`, because no single column answers
+Its `db_col` is the virtual `subscription_state`, because no single column answers
 the question: the value selects one of six predicates over four existing columns.
 
 `SUBSCRIBED_VALUE_SPECS` is the single value table both evaluators read — `sql` is
@@ -48,20 +48,27 @@ the daemon's in-memory decision would drift apart.
 |---|---|
 | `any` | everything — no constraint |
 | `never` | `own_first_subscribed_at IS NULL` — never seen subscribed (which includes queued items: they have never *been* subscribed) |
-| `currently` | `COALESCE(own_subscribed, 0) = 1` |
+| `subscribed` | `COALESCE(own_subscribed, 0) = 1` |
 | `previously` | `own_first_subscribed_at IS NOT NULL AND COALESCE(own_subscribed, 0) = 0` |
 | `queued` | `COALESCE(is_queued_for_subscription, 0) = 1` |
 | `downloaded` | `downloaded_at IS NOT NULL` — the latch added with the green star |
 
 `is_not` is the exact complement of `is`, applied in one place
 (`_build_subscribed_clause` / `_evaluate_subscribed_filter`) rather than spelled
-out per value, so `is_not never` is `currently` or `previously`, and so on. The
+out per value, so `is_not never` is `subscribed` or `previously`, and so on. The
 front ends **omit `any` from the value list while the operator is `is_not`**: a
 NOT over "everything" matches nothing, so the combination is not offered. It is
 still well defined if a saved filter or an API call carries it — `is_not any`
 matches nothing in both evaluators, the same as any unknown value (`is` matches
 nothing, `is_not` matches everything), keeping the pair complementary instead of
 one side silently matching the whole table.
+
+Two value spellings from before the marker vocabulary was unified are still
+read: `currently` is mapped to `subscribed` and `pending` to `queued` by
+`normalise_subscribed_value` before the value table is consulted, so a saved
+view in `.tui_state.yaml`, a browser's stored view or a saved enrichment filter
+keeps constraining the same population instead of silently falling back to
+`any`. Nothing is migrated on disk.
 
 ### `_EN_COLUMN_FOR` (database)
 
@@ -92,7 +99,7 @@ The main entry point for all searches. Accepts filters as a list of dicts with k
    - Percentile filters (op="percentile") — handled separately after the base WHERE clause is built
    - Tag filters (field maps to "tags") — routed through `_build_tag_clause`
    - Full Text (field maps to "full_text") — routed through `_build_fts_clause`
-   - Enum filters (field maps to `subscribed_state`) — routed through `_build_subscribed_clause`
+   - Enum filters (field maps to `subscription_state`) — routed through `_build_subscribed_clause`
    - Dual-field (field in `_EN_COLUMN_FOR` and operator in `_TEXT_OPS`) — expanded to search both columns
    - All others — routed through `_build_single_filter_clause`
 3. **Base WHERE clause**: Non-percentile filters produce the base clause, wrapped in `AND (...)`.
@@ -125,7 +132,7 @@ Converts a single operator-value pair into a SQL clause and parameter list. Supp
 
 Unrecognized operators return `("", [])` and are silently skipped.
 
-A `db_col` of `subscribed_state` is handed to `_build_subscribed_clause` before
+A `db_col` of `subscription_state` is handed to `_build_subscribed_clause` before
 the operator table below is consulted; the enum's `is`/`is_not` are answered from
 `SUBSCRIBED_VALUE_SPECS`, not by the generic `col = ?` / `col != ?` cases.
 
@@ -258,7 +265,7 @@ sites read the four columns that field needs. The daemon's merged record drops
 the queue-owned columns by design (`MERGE_EXCLUDED_KEYS`), so `_raise_scrape_and_image_priorities`
 overlays the pre-fetch record's values for exactly those columns on a copy before
 evaluating — never back onto the record it stores. The demotion walk selects only
-the columns a filter references and expands the virtual `subscribed_state` to all
+the columns a filter references and expands the virtual `subscription_state` to all
 four, so its rows carry what the predicate reads.
 
 ### `_evaluate_single_filter` (database)

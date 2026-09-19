@@ -206,7 +206,7 @@ async def test_the_detail_pane_keeps_the_projects_own_markup():
         assert any(span.style == "b" for span in title.spans), "the title is still bold"
 
         state = subscription.subscription_state(item)
-        glyph, colour, _css, _label = subscription.spec(state)
+        glyph, colour, _css, _label = subscription.marker_spec(state)
         marker = pane.query_one("#item-sub-marker", Label).render()
         assert str(marker) == glyph
         assert any(span.style == colour for span in marker.spans), (

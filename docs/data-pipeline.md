@@ -358,7 +358,7 @@ So one run is:
    queued; any other button-less page reports that the result cannot be told.
 
 **Outcome vocabulary.** Each run ends in one status, and the TUI's queue row renders its phrase from
-`subscribe_engine._STATUS_LABELS`:
+`subscribe_engine._OUTCOME_LABELS`:
 
 | Status | Phrase | Meaning |
 |---|---|---|

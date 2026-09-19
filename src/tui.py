@@ -13,7 +13,7 @@ from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, L
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.worker import Worker, WorkerState
-from src.database import search_items, get_all_creator_ids, initialize_database, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, raise_api_priority_for_list, raise_api_priority_for_detail, get_subscription_states, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES
+from src.database import search_items, get_all_creator_ids, initialize_database, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, raise_api_priority_for_list, raise_api_priority_for_detail, get_subscription_states, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES, normalise_subscribed_value
 from src.analysis import view_window_analysis
 from src import metrics
 from src import db_poll
@@ -1066,7 +1066,7 @@ class SubscriptionQueueScreen(ModalScreen):
         The marker is the item's real state from ``src/subscription.py`` -- the
         same table the list row, the detail pane and the web render from -- so a
         completed subscribe moves this row's glyph too, rather than every row
-        drawing the green ``pending`` outline whatever happened. ``countdown`` is
+        drawing the green ``queued`` outline whatever happened. ``countdown`` is
         the estimated seconds until the engine reaches the item, absent for the
         item it is reading now and for outcomes already reported.
         """
@@ -1075,7 +1075,7 @@ class SubscriptionQueueScreen(ModalScreen):
         line = RichText()
         line.append(f"{subscription.glyph(state)} ", style=subscription.colour(state))
         line.append(f"#{item['workshop_id']}  ")
-        line.append(str(item.get("title") or "(untitled)"))
+        line.append(str(item.get("title") or "Untitled"))
         if countdown:
             line.append("  ")
             line.append(countdown, style="dim")
@@ -1165,7 +1165,7 @@ class SubscriptionQueueScreen(ModalScreen):
         for index, item in enumerate(self._items):
             countdown, status, colour = self._row_display(index, elapsed)
             try:
-                row = self.query_one(f"#sub-item-{item['workshop_id']}", Static)
+                row = self.query_one(f"#sub-queue-item-{item['workshop_id']}", Static)
             except Exception:
                 continue
             row.update(self._row_text(item, status=status, colour=colour,
@@ -1191,26 +1191,26 @@ class SubscriptionQueueScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         self._items = get_subscription_queue_items(self.db_path)
-        with Vertical(id="sub-queue-container"):
-            yield Label("Subscription Queue", id="sub-queue-title")
+        with Vertical(id="subscription-queue-container"):
+            yield Label("Subscription Queue", id="subscription-queue-title")
             if not self._items:
                 yield Label("Queue is empty. Press 's' on an item to add it.")
             else:
                 yield Static(
                     "Press Subscribe to run the queue through the engine. "
                     "Row times are estimates.",
-                    id="sub-queue-status",
+                    id="subscription-queue-status",
                 )
                 for item in self._items:
                     yield Static(
                         self._row_text(item),
-                        id=f"sub-item-{item['workshop_id']}",
+                        id=f"sub-queue-item-{item['workshop_id']}",
                     )
             yield Button(
                 "Subscribe", id="btn-subscribe-queue", variant="primary",
                 disabled=not self._items,
             )
-            yield Button("Close", id="btn-close-sub-queue")
+            yield Button("Close", id="btn-close-subscription-queue")
 
     def _start_pass(self) -> None:
         """Run the queue through the engine on a worker thread."""
@@ -1222,7 +1222,7 @@ class SubscriptionQueueScreen(ModalScreen):
         self._last_result_at = None
         self._pass_started_at = time.monotonic()
         self.query_one("#btn-subscribe-queue", Button).disabled = True
-        self.query_one("#sub-queue-status", Static).update(
+        self.query_one("#subscription-queue-status", Static).update(
             "Subscribing... (start times are estimates)")
         self._start_estimate_timer()
         self._render_rows()
@@ -1324,13 +1324,13 @@ class SubscriptionQueueScreen(ModalScreen):
             outcomes = event.worker.result if event.state == WorkerState.SUCCESS else []
             done = sum(1 for o in outcomes if o.is_subscribed)
             remaining = len(outcomes) - done
-            self.query_one("#sub-queue-status", Static).update(
+            self.query_one("#subscription-queue-status", Static).update(
                 f"Pass finished: {done} subscribed, {remaining} left queued."
                 if outcomes else "Pass finished with no results."
             )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-close-sub-queue":
+        if event.button.id == "btn-close-subscription-queue":
             self.app.pop_screen()
         elif event.button.id == "btn-subscribe-queue":
             self._start_pass()
@@ -1431,7 +1431,7 @@ class DetailsPane(VerticalScroll):
                 if self._folder_service() is not None and self._folder_service().is_supported():
                     yield Button("Open Folder", id="btn-open-folder",
                                  classes="details-button", disabled=True)
-            yield Button("jump", id="btn-jump-author", variant="primary")
+            yield Button("Jump to Author", id="btn-jump-author", variant="primary")
 
         with Horizontal(id="title-creator-row"):
             # The subscription marker sits immediately before the title, the same
@@ -1460,8 +1460,8 @@ class DetailsPane(VerticalScroll):
             with Vertical(classes="stats-col"):
                 yield Label("Size: N/A", id="stat-size")
                 yield Label("Views: N/A", id="stat-views")
-                yield Label("Subs: N/A", id="stat-subs")
-                yield Label("Favs: N/A", id="stat-favs")
+                yield Label("Subscribers: N/A", id="stat-subscribers")
+                yield Label("Favorites: N/A", id="stat-favorites")
 
         desc_container = Vertical(
             Markdown(id="detail-content"),
@@ -1537,7 +1537,7 @@ class DetailsPane(VerticalScroll):
             if open_btn is not None:
                 open_btn.display = False
             
-            for stat in ["id", "created", "updated", "tags", "size", "views", "subs", "favs"]:
+            for stat in ["id", "created", "updated", "tags", "size", "views", "subscribers", "favorites"]:
                 self.query_one(f"#stat-{stat}", Label).display = False
             self.query_one("#wilson-scores", Label).update("")
             return
@@ -1547,7 +1547,7 @@ class DetailsPane(VerticalScroll):
         # The marker and its colour come from src/subscription.py, the same table
         # the web grid and pane render from.
         sub_state = subscription.subscription_state(item)
-        sub_glyph, sub_colour, _css, _label = subscription.spec(sub_state)
+        sub_glyph, sub_colour, _css, _label = subscription.marker_spec(sub_state)
         sub_marker = self.query_one("#item-sub-marker", Label)
         sub_marker.update(f"[{sub_colour}]{sub_glyph}[/]")
         sub_marker.tooltip = subscription.tooltip(sub_state)
@@ -1613,7 +1613,7 @@ class DetailsPane(VerticalScroll):
 
         tags_list = parse_tags(item.get("tags", "[]"))
 
-        for stat in ["id", "created", "updated", "tags", "size", "views", "subs", "favs"]:
+        for stat in ["id", "created", "updated", "tags", "size", "views", "subscribers", "favorites"]:
             self.query_one(f"#stat-{stat}", Label).display = True
 
         self.query_one("#stat-id", Label).update(f"[b]ID:[/b] {item.get('workshop_id', 'N/A')}")
@@ -1636,11 +1636,11 @@ class DetailsPane(VerticalScroll):
         
         subs_current = format_count(item.get('subscriptions', 0))
         subs_lifetime = format_count(item.get('lifetime_subscriptions', 0))
-        self.query_one("#stat-subs", Label).update(f"[b]Subscribers:[/b] {subs_current} / {subs_lifetime}")
+        self.query_one("#stat-subscribers", Label).update(f"[b]Subscribers:[/b] {subs_current} / {subs_lifetime}")
         
         favs_current = format_count(item.get('favorited', 0))
         favs_lifetime = format_count(item.get('lifetime_favorited', 0))
-        self.query_one("#stat-favs", Label).update(f"[b]Favorites:[/b] {favs_current} / {favs_lifetime}")
+        self.query_one("#stat-favorites", Label).update(f"[b]Favorites:[/b] {favs_current} / {favs_lifetime}")
 
         wilson_label = self.query_one("#wilson-scores", Label)
         app = self.app
@@ -1713,12 +1713,12 @@ class WorkshopItem(ListItem):
         to change it.
         """
         state = subscription.subscription_state(self.item_data)
-        glyph, colour, _css, _label = subscription.spec(state)
+        glyph, colour, _css, _label = subscription.marker_spec(state)
         return f"[{colour}]{glyph}[/]"
 
     def compose(self) -> ComposeResult:
         wid = self.item_data.get("workshop_id", "N/A")
-        title = self.item_data.get("title_en") or self.item_data.get("title", "Unknown Title")
+        title = self.item_data.get("title_en") or self.item_data.get("title", "Untitled")
         creator = self.item_data.get("personaname_en") or self.item_data.get("personaname") or self.item_data.get("creator", "Unknown Creator")
         spin = self._spinner()
         marker = self._subscription_marker()
@@ -1967,8 +1967,8 @@ class DatabaseCommands(Provider):
         )
         yield DiscoveryHit(
             "Show Subscription Queue",
-            self.app.action_show_sub_queue,
-            help="Show items queued for subscription as clickable links",
+            self.app.action_show_subscription_queue,
+            help="Subscribe each queued item through the engine",
         )
 
     async def search(self, query: str) -> Iterable[Hit]:
@@ -1977,7 +1977,7 @@ class DatabaseCommands(Provider):
         
         commands = {
             "Clear Pending Database": self.app.action_clear_pending,
-            "Show Subscription Queue": self.app.action_show_sub_queue,
+            "Show Subscription Queue": self.app.action_show_subscription_queue,
         }
         
         for label, action in commands.items():
@@ -2003,8 +2003,8 @@ def app_bindings(platform: str | None = None) -> list[tuple[str, str, str]]:
         ("ctrl+q", "quit", "Quit"),
         ("ctrl+d", "show_daemon", "Daemon"),
         ("ctrl+r", "show_stats", "Stats"),
-        ("s", "toggle_queue", "Queue for Sub"),
-        ("l", "show_sub_queue", "List Queued Items"),
+        ("s", "toggle_subscription_queue", "Queue for Subscription"),
+        ("l", "show_subscription_queue", "Subscription Queue"),
         ("ctrl+s", "save_filter_for_scraper", "Save Filter"),
         ("ctrl+w", "toggle_translation", "Toggle Translation"),
         ("ctrl+a", "add_and_row", "AND"),
@@ -2170,14 +2170,14 @@ class ScraperApp(App):
     .overlay-label { width: 12; height: 1; margin-top: 1; margin-bottom: 1; }
     .overlay-select { width: 1fr; }
 
-    #details-container {
+    #detail-container {
         width: 60%;
         border: solid $secondary;
         padding: 0 1;
         margin: 0;
         layout: vertical;
     }
-    #item-details {
+    #detail-pane {
         height: 1fr;
     }
     #details-buttons-row {
@@ -2237,14 +2237,14 @@ class ScraperApp(App):
         padding: 0;
         height: auto;
     }
-    #sub-queue-container {
+    #subscription-queue-container {
         width: 80%;
         height: 80%;
         background: $surface;
         border: thick $primary;
         padding: 1;
     }
-    #sub-queue-title {
+    #subscription-queue-title {
         width: 100%;
         text-align: center;
         text-style: bold;
@@ -2289,7 +2289,7 @@ class ScraperApp(App):
         self.current_item_creator = None
         self.pause_lock_file = ".pauselock"
         # One-shot timer that re-reads rendered rows whose subscription marker
-        # is still pending. Armed only while such a row exists, and disarmed by
+        # is still queued. Armed only while such a row exists, and disarmed by
         # its own tick when none does; see `_start_subscription_poll`.
         self._sub_poll_timer = None
         
@@ -2425,7 +2425,8 @@ class ScraperApp(App):
                     self.query_one("#sort-by", Select).value = self._initial_state["sort_by"]
                 if "sort_order" in self._initial_state:
                     self.query_one("#sort-order", Select).value = self._initial_state["sort_order"]
-                overlay_value = self._initial_state.get("subscribed_overlay")
+                overlay_value = normalise_subscribed_value(
+                    self._initial_state.get("subscribed_overlay"))
                 if overlay_value in SUBSCRIBED_VALUES:
                     self.query_one("#subscribed-overlay", Select).value = overlay_value
                 if "filters" in self._initial_state:
@@ -2479,7 +2480,7 @@ class ScraperApp(App):
 
     # --- the subscription-marker poll ---------------------------------------
 
-    def _pending_subscription_ids(self) -> list[int]:
+    def _queued_subscription_ids(self) -> list[int]:
         """Ids of rendered rows whose subscription marker is still ``pending``.
 
         The selection is made from what is *rendered* -- the item data the row
@@ -2496,7 +2497,7 @@ class ScraperApp(App):
             data = getattr(child, "item_data", None)
             if not data:
                 continue
-            if subscription.subscription_state(data) != subscription.PENDING:
+            if subscription.subscription_state(data) != subscription.QUEUED:
                 continue
             workshop_id = data.get("workshop_id")
             if workshop_id is not None:
@@ -2504,34 +2505,34 @@ class ScraperApp(App):
         return ids
 
     def _start_subscription_poll(self, delay: float = 0.05) -> None:
-        """Arm a one-shot re-read of the rendered rows that are still pending.
+        """Arm a one-shot re-read of the rendered rows that are still queued.
 
         The web grid's ``_startListPoll`` is the model: a new search, a row
-        moving into ``pending``, or a pass result all arm the next tick, and the
-        tick re-arms itself only while a rendered row is still pending. A
+        moving into ``queued``, or a pass result all arm the next tick, and the
+        tick re-arms itself only while a rendered row is still queued. A
         settled list therefore costs no reads, and there is no fixed interval.
         The default is a hair above zero rather than Textual's ``set_timer(0)``,
         whose zero interval divides by zero when a busy loop skips it.
         """
         self._stop_subscription_poll()
-        self._sub_poll_timer = self.set_timer(delay, self._poll_pending_subscriptions)
+        self._sub_poll_timer = self.set_timer(delay, self._poll_queued_subscriptions)
 
     def _stop_subscription_poll(self) -> None:
         if self._sub_poll_timer is not None:
             self._sub_poll_timer.stop()
             self._sub_poll_timer = None
 
-    async def _poll_pending_subscriptions(self) -> None:
-        """Re-read the rendered pending rows once; re-arm only if some remain."""
+    async def _poll_queued_subscriptions(self) -> None:
+        """Re-read the rendered queued rows once; re-arm only if some remain."""
         self._sub_poll_timer = None
         if not self.is_mounted:
             return
-        ids = self._pending_subscription_ids()
+        ids = self._queued_subscription_ids()
         if not ids:
             self._stop_subscription_poll()
             return
         await self.refresh_subscription_rows(ids)
-        remaining = len(self._pending_subscription_ids())
+        remaining = len(self._queued_subscription_ids())
         if not remaining:
             self._stop_subscription_poll()
             return
@@ -2601,7 +2602,7 @@ class ScraperApp(App):
         search_container = Vertical(
             search_builder,
             Horizontal(
-                Button("Execute Search", id="btn-execute-search", variant="primary"),
+                Button("Search", id="btn-search", variant="primary"),
                 Button("Save Filter for Scraper", id="btn-save-filter", variant="default"),
                 Button("Return", id="btn-return", variant="warning"),
                 classes="search-buttons"
@@ -2645,13 +2646,13 @@ class ScraperApp(App):
 
         compact_buttons = Horizontal(
             Button("Fetch New", id="btn-fetch-new", classes="compact-btn"),
-            Button("Upd.Vis", id="btn-update-visible", classes="compact-btn"),
+            Button("Update Visible", id="btn-update-visible", classes="compact-btn"),
             id="compact-buttons"
         )
 
         details_container = Vertical(
-            DetailsPane(id="item-details"),
-            id="details-container"
+            DetailsPane(id="detail-pane"),
+            id="detail-container"
         )
         details_container.border_title = "Details"
 
@@ -2669,7 +2670,7 @@ class ScraperApp(App):
         yield Footer()
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
-        pass  # search only on explicit "Execute Search" click
+        pass  # search only on explicit "Search" click
 
     async def on_select_changed(self, event: Select.Changed) -> None:
         # A field change may have added or removed the builder's Subscribed row,
@@ -2744,7 +2745,7 @@ class ScraperApp(App):
         await list_view.mount(*items)
 
         # Watch the rows that arrived already queued for subscription; the poll
-        # disarms itself at once when none of them is pending.
+        # disarms itself at once when none of them is queued.
         self._start_subscription_poll()
 
         for item in results:
@@ -2796,7 +2797,7 @@ class ScraperApp(App):
                 self.current_item_creator = item_data.get('creator')
                 # Detail priority is applied by DetailsPane when it adopts the
                 # item, not here: this handler fires on every highlight move.
-                detail_pane = self.query_one("#item-details", DetailsPane)
+                detail_pane = self.query_one("#detail-pane", DetailsPane)
                 detail_pane.workshop_id = item_data.get("workshop_id")
                 
                 jump_btn = self.query_one("#btn-jump-author", Button)
@@ -2820,7 +2821,7 @@ class ScraperApp(App):
             self.notify("Fetch-new triggered! The daemon will scan recently-updated items on its next cycle.")
         elif event.button.id == "btn-update-visible":
             await self.action_update_visible()
-        elif event.button.id == "btn-execute-search":
+        elif event.button.id == "btn-search":
             await self.execute_search()
         elif event.button.id == "btn-save-filter":
             await self.action_save_filter_for_scraper()
@@ -2888,7 +2889,7 @@ class ScraperApp(App):
         elif event.button.id == "btn-open-folder":
             # Acts on the pane's item, the same one the marker describes; the
             # `o` key acts on the highlighted list item.
-            detail = self.query_one("#item-details", DetailsPane)
+            detail = self.query_one("#detail-pane", DetailsPane)
             self.open_folder_for(detail.workshop_id)
 
         elif event.button.id == "btn-toggle-translation":
@@ -2938,10 +2939,10 @@ class ScraperApp(App):
         self.notify(f"Filter saved for AppID {current_appid}. Scraper will use this for enrichment.")
 
     def action_toggle_translation(self) -> None:
-        detail_pane = self.query_one("#item-details", DetailsPane)
+        detail_pane = self.query_one("#detail-pane", DetailsPane)
         detail_pane.show_translated = not detail_pane.show_translated
         
-    async def action_toggle_queue(self) -> None:
+    async def action_toggle_subscription_queue(self) -> None:
         """Toggles the subscription queue status of the highlighted item."""
         list_view = self.query_one("#results-list", ListView)
         if list_view.index is None:
@@ -2965,12 +2966,12 @@ class ScraperApp(App):
         await item.refresh_item()
 
         # A row queued from the keyboard is watched too: the web grid starts its
-        # poll on the transition into `pending` for the same reason.
-        if subscription.subscription_state(item.item_data) == subscription.PENDING:
+        # poll on the transition into `queued` for the same reason.
+        if subscription.subscription_state(item.item_data) == subscription.QUEUED:
             self._start_subscription_poll()
 
         # Update details pane if it's showing the same item
-        detail_pane = self.query_one("#item-details", DetailsPane)
+        detail_pane = self.query_one("#detail-pane", DetailsPane)
         if detail_pane.workshop_id == workshop_id and detail_pane.item_data is not None:
             detail_pane.item_data["is_queued_for_subscription"] = item.item_data["is_queued_for_subscription"]
             detail_pane.update_content()
@@ -3080,7 +3081,7 @@ class ScraperApp(App):
         conn.close()
         self.notify(f"Queued {len(visible_ids)} items for update.")
 
-    def action_show_sub_queue(self) -> None:
+    def action_show_subscription_queue(self) -> None:
         """Shows the subscription queue modal screen.
 
         The engine needs the cookie source, so the app's config travels with the
@@ -3104,7 +3105,7 @@ class ScraperApp(App):
     async def action_subscribe(self) -> None:
         """Subscribes to the currently displayed workshop item on Steam."""
         try:
-            detail = self.query_one("#item-details", DetailsPane)
+            detail = self.query_one("#detail-pane", DetailsPane)
             wid = getattr(detail, "workshop_id", None)
         except Exception:
             logging.warning("Failed to get workshop_id from detail pane for subscribe")

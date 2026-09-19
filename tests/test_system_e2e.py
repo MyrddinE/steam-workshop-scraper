@@ -88,7 +88,7 @@ async def test_end_to_end_system_flow(system_config):
 
             from src.tui import DetailsPane
             from textual.widgets import Markdown
-            detail_pane = app.query_one("#item-details", DetailsPane)
+            detail_pane = app.query_one("#detail-pane", DetailsPane)
             detail_content = detail_pane.query_one("#detail-content", Markdown)
             assert detail_content is not None
 

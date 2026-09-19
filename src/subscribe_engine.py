@@ -118,14 +118,14 @@ def item_page_url(workshop_id: int) -> str:
 
 
 # Button states. ``UNKNOWN`` is a real answer -- "cannot tell" -- and is never
-# collapsed into ``NOT_SUBSCRIBED``.
-BUTTON_SUBSCRIBED = "subscribed"
-BUTTON_NOT_SUBSCRIBED = "not_subscribed"
+# collapsed into ``NOT_TOGGLED``.
+BUTTON_TOGGLED = "subscribed"
+BUTTON_NOT_TOGGLED = "not_subscribed"
 BUTTON_UNKNOWN = "unknown"
 
 # --- outcome vocabulary ------------------------------------------------------
 
-ALREADY = "already_subscribed"
+ALREADY_SUBSCRIBED = "already_subscribed"
 SUBSCRIBED = "subscribed"
 DISAGREEMENT = "disagreement"
 THROTTLED = "throttled"
@@ -222,7 +222,7 @@ class SubscribeOutcome:
     @property
     def is_subscribed(self) -> bool:
         """Whether the item is subscribed now, verified or already."""
-        return self.status in (ALREADY, SUBSCRIBED)
+        return self.status in (ALREADY_SUBSCRIBED, SUBSCRIBED)
 
     @property
     def stays_queued(self) -> bool:
@@ -236,8 +236,8 @@ class SubscribeOutcome:
 # button-less page whose state it could not read -- so the phrase must not claim
 # the result is unknown. The cause differs per outcome and is written to the log
 # by the caller, so the phrase points there rather than guessing one of them.
-_STATUS_LABELS = {
-    ALREADY: "already subscribed",
+_OUTCOME_LABELS = {
+    ALREADY_SUBSCRIBED: "already subscribed",
     SUBSCRIBED: "subscribed",
     DISAGREEMENT: "unverified (sources disagree)",
     THROTTLED: "left queued (throttled)",
@@ -250,7 +250,7 @@ _STATUS_LABELS = {
 
 def status_label(status: str) -> str:
     """The human phrase for an outcome status."""
-    return _STATUS_LABELS.get(status, status)
+    return _OUTCOME_LABELS.get(status, status)
 
 
 # --- the parser --------------------------------------------------------------
@@ -270,8 +270,8 @@ _TOGGLED_CLASS = "toggled"
 def parse_button_state(html: str | bytes | None) -> str:
     """Read ``#SubscribeItemBtn``'s state from a server-rendered item page.
 
-    Returns :data:`BUTTON_SUBSCRIBED` when the element carries ``toggled``,
-    :data:`BUTTON_NOT_SUBSCRIBED` when it is present without it, and
+    Returns :data:`BUTTON_TOGGLED` when the element carries ``toggled``,
+    :data:`BUTTON_NOT_TOGGLED` when it is present without it, and
     :data:`BUTTON_UNKNOWN` when the element is absent. The three are never
     conflated: "absent" is what a throttle page, an error page and a
     signed-out page all look like, and none of them is a statement that the
@@ -286,7 +286,7 @@ def parse_button_state(html: str | bytes | None) -> str:
         return BUTTON_UNKNOWN
     class_match = _CLASS_ATTR_RE.search(match.group(0))
     classes = class_match.group(1).split() if class_match else []
-    return BUTTON_SUBSCRIBED if _TOGGLED_CLASS in classes else BUTTON_NOT_SUBSCRIBED
+    return BUTTON_TOGGLED if _TOGGLED_CLASS in classes else BUTTON_NOT_TOGGLED
 
 
 # The CSRF token Steam injects into every page it serves, always quoted. It is
@@ -684,7 +684,7 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
     # read, authenticated or not, observed before the POST is sent.
     page_authenticated = page_read_authenticated(page_html)
 
-    if button_before == BUTTON_SUBSCRIBED:
+    if button_before == BUTTON_TOGGLED:
         # The browser plugin never clicked an item it could see was already
         # subscribed, and neither does this: no request, no toggle question. The
         # page is the same authority the confirmed path trusts, so the
@@ -695,7 +695,7 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
         # read and skip again.
         mark_own_subscribed(db_path, workshop_id)
         return SubscribeOutcome(
-            workshop_id, ALREADY,
+            workshop_id, ALREADY_SUBSCRIBED,
             "The item page already shows it subscribed; no request was sent.",
             subscribed=True, button_before=button_before,
         )
@@ -813,7 +813,7 @@ def confirm_subscription(workshop_id: int, steam_success, *, db_path: str,
         "[Subscribe] Confirmation for %s: before=%s after=%s steam_success=%r",
         workshop_id, button_before, button_after, steam_success)
 
-    if button_after == BUTTON_SUBSCRIBED:
+    if button_after == BUTTON_TOGGLED:
         record_confirmed_subscription(db_path, workshop_id)
         if steam_success == 1:
             message = "Subscribed and verified from the item page."
@@ -826,7 +826,7 @@ def confirm_subscription(workshop_id: int, steam_success, *, db_path: str,
             workshop_id, SUBSCRIBED, message, subscribed=True,
             button_before=button_before, button_after=button_after, steam_success=steam_success)
 
-    if button_after == BUTTON_NOT_SUBSCRIBED:
+    if button_after == BUTTON_NOT_TOGGLED:
         if steam_success == 1:
             return SubscribeOutcome(
                 workshop_id, DISAGREEMENT, _DISAGREEMENT_MESSAGE,

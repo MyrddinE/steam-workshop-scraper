@@ -416,8 +416,8 @@ def test_stats_button_opens_a_panel_instead_of_navigating(web_client):
     assert daemon[0].getparent() is buttons[0].getparent(), \
         "#btn-stats and #btn-daemon must share a parent"
 
-    overlay = doc.xpath('//*[@id="stats-overlay"]')
-    assert overlay, "missing #stats-overlay"
+    overlay = doc.xpath('//*[@id="stats-modal"]')
+    assert overlay, "missing #stats-modal"
     assert doc.xpath('//*[@id="stats-metrics"]')[0] in overlay[0].iterdescendants(), \
         "#stats-metrics must live inside the overlay"
     assert doc.xpath('//*[@id="stats-close"]')[0] in overlay[0].iterdescendants(), \
@@ -537,8 +537,8 @@ def test_image_serve_flat_id_resolves_to_bucket(web_client):
     """
     client, db_path = web_client
     workshop_id = 1039919954
-    char1, char2, char3 = get_image_subdirs(workshop_id)
-    nested_dir = os.path.join(os.path.dirname(db_path), "images", char1, char2, char3)
+    bucket1, bucket2, bucket3 = get_image_subdirs(workshop_id)
+    nested_dir = os.path.join(os.path.dirname(db_path), "images", bucket1, bucket2, bucket3)
     os.makedirs(nested_dir, exist_ok=True)
     payload = b"bucket-image-bytes"
     with open(os.path.join(nested_dir, f"{workshop_id}.jpg"), "wb") as f:
@@ -1230,7 +1230,7 @@ def test_daemon_panel_and_toolbar_control_are_present(web_client):
     client, _ = web_client
     doc = lxml.html.fromstring(client.get('/').data.decode())
     assert doc.xpath('//*[@id="btn-daemon"]'), "toolbar control for the daemon panel is missing"
-    assert doc.xpath('//*[@id="daemon-overlay"]'), "daemon panel is missing"
+    assert doc.xpath('//*[@id="daemon-modal"]'), "daemon panel is missing"
     assert doc.xpath('//*[@id="daemon-status"]'), "daemon status line is missing"
     assert doc.xpath('//*[@id="daemon-log"]'), "daemon log view is missing"
 
@@ -1714,7 +1714,9 @@ const values = {
   'subscribed-overlay': {value: 'never'},
 };
 global.document = {getElementById: (id) => values[id]};
-const SUBSCRIBED_VALUES = ['any', 'never', 'currently', 'previously', 'queued', 'downloaded'];
+const SUBSCRIBED_VALUES = ['any', 'never', 'subscribed', 'previously', 'queued', 'downloaded'];
+const LEGACY_SUBSCRIBED_VALUES = __LEGACY__;
+const _normaliseSubscribedValue = (__NORM__);
 const _subscribedOverlayEl = () => values['subscribed-overlay'];
 const out = {};
 saveFn();
@@ -1736,6 +1738,11 @@ store[key] = JSON.stringify({
   sort_by: 'title', sort_order: 'ASC', selected: 7, scroll: -3,
 });
 out.filtered = loadFn();
+
+// A view saved before the marker vocabulary was unified names `currently`; it
+// must load as the current spelling rather than widen to `any`.
+store[key] = JSON.stringify({v: version, filters: [], subscribed: 'currently'});
+out.legacySubscribed = loadFn();
 
 // While the page is restoring, nothing may write the state back early.
 delete store[key];
@@ -1770,6 +1777,8 @@ def test_view_state_round_trips_and_rejects_stale_or_malformed_entries(web_clien
     driver = (VIEW_STATE_DRIVER
               .replace("__LOAD__", _extract_function(script, "_loadViewState"))
               .replace("__SAVE__", _extract_function(script, "_saveViewState"))
+              .replace("__LEGACY__", _extract_const(script, "LEGACY_SUBSCRIBED_VALUES"))
+              .replace("__NORM__", _extract_function(script, "_normaliseSubscribedValue"))
               .replace("__KEY__", _extract_const(script, "VIEW_STATE_KEY"))
               .replace("__VER__", _extract_const(script, "VIEW_STATE_VERSION")))
     out = _run_node(driver, tmp_path)
@@ -1802,6 +1811,8 @@ def test_view_state_round_trips_and_rejects_stale_or_malformed_entries(web_clien
     # does not know, reads back as the no-constraint default rather than hiding
     # rows.
     assert out["filtered"]["subscribed"] == "any"
+    assert out["legacySubscribed"]["subscribed"] == "subscribed", \
+        "a view saved with `currently` must load as the current value"
     assert out["wroteWhileRestoring"] is False, \
         "a restore in progress must not overwrite the state it is reading"
     assert out["wroteInAuthorMode"] is False, \
@@ -2089,7 +2100,7 @@ def _author_driver(script, tmp_path):
               .replace("__INITAUTHORLIST__", "(" + _extract_function(script, "_initAuthorList") + ")()")
               .replace("__CLOSEAUTHORLIST__",
                        "(function(event) { _closedList += 1; "
-                       "_elements['author-overlay'].style.display = 'none'; })"))
+                       "_elements['author-modal'].style.display = 'none'; })"))
     return _run_node(driver, tmp_path)
 
 
@@ -2156,7 +2167,7 @@ const _elements = {
   'sort-order': fakeEl('select'),
   'subscribed-overlay': fakeEl('select'),
   'results-grid': fakeEl('div'),
-  'author-overlay': fakeEl('div'),
+  'author-modal': fakeEl('div'),
   'author-list': fakeEl('div'),
   'author-list-status': fakeEl('span'),
   'btn-authors': fakeEl('button'),
@@ -2238,12 +2249,12 @@ __INITAUTHORLIST__;
     count: _elements['author-list'].children.length,
     authors: _elements['author-list'].children.map((b) => b.dataset.author),
     texts: _elements['author-list'].children.map((b) => b.textContent),
-    overlayShown: _elements['author-overlay'].style.display
+    overlayShown: _elements['author-modal'].style.display
   };
   if (_elements['author-list'].children.length) {
     _elements['author-list'].onclick({target: _elements['author-list'].children[0]});
   }
-  const pickerAfterChoice = _elements['author-overlay'].style.display;
+  const pickerAfterChoice = _elements['author-modal'].style.display;
 
   console.log(JSON.stringify({
     sortBefore: sortBefore,
@@ -2361,7 +2372,7 @@ def test_author_mode_scaffold_is_in_the_served_page(web_client):
     doc = lxml.html.fromstring(client.get('/').data.decode())
 
     for el_id in ("author-mode-bar", "author-mode-name", "btn-return-author",
-                  "btn-authors", "author-overlay", "author-list", "author-list-status"):
+                  "btn-authors", "author-modal", "author-list", "author-list-status"):
         assert doc.xpath(f'//*[@id="{el_id}"]'), f"missing #{el_id}"
 
     bars = doc.xpath('//*[@id="author-mode-bar"]')
@@ -2476,7 +2487,7 @@ queueRows.forEach((r) => queueList.appendChild(r));
 queueList.querySelectorAll = (sel) => (sel === '.sub-queue-item' ? queueRows.slice() : []);
 
 const elements = {
-  'sub-queue-overlay': fakeEl('div'),
+  'sub-queue-modal': fakeEl('div'),
   'sub-queue-list': queueList,
   'sub-progress': fakeEl('span'),
   'sub-cancel': fakeEl('button'),
@@ -2618,8 +2629,8 @@ def test_analysis_panel_dom_contract(web_client):
     assert buttons[0].tag == "button", "the analysis affordance must not navigate away"
     assert not buttons[0].get("href"), "the analysis button must not be a link"
 
-    overlay = doc.xpath('//*[@id="analysis-overlay"]')
-    assert overlay, "missing #analysis-overlay"
+    overlay = doc.xpath('//*[@id="analysis-modal"]')
+    assert overlay, "missing #analysis-modal"
     for el_id in ('analysis-bucket-days', 'analysis-recalc', 'analysis-close',
                   'analysis-summary', 'analysis-table-host'):
         nodes = doc.xpath(f'//*[@id="{el_id}"]')
@@ -3159,7 +3170,7 @@ global.fetch = async (url) => {
   if (url.indexOf('/api/item/') === 0) {
     return {ok: true, status: 200, statusText: 'OK',
             json: async () => ({workshop_id: 77, is_queued_for_subscription: serverQueued,
-                                subscription_state: serverQueued ? 'pending' : 'never',
+                                subscription_state: serverQueued ? 'queued' : 'never',
                                 subscription_glyph: serverQueued ? '\\u2606' : '\\u25cb',
                                 subscription_colour: serverQueued ? '#2ecc40' : '#808080',
                                 subscription_tooltip: 'tip', subscription_clickable: true})};
@@ -3232,7 +3243,7 @@ def test_toggle_queue_reflects_the_databases_state_and_updates_the_marker(web_cl
     ]
     # The cell marker was rewritten from the read-back payload, not from a local
     # flip of the old `queued` class.
-    assert result["markerAfterFirst"] == "pending"
+    assert result["markerAfterFirst"] == "queued"
     assert result["markerAfterExternalQueued"] == "never"
     assert result["markerText"] == "\u25cb"
     assert result["leftoverClasses"] == [], \

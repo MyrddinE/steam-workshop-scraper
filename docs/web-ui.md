@@ -107,10 +107,10 @@ When `doSearch(reset=true)` clears the grid (`innerHTML = ''`), the old sentinel
 
 An adaptive-timeout poll that keeps a rendered cell's markers in step with the database:
 - Collects workshop_ids from rendered cells (`.grid-cell[data-wid]`) whose row is not settled: one
-  with a stage spinner (`.has-spinner`), or one whose subscription marker is still `pending`. The
+  with a stage spinner (`.has-spinner`), or one whose subscription marker is still `queued`. The
   subscription queue is deliberately not a stage, so a row queued only to subscribe has no spinner;
   selecting on `has-spinner` alone missed it, and a subscribe landing behind the cell's back left the
-  green `pending` marker on it.
+  green `queued` marker on it.
 - POSTs to `/api/items` (read-only bulk ID lookup)
 - For each returned item: updates the title, replaces the image placeholder with `_imageCellHtml(item)`
   when the server has an answer, re-applies the stage marker (`_applyPending`) and the subscription
@@ -128,7 +128,7 @@ subscription change, so every writer of the flag is covered by one refresh: the 
 `POST /api/subscribe/<id>` route (which stamps on Steam `success == 1`). The autosubscribe verifier
 reads the same queue exit to mark the overlay's rows, independently of the grid. Because
 `_listNeedsPoll` only runs when a batch is rendered, `toggleDetailQueue` also starts the poll on the
-transition into `pending`, so a marker clicked into the queue after the search is watched too.
+transition into `queued`, so a marker clicked into the queue after the search is watched too.
 
 ### Stopping the poll
 
@@ -195,7 +195,7 @@ item with no creator renders the name plainly and offers no jump.
 
 ### The creator list
 
-`#btn-authors` in the header opens a picker (`#author-overlay`, `#author-list`), which
+`#btn-authors` in the header opens a picker (`#author-modal`, `#author-list`), which
 `GET /api/authors` fills. Picking a creator closes the picker and enters author mode through the same
 `jumpToAuthor` the item jump uses, so there is one mode and one entry into it, not a second
 implementation.
@@ -224,7 +224,7 @@ too, from the same `/api/queued` payload. It has five states, resolved by
 |---|---|---|---|---|
 | `downloaded` | ★ | deep green | the owner is subscribed and Steam has the item on disk | nothing |
 | `subscribed` | ★ | solid yellow | the owner is subscribed now | nothing |
-| `pending` | ☆ | green | queued to subscribe | un-queues |
+| `queued` | ☆ | green | queued to subscribe | un-queues |
 | `previously` | ☆ | yellow | we have seen the owner subscribed, and they are not now | queues |
 | `never` | ○ | gray | never seen subscribed | queues |
 
@@ -254,7 +254,7 @@ the pane alone.
 The click is not the only writer. A subscribe can land behind a rendered cell through
 `POST /api/subscribed/<id>` (the userscript bridge, or this page's cancel/clear calls) or through the
 direct `POST /api/subscribe/<id>` route, and none of those touches the DOM. The list poll is what
-re-reads such a cell: it keeps re-reading any row whose subscription marker is still `pending`, so
+re-reads such a cell: it keeps re-reading any row whose subscription marker is still `queued`, so
 the marker moves to `subscribed` on its own next tick ([Image Polling](#image-polling)).
 
 One transition is deliberately not a poll trigger: a cell already at `subscribed` is not re-read
@@ -329,7 +329,7 @@ The row under the detail pane (`#detail-buttons`) holds the queue and database a
 
 ## Daemon Panel
 
-The header toolbar's **Daemon** button (`#btn-daemon`) opens `#daemon-overlay`, a modal panel with the running status and PID, Start / Stop / Restart buttons, and a live log view (`#daemon-log`).
+The header toolbar's **Daemon** button (`#btn-daemon`) opens `#daemon-modal`, a modal panel with the running status and PID, Start / Stop / Restart buttons, and a live log view (`#daemon-log`).
 
 While the panel is open, `_refreshDaemonStatus` polls `/api/daemon` and `_pollDaemonLog` polls `/api/daemon/log?since=<byte-offset>` every 2 seconds. The offset is the byte position returned by the previous response, so each poll transfers only new lines. The view is a bounded preview: the server reads at most 64 KiB and returns at most 500 lines, so a first poll against a large log shows its tail rather than the whole file. A `reset: true` response means the returned lines do not continue the caller's view — a first call that had to seek to the tail, a rotation or truncation, or the client having fallen more than one window behind — and `_pollDaemonLog` clears the pane before showing them, so a gap is never rendered as if it were continuous. `_closeDaemonPanel` clears the interval, so nothing polls while the panel is hidden.
 
@@ -356,9 +356,9 @@ The strip has no close button on purpose: the condition is a silent data outage,
 
 ## Statistics Panel
 
-The 📊 button (`#btn-stats`, `templates/index.html:99`) opens `#stats-overlay` (`templates/index.html:136`), a modal panel modelled on the daemon overlay. It keeps the button's id and position; clicking it no longer navigates to the raw `/api/stats` JSON.
+The 📊 button (`#btn-stats`, `templates/index.html:99`) opens `#stats-modal` (`templates/index.html:136`), a modal panel modelled on the daemon overlay. It keeps the button's id and position; clicking it no longer navigates to the raw `/api/stats` JSON.
 
-`_openStatsPanel` (`templates/index.html:1316`) fetches `/api/metrics` for the catalogue — each metric's name, note and `seed_ms` hint — then builds one `<section class="stats-chunk" data-metric="...">` per metric, each with its own body element, and requests **every metric independently** through `GET /api/metrics/<name>` (`_loadMetric`, `templates/index.html:1286`). It deliberately does not `Promise.all` the requests: each section is filled and its own refresh timer armed the moment that metric lands, so a fast chunk draws while a slow one is still running. Every metric shows a human label, its note, and a value rendered to suit it, with its measured `ms` shown quietly in the heading:
+`_openStatsPanel` (`templates/index.html:1316`) fetches `/api/metrics` for the catalogue — each metric's name, note and `seed_ms` hint — then builds one `<section class="stats-section" data-metric="...">` per metric, each with its own body element, and requests **every metric independently** through `GET /api/metrics/<name>` (`_loadMetric`, `templates/index.html:1286`). It deliberately does not `Promise.all` the requests: each section is filled and its own refresh timer armed the moment that metric lands, so a fast section draws while a slow one is still running. Every metric shows a human label, its note, and a value rendered to suit it, with its measured `ms` shown quietly in the heading:
 
 * **coverage** — seven progress bars on one width (API Data, Translations, Extended Web, Extended Web Translation, Images, Creator, Creator Translation), at two scopes: the whole live library (dead items excluded), and the items the target AppIDs' stored `enrichment_filters` select — what the owner cares about. Each bar's population is the flagging rule, mirrored in SQL: **Translations** is per field (`title`, `short_description`) over the filter-selected items, because `_queue_translations` returns early unless the item was enriched; **Extended Web** is the scrape's coverage and its maximum excludes the pages that answered with no description, whose count and ceiling are printed with the bar; **Extended Web Translation** hangs off it and can never be longer than it, and its population is any scraped item, not only the filter-selected ones; **Creator Translation** counts items attributed to a creator whose name is non-ASCII. The three translation bars are drawn at half the standard bar's CSS height and sit flush under their parent — no margin, padding or row between them — with the same left edge, so a shorter bar still means less coverage. A bar whose population is zero reads "Nothing to translate" rather than a stuck 0.0%. The second figure is the search builder's SQL translation of the filters, which also searches each text field's `_en` counterpart, so it can disagree with the daemon's in-memory per-item check; where they disagree, the search builder's answer is shown. With more than one target AppID the population is the union of what any target's filters select. A scope note names the AppIDs and says why the two figures coincide when a filter set is empty, unreadable, or has no fixed predicate (a percentile); an unreadable set means no exclusion, never "excludes everything". The labels and counts come from the metric, so the two front ends make the same claim about the same data in the same words.
 * **totals** — alive and dead counts with the overall total.
@@ -379,7 +379,7 @@ The 📊 button (`#btn-stats`, `templates/index.html:99`) opens `#stats-overlay`
 
 ## View Window Analysis Panel
 
-The header toolbar's **Analysis** button (`#btn-analysis`, `templates/index.html:64`) opens `#analysis-overlay` (`templates/index.html:144`), the web half of the TUI's `ctrl+?` screen. It mirrors that screen's content: a bucket-size box in days, a **Recalculate** button, a per-bucket table, and a summary line.
+The header toolbar's **Analysis** button (`#btn-analysis`, `templates/index.html:64`) opens `#analysis-modal` (`templates/index.html:144`), the web half of the TUI's `ctrl+?` screen. It mirrors that screen's content: a bucket-size box in days, a **Recalculate** button, a per-bucket table, and a summary line.
 
 `_openAnalysisPanel` resets the box to the TUI's default of 7 days and calls `_runAnalysis`, which requests `GET /api/analysis?bucket_days=N` — one request per open or recalculate. There is deliberately no polling: the query is expensive and the shape it measures moves slowly. The bucket box is read the way the TUI reads its input (`_analysisBucketDays`): anything that is not an integer falls back to 7, and a real number is clamped to at least one day.
 

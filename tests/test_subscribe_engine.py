@@ -93,14 +93,14 @@ def _synthetic_page(session_id=None, *, authenticated=True, toggled=False):
 
 
 def test_the_parser_reads_the_two_rendered_states():
-    assert engine.parse_button_state(NOT_TOGGLED) == engine.BUTTON_NOT_SUBSCRIBED
-    assert engine.parse_button_state(TOGGLED) == engine.BUTTON_SUBSCRIBED
+    assert engine.parse_button_state(NOT_TOGGLED) == engine.BUTTON_NOT_TOGGLED
+    assert engine.parse_button_state(TOGGLED) == engine.BUTTON_TOGGLED
 
 
 def test_the_parser_ignores_toggled_outside_the_button():
     """`toggled` is read from the one element's own class list, nowhere else."""
     page = f'<div class="toggled">{NOT_TOGGLED}</div>'
-    assert engine.parse_button_state(page) == engine.BUTTON_NOT_SUBSCRIBED
+    assert engine.parse_button_state(page) == engine.BUTTON_NOT_TOGGLED
     assert engine.parse_button_state('<div class="toggled"></div>') == engine.BUTTON_UNKNOWN
 
 
@@ -158,8 +158,8 @@ def test_the_parser_reads_both_states_from_the_local_signed_in_captures():
             continue
         states[path.name] = engine.parse_button_state(text)
     assert states, "the captures should include signed-in item pages"
-    assert engine.BUTTON_SUBSCRIBED in states.values()
-    assert engine.BUTTON_NOT_SUBSCRIBED in states.values()
+    assert engine.BUTTON_TOGGLED in states.values()
+    assert engine.BUTTON_NOT_TOGGLED in states.values()
 
 
 # --- the engine's seams ------------------------------------------------------
@@ -252,14 +252,14 @@ def test_an_already_subscribed_item_sends_no_request(engine_env, monkeypatch):
     costs no POST.
     """
     db_path, config = engine_env
-    body = _capture_with_state(engine.BUTTON_SUBSCRIBED)
+    body = _capture_with_state(engine.BUTTON_TOGGLED)
     monkeypatch.setattr(web_scraper, "scrape_extended_details", _Fetcher([body]))
     session = _Session(payload={"success": 1})
     monkeypatch.setattr(web_scraper, "_get_session", lambda: session)
 
     outcome = engine.subscribe_item(7, config=config, db_path=db_path)
 
-    assert outcome.status == engine.ALREADY
+    assert outcome.status == engine.ALREADY_SUBSCRIBED
     assert outcome.subscribed is True
     assert session.calls == [], "an already-subscribed item must not be POSTed"
     row = _row(db_path, 7)
@@ -276,7 +276,7 @@ def test_the_already_subscribed_no_op_drains_the_subscription_queue(engine_env, 
     pass to list and re-read.
     """
     db_path, config = engine_env
-    body = _capture_with_state(engine.BUTTON_SUBSCRIBED)
+    body = _capture_with_state(engine.BUTTON_TOGGLED)
     monkeypatch.setattr(web_scraper, "scrape_extended_details", _Fetcher([body]))
     session = _Session(payload={"success": 1})
     monkeypatch.setattr(web_scraper, "_get_session", lambda: session)
@@ -294,7 +294,7 @@ def test_the_already_subscribed_no_op_drains_the_subscription_queue(engine_env, 
 def test_the_already_subscribed_no_op_reads_a_local_capture(engine_env, monkeypatch):
     """The same no-op, driven by the real signed-in page rather than a string."""
     db_path, config = engine_env
-    body = _capture_with_state(engine.BUTTON_SUBSCRIBED)
+    body = _capture_with_state(engine.BUTTON_TOGGLED)
     fetcher = _Fetcher([body])
     monkeypatch.setattr(web_scraper, "scrape_extended_details", fetcher)
     session = _Session(payload={"success": 1})
@@ -302,7 +302,7 @@ def test_the_already_subscribed_no_op_reads_a_local_capture(engine_env, monkeypa
 
     outcome = engine.subscribe_item(7, config=config, db_path=db_path)
 
-    assert outcome.status == engine.ALREADY
+    assert outcome.status == engine.ALREADY_SUBSCRIBED
     assert len(fetcher.calls) == 1, "the no-op path reads the page exactly once"
     assert session.calls == []
 
@@ -311,7 +311,7 @@ def test_the_already_subscribed_no_op_reads_a_local_capture(engine_env, monkeypa
 
 def test_a_not_subscribed_item_is_subscribed_and_verified(engine_env, monkeypatch):
     db_path, config = engine_env
-    not_toggled = _capture_with_state(engine.BUTTON_NOT_SUBSCRIBED)
+    not_toggled = _capture_with_state(engine.BUTTON_NOT_TOGGLED)
     monkeypatch.setattr(web_scraper, "scrape_extended_details",
                         _Fetcher([not_toggled, TOGGLED]))
     session = _Session(payload={"success": 1})
@@ -647,7 +647,7 @@ def test_the_pass_releases_the_pause_and_reports_each_result(tmp_path, monkeypat
     outcomes = []
     monkeypatch.setattr(
         engine, "subscribe_item",
-        lambda wid, **kwargs: engine.SubscribeOutcome(wid, engine.ALREADY,
+        lambda wid, **kwargs: engine.SubscribeOutcome(wid, engine.ALREADY_SUBSCRIBED,
                                                       subscribed=True))
 
     result = engine.run_subscription_pass(
@@ -753,7 +753,7 @@ def test_the_pass_spaces_every_item(tmp_path, monkeypatch):
         db_path=db_path,
         pause_lock_file=str(tmp_path / ".pauselock"))
 
-    assert [o.status for o in outcomes] == [engine.ALREADY, engine.ALREADY]
+    assert [o.status for o in outcomes] == [engine.ALREADY_SUBSCRIBED, engine.ALREADY_SUBSCRIBED]
     assert waits[0] == 8.0
     assert waits[1] == pytest.approx(8.0)
 

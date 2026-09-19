@@ -122,7 +122,7 @@ async def test_detail_pane_poll_survives_a_locked_database(mock_config):
             await pilot.press("enter")
             await pilot.pause(ASYNC_PAUSE)
 
-            pane = app.query_one("#item-details", DetailsPane)
+            pane = app.query_one("#detail-pane", DetailsPane)
             assert pane.item_data is not None, "the pane should have adopted the item"
             before = dict(pane.item_data)
 
@@ -146,7 +146,7 @@ async def test_subscription_marker_poll_survives_a_locked_database(mock_config):
         app = ScraperApp()
         async with app.run_test() as pilot:
             await pilot.pause(ASYNC_PAUSE)
-            assert app._pending_subscription_ids() == [1], (
+            assert app._queued_subscription_ids() == [1], (
                 "the rendered queued row should be the poll's subject"
             )
 
@@ -154,7 +154,7 @@ async def test_subscription_marker_poll_survives_a_locked_database(mock_config):
                 "src.tui.get_subscription_states",
                 side_effect=sqlite3.OperationalError("database is locked"),
             ):
-                await app._poll_pending_subscriptions()
+                await app._poll_queued_subscriptions()
                 assert app._sub_poll_timer is not None, (
                     "a locked tick must arm the next one, or the row never "
                     "updates again"
@@ -221,7 +221,7 @@ def test_a_read_that_succeeds_again_arms_the_warning_once_more(caplog):
 #: so a future `self.set_interval(..., self._new_poll)` fails this test until it
 #: is either decorated or listed below with its reason.
 _TIMERS_WITHOUT_THEIR_OWN_READ = {
-    ("ScraperApp", "_poll_pending_subscriptions"):
+    ("ScraperApp", "_poll_queued_subscriptions"):
         "reads through refresh_subscription_rows, which is guarded",
     ("StatsScreen", "_on_scheduler_tick"):
         "reads on the stats worker, which catches a failed metric and retries",

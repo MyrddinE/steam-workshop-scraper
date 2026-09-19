@@ -42,7 +42,7 @@ def _spans(markup: str):
 @pytest.mark.parametrize("columns,state", [
     ({"own_subscribed": 1, "downloaded_at": 1000}, subscription.DOWNLOADED),
     ({"own_subscribed": 1, "own_first_subscribed_at": 1000}, subscription.SUBSCRIBED),
-    ({"is_queued_for_subscription": 1}, subscription.PENDING),
+    ({"is_queued_for_subscription": 1}, subscription.QUEUED),
     ({"own_first_subscribed_at": 1000}, subscription.PREVIOUSLY),
     ({}, subscription.NEVER),
 ])
@@ -74,7 +74,7 @@ async def test_the_tui_list_row_draws_each_state(tmp_path, columns, state):
 @pytest.mark.parametrize("columns,state", [
     ({"own_subscribed": 1, "downloaded_at": 1000}, subscription.DOWNLOADED),
     ({"own_subscribed": 1, "own_first_subscribed_at": 1000}, subscription.SUBSCRIBED),
-    ({"is_queued_for_subscription": 1}, subscription.PENDING),
+    ({"is_queued_for_subscription": 1}, subscription.QUEUED),
     ({"own_first_subscribed_at": 1000}, subscription.PREVIOUSLY),
     ({}, subscription.NEVER),
 ])
@@ -96,7 +96,7 @@ async def test_the_tui_detail_pane_draws_each_state_before_the_title(tmp_path, c
             list_view = app.query_one("#results-list", ListView)
             list_view.index = 0
             await pilot.pause(ASYNC_PAUSE)
-            pane = app.query_one("#item-details", DetailsPane)
+            pane = app.query_one("#detail-pane", DetailsPane)
             title_row = pane.query_one("#title-creator-row")
             children = list(title_row.children)
             marker_label = pane.query_one("#item-sub-marker", Label)
@@ -123,7 +123,7 @@ async def test_the_tui_detail_pane_has_no_queue_buttons(tmp_path):
         app = ScraperApp()
         async with app.run_test() as pilot:
             await pilot.pause(ASYNC_PAUSE)
-            pane = app.query_one("#item-details", DetailsPane)
+            pane = app.query_one("#detail-pane", DetailsPane)
             ids = {widget.id for widget in pane.query("*")}
 
     assert "btn-queue-sub" not in ids
@@ -154,16 +154,16 @@ async def test_the_keyboard_toggle_updates_the_marker(tmp_path):
 
             after = _markup_of(list_view.highlighted_child.query(Label)[1])
             pane_marker = _markup_of(
-                app.query_one("#item-details", DetailsPane)
+                app.query_one("#detail-pane", DetailsPane)
                 .query_one("#item-sub-marker", Label))
 
     assert subscription.glyph(subscription.NEVER) in before
-    # The `s` binding queues the item, so both sites must now draw pending.
-    assert subscription.glyph(subscription.PENDING) in after, \
+    # The `s` binding queues the item, so both sites must now draw queued.
+    assert subscription.glyph(subscription.QUEUED) in after, \
         "the list row must follow the keyboard toggle"
     _plain, after_spans = _spans(after)
-    assert subscription.colour(subscription.PENDING) in [s.style for s in after_spans]
-    assert subscription.glyph(subscription.PENDING) in pane_marker
+    assert subscription.colour(subscription.QUEUED) in [s.style for s in after_spans]
+    assert subscription.glyph(subscription.QUEUED) in pane_marker
 
 
 # --- the list marker follows the database, whoever wrote it -----------------
@@ -189,7 +189,7 @@ async def test_the_list_marker_follows_a_subscribe_that_lands_behind_it(tmp_path
     built from the item data captured when the row was made and nothing on the
     two-second detail-pane timer re-reads the list, so a subscribe landed by the
     daemon's reconcile -- or by the web UI in another process -- used to leave
-    the green pending outline in place until a search or a scroll rebuilt it.
+    the green queued outline in place until a search or a scroll rebuilt it.
     """
     db_path = str(tmp_path / "behind.db")
     _seed_queued(db_path)
@@ -200,7 +200,7 @@ async def test_the_list_marker_follows_a_subscribe_that_lands_behind_it(tmp_path
         async with app.run_test() as pilot:
             await pilot.pause(ASYNC_PAUSE)
             before = _list_row_markup(app)
-            assert subscription.glyph(subscription.PENDING) in before
+            assert subscription.glyph(subscription.QUEUED) in before
 
             # No callback in this process runs: the daemon's daily reconcile (or
             # the web UI) stamps the subscription straight into the shared table.
@@ -214,11 +214,11 @@ async def test_the_list_marker_follows_a_subscribe_that_lands_behind_it(tmp_path
     assert subscription.glyph(subscription.SUBSCRIBED) in after, after
     _plain, spans = _spans(after)
     assert subscription.colour(subscription.SUBSCRIBED) in [s.style for s in spans]
-    assert armed is None, "the poll must stop once no rendered row is pending"
+    assert armed is None, "the poll must stop once no rendered row is queued"
 
 
 @pytest.mark.asyncio
-async def test_the_poll_stops_when_no_rendered_row_is_pending(tmp_path):
+async def test_the_poll_stops_when_no_rendered_row_is_queued(tmp_path):
     """A settled list costs no database reads: the poll must not stay armed."""
     db_path = str(tmp_path / "settled.db")
     initialize_database(db_path)
@@ -230,7 +230,7 @@ async def test_the_poll_stops_when_no_rendered_row_is_pending(tmp_path):
         async with app.run_test() as pilot:
             await pilot.pause(ASYNC_PAUSE)
             never_armed = app._sub_poll_timer
-            # Even when armed by hand, one tick with nothing pending stops it.
+            # Even when armed by hand, one tick with nothing queued stops it.
             app._start_subscription_poll()
             await pilot.pause(ASYNC_PAUSE * 2)
             after_tick = app._sub_poll_timer
@@ -240,9 +240,9 @@ async def test_the_poll_stops_when_no_rendered_row_is_pending(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_the_poll_re_arms_itself_while_a_row_is_still_pending(tmp_path):
-    """Stopping is the exception, not the rule: a pending row keeps it armed."""
-    db_path = str(tmp_path / "still_pending.db")
+async def test_the_poll_re_arms_itself_while_a_row_is_still_queued(tmp_path):
+    """Stopping is the exception, not the rule: a queued row keeps it armed."""
+    db_path = str(tmp_path / "still_queued.db")
     _seed_queued(db_path)
     config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
 
@@ -256,9 +256,9 @@ async def test_the_poll_re_arms_itself_while_a_row_is_still_pending(tmp_path):
             armed = app._sub_poll_timer
             markup = _list_row_markup(app)
 
-    assert armed is not None, "a still-pending row must keep the poll running"
+    assert armed is not None, "a still-queued row must keep the poll running"
     _plain, spans = _spans(markup)
-    assert subscription.colour(subscription.PENDING) in [s.style for s in spans]
+    assert subscription.colour(subscription.QUEUED) in [s.style for s in spans]
 
 
 @pytest.mark.asyncio
@@ -304,7 +304,7 @@ async def test_a_pass_result_moves_an_on_screen_row_without_the_next_tick(tmp_pa
 
 
 def test_the_queue_row_builder_draws_the_items_real_state():
-    """The row used to hardcode `pending` whatever the item's state was."""
+    """The row used to hardcode `queued` whatever the item's state was."""
     subscribed = {
         "workshop_id": 5, "title": "Item",
         "own_subscribed": 1, "is_queued_for_subscription": 0,
@@ -350,7 +350,7 @@ async def test_the_open_folder_button_is_absent_off_windows(tmp_path):
         app = ScraperApp()
         async with app.run_test() as pilot:
             await pilot.pause(ASYNC_PAUSE)
-            pane = app.query_one("#item-details", DetailsPane)
+            pane = app.query_one("#detail-pane", DetailsPane)
             ids = {widget.id for widget in pane.query("*")}
 
     assert "btn-open-folder" not in ids
@@ -387,7 +387,7 @@ async def test_the_open_button_and_key_act_only_on_a_downloaded_item(tmp_path):
             list_view = app.query_one("#results-list", ListView)
             list_view.index = 0
             await pilot.pause(ASYNC_PAUSE)
-            pane = app.query_one("#item-details", DetailsPane)
+            pane = app.query_one("#detail-pane", DetailsPane)
 
             button = pane.query_one("#btn-open-folder", Button)
             assert button.disabled is True, "subscribed but not confirmed on disk"
@@ -440,11 +440,11 @@ async def test_the_queue_row_marker_follows_the_pass_outcome(tmp_path):
             await pilot.press("l")
             await pilot.pause(ASYNC_PAUSE)
             screen = app.screen
-            before = str(screen.query_one("#sub-item-5", Static).render())
+            before = str(screen.query_one("#sub-queue-item-5", Static).render())
             await pilot.click("#btn-subscribe-queue")
             await pilot.pause(ASYNC_PAUSE * 3)
-            after = str(screen.query_one("#sub-item-5", Static).render())
+            after = str(screen.query_one("#sub-queue-item-5", Static).render())
 
-    assert subscription.glyph(subscription.PENDING) in before
+    assert subscription.glyph(subscription.QUEUED) in before
     assert subscription.glyph(subscription.SUBSCRIBED) in after, after
-    assert subscription.glyph(subscription.PENDING) not in after, after
+    assert subscription.glyph(subscription.QUEUED) not in after, after
