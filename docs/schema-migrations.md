@@ -1,10 +1,10 @@
 # Schema & Migrations
 
-The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_version` increment pattern where each migration is a discrete `if db_version < N:` block within `initialize_database`, run sequentially on startup. Fresh databases run all migrations; existing databases run only pending ones.
+The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_version` increment pattern. Each migration is its own function in `src/database.py`, named `_migration_<from>_to_<to>`, and the ordered `MIGRATIONS` table maps each target version to its function. `initialize_database` is a short driver: it creates the schema, reads `PRAGMA user_version`, and runs every pending entry in ascending order on startup. Fresh databases run all migrations; existing databases run only pending ones.
 
 ---
 
-## Current Schema (v27)
+## Current Schema (v29)
 
 The application-level reference for every table and column is
 [data-model.md](data-model.md); the timestamp conventions are in
@@ -147,7 +147,55 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 
 ### Migration system (`initialize_database`)
 
-On startup, reads `PRAGMA user_version` and runs all unapplied migrations sequentially within the same database connection. Each migration sets `PRAGMA user_version = N` on completion. The connection is not wrapped in a single transaction across migrations — each migration commits independently, allowing crash recovery on a per-migration basis.
+`initialize_database` (`src/database.py`) is a short driver. It:
+
+1. opens the connection and sets `PRAGMA journal_mode=WAL`;
+2. calls `_create_schema(cursor, conn)`, which creates the tables and the
+   unversioned baseline columns every database history shares;
+3. reads `PRAGMA user_version` and runs every entry in the module-level
+   `MIGRATIONS` table whose target version is above it, in ascending order;
+4. calls `_ensure_indexes(cursor)`, then commits and closes.
+
+`MIGRATIONS` is an ordered list of `(target version, function)` pairs, from
+`(1, _migration_0_to_1)` to `(29, _migration_28_to_29)`. The functions are
+defined in `src/database.py` immediately above the table, in that same ascending
+order, so the file still reads as the schema's history top to bottom; each
+function body is the migration exactly as it stood at its version.
+
+The functions live beside the driver rather than in a separate `migrations`
+module because most of them call helpers defined in `database.py`
+(`normalize_tags`, `_ensure_tag_ids`, `compact_tag_ids`, `get_image_subdirs`,
+`_demote_filtered_out_queue_priorities`). A module that imported those helpers
+while `database.py` imported the migration table would be circular, so the
+extraction keeps them together.
+
+A migration is callable in isolation now: `_migration_19_to_20(cursor, conn,
+db_path)` runs one step against a database whose schema already sits at its base,
+which is what lets a test exercise one migration without replaying the chain.
+Each migration still sets `PRAGMA user_version = N` on completion. The connection
+is not wrapped in a single transaction across migrations — each migration commits
+independently, allowing crash recovery on a per-migration basis.
+`tests/test_migration_table.py` pins that the table is contiguous and ascending
+from 1 to `EXPECTED_VERSION`, that each entry names the function for its own
+version, and that a fresh database reaches `EXPECTED_VERSION`.
+
+**Adding the next migration (target v30):**
+
+1. bump `EXPECTED_VERSION` in `src/database.py` to `30`;
+2. append `def _migration_29_to_30(cursor, conn, db_path): ...` immediately
+   after `_migration_28_to_29`, keeping the body self-contained and preserving
+   what the step meant at v30 (no tidying an older step, no changing a
+   `PRAGMA user_version = N` target);
+3. append `(30, _migration_29_to_30)` as the last entry of `MIGRATIONS`;
+4. add a `### v29 → v30: ...` entry below, in the same shape as the others;
+5. if the step adds a column or table that a fresh database must also start
+   with, add it to `_create_schema` too — a fresh database begins at
+   `user_version = 0` and runs the whole table, so the two paths must agree on
+   the terminal schema.
+
+`tests/test_migration_table.py` fails if the table and `EXPECTED_VERSION`
+disagree, so a step cannot be half-added (function without entry, or entry
+without function) silently.
 
 ### v0 → v1: Wilson scores
 
@@ -812,7 +860,15 @@ Opens a new SQLite connection with `row_factory = sqlite3.Row` for dict-like row
 
 ### `initialize_database` (database)
 
-Creates tables (using `IF NOT EXISTS`), runs all pending migrations, creates indexes, and puts the database into WAL mode. This is called on every startup by the daemon, TUI, and web runner — before anything reads or writes — so the one call covers every later connection. Idempotent and safe to call on an existing database: on a database already in WAL the statement is a no-op.
+The driver described under [Migration system](#migration-system-initialize_database): sets WAL mode, calls `_create_schema`, runs the pending entries of `MIGRATIONS` in ascending order, calls `_ensure_indexes`, and commits. This is called on every startup by the daemon, TUI, and web runner — before anything reads or writes — so the one call covers every later connection. Idempotent and safe to call on an existing database: on a database already in WAL the statement is a no-op.
+
+### `_create_schema`, `_ensure_indexes`, `MIGRATIONS` (database)
+
+`_create_schema(cursor, conn)` creates the tables (`IF NOT EXISTS`) and the baseline columns, and runs the legacy data conversions every database history shares. It is the unversioned part of the schema, run before the versioned steps.
+
+`_ensure_indexes(cursor)` creates the query indexes. It is separate from `_create_schema` because several index columns (`api_fetched_at`, `scrape_version`) only exist after migration 13→14's renames, so it must run last; every statement is `IF NOT EXISTS`.
+
+`MIGRATIONS` is the ordered `[(target version, function), ...]` table the driver walks. The functions are `_migration_<from>_to_<to>(cursor, conn, db_path)` and sit above the table in ascending order. See [Migration system](#migration-system-initialize_database) for the shape and for how to add the next one.
 
 ### `_safe_add_columns` (database)
 
