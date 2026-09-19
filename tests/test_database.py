@@ -12,10 +12,10 @@ from src.database import (
     get_connection,
     count_never_fetched_items,
     delete_never_fetched_items,
-    flag_for_web_scrape,
-    flag_for_image,
-    bump_api_priority_for_list,
-    bump_api_priority_for_detail,
+    raise_web_scrape_priority,
+    raise_image_priority,
+    raise_api_priority_for_list,
+    raise_api_priority_for_detail,
     clear_subscription_queue,
     get_subscription_queue_items,
     EXPECTED_VERSION,
@@ -404,13 +404,13 @@ def test_get_app_tracking_missing(db_path):
 
 
 def test_translation_priority_set_on_flag(db_path):
-    """Bug #1 regression: flag_field_for_translation must set translation_priority
+    """Bug #1 regression: queue_field_for_translation must set translation_priority
     on the parent item so the web UI detail poll detects queued work."""
-    from src.database import insert_or_update_item, flag_field_for_translation, get_connection
+    from src.database import insert_or_update_item, queue_field_for_translation, get_connection
 
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト", "status": 200})
 
-    flag_field_for_translation(db_path, "item", 1, "title_en", "テスト", 10)
+    queue_field_for_translation(db_path, "item", 1, "title_en", "テスト", 10)
 
     conn = get_connection(db_path)
     prio = conn.execute(
@@ -423,10 +423,10 @@ def test_translation_priority_set_on_flag(db_path):
 def test_classify_translation_queued(db_path):
     """Bug #3: _classify_translation_status must show 'Queued' for items with
     non-ASCII text that have been flagged for translation."""
-    from src.database import insert_or_update_item, flag_field_for_translation, get_db_stats
+    from src.database import insert_or_update_item, queue_field_for_translation, get_db_stats
 
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト", "status": 200})
-    flag_field_for_translation(db_path, "item", 1, "title_en", "テスト", 5)
+    queue_field_for_translation(db_path, "item", 1, "title_en", "テスト", 5)
 
     stats = get_db_stats(db_path)
     assert stats["translation_status"]["Queued"] >= 1
@@ -611,35 +611,35 @@ def test_get_next_items_to_fetch_excludes_dead(db_path):
     assert [i["workshop_id"] for i in items] == [2]
 
 
-def test_flag_for_web_scrape_sets_priority(db_path):
-    """flag_for_web_scrape updates the needs_web_scrape column."""
+def test_raise_web_scrape_priority_sets_priority(db_path):
+    """raise_web_scrape_priority updates the needs_web_scrape column."""
     insert_or_update_item(db_path, {"workshop_id": 1})
-    flag_for_web_scrape(db_path, 1, 7)
+    raise_web_scrape_priority(db_path, 1, 7)
     conn = get_connection(db_path)
     val = conn.execute("SELECT needs_web_scrape FROM workshop_items WHERE workshop_id=1").fetchone()[0]
     conn.close()
     assert val == 7
 
 
-def test_flag_for_image_max_semantics(db_path):
-    """flag_for_image uses MAX — never downgrades."""
+def test_raise_image_priority_max_semantics(db_path):
+    """raise_image_priority uses MAX — never downgrades."""
     insert_or_update_item(db_path, {"workshop_id": 1, "needs_image": 10})
-    flag_for_image(db_path, 1, 3)
+    raise_image_priority(db_path, 1, 3)
     conn = get_connection(db_path)
     val = conn.execute("SELECT needs_image FROM workshop_items WHERE workshop_id=1").fetchone()[0]
     conn.close()
     assert val == 10  # not downgraded to 3
 
 
-def test_bump_api_priority_for_list_and_detail(db_path):
+def test_raise_api_priority_for_list_and_detail(db_path):
     """Bump functions set correct priority and skip dead items."""
     insert_or_update_item(db_path, {"workshop_id": 1})  # unscraped
     insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 8})  # already high
     insert_or_update_item(db_path, {"workshop_id": 3, "status": -1, "api_priority": 0})  # dead
 
-    bump_api_priority_for_list(db_path, 1)
-    bump_api_priority_for_list(db_path, 2)
-    bump_api_priority_for_list(db_path, 3)
+    raise_api_priority_for_list(db_path, 1)
+    raise_api_priority_for_list(db_path, 2)
+    raise_api_priority_for_list(db_path, 3)
 
     conn = get_connection(db_path)
     p1 = conn.execute("SELECT api_priority FROM workshop_items WHERE workshop_id=1").fetchone()[0]
@@ -651,7 +651,7 @@ def test_bump_api_priority_for_list_and_detail(db_path):
     assert p3 == 0   # dead, not bumped
 
     # Detail bump
-    bump_api_priority_for_detail(db_path, 1)
+    raise_api_priority_for_detail(db_path, 1)
     conn = get_connection(db_path)
     p1 = conn.execute("SELECT api_priority FROM workshop_items WHERE workshop_id=1").fetchone()[0]
     conn.close()
@@ -813,12 +813,12 @@ def test_insert_first_seen_at_defaults_when_explicitly_none(db_path):
 
 # ── translation_queue.queued_at ──────────────────────────────────────────────
 
-def test_flag_field_for_translation_stamps_queued_at(db_path):
+def test_queue_field_for_translation_stamps_queued_at(db_path):
     """New queue rows record our queue time; legacy NULLs are not fabricated."""
-    from src.database import flag_field_for_translation
+    from src.database import queue_field_for_translation
 
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト", "status": 200})
-    flag_field_for_translation(db_path, "item", 1, "title_en", "テスト", 5)
+    queue_field_for_translation(db_path, "item", 1, "title_en", "テスト", 5)
 
     conn = get_connection(db_path)
     row = conn.execute(

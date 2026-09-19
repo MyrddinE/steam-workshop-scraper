@@ -235,8 +235,8 @@ def _item(**over):
 
 
 def _flag(daemon, merged, existing, api_priority=3):
-    with patch("src.daemon.flag_for_web_scrape") as web, \
-         patch("src.daemon.flag_for_image") as img:
+    with patch("src.daemon.raise_web_scrape_priority") as web, \
+         patch("src.daemon.raise_image_priority") as img:
         outcome = daemon._raise_scrape_and_image_priorities(merged, existing, existing["workshop_id"], api_priority)
     return outcome, web, img
 

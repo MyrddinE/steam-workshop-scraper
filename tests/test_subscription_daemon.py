@@ -14,7 +14,7 @@ import pytest
 
 from src.daemon import (Daemon, SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS,
                         SUBSCRIPTION_RECONCILE_RETRY_SECONDS)
-from src.workshop_folders import DOWNLOAD_SCAN_INTERVAL_SECONDS
+from src.workshop_folders import DOWNLOADED_ITEM_SCAN_INTERVAL_SECONDS
 
 
 @pytest.fixture
@@ -201,7 +201,7 @@ def test_the_recorded_problem_lifts_the_short_interval_once_it_clears(daemon):
 
 def test_the_downloaded_scan_runs_on_the_first_batch_after_startup(daemon):
     assert daemon._last_download_scan is None
-    with patch.object(daemon.workshop_folders, "scan") as scan, \
+    with patch.object(daemon.workshop_folders, "scan_downloads") as scan, \
          patch('src.daemon.reconcile_own_subscriptions'), \
          patch('src.daemon.get_next_items_to_fetch', return_value=[]), \
          patch.object(Daemon, '_wait_for_work'):
@@ -211,7 +211,7 @@ def test_the_downloaded_scan_runs_on_the_first_batch_after_startup(daemon):
 
 
 def test_the_downloaded_scan_is_not_repeated_within_its_interval(daemon):
-    with patch.object(daemon.workshop_folders, "scan") as scan:
+    with patch.object(daemon.workshop_folders, "scan_downloads") as scan:
         daemon._maybe_scan_downloaded_items()
         daemon._maybe_scan_downloaded_items()
         daemon._maybe_scan_downloaded_items()
@@ -220,16 +220,16 @@ def test_the_downloaded_scan_is_not_repeated_within_its_interval(daemon):
 
 
 def test_the_downloaded_scan_runs_again_after_its_interval(daemon):
-    with patch.object(daemon.workshop_folders, "scan") as scan:
+    with patch.object(daemon.workshop_folders, "scan_downloads") as scan:
         daemon._maybe_scan_downloaded_items()
-        daemon._last_download_scan -= DOWNLOAD_SCAN_INTERVAL_SECONDS + 1
+        daemon._last_download_scan -= DOWNLOADED_ITEM_SCAN_INTERVAL_SECONDS + 1
         daemon._maybe_scan_downloaded_items()
 
     assert scan.call_count == 2
 
 
 def test_a_failing_downloaded_scan_never_reaches_the_scrape_loop(daemon):
-    with patch.object(daemon.workshop_folders, "scan",
+    with patch.object(daemon.workshop_folders, "scan_downloads",
                       side_effect=RuntimeError("drive went away")) as scan, \
          patch('src.daemon.reconcile_own_subscriptions'), \
          patch('src.daemon.get_next_items_to_fetch', return_value=[]), \

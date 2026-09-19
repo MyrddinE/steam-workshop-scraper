@@ -28,7 +28,7 @@ in the current schema.
 | `translated_at` | `workshop_items` | translator, when the item's last queued field is translated | Our clock: when this item's translation last completed. One stamp per item, not per field. |
 | `api_fetched_at` | `users` | daemon | Our clock: when the creator profile was last refreshed. |
 | `translated_at` | `users` | translator | Our wall-clock time of the translation. Users have no `steam_updated_at`, so this is not a version key. |
-| `queued_at` | `translation_queue` | `flag_field_for_translation`, new rows only | Our clock: when the queue entry was created. NULL on rows that predate migration 13→14, because their queue time is unknown. |
+| `queued_at` | `translation_queue` | `queue_field_for_translation`, new rows only | Our clock: when the queue entry was created. NULL on rows that predate migration 13→14, because their queue time is unknown. |
 
 ## Write Rules
 

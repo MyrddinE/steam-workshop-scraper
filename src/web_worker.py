@@ -6,12 +6,12 @@ import os
 import logging
 import threading
 from datetime import datetime, timezone
-from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, flag_field_for_translation, translation_is_current
+from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, queue_field_for_translation, translation_is_current
 from src import pacing
 from src import session_health
-from src.web_scraper import (DESCRIPTION_SELECTOR, ITEM_MISSING_HTTP_STATUSES, looks_gated,
+from src.web_scraper import (DESCRIPTION_SELECTOR, ITEM_MISSING_HTTP_STATUSES, looks_like_gated,
                              looks_like_item_page_without_description, looks_like_missing_item,
-                             looks_rate_limited, looks_signed_out, missing_item_reason,
+                             looks_like_rate_limited, looks_like_signed_out, missing_item_reason,
                              scrape_extended_details)
 from src import capture
 
@@ -106,7 +106,7 @@ def classify_scrape(scrape_result: dict | None) -> ScrapeOutcome:
     * ``None`` is a transport failure and is unattributable by construction.
     * A 404/410 means the item is gone. It is checked before the gate predicate
       because Steam serves its item-error page from the ordinary error shell
-      ("Steam Community :: Error"), which ``looks_gated`` claims.
+      ("Steam Community :: Error"), which ``looks_like_gated`` claims.
     * A 5xx is a server fault with no attributable cause, so it is unknown
       whatever the body happens to contain -- including that same wording.
     * Failing a status, Steam's item-error wording on a served 200 page means
@@ -131,11 +131,11 @@ def classify_scrape(scrape_result: dict | None) -> ScrapeOutcome:
         return ScrapeOutcome.UNKNOWN
     if looks_like_missing_item(body):
         return ScrapeOutcome.ITEM_MISSING
-    if looks_rate_limited(body):
+    if looks_like_rate_limited(body):
         return ScrapeOutcome.RATE_LIMITED
     if looks_like_item_page_without_description(body):
         return ScrapeOutcome.ITEM_PAGE_WITHOUT_DESCRIPTION
-    if looks_gated(body):
+    if looks_like_gated(body):
         return ScrapeOutcome.GATED
     return ScrapeOutcome.UNKNOWN
 
@@ -195,7 +195,7 @@ class WebScraperThread(threading.Thread):
         # lacks the signed-in markers too -- and reading that overlap as "signed
         # out" would be a mistake in one direction and skipping the refresh a
         # mistake in the other.
-        if self._session_refresh and (looks_signed_out(body) or looks_gated(body)):
+        if self._session_refresh and (looks_like_signed_out(body) or looks_like_gated(body)):
             try:
                 self._session_refresh()
             except Exception as exc:
@@ -205,13 +205,13 @@ class WebScraperThread(threading.Thread):
         # the login is bad, so it makes no claim about the session in either
         # direction. Every other miss does: this records the problem, or clears
         # one the fresh page disproves.
-        if not looks_rate_limited(body):
+        if not looks_like_rate_limited(body):
             self._record_session_health_from(body)
 
     def _record_session_health_from(self, body: str) -> None:
         """Record or clear the login problem a failed scrape is evidence of.
 
-        The predicate is :func:`looks_signed_out`, the specific one, rather than
+        The predicate is :func:`looks_like_signed_out`, the specific one, rather than
         the broader gate predicate beside it: it is what this codebase already
         trusts for exactly this decision, and unlike the gate predicate it does
         not fire on a throttle page. It is a heuristic and is documented as one --
@@ -225,7 +225,7 @@ class WebScraperThread(threading.Thread):
         """
         if not body:
             return
-        if looks_signed_out(body):
+        if looks_like_signed_out(body):
             session_health.record_rejected(self.db_path, session_health.NOT_ACCEPTED_DETAIL)
         else:
             session_health.record_accepted(self.db_path)
@@ -458,7 +458,7 @@ class WebScraperThread(threading.Thread):
                         item.get("extended_description_en"),
                         item.get("translate_version"),
                         item.get("steam_updated_at")):
-                    flag_field_for_translation(self.db_path, "item", workshop_id, "extended_description_en", desc, 3)
+                    queue_field_for_translation(self.db_path, "item", workshop_id, "extended_description_en", desc, 3)
 
                 title = item.get("title_en") or item.get("title") or str(workshop_id)
                 logging.info(f"[W:{workshop_id}] Scraped \"{title}\"")

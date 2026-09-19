@@ -7,7 +7,7 @@ queue row behind them, so the item reads as permanently pending and no producer
 will queue it again -- every producer skips a translation that is already
 current.
 
-The cause was in `flag_field_for_translation`: it wrote the queue row and the
+The cause was in `queue_field_for_translation`: it wrote the queue row and the
 parent mirror on two separate connections, so a translator drain landing between
 the two committed writes deleted the row and zeroed the mirror, and the second
 write raised the mirror again from `MAX(0, priority)`. These tests pin the
@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 
 from src.database import (
     EXPECTED_VERSION,
-    flag_field_for_translation,
+    queue_field_for_translation,
     get_connection,
     initialize_database,
     insert_or_update_item,
@@ -100,7 +100,7 @@ def test_flag_is_atomic_against_a_translator_drain(db_path):
         return real_get_connection(path)
 
     with patch.object(dbmod, "get_connection", get_connection_with_a_drain):
-        flag_field_for_translation(db_path, "item", 1, "title_en", "テスト", 5)
+        queue_field_for_translation(db_path, "item", 1, "title_en", "テスト", 5)
 
     # The invariant in both directions: a priority implies a queued field, and
     # an empty queue implies no priority.
@@ -116,7 +116,7 @@ def test_flag_raises_the_mirror_and_queues_the_field(db_path):
     """The ordinary case still does both, and the queue row is the source."""
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト"})
 
-    flag_field_for_translation(db_path, "item", 1, "title_en", "テスト", 5)
+    queue_field_for_translation(db_path, "item", 1, "title_en", "テスト", 5)
 
     assert _queue_count(db_path, 1) == 1
     assert _mirror(db_path, 1) == 5
@@ -126,8 +126,8 @@ def test_reflagging_never_downgrades(db_path):
     """A lower priority after a higher one leaves both queue and mirror alone."""
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト"})
 
-    flag_field_for_translation(db_path, "item", 1, "title_en", "テスト", 10)
-    flag_field_for_translation(db_path, "item", 1, "title_en", "テスト", 3)
+    queue_field_for_translation(db_path, "item", 1, "title_en", "テスト", 10)
+    queue_field_for_translation(db_path, "item", 1, "title_en", "テスト", 3)
 
     conn = get_connection(db_path)
     queued = conn.execute(

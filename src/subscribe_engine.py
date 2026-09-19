@@ -207,8 +207,8 @@ class SubscribeOutcome:
 
     ``status`` is one of the module's outcome constants. ``subscribed`` is the
     authoritative state after the run -- true only when the page (or the
-    already-toggled read) said so, never from Steam's JSON alone. ``queued`` is
-    true for the outcomes that must leave ``is_queued_for_subscription`` alone.
+    already-toggled read) said so, never from Steam's JSON alone. ``stays_queued``
+    is true for the outcomes that must leave ``is_queued_for_subscription`` alone.
     """
 
     workshop_id: int
@@ -220,14 +220,14 @@ class SubscribeOutcome:
     steam_success: int | None = None
 
     @property
-    def ok(self) -> bool:
+    def is_subscribed(self) -> bool:
         """Whether the item is subscribed now, verified or already."""
         return self.status in (ALREADY, SUBSCRIBED)
 
     @property
-    def queued(self) -> bool:
+    def stays_queued(self) -> bool:
         """Whether the item's queue entry should survive this outcome."""
-        return not self.ok
+        return not self.is_subscribed
 
 
 # The engine's own summary line for the TUI, one short phrase per outcome.
@@ -296,7 +296,7 @@ def parse_button_state(html: str | bytes | None) -> str:
 _CSRF_TOKEN_RE = re.compile(r"""g_sessionID\s*=\s*["']([^"']*)["']""", re.IGNORECASE)
 
 
-def parse_session_id(html: str | bytes | None) -> str:
+def parse_csrf_token(html: str | bytes | None) -> str:
     """The CSRF token Steam injected into a page, or ``""`` when it has none.
 
     Read from the page the attempt actually fetched, because ``sessionid`` is a
@@ -360,7 +360,7 @@ def page_read_authenticated(page_html: str | bytes | None) -> bool:
         return False
     if isinstance(page_html, bytes):
         page_html = page_html.decode("utf-8", "replace")
-    return not web_scraper.looks_signed_out(page_html)
+    return not web_scraper.looks_like_signed_out(page_html)
 
 
 # --- the shared request shape ------------------------------------------------
@@ -405,7 +405,7 @@ def resolve_subscribe_token(page_html: str | bytes | None, cookies: dict,
     ``page_token`` is exposed so the caller can log both fingerprints when the
     page's token differs from the fallback it replaced.
     """
-    page_token = parse_session_id(page_html)
+    page_token = parse_csrf_token(page_html)
     token = page_token or cookies.get("sessionid") or fallback_token or ""
     if token:
         cookies["sessionid"] = token
@@ -476,7 +476,7 @@ def post_subscribe_request(cookies: dict, token: str, appid, workshop_id: int,
     return resp
 
 
-def consumer_appid(db_path: str, workshop_id: int):
+def lookup_consumer_appid(db_path: str, workshop_id: int):
     """``(found, appid)`` for one item, so a refusal can name the real reason.
 
     The subscribe POST cannot be built without an AppID, and a missing row is a
@@ -611,7 +611,7 @@ class WebInterval:
         """
         if button_state != BUTTON_UNKNOWN:
             self._set_delay(pacing.decay(self.delay, self._elapsed, WEB_DELAY_FLOOR))
-        elif web_scraper.looks_rate_limited(body):
+        elif web_scraper.looks_like_rate_limited(body):
             self._set_delay(pacing.backoff(self.delay), force=True)
 
     def _set_delay(self, value: float, *, force: bool = False) -> None:
@@ -701,7 +701,7 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
         )
 
     if button_before == BUTTON_UNKNOWN:
-        if web_scraper.looks_rate_limited(page_html):
+        if web_scraper.looks_like_rate_limited(page_html):
             logging.warning(
                 "[Subscribe] Throttled while reading item %s; left queued.", workshop_id)
             return SubscribeOutcome(
@@ -729,7 +729,7 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
         return SubscribeOutcome(
             workshop_id, SESSION_PROBLEM, problem, button_before=button_before)
 
-    found, appid = consumer_appid(db_path, workshop_id)
+    found, appid = lookup_consumer_appid(db_path, workshop_id)
     if not found:
         return SubscribeOutcome(
             workshop_id, REFUSED, "Item not found.", button_before=button_before)
@@ -753,7 +753,7 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
             return refusal_outcome(
                 workshop_id, page_authenticated=page_authenticated,
                 db_path=db_path, button_before=button_before)
-        if web_scraper.looks_rate_limited(getattr(resp, "text", "") or ""):
+        if web_scraper.looks_like_rate_limited(getattr(resp, "text", "") or ""):
             logging.warning(
                 "[Subscribe] Throttled on the subscribe POST for %s; left queued.",
                 workshop_id)
@@ -838,7 +838,7 @@ def confirm_subscription(workshop_id: int, steam_success, *, db_path: str,
 
     # No button on the confirmation read: cannot tell. A throttle page stays
     # queued.
-    if web_scraper.looks_rate_limited(page_body(after_page)):
+    if web_scraper.looks_like_rate_limited(page_body(after_page)):
         logging.warning(
             "[Subscribe] Throttled on the confirmation read for %s; left queued.",
             workshop_id)

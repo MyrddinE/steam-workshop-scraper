@@ -233,7 +233,7 @@ def test_the_fixed_web_delay_gate_is_gone():
     source = pathlib.Path("src/web_scraper.py").read_text(encoding="utf-8")
     for name in names:
         # A word boundary so the removed gate's `_rate_limit` is not matched
-        # inside the surviving `looks_rate_limited`, which is a body predicate.
+        # inside the surviving `looks_like_rate_limited`, which is a body predicate.
         assert not re.search(rf"\b{re.escape(name)}\b", source), \
             f"{name} is still referenced in src/web_scraper.py"
 
@@ -275,16 +275,16 @@ def test_the_scraper_applies_no_delay_of_its_own():
 
 
 def test_image_worker_runs_without_crash(tmp_path):
-    """Smoke test: ImageScraperThread initializes and exits immediately."""
+    """Smoke test: ImageDownloadThread initializes and exits immediately."""
     import os
     from src.database import initialize_database
-    from src.image_worker import ImageScraperThread
+    from src.image_worker import ImageDownloadThread
 
     db_path = str(tmp_path / "img.db")
     initialize_database(db_path)
     os.makedirs("images", exist_ok=True)
 
-    worker = ImageScraperThread(db_path, ".pauselock")
+    worker = ImageDownloadThread(db_path, ".pauselock")
     worker.running = False
     worker.run()
 

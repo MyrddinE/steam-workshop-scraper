@@ -22,7 +22,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.database import (
-    flag_field_for_translation,
+    queue_field_for_translation,
     get_connection,
     get_next_batch_for_translation,
     initialize_database,
@@ -140,7 +140,7 @@ def _queued(db_path, fields, item_id: int = 1, priority: int = 10) -> list[dict]
         "workshop_id": item_id, "title": SOURCE, "status": 200,
     })
     for field in fields:
-        flag_field_for_translation(db_path, "item", item_id, field, SOURCE, priority)
+        queue_field_for_translation(db_path, "item", item_id, field, SOURCE, priority)
     return get_next_batch_for_translation(db_path, limit=len(fields))
 
 

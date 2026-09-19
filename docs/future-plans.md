@@ -380,7 +380,7 @@ pane needs nothing either, but for a different reason — `_poll_tail` writes th
 widget; the raw escape bytes do reach it, unrendered and zero-width.
 
 *(Landed. `_raise_scrape_and_image_priorities` returns a `ScrapeImageOutcome(enriched, queued)` rather than a
-bare bool: `queued` is set when `flag_for_web_scrape` or `flag_for_image` is called, and `enriched`
+bare bool: `queued` is set when `raise_web_scrape_priority` or `raise_image_priority` is called, and `enriched`
 is the filter verdict the two other consumers still need — `_queue_translations` and
 `_creator_to_refresh` read `outcome.enriched`, because a filter match is what gates translation and
 the creator refresh. The first landed form chose the marker from `enriched` alone, so an item that

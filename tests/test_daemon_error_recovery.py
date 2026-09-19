@@ -13,7 +13,7 @@ def _no_discovery_side_effects():
     _wait_for_work for ten minutes. Both are stubbed so a regression fails fast
     instead of hanging the suite.
     """
-    with patch("src.daemon.query_workshop_files"), patch.object(Daemon, "_wait_for_work"):
+    with patch("src.daemon.query_workshop_newest_page"), patch.object(Daemon, "_wait_for_work"):
         yield
 
 

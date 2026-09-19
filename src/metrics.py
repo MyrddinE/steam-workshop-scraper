@@ -612,7 +612,7 @@ def _coverage_scan(conn, where_sql: str, params: list) -> dict:
 
     The population tests here are the flagging rules, in SQL. A field is in a
     translation bar's population exactly when the code that queues it would
-    queue it: non-empty and non-ASCII (``flag_field_for_translation`` returns
+    queue it: non-empty and non-ASCII (``queue_field_for_translation`` returns
     early on an empty or ASCII field), and a stored translation counts only when
     :func:`translation_is_current` says it is current. The creator's name is the
     same test read through ``users``, counted per item so the bar is comparable

@@ -177,7 +177,7 @@ def get_workshop_details_batch(item_ids: list[int], api_key: str) -> dict[int, d
         return None
 
 
-def get_workshop_details_api(item_id: int, api_key: str) -> dict | None:
+def get_workshop_details(item_id: int, api_key: str) -> dict | None:
     """
     Fetches metadata for a single Steam Workshop item using the Steam Web API.
 
@@ -257,8 +257,8 @@ def get_player_summaries(steamids: list[int], api_key: str) -> dict[int, dict]:
     except (requests.exceptions.RequestException, ValueError, KeyError):
         return {}
 
-def query_workshop_files(appid: int, cursor: str, api_key: str,
-                         keep_running=None) -> dict:
+def query_workshop_newest_page(appid: int, cursor: str, api_key: str,
+                               keep_running=None) -> dict:
     """
     Queries the Steam Workshop using IPublishedFileService/QueryFiles,
     sorted by publication date (newest first). Uses cursor-based pagination
@@ -306,7 +306,7 @@ def query_workshop_files(appid: int, cursor: str, api_key: str,
         return {"total": 0, "items": [], "next_cursor": "", "error": True}
 
 
-def query_workshop_page_updated(appid: int, cursor: str, api_key: str, numperpage: int = 100,
+def query_workshop_updated_page(appid: int, cursor: str, api_key: str, numperpage: int = 100,
                                 keep_running=None) -> dict:
     """
     Queries Steam Workshop via IPublishedFileService/QueryFiles with

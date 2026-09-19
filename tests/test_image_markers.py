@@ -32,7 +32,7 @@ from src.images import (
     is_resolved,
     is_status_marker,
     served_type_marker,
-    status_marker,
+    permanent_status_marker,
 )
 
 # Every value that must never be handed to the browser as a filename.
@@ -130,13 +130,13 @@ def test_the_allowlist_is_derived_from_what_the_downloader_writes():
 
 @pytest.mark.parametrize("status,expected", [(404, "404"), (410, "410"), ("404", "404")])
 def test_a_permanent_status_is_recorded_as_its_number(status, expected):
-    assert status_marker(status) == expected
+    assert permanent_status_marker(status) == expected
 
 
 @pytest.mark.parametrize("status", [500, 503, 429, 200, None, "abc", ""])
 def test_a_non_permanent_status_records_nothing(status):
     """Only the final answers are written; the rest stay queued and retryable."""
-    assert status_marker(status) is None
+    assert permanent_status_marker(status) is None
 
 
 @pytest.mark.parametrize("content_type,expected", [

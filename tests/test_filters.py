@@ -227,8 +227,8 @@ def _daemon_for(db_path, appid=294100):
 def _flag(daemon, item, api_priority):
     """Drive the flagging with the item's pre-fetch api_priority, as the fetch does."""
     from unittest.mock import patch
-    with patch("src.daemon.flag_for_web_scrape") as web, \
-         patch("src.daemon.flag_for_image") as img:
+    with patch("src.daemon.raise_web_scrape_priority") as web, \
+         patch("src.daemon.raise_image_priority") as img:
         daemon._raise_scrape_and_image_priorities(item, item, item["workshop_id"], api_priority)
     return web, img
 

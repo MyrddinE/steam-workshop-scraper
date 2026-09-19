@@ -41,7 +41,7 @@ class _SlowController:
     def read_pid(self):
         return 4242
 
-    def tail_log(self, since=0, max_bytes=0, max_lines=0):
+    def tail_log(self, since_offset=0, max_bytes=0, max_lines=0):
         return {"lines": [], "offset": 0, "reset": False}
 
     def _transition(self, name: str):

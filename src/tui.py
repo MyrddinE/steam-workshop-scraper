@@ -13,7 +13,7 @@ from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, L
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.worker import Worker, WorkerState
-from src.database import search_items, get_all_creator_ids, initialize_database, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, bump_api_priority_for_list, bump_api_priority_for_detail, get_subscription_states, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES
+from src.database import search_items, get_all_creator_ids, initialize_database, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, raise_api_priority_for_list, raise_api_priority_for_detail, get_subscription_states, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES
 from src.analysis import view_window_analysis
 from src import metrics
 from src import db_poll
@@ -1142,7 +1142,7 @@ class SubscriptionQueueScreen(ModalScreen):
         item = self._items[index]
         outcome = self._outcomes.get(item["workshop_id"])
         if outcome is not None:
-            colour = "green" if outcome.ok else "yellow"
+            colour = "green" if outcome.is_subscribed else "yellow"
             return None, subscribe_engine.status_label(outcome.status), colour
         if not self._pass_running:
             return None, None, None
@@ -1304,7 +1304,7 @@ class SubscriptionQueueScreen(ModalScreen):
         refresh = getattr(self.app, "refresh_subscription_rows", None)
         if refresh is not None:
             self.app.call_after_refresh(refresh, [outcome.workshop_id])
-        if not outcome.ok and outcome.message:
+        if not outcome.is_subscribed and outcome.message:
             logging.info("[subscribe] %s: %s", outcome.workshop_id, outcome.message)
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
@@ -1322,7 +1322,7 @@ class SubscriptionQueueScreen(ModalScreen):
             button = self.query_one("#btn-subscribe-queue", Button)
             button.disabled = not self._items
             outcomes = event.worker.result if event.state == WorkerState.SUCCESS else []
-            done = sum(1 for o in outcomes if o.ok)
+            done = sum(1 for o in outcomes if o.is_subscribed)
             remaining = len(outcomes) - done
             self.query_one("#sub-queue-status", Static).update(
                 f"Pass finished: {done} subscribed, {remaining} left queued."
@@ -1428,7 +1428,7 @@ class DetailsPane(VerticalScroll):
                 # Windows-only, like the `o` binding it duplicates. It is present
                 # but disabled while the item is not green, so the affordance is
                 # discoverable with the reason rather than invisible.
-                if self._folder_service() is not None and self._folder_service().enabled():
+                if self._folder_service() is not None and self._folder_service().is_supported():
                     yield Button("Open Folder", id="btn-open-folder",
                                  classes="details-button", disabled=True)
             yield Button("jump", id="btn-jump-author", variant="primary")
@@ -1510,10 +1510,10 @@ class DetailsPane(VerticalScroll):
         self.item_data = None
         if workshop_id:
             db_path = self.app.db_path
-            bump_web_priority_for_detail(db_path, workshop_id)
-            bump_translation_for_detail(db_path, workshop_id)
-            bump_image_priority_for_detail(db_path, workshop_id)
-            bump_api_priority_for_detail(db_path, workshop_id)
+            raise_web_scrape_priority_for_detail(db_path, workshop_id)
+            raise_translation_priority_for_detail(db_path, workshop_id)
+            raise_image_priority_for_detail(db_path, workshop_id)
+            raise_api_priority_for_detail(db_path, workshop_id)
             await self.refresh_data()
 
     def watch_item_data(self, item_data: dict) -> None:
@@ -2281,7 +2281,7 @@ class ScraperApp(App):
         self._daemon_controller = DaemonController(self.config_path, config=self.config)
         # The downloaded-star folder helper: one locator for this process, shared
         # with the embedded web server through module-level discovery caching. The
-        # detail pane reads `enabled()` to decide whether to draw its button, and
+        # detail pane reads `is_supported()` to decide whether to draw its button, and
         # the periodic scan below uses it. One startup line says why it is off.
         self.workshop_folders = workshop_folders.WorkshopFolders(self.db_path, self.config)
         self.workshop_folders.log_status()
@@ -2451,7 +2451,7 @@ class ScraperApp(App):
         # while this process can see a daemon running, because the daemon runs
         # the same scan and two of them would check the same folders in
         # parallel. Off Windows the scan is a no-op and reads nothing.
-        self.set_interval(workshop_folders.DOWNLOAD_SCAN_INTERVAL_SECONDS,
+        self.set_interval(workshop_folders.DOWNLOADED_ITEM_SCAN_INTERVAL_SECONDS,
                           self._maybe_scan_downloaded_items)
 
     def _check_scroll_bottom(self, scroll_y: float) -> None:
@@ -2584,7 +2584,7 @@ class ScraperApp(App):
         The daemon runs the same scan, so this TUI's copy is skipped while the
         controller can see a daemon: two scans would stat the same folders in
         parallel for one answer. The interval is the daemon's
-        (``DOWNLOAD_SCAN_INTERVAL_SECONDS``), because it is the same work.
+        (``DOWNLOADED_ITEM_SCAN_INTERVAL_SECONDS``), because it is the same work.
 
         The read/write is guarded like every unattended database callback: a
         transient lock skips this tick, and the next one is the retry. Off
@@ -2592,7 +2592,7 @@ class ScraperApp(App):
         """
         if self._daemon_controller.is_running():
             return
-        self.workshop_folders.scan()
+        self.workshop_folders.scan_downloads()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -2749,11 +2749,11 @@ class ScraperApp(App):
 
         for item in results:
             if item.get("needs_web_scrape", 0) > 0:
-                bump_web_priority_for_list(self.db_path, item["workshop_id"])
-                bump_translation_for_list(self.db_path, item["workshop_id"])
+                raise_web_scrape_priority_for_list(self.db_path, item["workshop_id"])
+                raise_translation_priority_for_list(self.db_path, item["workshop_id"])
             if item.get("needs_image", 0) > 0:
-                bump_image_priority_for_list(self.db_path, item["workshop_id"])
-            bump_api_priority_for_list(self.db_path, item["workshop_id"])
+                raise_image_priority_for_list(self.db_path, item["workshop_id"])
+            raise_api_priority_for_list(self.db_path, item["workshop_id"])
             
         self.current_offset += len(results)
         
@@ -3007,7 +3007,7 @@ class ScraperApp(App):
         if not workshop_id:
             self.notify("No item selected to open.", severity="warning")
             return
-        result = self.workshop_folders.open(workshop_id)
+        result = self.workshop_folders.open_folder(workshop_id)
         severity = "information" if result["ok"] else "warning"
         self.notify(result["message"], severity=severity)
 

@@ -26,21 +26,21 @@ from src.database import (
     WORKSHOP_ITEM_COLUMNS,
 )
 from src.steam_api import (
-    get_workshop_details_api,
+    get_workshop_details,
     get_workshop_details_batch,
     query_workshop_items,
     get_player_summaries,
-    query_workshop_files,
+    query_workshop_newest_page,
     set_api_delay,
-    query_workshop_page_updated,
+    query_workshop_updated_page,
     STEAM_API_MAX_IDS_PER_REQUEST,
 )
 from src.translator import TranslatorThread, is_ascii
 from src.config import login_secure_value, save_config
-from src.database import flag_for_web_scrape, flag_field_for_translation, flag_for_image, translation_is_current
+from src.database import raise_web_scrape_priority, queue_field_for_translation, raise_image_priority, translation_is_current
 from src.firefox_cookies import steam_login_secure
 from src.web_worker import WebScraperThread
-from src.image_worker import ImageScraperThread
+from src.image_worker import ImageDownloadThread
 from src.backup import BackupThread
 from src.daemon_state import StateStore, state_path_for
 from src import pacing
@@ -50,7 +50,7 @@ from src import capture
 from src import crash
 from src import session_health
 from src.subscription_sync import reconcile_own_subscriptions
-from src.workshop_folders import WorkshopFolders, DOWNLOAD_SCAN_INTERVAL_SECONDS
+from src.workshop_folders import WorkshopFolders, DOWNLOADED_ITEM_SCAN_INTERVAL_SECONDS
 
 # API statuses the fetch path has an explicit branch for. Anything else is
 # captured as evidence and then treated as temporary by _settle_api_failure; it
@@ -58,7 +58,7 @@ from src.workshop_folders import WorkshopFolders, DOWNLOAD_SCAN_INTERVAL_SECONDS
 HANDLED_API_STATUSES = frozenset({200, 404, 500})
 
 # The only API outcome that cannot succeed on retry. Everything else -- 500,
-# transport exceptions (which get_workshop_details_api reports as 500), and any
+# transport exceptions (which get_workshop_details reports as 500), and any
 # status without its own branch -- is retried at one priority level lower.
 PERMANENT_API_STATUSES = frozenset({404})
 
@@ -178,7 +178,7 @@ class ScrapeImageOutcome(NamedTuple):
     * ``enriched`` -- the item matched its AppID's enrichment filters. This is
       what gates translation and the creator-persona refresh, and it says
       nothing about whether anything was queued.
-    * ``queued`` -- at least one of `flag_for_web_scrape` / `flag_for_image` was
+    * ``queued`` -- at least one of `raise_web_scrape_priority` / `raise_image_priority` was
       actually called. An enriched item whose description is current and whose
       preview needs no attempt matches the filters and queues nothing, and the
       discovery line must say so rather than claim it is ``enriching``.
@@ -193,9 +193,9 @@ class ScrapeImageOutcome(NamedTuple):
 # API merge. They must NOT survive a merge: a stale value would clobber a flag
 # just set, or resurrect one whose queue has already drained.
 #
-# flag_for_web_scrape / flag_for_image set their columns explicitly between the
+# raise_web_scrape_priority / raise_image_priority set their columns explicitly between the
 # merge and the insert. translation_priority is different only in timing: it is
-# written by flag_field_for_translation, which _queue_translations calls after
+# written by queue_field_for_translation, which _queue_translations calls after
 # the insert. Carrying the pre-fetch snapshot through the merge would write that
 # snapshot back over it, so a translator drain that landed while the API fetch
 # was in flight would be undone and leave a priority with no queue row behind
@@ -431,7 +431,7 @@ class Daemon:
         # is on disk, so its marker can turn solid green. The locator resolves
         # the Steam libraries once per process and only re-resolves on a miss,
         # and the scan itself is on a monotonic clock (see
-        # DOWNLOAD_SCAN_INTERVAL_SECONDS) because the per-batch path runs every
+        # DOWNLOADED_ITEM_SCAN_INTERVAL_SECONDS) because the per-batch path runs every
         # few seconds. One startup line says why it is off when it cannot work.
         self.workshop_folders = WorkshopFolders(self.db_path, self.config)
         self.workshop_folders.log_status()
@@ -496,7 +496,7 @@ class Daemon:
         """Upsert a creator profile, then queue a non-ASCII name for translation.
 
         The write comes **before** the queue call on purpose.
-        `flag_field_for_translation` inserts the `translation_queue` row and
+        `queue_field_for_translation` inserts the `translation_queue` row and
         raises `users.translation_priority` in one transaction, so it needs the
         `users` row to exist: on a creator's first sighting there is nothing for
         the mirror to land on, and queueing first would leave a queue row whose
@@ -512,7 +512,7 @@ class Daemon:
         """
         insert_or_update_user(self.db_path, self._build_user_record(steamid, personaname))
         if not is_ascii(personaname):
-            flag_field_for_translation(
+            queue_field_for_translation(
                 self.db_path, "user", steamid, "personaname_en", personaname, 1)
 
     def _merge_and_clean_api_data(self, api_data: dict, stored_item: dict, item_id: int, now_ts: int) -> dict:
@@ -626,7 +626,7 @@ class Daemon:
         """Fetch details for a batch in as few requests as the API allows.
 
         This is the only place request-level outcomes are counted: one call to
-        `_record_api_request_failure` or `_record_api_request_success` per POST.
+        `_back_off_api_delay` or `_decay_api_delay` per POST.
         A request that fails transports, times out, returns an HTTP error or an
         unparseable body settles every id it carried as a temporary 500; a
         request that returns and parses is a success whatever the individual
@@ -638,11 +638,11 @@ class Daemon:
             ids = [row["workshop_id"] for row in chunk]
             results = get_workshop_details_batch(ids, self.api_key)
             if results is None:
-                self._record_api_request_failure()
+                self._back_off_api_delay()
                 for item_id in ids:
                     api_data_by_id[item_id] = {"status": 500, "publishedfileid": item_id}
             else:
-                self._record_api_request_success()
+                self._decay_api_delay()
                 for item_id in ids:
                     # The batch helper fills omitted ids in as 404, so this
                     # fallback only covers an unanticipated response shape.
@@ -750,11 +750,11 @@ class Daemon:
         """
         now = time.monotonic()
         if (self._last_download_scan is not None
-                and now - self._last_download_scan < DOWNLOAD_SCAN_INTERVAL_SECONDS):
+                and now - self._last_download_scan < DOWNLOADED_ITEM_SCAN_INTERVAL_SECONDS):
             return
         self._last_download_scan = now
         try:
-            self.workshop_folders.scan()
+            self.workshop_folders.scan_downloads()
         except Exception as exc:
             logging.warning(
                 "Downloaded-item scan failed; housekeeping skipped this pass: %s", exc)
@@ -801,9 +801,9 @@ class Daemon:
         # items appeared, and then resumed. Batching the details calls made
         # fetching fast enough that the stall became a visible share of the
         # time, so the refill moved off this path entirely.
-        return self._fetch_batch()
+        return self._read_batch()
 
-    def _fetch_batch(self, failure_context: str = "Database error in process_batch"):
+    def _read_batch(self, failure_context: str = "Database error in process_batch"):
         """Read one batch from the database. Returns None on database error."""
         try:
             return get_next_items_to_fetch(self.db_path, limit=self.batch_size)
@@ -852,7 +852,7 @@ class Daemon:
 
         # Step 1: Query API
         if api_data is None:
-            api_data = get_workshop_details_api(item_id, self.api_key)
+            api_data = get_workshop_details(item_id, self.api_key)
         api_status = api_data.get("status", 0)
 
         if api_status not in HANDLED_API_STATUSES:
@@ -971,7 +971,7 @@ class Daemon:
             f"[A:{item_id}] API request failed ({api_status}). "
             f"Requeued at priority {retry_priority} to retry after the current queue."
         )
-        # Deliberately no `_record_api_request_failure()` here: this is one
+        # Deliberately no `_back_off_api_delay()` here: this is one
         # item's result, not the request's. A batch that returns and parses is a
         # success even when some of its items settle as temporary failures, so
         # only `_fetch_details` moves the delay.
@@ -1048,7 +1048,7 @@ class Daemon:
             if description_is_current:
                 merged_data["extended_description"] = stored_item["extended_description"]
             else:
-                flag_for_web_scrape(self.db_path, item_id, max(3, requested_priority))
+                raise_web_scrape_priority(self.db_path, item_id, max(3, requested_priority))
                 queued = True
             enriched = True
         elif not description_is_current:
@@ -1059,7 +1059,7 @@ class Daemon:
             # unless a person asked for the item, so a newly discovered one is
             # queued at 1 rather than carrying its discovery priority (3) into
             # this queue and outranking an item the filters did select.
-            flag_for_web_scrape(self.db_path, item_id, max(1, requested_priority))
+            raise_web_scrape_priority(self.db_path, item_id, max(1, requested_priority))
             queued = True
 
         # Image work, on the same revision test. Without it every API fetch
@@ -1073,8 +1073,8 @@ class Daemon:
         if merged_data.get("preview_url") and not (
                 images.blocks_retry(existing_ext)
                 or (revision_unchanged and images.can_render_image(existing_ext))):
-            flag_for_image(self.db_path, item_id,
-                           max(3, requested_priority) if enriched else max(1, requested_priority))
+            raise_image_priority(self.db_path, item_id,
+                                 max(3, requested_priority) if enriched else max(1, requested_priority))
             queued = True
         return ScrapeImageOutcome(enriched=enriched, queued=queued)
 
@@ -1082,7 +1082,7 @@ class Daemon:
                            enriched: bool, inherited_priority: int) -> None:
         """Flag title and short description for translation.
 
-        The non-ASCII test lives in flag_field_for_translation. What this adds is
+        The non-ASCII test lives in queue_field_for_translation. What this adds is
         the freshness test: a field whose translation was taken at the item's
         current Steam revision is left alone, so the staleness sweep does not
         re-translate unchanged text, while a field left behind by a source edit
@@ -1099,7 +1099,7 @@ class Daemon:
              merged_data.get("short_description_en")),
         ]:
             if text and not translation_is_current(translated, translate_version, steam_updated_at):
-                flag_field_for_translation(self.db_path, "item", item_id, field, text, translation_priority)
+                queue_field_for_translation(self.db_path, "item", item_id, field, text, translation_priority)
 
     def _creator_to_refresh(self, merged_data: dict, enriched: bool) -> int | None:
         """Return the creator id this item proposes for a persona refresh.
@@ -1156,7 +1156,7 @@ class Daemon:
             if creator_id in summaries:
                 self._store_user_record(creator_id, summaries[creator_id].get("personaname"))
 
-    def _record_api_request_failure(self) -> None:
+    def _back_off_api_delay(self) -> None:
         """Multiply the delay once for a refused request and clear the streak.
 
         Called once per POST from `_fetch_details`, never from the per-item
@@ -1186,7 +1186,7 @@ class Daemon:
             self._save_config_value(
                 "api_delay_seconds", pacing.persistable(self.api_delay))
 
-    def _record_api_request_success(self) -> None:
+    def _decay_api_delay(self) -> None:
         """Shave one step off the delay for a healthy request.
 
         A success is a request that returned and parsed; the individual results
@@ -1237,7 +1237,7 @@ class Daemon:
         self._web_worker = WebScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value,
                                               session_refresh=self._refresh_login_cookie)
         self._web_worker.start()
-        self._image_worker = ImageScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value)
+        self._image_worker = ImageDownloadThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value)
         self._image_worker.start()
         if self._backup_worker is not None:
             self._backup_worker.start()
@@ -1266,7 +1266,7 @@ class Daemon:
             # has been joined so no writer can be mid-transaction. Backup
             # failures are logged and swallowed: shutdown must still complete.
             try:
-                self._backup_worker.run_now()
+                self._backup_worker.snapshot_now()
             except Exception as e:
                 logging.error(f"Final database backup failed: {e}")
 
@@ -1313,8 +1313,8 @@ class Daemon:
             while cursor and self.running:
                 if self._pid_file_removed():
                     break
-                result = query_workshop_files(appid, cursor=cursor, api_key=self.api_key,
-                                              keep_running=self._discovery_alive)
+                result = query_workshop_newest_page(appid, cursor=cursor, api_key=self.api_key,
+                                                    keep_running=self._discovery_alive)
                 if result.get("abandoned"):
                     logging.info("Abandoned discovery for AppID %s: the daemon is stopping.", appid)
                     break
@@ -1325,10 +1325,10 @@ class Daemon:
                     # controller blind to half its traffic -- tolerable while it
                     # was serialised behind the fetch loop, not once it runs on
                     # its own thread.
-                    self._record_api_request_failure()
+                    self._back_off_api_delay()
                     logging.error(f"API error for AppID {appid}. Halting discovery.")
                     break
-                self._record_api_request_success()
+                self._decay_api_delay()
 
                 if pages == 0 and result["total"]:
                     logging.info(f"AppID {appid} has ~{result['total']} total items.")
@@ -1407,16 +1407,16 @@ class Daemon:
             cursor = "*"
             page = 0
             while cursor and self.running and page < 500:
-                result = query_workshop_page_updated(
+                result = query_workshop_updated_page(
                     appid, cursor, self.api_key, keep_running=self._discovery_alive)
                 if result.get("abandoned"):
                     logging.info("Abandoned page discovery for AppID %s: the daemon is stopping.", appid)
                     break
                 if result.get("error"):
-                    self._record_api_request_failure()
+                    self._back_off_api_delay()
                     logging.error(f"Page discovery error for AppID {appid}.")
                     break
-                self._record_api_request_success()
+                self._decay_api_delay()
 
                 items = result.get("items", [])
                 if page == 0:

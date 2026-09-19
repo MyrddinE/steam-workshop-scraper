@@ -6,7 +6,7 @@ import time
 import re
 import logging
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue, clear_subscription_queue, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, bump_api_priority_for_detail, delete_never_fetched_items
+from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, clear_subscription_queue, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items
 from src.analysis import view_window_analysis
 from src import capture
 from src import crash
@@ -27,7 +27,7 @@ app = Flask(__name__, template_folder='../templates')
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 
 
-def _with_image_state(rows):
+def _attach_image_state(rows):
     """Attach the image classification the grid branches on.
 
     Computed here from `src/images.py` rather than left to the browser: if the
@@ -110,7 +110,7 @@ def _get_daemon_controller() -> DaemonController:
     return _daemon_controller
 
 
-def _bbcode_to_html(text):
+def bbcode_to_html(text):
     """Converts Steam BBCode to HTML for web display."""
     if not text:
         return ""
@@ -175,7 +175,7 @@ def index():
     return render_template('index.html', web_delay=web_delay,
                            filter_schema_json=_json.dumps(SEARCH_FILTER_SCHEMA),
                            open_folder_enabled=bool(
-                               _workshop_folders and _workshop_folders.enabled()))
+                               _workshop_folders and _workshop_folders.is_supported()))
 
 
 @app.route('/userscript/<path:filename>')
@@ -229,11 +229,11 @@ def api_search():
             image_flagged_count = 0
             for item in results:
                 wid = item['workshop_id']
-                bump_web_priority_for_list(_db_path, wid)
-                bump_image_priority_for_list(_db_path, wid)
+                raise_web_scrape_priority_for_list(_db_path, wid)
+                raise_image_priority_for_list(_db_path, wid)
                 if _ensure_image_flagged(wid, 5):
                     image_flagged_count += 1
-                bump_translation_for_list(_db_path, wid)
+                raise_translation_priority_for_list(_db_path, wid)
 
             ids = [row['workshop_id'] for row in results]
             conn = get_connection(_db_path)
@@ -254,7 +254,7 @@ def api_search():
             sample = results[0] if results else {}
             logging.info(f"[Search] returned {len(results)} items, flagged {image_flagged_count} for image, sample needs_image={sample.get('needs_image')} image_extension={sample.get('image_extension')!r}")
 
-        return jsonify([_attach_subscription(row) for row in _with_image_state(results)])
+        return jsonify([_attach_subscription(row) for row in _attach_image_state(results)])
     except Exception as e:
         logging.exception(f"[Search] Error processing search request")
         return jsonify({"error": str(e)}), 500
@@ -269,9 +269,9 @@ def _detail_payload(workshop_id):
     # Both language variants travel together so the client can switch between
     # them without another request. The TUI's toggle is a local re-render, and
     # shipping the pair keeps the web equivalent off the network as well.
-    item["description_html"] = _bbcode_to_html(
+    item["description_html"] = bbcode_to_html(
         item.get("extended_description_en") or item.get("extended_description") or "")
-    item["description_html_original"] = _bbcode_to_html(item.get("extended_description") or "")
+    item["description_html_original"] = bbcode_to_html(item.get("extended_description") or "")
     item["display_title"] = item.get("title_en") or item.get("title") or "N/A"
     item["display_title_original"] = item.get("title") or item.get("title_en") or "N/A"
     # The TUI offers the toggle only once a translation has been stored, so the
@@ -337,11 +337,11 @@ def api_item_open(workshop_id):
     Separate from the read-only route so the frequent caller cannot re-queue an
     item by accident, and so the behaviour is directly testable.
     """
-    bump_web_priority_for_detail(_db_path, workshop_id)
-    bump_image_priority_for_detail(_db_path, workshop_id)
+    raise_web_scrape_priority_for_detail(_db_path, workshop_id)
+    raise_image_priority_for_detail(_db_path, workshop_id)
     _ensure_image_flagged(workshop_id, 10)
-    bump_translation_for_detail(_db_path, workshop_id)
-    bump_api_priority_for_detail(_db_path, workshop_id)
+    raise_translation_priority_for_detail(_db_path, workshop_id)
+    raise_api_priority_for_detail(_db_path, workshop_id)
 
     item = _detail_payload(workshop_id)
     if item is None:
@@ -370,7 +370,7 @@ def api_items():
         WHERE w.workshop_id IN ({placeholders})
     """
     results = [_attach_subscription(row) for row in
-               _with_image_state([dict(row) for row in conn.execute(sql, ids).fetchall()])]
+               _attach_image_state([dict(row) for row in conn.execute(sql, ids).fetchall()])]
     conn.close()
     return jsonify(results)
 
@@ -573,7 +573,7 @@ def _ensure_image_flagged(workshop_id, priority):
     ).fetchone()
     conn.close()
     if row and row["preview_url"] and not images.is_resolved(row["image_extension"]):
-        flag_for_image(_db_path, workshop_id, max(row["needs_image"] or 1, priority))
+        raise_image_priority(_db_path, workshop_id, max(row["needs_image"] or 1, priority))
         return True
     return False
 
@@ -628,7 +628,7 @@ def api_subscribe(workshop_id):
         session_health.record_rejected(_db_path, problem)
         return jsonify({"success": -1, "message": problem}), 400
 
-    found, appid = subscribe_engine.consumer_appid(_db_path, workshop_id)
+    found, appid = subscribe_engine.lookup_consumer_appid(_db_path, workshop_id)
     if not found:
         logging.warning(f"[Subscribe] No item row for workshop_id={workshop_id} — cannot subscribe")
         return jsonify({"success": -1, "message": "Item not found."}), 404
@@ -855,7 +855,7 @@ def api_open_folder(workshop_id):
     if helper is None:
         return jsonify({"ok": False, "folder": None,
                         "message": "The folder helper is not initialised on this server."}), 400
-    result = helper.open(workshop_id)
+    result = helper.open_folder(workshop_id)
     status = 200 if result["ok"] else 400
     return jsonify(result), status
 
@@ -904,5 +904,5 @@ def api_daemon_restart():
 
 @app.route('/api/daemon/log')
 def api_daemon_log():
-    since = request.args.get('since', 0, type=int) or 0
-    return jsonify(_get_daemon_controller().tail_log(since))
+    since_offset = request.args.get('since', 0, type=int) or 0
+    return jsonify(_get_daemon_controller().tail_log(since_offset))

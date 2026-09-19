@@ -447,10 +447,10 @@ async def test_tui_detail_priority_applied_once_per_pane_load(mock_config, mock_
          patch('src.tui.search_items', return_value=mock_results), \
          patch('src.tui.get_item_details', side_effect=get_details_mock), \
          patch('src.tui.get_all_creator_ids', return_value=["Author A"]), \
-         patch('src.tui.bump_api_priority_for_detail') as mock_api_bump, \
-         patch('src.tui.bump_web_priority_for_detail'), \
-         patch('src.tui.bump_image_priority_for_detail'), \
-         patch('src.tui.bump_translation_for_detail'):
+         patch('src.tui.raise_api_priority_for_detail') as mock_api_bump, \
+         patch('src.tui.raise_web_scrape_priority_for_detail'), \
+         patch('src.tui.raise_image_priority_for_detail'), \
+         patch('src.tui.raise_translation_priority_for_detail'):
 
         app = ScraperApp()
         async with app.run_test() as pilot:

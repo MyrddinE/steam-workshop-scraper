@@ -125,7 +125,7 @@ def page_count(declared_total: int) -> int:
     return max(1, math.ceil(declared_total / ITEMS_PER_PAGE))
 
 
-class SignInRequired(RuntimeError):
+class SignInRequiredError(RuntimeError):
     """Steam answered with its sign-in page instead of the requested page.
 
     Raised rather than logged at the point of the request so the caller can stop
@@ -143,7 +143,7 @@ SIGN_IN_PATH = "/login/"
 def _fetch_page(appid: int, page: int, config: dict, keep_running=None) -> str:
     """Fetch one subscriptions page and return its body.
 
-    Raises :class:`SignInRequired` when the response is Steam's sign-in page,
+    Raises :class:`SignInRequiredError` when the response is Steam's sign-in page,
     which is what an expired or revoked login cookie produces. Raises on a
     transport error or a non-2xx status: a page that did not arrive is not
     evidence about the owner's subscriptions, and the caller converts the raise
@@ -188,7 +188,7 @@ def _fetch_page(appid: int, page: int, config: dict, keep_running=None) -> str:
     response.raise_for_status()
     final_url = getattr(response, "url", "") or ""
     if SIGN_IN_PATH in final_url:
-        raise SignInRequired(
+        raise SignInRequiredError(
             f"the request for page {page} was redirected to Steam's sign-in page"
         )
     return response.text or ""
@@ -315,7 +315,7 @@ def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
         try:
             ids, declared_total = collect_subscribed_ids(
                 appid, config, keep_running=keep_running)
-        except SignInRequired as exc:
+        except SignInRequiredError as exc:
             # Retrying cannot help and would only ask Steam again, so the walk
             # ends here. Nothing is applied: a sign-in page is not a list. The
             # local expiry was readable and still in the future, so this is the

@@ -511,7 +511,7 @@ it without nine files each repeating the number.
 No schema change — the whole migration is data. `translation_priority` is a
 mirror of `translation_queue`: a producer raises it when it queues a field, and
 the translator zeroes it when the item's last queue row is deleted. Before this
-version `flag_field_for_translation` wrote the queue row and the mirror on **two
+version `queue_field_for_translation` wrote the queue row and the mirror on **two
 separate connections**, so the translator — which drains the queue on its own
 thread — could delete the row and zero the mirror between the two commits, after
 which the helper's second statement raised the mirror again from
@@ -775,7 +775,7 @@ backup*: `translation_queue` held 127,385 rows, **every one `item_type='item'`**
 and 5,540 creators held a translated name — the last written 45 minutes after the
 commit that replaced the scan, and none since. The regression is recorded as
 entries 45 and 46 in [code-issues.md](code-issues.md); `_build_user_record` now
-queues through `flag_field_for_translation`, and the translator's completion pass
+queues through `queue_field_for_translation`, and the translator's completion pass
 clears the user mirror.
 
 Two statements, in this order:

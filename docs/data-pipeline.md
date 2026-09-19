@@ -21,13 +21,13 @@ fetch while its scraper, image and discovery threads are already working. Each i
 4. Merges API data with existing DB row via `_merge_and_clean_api_data`, which filters to `MERGE_ITEM_KEYS` (derived from `WORKSHOP_ITEM_COLUMNS`), remaps `creator_app_id`/`consumer_app_id` to `creator_appid`/`consumer_appid`, remaps `description` to `short_description`, and remaps the API's `time_created`/`time_updated` to `steam_created_at`/`steam_updated_at`. Unknown API keys are discarded with a log message.
 5. Computes Wilson scores via `wilson_lower` (a binomial-proportion confidence interval using a 95% z-score of 1.96). Sets `wilson_favorite_score` from `(favorited, lifetime_subscriptions)` and `wilson_subscription_score` from `(subscriptions, lifetime_subscriptions)`.
 6. Evaluates enrichment filters via `_should_enrich`. Checks the stored `enrichment_filters` for each AppID against the item using `_evaluate_filters` (an in-memory filter evaluator that mirrors the SQL builder's semantics). If no filters are configured, all items are enriched.
-7. If enrichment is approved, calls `flag_for_web_scrape` at `max(3, requested)` -- and `flag_for_image` at the same priority if `preview_url` is present -- where `requested` is the part of the item's pre-fetch `api_priority` a *user* asked for (`user_requested_priority`; `5` and `10` only). An item the filters exclude is still scraped, but at `max(1, requested)`: the filters choose priority, not membership, and an excluded item must not outrank a selected one ([data-model.md](data-model.md#queue-priorities)). Sets `status = 200`. Calls `insert_or_update_item` to persist. The merge sets `api_fetched_at = now_ts` and `api_priority = 0`; `last_fetch_attempted_at` was already stamped on entry.
-8. For enriched items, flags `title` and `short_description` for translation via `flag_field_for_translation` at `max(3, requested)`. That function inserts into `translation_queue` and also raises the parent row's `translation_priority` (using `MAX`, so it never downgrades); the translator clears it to 0 when the item has no queue entries left. Users with non-ASCII names get `translation_priority = 1` set via `_build_user_record`.
+7. If enrichment is approved, calls `raise_web_scrape_priority` at `max(3, requested)` -- and `raise_image_priority` at the same priority if `preview_url` is present -- where `requested` is the part of the item's pre-fetch `api_priority` a *user* asked for (`user_requested_priority`; `5` and `10` only). An item the filters exclude is still scraped, but at `max(1, requested)`: the filters choose priority, not membership, and an excluded item must not outrank a selected one ([data-model.md](data-model.md#queue-priorities)). Sets `status = 200`. Calls `insert_or_update_item` to persist. The merge sets `api_fetched_at = now_ts` and `api_priority = 0`; `last_fetch_attempted_at` was already stamped on entry.
+8. For enriched items, flags `title` and `short_description` for translation via `queue_field_for_translation` at `max(3, requested)`. That function inserts into `translation_queue` and also raises the parent row's `translation_priority` (using `MAX`, so it never downgrades); the translator clears it to 0 when the item has no queue entries left. Users with non-ASCII names get `translation_priority = 1` set via `_build_user_record`.
 9. After the batch, refreshes the batch's creator profiles in **one** `get_player_summaries` call: the distinct creators proposed by enriched items whose `users` row is missing or older than `user_staleness_days`. This was one request per item; the "only for enriched items" and staleness rules are unchanged.
 
 **Missing ids**: `get_workshop_details_batch` keys results by each entry's `publishedfileid`, never by position, and ignores duplicate or unrequested ids. A requested id the response omits is reported as a synthetic `500`, not a `404`: the response not covering an id is a different claim from Steam having deleted the item, and a `404` would mark it permanently dead. It is therefore settled as a temporary failure and retried, rather than being silently skipped at the front of the queue.
 
-**Error handling**: the batch helper returns `None` when the *request* failed — a transport error, a timeout, an HTTP error such as 429, or a body that is not JSON — and the daemon settles every id it carried as a temporary `500`. It returns a mapping (an empty successful response included) when the request returned and parsed. The daemon maps a per-item `404` to `status = -1` (dead), clears every queue flag so the item is in no queue, and persists a `500` as `status = 500` for a later attempt. Both paths stamp `last_fetch_attempted_at`; the `500` path leaves `api_fetched_at` untouched. `get_workshop_details_api(item_id)` remains the one-id spelling and returns the same shapes.
+**Error handling**: the batch helper returns `None` when the *request* failed — a transport error, a timeout, an HTTP error such as 429, or a body that is not JSON — and the daemon settles every id it carried as a temporary `500`. It returns a mapping (an empty successful response included) when the request returned and parsed. The daemon maps a per-item `404` to `status = -1` (dead), clears every queue flag so the item is in no queue, and persists a `500` as `status = 500` for a later attempt. Both paths stamp `last_fetch_attempted_at`; the `500` path leaves `api_fetched_at` untouched. `get_workshop_details(item_id)` remains the one-id spelling and returns the same shapes.
 
 **Dynamic delay**: `api_delay` is driven by **requests**, not items — one change per batched POST, never per item. A request that returns and parses is a success whatever its individual results say (a batch of 50 of which 10 are "not found" is a completely successful API call), and it resets the failure streak. The rule is TCP congestion control, not a safety net: every refused request doubles the delay and healthy operation walks it back down, so the client converges on the fastest rate Steam will sustain — a limit that is not published and may move. Steady state is a sawtooth around that rate.
 
@@ -58,7 +58,7 @@ the install's `libraryfolders.vdf`, in both the current `<steam>/steamapps/` and
 `<steam>/config/` locations, with `steam.workshop_content_dirs` added on top — and re-resolved only
 when a lookup finds nothing, so a second drive that appears later is picked up without re-reading the
 registry on every check. `_maybe_scan_downloaded_items` guards the scan on a monotonic
-`DOWNLOAD_SCAN_INTERVAL_SECONDS` (60 s) clock, like the staleness sweep, because the per-batch path runs
+`DOWNLOADED_ITEM_SCAN_INTERVAL_SECONDS` (60 s) clock, like the staleness sweep, because the per-batch path runs
 every few seconds; the scan changed nothing logs nothing, and a changing scan logs one line with its
 counts. The TUI runs the same scan on the same interval but skips it while its daemon controller can see
 a daemon, so the two processes never scan in parallel. On a machine where the feature cannot work (not
@@ -118,15 +118,15 @@ suppressed discovery permanently while the fetch queue held a single item.
 
 A periodic alternative to cursor-based discovery. Enabled when a `.fetch_new` trigger file exists, when `_cursor_exhausted` is True, or when at least 500 items have been scraped (`api_fetched_at IS NOT NULL`). Runs at most once per 24 hours (tracked via `_last_page_discovery`), unless the trigger file bypasses the cooldown.
 
-Uses `query_workshop_page_updated`, which calls QueryFiles with `query_type=21` (rank by last updated, most recent first) and cursor-based pagination. It walks up to 500 pages per AppID, comparing each item's returned `time_updated` against the stored `steam_updated_at` and upserting new or changed items as bare rows at `api_priority = 5`. Stops when a page yields no new or changed items.
+Uses `query_workshop_updated_page`, which calls QueryFiles with `query_type=21` (rank by last updated, most recent first) and cursor-based pagination. It walks up to 500 pages per AppID, comparing each item's returned `time_updated` against the stored `steam_updated_at` and upserting new or changed items as bare rows at `api_priority = 5`. Stops when a page yields no new or changed items.
 
 After page mode completes, the daemon resumes normal cursor-based discovery.
 
-### `query_workshop_files` (steam_api)
+### `query_workshop_newest_page` (steam_api)
 
 Calls `IPublishedFileService/QueryFiles/v1/` with cursor-based pagination. Parameters: `query_type=1` (publication date), `cursor`, `numperpage=100`, `appid`. Returns `{total, items, next_cursor}`. Rate-limited via `_rate_limit()`.
 
-### `query_workshop_page_updated` (steam_api)
+### `query_workshop_updated_page` (steam_api)
 
 Same API endpoint but with `query_type=21` (last updated) and cursor-based pagination. Used exclusively by `_run_page_discovery`. Returns the same `{total, items, next_cursor}` shape.
 
@@ -138,7 +138,7 @@ Same API endpoint but with `query_type=21` (last updated) and cursor-based pagin
 
 Calls `ISteamRemoteStorage/GetPublishedFileDetails/v1/` once for many ids — `itemcount=N` with `publishedfileids[0..N-1]` — and returns a `{id: detail}` mapping. Results are matched by each entry's `publishedfileid`, never by position, so a reordered, duplicated or extended response cannot mis-assign a result. A requested id the response omits is filled in as `{status: 500}` — deliberately not a `404`, which would mark the item permanently dead. Returns `None` when the request itself failed (transport, timeout, HTTP error, or unparseable body); that is the signal the daemon backs off on. The per-request ceiling is `STEAM_API_MAX_IDS_PER_REQUEST = 100`, taken from the documented `GetPlayerSummaries` limit and applied to `GetPublishedFileDetails` too, which publishes no cap.
 
-### `get_workshop_details_api` (steam_api)
+### `get_workshop_details` (steam_api)
 
 The one-id spelling of the batch call, kept for existing callers. Returns `{status: 500}` on a request failure and `{status: 404}` when the item is not found or `result != 1`. Returns the raw detail dict otherwise, containing the API's `title`, `description`, `tags`, `file_size`, `preview_url`, `creator`, `subscriptions`, `favorited`, `views`, `time_created`, `time_updated`, and more (these are the raw API field names; `_merge_and_clean_api_data` renames some of them before storage).
 
@@ -146,7 +146,7 @@ The one-id spelling of the batch call, kept for existing callers. Returns `{stat
 
 Merges API response data into the existing DB row. Applies column-name remapping (`creator_app_id` → `creator_appid`, `description` → `short_description`, `time_created`/`time_updated` → `steam_created_at`/`steam_updated_at`). Filters to `MERGE_ITEM_KEYS` (derived from `WORKSHOP_ITEM_COLUMNS`) to prevent unknown API columns from polluting the DB, and discards known-but-handled-externally keys (for example `needs_web_scrape`, `image_extension`, `needs_image`, `translation_priority`). Normalizes tags via `normalize_tags`. On the success path it stamps `api_fetched_at = now_ts` and `api_priority = 0`.
 
-The queue-owned columns are dropped rather than carried because the merge is a read-modify-write: the existing row is read before the API call and written back after it, so a queue flag that changed while the request was in flight would be overwritten by the stale snapshot. `needs_web_scrape` and `needs_image` are set explicitly between the merge and the insert; `translation_priority` is written by `flag_field_for_translation` just after the insert, so the merge must leave the column untouched.
+The queue-owned columns are dropped rather than carried because the merge is a read-modify-write: the existing row is read before the API call and written back after it, so a queue flag that changed while the request was in flight would be overwritten by the stale snapshot. `needs_web_scrape` and `needs_image` are set explicitly between the merge and the insert; `translation_priority` is written by `queue_field_for_translation` just after the insert, so the merge must leave the column untouched.
 
 ### `_should_enrich` (daemon)
 
@@ -403,7 +403,7 @@ outbox.
 
 ## Image Download Phase
 
-### `ImageScraperThread` (image_worker)
+### `ImageDownloadThread` (image_worker)
 
 A daemon thread that picks up items from `get_next_image_item`, ordered by `needs_image DESC, api_fetched_at ASC`. For each item:
 
@@ -454,19 +454,19 @@ The mirror was once the queue itself. `flag_for_translation` set
 was a complete producer and `_build_user_record` calling it directly was correct.
 The per-field `translation_queue` replaced that scan, and once nothing in `src/`
 called either function — only their own tests did — both were deleted. The current
-design queues a field with `flag_field_for_translation` and derives the mirror
+design queues a field with `queue_field_for_translation` and derives the mirror
 from the queue, so raising the mirror without a queue row is the stranded state
 migrations 22→23 and 27→28 repair. The regression that followed from leaving the
 producer unported is why migration 27→28 exists; see
 [schema-migrations.md](schema-migrations.md).
 
-### `flag_field_for_translation` (database)
+### `queue_field_for_translation` (database)
 
 Inserts or bumps an entry in `translation_queue`, and also raises the parent row's `translation_priority` via `MAX`. Checks if the field already exists in the queue; if so, bumps its priority (never downgrades). If new, inserts with the given priority and `queued_at = now`. This is the **only** producer: it queues item fields and, since issue 45, a creator's `personaname_en` as well, called by `_store_user_record` after the profile upsert (the mirror needs the `users` row to exist).
 
 **Both writes happen in one transaction on one connection.** They used to run on two connections, and the translator drains the queue on its own thread: a drain landing between them deleted the row and zeroed the mirror, after which the second write raised the mirror again with nothing queued behind it. The item then read as permanently pending, because every producer skips a translation that is already current, so nothing ever re-queued the field to clear it. Migration 22→23 repairs the rows the old helper stranded.
 
-### `bump_translation_for_list` / `bump_translation_for_detail` (database)
+### `raise_translation_priority_for_list` / `raise_translation_priority_for_detail` (database)
 
 Called when items are displayed in the list or detail view. For each non-ASCII text field (title, short_description, extended_description), checks if the `_en` translated counterpart is already populated. If not, flags the field for translation at priority 5 (list) or 10 (detail). This ensures viewed items get translated promptly.
 
@@ -480,13 +480,13 @@ priority. The fifth, a creator's name, is the exception and says why below.
 |---|---|---|---|---|
 | Daemon enriches an item via the API | `daemon.py`, `_queue_translations` (from `_process_item`) | `title_en`, `short_description_en` | `max(3, requested)` | Yes |
 | Web scrape succeeds | `web_worker.py`, `WebScraperThread` | `extended_description_en` | 3 | Yes |
-| Item appears in a list | `bump_translation_for_list` (TUI list load, `POST /api/search`) | all three | 5 | Yes |
-| Item opened in the detail pane | `bump_translation_for_detail` (TUI selection, `GET /api/item/<id>`) | all three | 10 | Yes |
+| Item appears in a list | `raise_translation_priority_for_list` (TUI list load, `POST /api/search`) | all three | 5 | Yes |
+| Item opened in the detail pane | `raise_translation_priority_for_detail` (TUI selection, `GET /api/item/<id>`) | all three | 10 | Yes |
 | Daemon refreshes a creator's profile | `daemon.py`, `_store_user_record` (from `_refresh_creators`) | `personaname_en` | 1 | **No** |
 
 Two conditions apply to every trigger:
 
-- **Only non-empty, non-ASCII text is queued.** `flag_field_for_translation` returns immediately
+- **Only non-empty, non-ASCII text is queued.** `queue_field_for_translation` returns immediately
   for empty or ASCII text, so an ASCII-only title is never sent anywhere.
 - **Priority only rises.** Flagging a field already in the queue with a higher priority updates the
   entry; a lower priority is ignored. It is never downgraded.
@@ -504,7 +504,7 @@ creator has no `steam_updated_at`, and the only clock the rule could compare —
 very refresh that calls the producer. Skipping there would leave the Creator
 Translation bar counting a name as untranslated with nothing queued behind it, so
 `_store_user_record` queues every non-ASCII name it is handed, right after the
-profile upsert (`flag_field_for_translation` raises the mirror in the same
+profile upsert (`queue_field_for_translation` raises the mirror in the same
 transaction as the queue row, so the `users` row must exist first). The cost is at
 most one re-translation per creator per refresh cycle, and a profile is only
 refreshed when an enriched item proposes its creator and the profile's
@@ -512,7 +512,7 @@ refreshed when an enriched item proposes its creator and the profile's
 
 This replaced a pair of defects. The two background triggers used to check only that the text was
 non-ASCII, while the two user-view triggers also checked for an existing translation. Since a
-successful translation **deletes** its queue row, `flag_field_for_translation`'s "already in the
+successful translation **deletes** its queue row, `queue_field_for_translation`'s "already in the
 queue" check offered no protection afterwards — so with the staleness sweep returning every
 `status = 200` item to the fetch queue about monthly, an enriched item with a non-ASCII title was
 re-translated roughly monthly whether or not anything had changed. Meanwhile nothing compared the
@@ -557,9 +557,9 @@ to implement it — the producer that writes the column and the consumer that re
 | Handoff | Producer writes | Consumer selects on | Predicate function (`src/database.py`) |
 |---|---|---|---|
 | Discovery → API fetch | `api_priority = 3` for a cursor-discovered item, `5` for a page-discovered new or changed one, with `status` and `api_fetched_at` left NULL (`seed_database`, `_run_page_discovery`) | `get_next_items_to_fetch`: `api_priority > 0 AND (status IS NULL OR status != -1)` | `api_fetch_queue_predicate()` |
-| API fetch → web scrape | `status = 200`, `api_fetched_at = now`, then `flag_for_web_scrape(max(3, requested))` — or `max(1, requested)` for an item the enrichment filters exclude (`_raise_scrape_and_image_priorities`) | `get_next_web_scrape_item`: `needs_web_scrape > 0`. The worker's own success test is that it stored a description, not merely that the flag is clear | `web_scrape_queue_predicate()` |
-| API fetch → image | `flag_for_image(max(3, requested))`, or `max(1, requested)` when the filters exclude, whenever `preview_url` is present (`_raise_scrape_and_image_priorities`) | `get_next_image_item`: `needs_image > 0`; `image_extension` records the answer, so a permanent `404` or a non-image type also settles the stage | `image_queue_predicate()` |
-| API fetch and web scrape → translation | `flag_field_for_translation` raises the item's `translation_priority` with `MAX` and inserts a `translation_queue` row for each non-ASCII `title`/`short_description` (`_queue_translations`) or `extended_description` (`WebScraperThread`) | `get_next_batch_for_translation`: any `translation_queue` row; the translator clears the mirror to `0` when the item has no queue entries left | `translation_queue_predicate()` (the poll's; `translation_priority_predicate()` is the item-level mirror the invariant reads) |
+| API fetch → web scrape | `status = 200`, `api_fetched_at = now`, then `raise_web_scrape_priority(max(3, requested))` — or `max(1, requested)` for an item the enrichment filters exclude (`_raise_scrape_and_image_priorities`) | `get_next_web_scrape_item`: `needs_web_scrape > 0`. The worker's own success test is that it stored a description, not merely that the flag is clear | `web_scrape_queue_predicate()` |
+| API fetch → image | `raise_image_priority(max(3, requested))`, or `max(1, requested)` when the filters exclude, whenever `preview_url` is present (`_raise_scrape_and_image_priorities`) | `get_next_image_item`: `needs_image > 0`; `image_extension` records the answer, so a permanent `404` or a non-image type also settles the stage | `image_queue_predicate()` |
+| API fetch and web scrape → translation | `queue_field_for_translation` raises the item's `translation_priority` with `MAX` and inserts a `translation_queue` row for each non-ASCII `title`/`short_description` (`_queue_translations`) or `extended_description` (`WebScraperThread`) | `get_next_batch_for_translation`: any `translation_queue` row; the translator clears the mirror to `0` when the item has no queue entries left | `translation_queue_predicate()` (the poll's; `translation_priority_predicate()` is the item-level mirror the invariant reads) |
 | any stage → dead | `_settle_api_failure` on a permanent `404`: `status = -1` and `api_priority`, `needs_web_scrape`, `needs_image` and `translation_priority` all cleared | every queue predicate. The web, image and translation polls have **no** dead-item guard, so that clear is what keeps a dead item out; the fetch queue also tests `status != -1` on its own | `queued_anywhere_predicate()` (built from the four above) |
 
 Each predicate is a named function, not a copy of its SQL: the worker poll
@@ -620,7 +620,7 @@ population is what stops a bar promising work that cannot exist.
 
 The three translation bars have **three different scopes** deliberately, because the code that feeds
 them does. Each population is the flagging rule written in SQL — non-empty and non-ASCII
-(`flag_field_for_translation` returns early on an empty or ASCII field), translated and current
+(`queue_field_for_translation` returns early on an empty or ASCII field), translated and current
 (`translation_is_current`) — so a bar and the work it measures cannot disagree. Where a rule is
 Python today and the metric is its SQL translation, the metric's docstring says so, the same way the
 filtered figure already did for the enrichment filters. A population of zero is a legitimate answer
@@ -731,7 +731,7 @@ completion indexes migration 26→27 added. No new index was required.
     │      ▼
     │   [Scraped: extended_description populated, needs_web_scrape=0]
     │
-    ├─► Image Download (if preview_url): ImageScraperThread
+    ├─► Image Download (if preview_url): ImageDownloadThread
     │      │
     │      ▼
     │   [Image: image_extension set, needs_image=0]
@@ -742,7 +742,7 @@ completion indexes migration 26→27 added. No new index was required.
         [Translated: title_en, etc. populated, translation_priority=0]
 ```
 
-Each thread operates independently. The web server's `_ensure_image_flagged` sets `needs_image=5` for list-viewed items and 10 for the detail view, and the daemon calls `flag_for_image(max(3, requested))` for newly discovered items with a `preview_url`, where `requested` is the user-requested part of the item's pre-fetch `api_priority` (`user_requested_priority`).
+Each thread operates independently. The web server's `_ensure_image_flagged` sets `needs_image=5` for list-viewed items and 10 for the detail view, and the daemon calls `raise_image_priority(max(3, requested))` for newly discovered items with a `preview_url`, where `requested` is the user-requested part of the item's pre-fetch `api_priority` (`user_requested_priority`).
 
 ---
 

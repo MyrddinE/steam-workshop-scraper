@@ -477,7 +477,7 @@ class TranslatorThread(threading.Thread):
         self._resume_persisted_backoff()
 
         while self.running:
-            candidates = self._fetch_candidates()
+            candidates = self._read_candidates()
             if candidates is None:
                 self._sleep(30)
                 continue
@@ -497,7 +497,7 @@ class TranslatorThread(threading.Thread):
                 # the old loop did forever -- it re-polled the same partial batch
                 # every 30 s, so work smaller than a full batch never ran.
                 self._sleep(BATCH_FILL_WAIT_SECONDS)
-                refreshed = self._fetch_candidates()
+                refreshed = self._read_candidates()
                 if refreshed:
                     # Whatever the queue holds now is what gets sent: the deadline
                     # has passed, so the re-pack feeds the send rather than another
@@ -519,7 +519,7 @@ class TranslatorThread(threading.Thread):
 
         # Thread lifecycle logging handled by daemon
 
-    def _fetch_candidates(self) -> list[dict] | None:
+    def _read_candidates(self) -> list[dict] | None:
         """One fetch of a full request's worth of candidates, plus one.
 
         The extra row is what makes "the next candidate would exceed the cap"

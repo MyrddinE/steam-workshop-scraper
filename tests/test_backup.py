@@ -210,19 +210,19 @@ def test_update_manifest_recovers_from_corrupt_manifest(tmp_path):
 
 # ── BackupThread ─────────────────────────────────────────────────────────────
 
-def test_backup_thread_run_now_swallows_failure(tmp_path):
+def test_backup_thread_snapshot_now_swallows_failure(tmp_path):
     worker = BackupThread(str(tmp_path / "test.db"), str(tmp_path / "outbox"), 60)
 
     with patch("src.backup.snapshot_database", side_effect=RuntimeError("boom")):
-        assert worker.run_now() is None  # logged and swallowed, no exception
+        assert worker.snapshot_now() is None  # logged and swallowed, no exception
 
 
-def test_backup_thread_run_now_publishes_snapshot_and_manifest(db_path, tmp_path):
+def test_backup_thread_snapshot_now_publishes_snapshot_and_manifest(db_path, tmp_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 5})
     outbox = str(tmp_path / "outbox")
     worker = BackupThread(db_path, outbox, 60)
 
-    meta = worker.run_now()
+    meta = worker.snapshot_now()
 
     assert meta is not None
     assert os.path.isfile(os.path.join(outbox, "db", "workshop-backup.db"))
@@ -251,8 +251,8 @@ def test_daemon_runs_batch_normally_with_backup_config_absent(tmp_path):
                return_value=[{"workshop_id": 1, "api_priority": 0, "status": 200}]) as mock_batch, \
          patch("src.daemon.get_workshop_details_batch",
                return_value={1: {"title": "T", "status": 200, "publishedfileid": 1}}) as mock_api, \
-         patch("src.daemon.flag_for_web_scrape"), \
-         patch("src.daemon.flag_for_image"), \
+         patch("src.daemon.raise_web_scrape_priority"), \
+         patch("src.daemon.raise_image_priority"), \
          patch("src.daemon.get_user", return_value=None):
         daemon.process_batch()
 
@@ -310,7 +310,7 @@ def test_daemon_run_takes_final_snapshot_on_shutdown(tmp_path):
     # taken after they are joined, which is what we assert.
     with patch("src.daemon.TranslatorThread"), \
          patch("src.daemon.WebScraperThread"), \
-         patch("src.daemon.ImageScraperThread"):
+         patch("src.daemon.ImageDownloadThread"):
         daemon = Daemon(config, config_path=str(tmp_path / "config.yaml"))
         with patch.object(Daemon, "process_batch",
                           side_effect=lambda: setattr(daemon, "running", False)):

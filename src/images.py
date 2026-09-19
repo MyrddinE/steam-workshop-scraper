@@ -131,7 +131,7 @@ def is_resolved(stored) -> bool:
     return can_render_image(stored) or blocks_retry(stored)
 
 
-def status_marker(status) -> str | None:
+def permanent_status_marker(status) -> str | None:
     """The value to store for a response ``status``, or ``None`` if not permanent.
 
     Returns a string because the column is text and because a stored number

@@ -60,7 +60,7 @@ def test_daemon_init_missing_appids():
 @patch('src.daemon.get_user')
 @patch('src.daemon.insert_or_update_user')
 @patch('src.daemon.insert_or_update_item')
-@patch('src.daemon.flag_for_web_scrape')
+@patch('src.daemon.raise_web_scrape_priority')
 @patch('time.sleep')
 def test_daemon_process_batch_success(mock_sleep, mock_flag_web, mock_insert, mock_insert_user, mock_get_user, mock_api, mock_get_items, mock_count, mock_config):
     mock_count.return_value = 1000
@@ -147,7 +147,7 @@ def test_daemon_process_batch_exit_early(mock_api, mock_get_items, mock_count, m
 @patch('src.daemon.get_user')
 @patch('src.daemon.insert_or_update_user')
 @patch('src.daemon.insert_or_update_item')
-@patch('src.daemon.flag_for_web_scrape')
+@patch('src.daemon.raise_web_scrape_priority')
 @patch('time.sleep')
 def test_api_delay_decays_on_every_healthy_request(mock_sleep, mock_flag_web, mock_insert, mock_insert_user, mock_get_user, mock_api, mock_get_items, mock_count, mock_config):
     """Every healthy request shaves one step off the delay.
@@ -207,14 +207,14 @@ def test_the_api_delay_doubles_past_the_old_ceiling_and_still_floors(db_path, tm
     daemon = _real_db_daemon(db_path, tmp_path)
 
     daemon.api_delay = 2.0
-    daemon._record_api_request_failure()
+    daemon._back_off_api_delay()
     assert daemon.api_delay == 4.0, "the delay doubles past the old 2 s ceiling"
 
     daemon.api_delay = 0.01
     ticks = iter(range(0, 100_000, 600))
     with patch("src.pacing.now", side_effect=lambda: next(ticks)):
         daemon._api_clock = pacing.Clock()
-        daemon._record_api_request_success()
+        daemon._decay_api_delay()
     assert daemon.api_delay == 0.01, "a zero delay is not a rate limit"
 
 
@@ -239,10 +239,10 @@ def test_the_delay_settles_around_a_refusal_threshold(db_path, tmp_path):
         for _ in range(6000):
             simulated["t"] += daemon.api_delay
             if daemon.api_delay < limit:
-                daemon._record_api_request_failure()
+                daemon._back_off_api_delay()
                 refusals += 1
             else:
-                daemon._record_api_request_success()
+                daemon._decay_api_delay()
 
     assert refusals > 0, "it must have probed into the limit at least once"
     assert refusals < 100, "and must back off rather than keep knocking"
@@ -292,13 +292,13 @@ def test_request_failure_multiplies_delay_and_success_decays_it(db_path, tmp_pat
     daemon = _real_db_daemon(db_path, tmp_path)
     daemon.api_delay = 0.25
 
-    daemon._record_api_request_failure()
+    daemon._back_off_api_delay()
     assert daemon.api_delay == 0.5
     assert daemon.api_failures == 1
 
     # A half-life of healthy operation is exactly what takes back one doubling.
     daemon._api_clock._at = pacing.now() - pacing.HALF_LIFE_SECONDS
-    daemon._record_api_request_success()
+    daemon._decay_api_delay()
     assert daemon.api_delay == pytest.approx(0.25, rel=1e-4), \
         "a half-life of healthy operation undoes a doubling"
     assert daemon.api_failures == 0, "a healthy request resets the failure streak"
@@ -367,11 +367,11 @@ def test_the_api_merge_never_carries_the_downloaded_latch(mock_config):
 @patch('src.daemon.count_never_fetched_items', return_value=0)
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
-@patch('src.daemon.flag_for_web_scrape')
-@patch('src.daemon.flag_for_image')
+@patch('src.daemon.raise_web_scrape_priority')
+@patch('src.daemon.raise_image_priority')
 @patch('src.daemon.get_connection')
 @patch('src.daemon.get_user')
-def test_process_batch_404_status_marker(
+def test_process_batch_404_permanent_status_marker(
     mock_user, mock_conn, mock_img, mock_web, mock_insert,
     mock_api, mock_count, mock_items, mock_save, mock_init, mock_config
 ):
@@ -395,8 +395,8 @@ def test_process_batch_404_status_marker(
 @patch('src.daemon.count_never_fetched_items', return_value=0)
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
-@patch('src.daemon.flag_for_web_scrape')
-@patch('src.daemon.flag_for_image')
+@patch('src.daemon.raise_web_scrape_priority')
+@patch('src.daemon.raise_image_priority')
 @patch('src.daemon.get_connection')
 @patch('src.daemon.get_user')
 @patch('src.daemon.get_player_summaries', return_value={})
@@ -405,7 +405,7 @@ def test_process_batch_inherits_priority(
     mock_track, mock_summaries, mock_user, mock_conn, mock_img, mock_web, mock_insert,
     mock_api, mock_count, mock_items, mock_save, mock_init, mock_config
 ):
-    """flag_for_web_scrape and flag_for_image keep a priority the user asked for.
+    """raise_web_scrape_priority and raise_image_priority keep a priority the user asked for.
 
     api_priority 5 is "visible in a list" -- a person asked for this item -- so
     the dependent stages inherit it rather than falling back to their own
@@ -431,8 +431,8 @@ def test_process_batch_inherits_priority(
 @patch('src.daemon.count_never_fetched_items', return_value=0)
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
-@patch('src.daemon.flag_for_web_scrape')
-@patch('src.daemon.flag_for_image')
+@patch('src.daemon.raise_web_scrape_priority')
+@patch('src.daemon.raise_image_priority')
 @patch('src.daemon.get_connection')
 @patch('src.daemon.get_user')
 @patch('src.daemon.get_player_summaries', return_value={})
@@ -557,7 +557,7 @@ def test_process_item_500_records_attempt_but_not_fetch(db_path, tmp_path):
     existing = {"workshop_id": 1, "status": 200, "api_priority": 5,
                 "api_fetched_at": 1000, "last_fetch_attempted_at": 1000}
 
-    with patch("src.daemon.get_workshop_details_api", return_value={"status": 500}):
+    with patch("src.daemon.get_workshop_details", return_value={"status": 500}):
         daemon._process_item(existing)
 
     conn = get_connection(db_path)
@@ -578,7 +578,7 @@ def test_process_item_404_records_attempt_but_not_fetch(db_path, tmp_path):
     existing = {"workshop_id": 1, "status": 200, "api_priority": 5,
                 "api_fetched_at": 1000, "last_fetch_attempted_at": 1000}
 
-    with patch("src.daemon.get_workshop_details_api", return_value={"status": 404}):
+    with patch("src.daemon.get_workshop_details", return_value={"status": 404}):
         daemon._process_item(existing)
 
     conn = get_connection(db_path)
@@ -607,7 +607,7 @@ def test_process_item_404_clears_every_queue_flag(db_path, tmp_path):
                 "needs_web_scrape": 5, "needs_image": 10,
                 "translation_priority": 3}
 
-    with patch("src.daemon.get_workshop_details_api", return_value={"status": 404}):
+    with patch("src.daemon.get_workshop_details", return_value={"status": 404}):
         daemon._process_item(existing)
 
     conn = get_connection(db_path)
@@ -631,7 +631,7 @@ def test_process_item_success_moves_both_clocks(db_path, tmp_path):
     existing = {"workshop_id": 1, "status": 200, "api_priority": 5,
                 "api_fetched_at": 1000, "last_fetch_attempted_at": 1000}
 
-    with patch("src.daemon.get_workshop_details_api",
+    with patch("src.daemon.get_workshop_details",
                return_value={"title": "T", "status": 200}):
         daemon._process_item(existing)
 

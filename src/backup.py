@@ -438,7 +438,7 @@ class BackupThread(threading.Thread):
         self.dest_path = os.path.join(outbox_dir, *DB_SNAPSHOT_REL_PATH.split("/"))
         self._next_due = time.time() + self.interval_seconds
 
-    def run_now(self):
+    def snapshot_now(self):
         """Take one snapshot and publish it. Never raises.
 
         Returns the snapshot metadata on success, ``None`` on failure. Failures
@@ -466,7 +466,7 @@ class BackupThread(threading.Thread):
         while self.running:
             remaining = self._next_due - time.time()
             if remaining <= 0:
-                self.run_now()
+                self.snapshot_now()
                 self._next_due = time.time() + self.interval_seconds
                 continue
             time.sleep(min(1.0, remaining))
