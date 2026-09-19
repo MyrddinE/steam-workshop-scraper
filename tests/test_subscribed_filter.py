@@ -492,7 +492,7 @@ async def test_tui_detail_pane_shows_subscribed_at_only_when_set(mock_config):
         app = ScraperApp()
         async with app.run_test() as pilot:
             await pilot.pause(ASYNC_PAUSE)
-            pane = app.query_one("#item-details", DetailsPane)
+            pane = app.query_one("#detail-pane", DetailsPane)
             base = {
                 "workshop_id": 7, "title": "T", "tags": "[]",
                 "own_subscribed": 1, "own_first_subscribed_at": 1700000000,

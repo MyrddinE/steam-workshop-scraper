@@ -122,7 +122,7 @@ async def test_detail_pane_poll_survives_a_locked_database(mock_config):
             await pilot.press("enter")
             await pilot.pause(ASYNC_PAUSE)
 
-            pane = app.query_one("#item-details", DetailsPane)
+            pane = app.query_one("#detail-pane", DetailsPane)
             assert pane.item_data is not None, "the pane should have adopted the item"
             before = dict(pane.item_data)
 

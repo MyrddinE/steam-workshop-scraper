@@ -27,7 +27,7 @@ async def test_main_ui_contrast(mock_config):
     """Check contrast of primary static elements."""
     app = ScraperApp()
     async with app.run_test() as pilot:
-        btn = app.query_one("#btn-execute-search")
+        btn = app.query_one("#btn-search")
         assert is_readable(btn)
 
 @pytest.mark.asyncio
@@ -52,7 +52,7 @@ async def test_details_pane_contrast(mock_config):
             list_view.index = 0
             await pilot.pause(ASYNC_PAUSE)
             
-            detail_pane = app.query_one("#item-details", DetailsPane)
+            detail_pane = app.query_one("#detail-pane", DetailsPane)
             title = detail_pane.query_one("#item-title")
             assert is_readable(title)
 

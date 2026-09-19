@@ -53,7 +53,7 @@ async def test_tui_advanced_search_flow(mock_config, mock_results):
             
             from src.tui import DetailsPane
             from textual.widgets import Markdown, Label
-            detail_pane = app.query_one("#item-details", DetailsPane)
+            detail_pane = app.query_one("#detail-pane", DetailsPane)
             title_label = detail_pane.query_one("#item-title", Label)
             detail_content = detail_pane.query_one("#detail-content", Markdown)
 
@@ -139,7 +139,7 @@ async def test_tui_translation_flow(mock_config, mock_results):
 
             from src.tui import DetailsPane
             from textual.widgets import Markdown, Label
-            detail_pane = app.query_one("#item-details", DetailsPane)
+            detail_pane = app.query_one("#detail-pane", DetailsPane)
             title_label = detail_pane.query_one("#item-title", Label)
             tags_label = detail_pane.query_one("#stat-tags", Label)
 
@@ -472,7 +472,7 @@ async def test_tui_detail_priority_applied_once_per_pane_load(mock_config, mock_
             assert mock_api_bump.call_count == 1, "a repeat highlight must not re-queue the item"
 
             from src.tui import DetailsPane
-            pane = app.query_one("#item-details", DetailsPane)
+            pane = app.query_one("#detail-pane", DetailsPane)
             await pane.refresh_data()
             await pilot.pause(ASYNC_PAUSE)
 

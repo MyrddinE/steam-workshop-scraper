@@ -96,7 +96,7 @@ async def test_the_tui_detail_pane_draws_each_state_before_the_title(tmp_path, c
             list_view = app.query_one("#results-list", ListView)
             list_view.index = 0
             await pilot.pause(ASYNC_PAUSE)
-            pane = app.query_one("#item-details", DetailsPane)
+            pane = app.query_one("#detail-pane", DetailsPane)
             title_row = pane.query_one("#title-creator-row")
             children = list(title_row.children)
             marker_label = pane.query_one("#item-sub-marker", Label)
@@ -123,7 +123,7 @@ async def test_the_tui_detail_pane_has_no_queue_buttons(tmp_path):
         app = ScraperApp()
         async with app.run_test() as pilot:
             await pilot.pause(ASYNC_PAUSE)
-            pane = app.query_one("#item-details", DetailsPane)
+            pane = app.query_one("#detail-pane", DetailsPane)
             ids = {widget.id for widget in pane.query("*")}
 
     assert "btn-queue-sub" not in ids
@@ -154,7 +154,7 @@ async def test_the_keyboard_toggle_updates_the_marker(tmp_path):
 
             after = _markup_of(list_view.highlighted_child.query(Label)[1])
             pane_marker = _markup_of(
-                app.query_one("#item-details", DetailsPane)
+                app.query_one("#detail-pane", DetailsPane)
                 .query_one("#item-sub-marker", Label))
 
     assert subscription.glyph(subscription.NEVER) in before
@@ -350,7 +350,7 @@ async def test_the_open_folder_button_is_absent_off_windows(tmp_path):
         app = ScraperApp()
         async with app.run_test() as pilot:
             await pilot.pause(ASYNC_PAUSE)
-            pane = app.query_one("#item-details", DetailsPane)
+            pane = app.query_one("#detail-pane", DetailsPane)
             ids = {widget.id for widget in pane.query("*")}
 
     assert "btn-open-folder" not in ids
@@ -387,7 +387,7 @@ async def test_the_open_button_and_key_act_only_on_a_downloaded_item(tmp_path):
             list_view = app.query_one("#results-list", ListView)
             list_view.index = 0
             await pilot.pause(ASYNC_PAUSE)
-            pane = app.query_one("#item-details", DetailsPane)
+            pane = app.query_one("#detail-pane", DetailsPane)
 
             button = pane.query_one("#btn-open-folder", Button)
             assert button.disabled is True, "subscribed but not confirmed on disk"
@@ -440,10 +440,10 @@ async def test_the_queue_row_marker_follows_the_pass_outcome(tmp_path):
             await pilot.press("l")
             await pilot.pause(ASYNC_PAUSE)
             screen = app.screen
-            before = str(screen.query_one("#sub-item-5", Static).render())
+            before = str(screen.query_one("#sub-queue-item-5", Static).render())
             await pilot.click("#btn-subscribe-queue")
             await pilot.pause(ASYNC_PAUSE * 3)
-            after = str(screen.query_one("#sub-item-5", Static).render())
+            after = str(screen.query_one("#sub-queue-item-5", Static).render())
 
     assert subscription.glyph(subscription.QUEUED) in before
     assert subscription.glyph(subscription.SUBSCRIBED) in after, after

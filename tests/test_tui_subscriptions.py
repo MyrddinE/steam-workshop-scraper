@@ -49,7 +49,7 @@ async def test_tui_show_subscription_queue(mock_config, tmp_path):
         assert isinstance(app.screen, SubscriptionQueueScreen)
         assert lock_file.exists()
 
-        await pilot.click("#btn-close-sub-queue")
+        await pilot.click("#btn-close-subscription-queue")
         await pilot.pause(ASYNC_PAUSE)
 
         assert not isinstance(app.screen, SubscriptionQueueScreen)

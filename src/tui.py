@@ -1165,7 +1165,7 @@ class SubscriptionQueueScreen(ModalScreen):
         for index, item in enumerate(self._items):
             countdown, status, colour = self._row_display(index, elapsed)
             try:
-                row = self.query_one(f"#sub-item-{item['workshop_id']}", Static)
+                row = self.query_one(f"#sub-queue-item-{item['workshop_id']}", Static)
             except Exception:
                 continue
             row.update(self._row_text(item, status=status, colour=colour,
@@ -1191,26 +1191,26 @@ class SubscriptionQueueScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         self._items = get_subscription_queue_items(self.db_path)
-        with Vertical(id="sub-queue-container"):
-            yield Label("Subscription Queue", id="sub-queue-title")
+        with Vertical(id="subscription-queue-container"):
+            yield Label("Subscription Queue", id="subscription-queue-title")
             if not self._items:
                 yield Label("Queue is empty. Press 's' on an item to add it.")
             else:
                 yield Static(
                     "Press Subscribe to run the queue through the engine. "
                     "Row times are estimates.",
-                    id="sub-queue-status",
+                    id="subscription-queue-status",
                 )
                 for item in self._items:
                     yield Static(
                         self._row_text(item),
-                        id=f"sub-item-{item['workshop_id']}",
+                        id=f"sub-queue-item-{item['workshop_id']}",
                     )
             yield Button(
                 "Subscribe", id="btn-subscribe-queue", variant="primary",
                 disabled=not self._items,
             )
-            yield Button("Close", id="btn-close-sub-queue")
+            yield Button("Close", id="btn-close-subscription-queue")
 
     def _start_pass(self) -> None:
         """Run the queue through the engine on a worker thread."""
@@ -1222,7 +1222,7 @@ class SubscriptionQueueScreen(ModalScreen):
         self._last_result_at = None
         self._pass_started_at = time.monotonic()
         self.query_one("#btn-subscribe-queue", Button).disabled = True
-        self.query_one("#sub-queue-status", Static).update(
+        self.query_one("#subscription-queue-status", Static).update(
             "Subscribing... (start times are estimates)")
         self._start_estimate_timer()
         self._render_rows()
@@ -1324,13 +1324,13 @@ class SubscriptionQueueScreen(ModalScreen):
             outcomes = event.worker.result if event.state == WorkerState.SUCCESS else []
             done = sum(1 for o in outcomes if o.is_subscribed)
             remaining = len(outcomes) - done
-            self.query_one("#sub-queue-status", Static).update(
+            self.query_one("#subscription-queue-status", Static).update(
                 f"Pass finished: {done} subscribed, {remaining} left queued."
                 if outcomes else "Pass finished with no results."
             )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-close-sub-queue":
+        if event.button.id == "btn-close-subscription-queue":
             self.app.pop_screen()
         elif event.button.id == "btn-subscribe-queue":
             self._start_pass()
@@ -1460,8 +1460,8 @@ class DetailsPane(VerticalScroll):
             with Vertical(classes="stats-col"):
                 yield Label("Size: N/A", id="stat-size")
                 yield Label("Views: N/A", id="stat-views")
-                yield Label("Subs: N/A", id="stat-subs")
-                yield Label("Favs: N/A", id="stat-favs")
+                yield Label("Subs: N/A", id="stat-subscribers")
+                yield Label("Favs: N/A", id="stat-favorites")
 
         desc_container = Vertical(
             Markdown(id="detail-content"),
@@ -1537,7 +1537,7 @@ class DetailsPane(VerticalScroll):
             if open_btn is not None:
                 open_btn.display = False
             
-            for stat in ["id", "created", "updated", "tags", "size", "views", "subs", "favs"]:
+            for stat in ["id", "created", "updated", "tags", "size", "views", "subscribers", "favorites"]:
                 self.query_one(f"#stat-{stat}", Label).display = False
             self.query_one("#wilson-scores", Label).update("")
             return
@@ -1613,7 +1613,7 @@ class DetailsPane(VerticalScroll):
 
         tags_list = parse_tags(item.get("tags", "[]"))
 
-        for stat in ["id", "created", "updated", "tags", "size", "views", "subs", "favs"]:
+        for stat in ["id", "created", "updated", "tags", "size", "views", "subscribers", "favorites"]:
             self.query_one(f"#stat-{stat}", Label).display = True
 
         self.query_one("#stat-id", Label).update(f"[b]ID:[/b] {item.get('workshop_id', 'N/A')}")
@@ -1636,11 +1636,11 @@ class DetailsPane(VerticalScroll):
         
         subs_current = format_count(item.get('subscriptions', 0))
         subs_lifetime = format_count(item.get('lifetime_subscriptions', 0))
-        self.query_one("#stat-subs", Label).update(f"[b]Subscribers:[/b] {subs_current} / {subs_lifetime}")
+        self.query_one("#stat-subscribers", Label).update(f"[b]Subscribers:[/b] {subs_current} / {subs_lifetime}")
         
         favs_current = format_count(item.get('favorited', 0))
         favs_lifetime = format_count(item.get('lifetime_favorited', 0))
-        self.query_one("#stat-favs", Label).update(f"[b]Favorites:[/b] {favs_current} / {favs_lifetime}")
+        self.query_one("#stat-favorites", Label).update(f"[b]Favorites:[/b] {favs_current} / {favs_lifetime}")
 
         wilson_label = self.query_one("#wilson-scores", Label)
         app = self.app
@@ -1967,7 +1967,7 @@ class DatabaseCommands(Provider):
         )
         yield DiscoveryHit(
             "Show Subscription Queue",
-            self.app.action_show_sub_queue,
+            self.app.action_show_subscription_queue,
             help="Show items queued for subscription as clickable links",
         )
 
@@ -1977,7 +1977,7 @@ class DatabaseCommands(Provider):
         
         commands = {
             "Clear Pending Database": self.app.action_clear_pending,
-            "Show Subscription Queue": self.app.action_show_sub_queue,
+            "Show Subscription Queue": self.app.action_show_subscription_queue,
         }
         
         for label, action in commands.items():
@@ -2003,8 +2003,8 @@ def app_bindings(platform: str | None = None) -> list[tuple[str, str, str]]:
         ("ctrl+q", "quit", "Quit"),
         ("ctrl+d", "show_daemon", "Daemon"),
         ("ctrl+r", "show_stats", "Stats"),
-        ("s", "toggle_queue", "Queue for Sub"),
-        ("l", "show_sub_queue", "List Queued Items"),
+        ("s", "toggle_subscription_queue", "Queue for Sub"),
+        ("l", "show_subscription_queue", "List Queued Items"),
         ("ctrl+s", "save_filter_for_scraper", "Save Filter"),
         ("ctrl+w", "toggle_translation", "Toggle Translation"),
         ("ctrl+a", "add_and_row", "AND"),
@@ -2170,14 +2170,14 @@ class ScraperApp(App):
     .overlay-label { width: 12; height: 1; margin-top: 1; margin-bottom: 1; }
     .overlay-select { width: 1fr; }
 
-    #details-container {
+    #detail-container {
         width: 60%;
         border: solid $secondary;
         padding: 0 1;
         margin: 0;
         layout: vertical;
     }
-    #item-details {
+    #detail-pane {
         height: 1fr;
     }
     #details-buttons-row {
@@ -2237,14 +2237,14 @@ class ScraperApp(App):
         padding: 0;
         height: auto;
     }
-    #sub-queue-container {
+    #subscription-queue-container {
         width: 80%;
         height: 80%;
         background: $surface;
         border: thick $primary;
         padding: 1;
     }
-    #sub-queue-title {
+    #subscription-queue-title {
         width: 100%;
         text-align: center;
         text-style: bold;
@@ -2602,7 +2602,7 @@ class ScraperApp(App):
         search_container = Vertical(
             search_builder,
             Horizontal(
-                Button("Execute Search", id="btn-execute-search", variant="primary"),
+                Button("Execute Search", id="btn-search", variant="primary"),
                 Button("Save Filter for Scraper", id="btn-save-filter", variant="default"),
                 Button("Return", id="btn-return", variant="warning"),
                 classes="search-buttons"
@@ -2651,8 +2651,8 @@ class ScraperApp(App):
         )
 
         details_container = Vertical(
-            DetailsPane(id="item-details"),
-            id="details-container"
+            DetailsPane(id="detail-pane"),
+            id="detail-container"
         )
         details_container.border_title = "Details"
 
@@ -2797,7 +2797,7 @@ class ScraperApp(App):
                 self.current_item_creator = item_data.get('creator')
                 # Detail priority is applied by DetailsPane when it adopts the
                 # item, not here: this handler fires on every highlight move.
-                detail_pane = self.query_one("#item-details", DetailsPane)
+                detail_pane = self.query_one("#detail-pane", DetailsPane)
                 detail_pane.workshop_id = item_data.get("workshop_id")
                 
                 jump_btn = self.query_one("#btn-jump-author", Button)
@@ -2821,7 +2821,7 @@ class ScraperApp(App):
             self.notify("Fetch-new triggered! The daemon will scan recently-updated items on its next cycle.")
         elif event.button.id == "btn-update-visible":
             await self.action_update_visible()
-        elif event.button.id == "btn-execute-search":
+        elif event.button.id == "btn-search":
             await self.execute_search()
         elif event.button.id == "btn-save-filter":
             await self.action_save_filter_for_scraper()
@@ -2889,7 +2889,7 @@ class ScraperApp(App):
         elif event.button.id == "btn-open-folder":
             # Acts on the pane's item, the same one the marker describes; the
             # `o` key acts on the highlighted list item.
-            detail = self.query_one("#item-details", DetailsPane)
+            detail = self.query_one("#detail-pane", DetailsPane)
             self.open_folder_for(detail.workshop_id)
 
         elif event.button.id == "btn-toggle-translation":
@@ -2939,10 +2939,10 @@ class ScraperApp(App):
         self.notify(f"Filter saved for AppID {current_appid}. Scraper will use this for enrichment.")
 
     def action_toggle_translation(self) -> None:
-        detail_pane = self.query_one("#item-details", DetailsPane)
+        detail_pane = self.query_one("#detail-pane", DetailsPane)
         detail_pane.show_translated = not detail_pane.show_translated
         
-    async def action_toggle_queue(self) -> None:
+    async def action_toggle_subscription_queue(self) -> None:
         """Toggles the subscription queue status of the highlighted item."""
         list_view = self.query_one("#results-list", ListView)
         if list_view.index is None:
@@ -2971,7 +2971,7 @@ class ScraperApp(App):
             self._start_subscription_poll()
 
         # Update details pane if it's showing the same item
-        detail_pane = self.query_one("#item-details", DetailsPane)
+        detail_pane = self.query_one("#detail-pane", DetailsPane)
         if detail_pane.workshop_id == workshop_id and detail_pane.item_data is not None:
             detail_pane.item_data["is_queued_for_subscription"] = item.item_data["is_queued_for_subscription"]
             detail_pane.update_content()
@@ -3081,7 +3081,7 @@ class ScraperApp(App):
         conn.close()
         self.notify(f"Queued {len(visible_ids)} items for update.")
 
-    def action_show_sub_queue(self) -> None:
+    def action_show_subscription_queue(self) -> None:
         """Shows the subscription queue modal screen.
 
         The engine needs the cookie source, so the app's config travels with the
@@ -3105,7 +3105,7 @@ class ScraperApp(App):
     async def action_subscribe(self) -> None:
         """Subscribes to the currently displayed workshop item on Steam."""
         try:
-            detail = self.query_one("#item-details", DetailsPane)
+            detail = self.query_one("#detail-pane", DetailsPane)
             wid = getattr(detail, "workshop_id", None)
         except Exception:
             logging.warning("Failed to get workshop_id from detail pane for subscribe")

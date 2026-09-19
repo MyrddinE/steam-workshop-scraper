@@ -57,7 +57,7 @@ async def test_tui_no_markup_error_on_bbcode(mock_config, mock_results_with_bbco
             # Specifically check the title label and markdown content separately
             from src.tui import DetailsPane
             from textual.widgets import Markdown, Label
-            detail_pane = app.query_one("#item-details", DetailsPane)
+            detail_pane = app.query_one("#detail-pane", DetailsPane)
             title_label = detail_pane.query_one("#item-title", Label)
             detail_content = detail_pane.query_one("#detail-content", Markdown)
             

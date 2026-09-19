@@ -196,7 +196,7 @@ def test_webserver_serves_on_the_port_it_reports(db_path):
 def test_no_two_widgets_share_an_id():
     """Two screens answering to one id is how a duplicated handler appeared.
 
-    `StatsScreen` and `SubscriptionQueueScreen` both used `btn-close-sub-queue`.
+    `StatsScreen` and `SubscriptionQueueScreen` both used `btn-close-subscription-queue`.
     Textual scopes queries per screen, so both worked, which is exactly why it
     went unnoticed -- the id named the wrong screen and nothing failed.
     """
