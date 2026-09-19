@@ -51,7 +51,7 @@ SWEEP_SECTION = "queue_sweeps"
 #: How long pause intervals and sweep entries are kept. The drain metric's window
 #: is one day, so a week is comfortably more than any caller asks for and keeps
 #: the document small.
-KEEP_SECONDS = 7 * 86400
+RETENTION_SECONDS = 7 * 86400
 
 
 def _now(now: int | float | None) -> int:
@@ -71,7 +71,7 @@ def _prune(intervals: list, cutoff: int) -> list:
     return [entry for entry in intervals if len(entry) == 2 and entry[1] >= cutoff]
 
 
-def _merge(intervals: list[tuple[int, int]], window_start: int, now: int) -> float:
+def _merged_seconds(intervals: list[tuple[int, int]], window_start: int, now: int) -> float:
     """Merged, window-clamped length of the intervals, in seconds.
 
     Overlapping intervals are merged before their lengths are added: the three
@@ -169,7 +169,7 @@ def _open_interval(db_path: str, source: str, now: int | None) -> bool:
         return False  # already inside an interval; the file edge is the signal
     timestamp = _now(now)
     section["open"] = {"at": timestamp, "source": str(source)}
-    section["closed"] = _prune(section.get("closed") or [], timestamp - KEEP_SECONDS)
+    section["closed"] = _prune(section.get("closed") or [], timestamp - RETENTION_SECONDS)
     return store.save({PAUSE_SECTION: section})
 
 
@@ -185,7 +185,7 @@ def _close_interval(db_path: str, now: int | None) -> bool:
     closed = list(section.get("closed") or [])
     closed.append([int(opened["at"]), timestamp])
     section["open"] = None
-    section["closed"] = _prune(closed, timestamp - KEEP_SECONDS)
+    section["closed"] = _prune(closed, timestamp - RETENTION_SECONDS)
     return store.save({PAUSE_SECTION: section})
 
 
@@ -204,13 +204,13 @@ def paused_seconds(db_path: str, window_start: int, now: int | None = None) -> f
         logging.warning("Could not read the pause record: %s", exc)
         section = None
     if not isinstance(section, dict):
-        return _merge([], window_start, reference)
+        return _merged_seconds([], window_start, reference)
     intervals = [entry for entry in (section.get("closed") or [])
                  if isinstance(entry, (list, tuple)) and len(entry) == 2]
     opened = section.get("open")
     if isinstance(opened, dict) and "at" in opened:
         intervals.append((opened["at"], reference))
-    return _merge(intervals, window_start, reference)
+    return _merged_seconds(intervals, window_start, reference)
 
 
 # --------------------------------------------------------------------------
@@ -237,7 +237,7 @@ def record_sweep_inflow(db_path: str, rows: int, now: int | None = None) -> bool
                    if isinstance(entry, dict) and _as_int(entry.get("at")) is not None]
         entries.append({"at": timestamp, "rows": rows})
         entries = [entry for entry in entries
-                   if _as_int(entry["at"]) >= timestamp - KEEP_SECONDS]
+                   if _as_int(entry["at"]) >= timestamp - RETENTION_SECONDS]
         return store.save({SWEEP_SECTION: {"entries": entries}})
     except Exception as exc:
         logging.warning("Could not record staleness-sweep inflow: %s", exc)

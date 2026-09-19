@@ -86,7 +86,7 @@ def main():
     _fix_windows_encoding()
     config_path = "config.yaml"
     args = [a for a in sys.argv[1:] if a != "--daemon"]
-    is_daemon = "--daemon" in sys.argv
+    should_daemonize = "--daemon" in sys.argv
     if args:
         config_path = args[0]
         
@@ -101,7 +101,7 @@ def main():
         logging.error("%s", exc)
         sys.exit(2)
 
-    if is_daemon:
+    if should_daemonize:
         _daemonize()
 
     # Write PID file for TUI daemon manager
@@ -118,7 +118,7 @@ def main():
     handlers = []
     if log_file:
         handlers.append(_log_file_handler(log_file))
-    if not is_daemon:
+    if not should_daemonize:
         stdout_handler = _SafeStreamHandler(sys.stdout)
         stdout_handler.setLevel(log_level)
         handlers.append(stdout_handler)

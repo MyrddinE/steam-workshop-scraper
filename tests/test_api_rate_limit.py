@@ -23,7 +23,7 @@ from src import steam_api
 @pytest.fixture(autouse=True)
 def _restore_schedule():
     """These tests move a module global; put it back."""
-    saved_delay = steam_api._API_DELAY
+    saved_delay = steam_api._api_delay
     saved_slot = steam_api._next_slot
     yield
     steam_api.set_api_delay(saved_delay)

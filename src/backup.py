@@ -25,7 +25,7 @@ import time
 from datetime import datetime, timezone
 
 # Name of the snapshot inside the outbox, relative to ``<outbox_dir>/db``.
-DB_ARTIFACT_REL_PATH = "db/workshop-backup.db"
+DB_SNAPSHOT_REL_PATH = "db/workshop-backup.db"
 
 # Suffix appended to a destination path to build the same-directory temp file.
 _TEMP_SUFFIX = ".tmp"
@@ -43,7 +43,7 @@ _FREE_SPACE_HEADROOM = 16 * 1024 * 1024
 # Whether the stale-artifact warning has already been emitted in this process.
 # The check runs after every snapshot and the answer does not change, so it is
 # said once rather than every hour.
-_stale_artifacts_warned = False
+_stale_artefacts_warned = False
 
 
 class BackupError(Exception):
@@ -142,17 +142,17 @@ def verify_snapshot(snapshot_path: str, source_db_path: str) -> dict:
     try:
         conn = sqlite3.connect(snapshot_path, timeout=15.0)
         try:
-            check = conn.execute("PRAGMA quick_check").fetchall()
-            if check != [("ok",)]:
-                raise BackupError(f"quick_check failed for {snapshot_path}: {check}")
-            row = conn.execute("SELECT COUNT(*), MAX(api_fetched_at) FROM workshop_items").fetchone()
+            quick_check = conn.execute("PRAGMA quick_check").fetchall()
+            if quick_check != [("ok",)]:
+                raise BackupError(f"quick_check failed for {snapshot_path}: {quick_check}")
+            counts = conn.execute("SELECT COUNT(*), MAX(api_fetched_at) FROM workshop_items").fetchone()
             snapshot_version = conn.execute("PRAGMA user_version").fetchone()[0]
         finally:
             conn.close()
     except sqlite3.DatabaseError as exc:
         raise BackupError(f"snapshot {snapshot_path} is not a usable database: {exc}") from exc
 
-    snapshot_rows = row[0]
+    snapshot_rows = counts[0]
     try:
         source = read_source_stats(source_db_path)
     except sqlite3.DatabaseError as exc:
@@ -179,10 +179,10 @@ def verify_snapshot(snapshot_path: str, source_db_path: str) -> dict:
             snapshot_rows, source["rows"], source["rows"] - snapshot_rows,
         )
 
-    return {"rows": snapshot_rows, "max_api_fetched_at": row[1]}
+    return {"rows": snapshot_rows, "max_api_fetched_at": counts[1]}
 
 
-def _warn_about_stale_artifacts(dest_dir: str, dest_path: str) -> None:
+def _warn_about_stale_artefacts(dest_dir: str, dest_path: str) -> None:
     """Report files beside the snapshot that this build does not manage.
 
     The snapshot layout has changed before. ``<outbox>/db/workshop-backup.db.gz``
@@ -199,10 +199,10 @@ def _warn_about_stale_artifacts(dest_dir: str, dest_path: str) -> None:
     Warned once per process, because this runs after every snapshot and the
     answer does not change.
     """
-    global _stale_artifacts_warned
-    if _stale_artifacts_warned:
+    global _stale_artefacts_warned
+    if _stale_artefacts_warned:
         return
-    _stale_artifacts_warned = True
+    _stale_artefacts_warned = True
 
     base = os.path.basename(dest_path)
     ours = {base}
@@ -314,7 +314,7 @@ def snapshot_database(db_path: str, dest_path: str) -> dict:
         raise BackupError(f"could not publish snapshot to {dest_path}: {exc}") from exc
 
     logging.info("Database snapshot written to %s (%s bytes, %s rows)", dest_path, size, stats["rows"])
-    _warn_about_stale_artifacts(dest_dir, dest_path)
+    _warn_about_stale_artefacts(dest_dir, dest_path)
     return {
         "bytes": size,
         "sha256": sha256,
@@ -399,12 +399,12 @@ def _update_manifest_unlocked(outbox_dir: str, entry: dict) -> None:
         artifacts = []
 
     entry_path = entry.get("path")
-    kept = [
+    remaining = [
         existing for existing in artifacts
         if not (isinstance(existing, dict) and existing.get("path") == entry_path)
     ]
-    kept.append(entry)
-    manifest["artifacts"] = kept
+    remaining.append(entry)
+    manifest["artifacts"] = remaining
     manifest["generated_at"] = _utc_now_iso()
 
     temp_path = manifest_path + _TEMP_SUFFIX
@@ -435,7 +435,7 @@ class BackupThread(threading.Thread):
         self.outbox_dir = outbox_dir
         self.interval_seconds = max(1.0, float(interval_seconds))
         self.running = True
-        self.dest_path = os.path.join(outbox_dir, *DB_ARTIFACT_REL_PATH.split("/"))
+        self.dest_path = os.path.join(outbox_dir, *DB_SNAPSHOT_REL_PATH.split("/"))
         self._next_due = time.time() + self.interval_seconds
 
     def run_now(self):

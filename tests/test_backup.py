@@ -343,12 +343,12 @@ def test_a_file_this_build_does_not_manage_is_reported(monkeypatch, db_path, tmp
     nothing prunes the outbox, so it stays until someone deletes it by hand --
     measured live at 672.9 MB against a 1.9 GB current snapshot.
     """
-    monkeypatch.setattr(backup, "_stale_artifacts_warned", False)
+    monkeypatch.setattr(backup, "_stale_artefacts_warned", False)
     dest = _dest(tmp_path)
     snapshot_database(db_path, dest)
     stale = _plant_stale_artifact(dest)
 
-    monkeypatch.setattr(backup, "_stale_artifacts_warned", False)
+    monkeypatch.setattr(backup, "_stale_artefacts_warned", False)
     with caplog.at_level(logging.WARNING):
         snapshot_database(db_path, dest)
 
@@ -358,11 +358,11 @@ def test_a_file_this_build_does_not_manage_is_reported(monkeypatch, db_path, tmp
 
 
 def test_a_clean_snapshot_directory_reports_nothing(monkeypatch, db_path, tmp_path, caplog):
-    monkeypatch.setattr(backup, "_stale_artifacts_warned", False)
+    monkeypatch.setattr(backup, "_stale_artefacts_warned", False)
     dest = _dest(tmp_path)
     snapshot_database(db_path, dest)
 
-    monkeypatch.setattr(backup, "_stale_artifacts_warned", False)
+    monkeypatch.setattr(backup, "_stale_artefacts_warned", False)
     with caplog.at_level(logging.WARNING):
         snapshot_database(db_path, dest)
 
@@ -372,12 +372,12 @@ def test_a_clean_snapshot_directory_reports_nothing(monkeypatch, db_path, tmp_pa
 
 def test_the_stale_artifact_report_is_said_once(monkeypatch, db_path, tmp_path, caplog):
     """It runs after every snapshot, and the answer does not change."""
-    monkeypatch.setattr(backup, "_stale_artifacts_warned", False)
+    monkeypatch.setattr(backup, "_stale_artefacts_warned", False)
     dest = _dest(tmp_path)
     snapshot_database(db_path, dest)
     _plant_stale_artifact(dest)
 
-    monkeypatch.setattr(backup, "_stale_artifacts_warned", False)
+    monkeypatch.setattr(backup, "_stale_artefacts_warned", False)
     with caplog.at_level(logging.WARNING):
         snapshot_database(db_path, dest)
         snapshot_database(db_path, dest)
