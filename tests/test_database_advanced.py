@@ -1,7 +1,7 @@
 import pytest
 from src.database import (
     search_items,
-    get_all_authors,
+    get_all_creator_ids,
     get_connection,
 )
 
@@ -120,8 +120,8 @@ def test_search_by_author(deterministic_db):
         assert r["creator"] == author
 
 
-def test_get_all_authors_advanced(deterministic_db):
-    authors = get_all_authors(deterministic_db)
+def test_get_all_creator_ids_advanced(deterministic_db):
+    authors = get_all_creator_ids(deterministic_db)
     assert len(authors) > 0
     conn = get_connection(deterministic_db)
     expected = conn.execute(

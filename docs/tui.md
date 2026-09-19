@@ -452,11 +452,11 @@ The `btn-return` button leaves single-creator mode: it clears the flag, shows th
 The Web UI now has the same mode (`jumpToAuthor`, `returnFromAuthor`, `#author-mode-bar`,
 `#btn-return-author`), and its Return additionally re-opens the item and scroll position the jump
 interrupted. **The TUI has no creator list**, and that asymmetry is one-sided in the web UI's favour:
-`src.tui` imports `get_all_authors` and never calls it, so the TUI reaches a creator only by typing an
+`src.tui` imports `get_all_creator_ids` and never calls it, so the TUI reaches a creator only by typing an
 `Author ID` or jumping from one of their items. The web picker
 ([web-ui.md](web-ui.md#the-creator-list)) is a third route to the same end, not a control the TUI
 lacks the action for, so no TUI change is needed for parity; if a TUI creator picker is ever wanted it
-would call the same `get_all_authors`.
+would call the same `get_all_creator_ids`.
 
 ### Subscription Queue (s/l keys)
 

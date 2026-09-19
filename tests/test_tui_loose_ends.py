@@ -53,7 +53,7 @@ async def test_return_button_leaves_single_creator_mode_and_restores_filters(
     """Issue 12: Return must clear the flag, restore the save button and filters."""
     with patch("src.tui.load_config", return_value=mock_config), \
          patch("src.tui.search_items", return_value=mock_results), \
-         patch("src.tui.get_all_authors", return_value=["Author A"]):
+         patch("src.tui.get_all_creator_ids", return_value=["Author A"]):
         app = ScraperApp()
         async with app.run_test() as pilot:
             await pilot.pause(ASYNC_PAUSE)

@@ -2968,7 +2968,7 @@ def search_items(db_path: str, query: str = "", appid: int = None,
     conn.close()
     return results
 
-def get_all_authors(db_path: str) -> list[str]:
+def get_all_creator_ids(db_path: str) -> list[str]:
     """Returns a list of all unique creator IDs currently in the database."""
     conn = get_connection(db_path)
     cursor = conn.execute("SELECT DISTINCT creator FROM workshop_items WHERE creator IS NOT NULL ORDER BY creator")

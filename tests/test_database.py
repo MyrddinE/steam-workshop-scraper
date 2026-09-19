@@ -253,12 +253,12 @@ def test_search_items_advanced_queries(db_path):
     assert len(results) == 1
     assert results[0]["workshop_id"] == 2
 
-def test_get_all_authors(db_path):
-    from src.database import insert_or_update_item, get_all_authors
+def test_get_all_creator_ids(db_path):
+    from src.database import insert_or_update_item, get_all_creator_ids
     insert_or_update_item(db_path, {"workshop_id": 1, "creator": 999})
     insert_or_update_item(db_path, {"workshop_id": 2, "creator": 888})
     
-    authors = get_all_authors(db_path)
+    authors = get_all_creator_ids(db_path)
     assert 999 in authors
     assert 888 in authors
     assert len(authors) >= 2
