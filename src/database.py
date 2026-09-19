@@ -2517,7 +2517,7 @@ def apply_own_subscriptions(db_path: str, appid: int, subscribed_ids,
     }
 
 
-def get_queued_items(db_path: str) -> list[dict]:
+def get_subscription_queue_items(db_path: str) -> list[dict]:
     """Retrieves all items currently queued for subscription.
 
     The subscription columns travel with the row so each front end can render

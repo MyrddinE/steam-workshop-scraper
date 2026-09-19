@@ -8,7 +8,7 @@ from the queue — throwing away the work the drain had queued up.
 
 import pytest
 
-from src.database import get_queued_items, insert_or_update_item, initialize_database
+from src.database import get_subscription_queue_items, insert_or_update_item, initialize_database
 from src.webserver import app, init_webserver
 
 
@@ -29,7 +29,7 @@ def client(tmp_path):
 
 
 def _queue(db_path):
-    return [row["workshop_id"] for row in get_queued_items(db_path)]
+    return [row["workshop_id"] for row in get_subscription_queue_items(db_path)]
 
 
 def test_a_throttled_subscription_stays_queued(client):

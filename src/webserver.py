@@ -6,7 +6,7 @@ import time
 import re
 import logging
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, mark_own_subscribed, get_queued_items, FILTER_SCHEMA, bump_api_priority_for_detail, clear_pending_items
+from src.database import search_items, get_item_details, get_db_stats, get_all_authors, save_app_filter, compute_wilson_cutoffs, bump_web_priority_for_list, bump_web_priority_for_detail, bump_translation_for_list, bump_translation_for_detail, bump_image_priority_for_list, bump_image_priority_for_detail, flag_for_image, get_connection, toggle_subscription_queue_status, clear_subscription_queue_status, mark_own_subscribed, get_subscription_queue_items, FILTER_SCHEMA, bump_api_priority_for_detail, clear_pending_items
 from src.analysis import view_window_analysis
 from src import capture
 from src import crash
@@ -836,7 +836,7 @@ def api_queued():
     # The queue overlay draws each row's real marker from this payload, the same
     # table the grid and the TUI's queue screen read; without the derived fields
     # the overlay could not draw `downloaded` or any other state.
-    items = [_attach_subscription(item) for item in get_queued_items(_db_path)]
+    items = [_attach_subscription(item) for item in get_subscription_queue_items(_db_path)]
     return jsonify(items)
 
 

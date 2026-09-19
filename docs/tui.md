@@ -136,7 +136,7 @@ Every value that comes from Steam goes through `escape_markup` in `src/tui.py`, 
 
 The row's second line shows the owner's subscription marker next to the pending spinner, and the detail pane shows the same marker immediately before the title — the convention the web pane uses too. `_subscription_marker` and `DetailsPane.update_content` both read `src/subscription.py`, which owns the five states (`downloaded`, `subscribed`, `pending`, `previously`, `never`), their precedence, and the glyph/colour for each, so the TUI and the web grid cannot disagree about why the same row looks the way it does. The marker replaces the old leading `*` prefix on the title line for `is_queued_for_subscription`; there is only one indicator. `downloaded` is a solid `★` in a deeper green than `pending`'s outline, and it requires both `own_subscribed` and the local `downloaded_at` latch, so a stray timestamp cannot claim it.
 
-**The subscription queue screen draws the same five states** — `SubscriptionQueueScreen._row_text` reads the shared table from the row `get_queued_items` returns, so a completed subscribe moves that row's glyph too.
+**The subscription queue screen draws the same five states** — `SubscriptionQueueScreen._row_text` reads the shared table from the row `get_subscription_queue_items` returns, so a completed subscribe moves that row's glyph too.
 
 **The downloaded marker (and opening the folder).** Windows only. On its own
 `DOWNLOAD_SCAN_INTERVAL_SECONDS` (60 s) timer the TUI runs
@@ -485,7 +485,7 @@ use. Before that the row changed only its status word and the final tally: every
 `pending` outline whatever happened, including a row whose subscribe had just been confirmed. A
 confirmed subscribe moves that row to the yellow ★; an outcome that leaves the item queued (throttled,
 refused, a disagreement) leaves it on the green ☆, which is what `mark_own_subscribed` not being called
-means. `get_queued_items` now carries the three subscription columns so the screen can draw that state
+means. `get_subscription_queue_items` now carries the three subscription columns so the screen can draw that state
 rather than assuming it.
 
 **Watching the queue drain.** While the pass runs, the screen ticks four times a second (the web

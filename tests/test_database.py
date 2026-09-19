@@ -17,7 +17,7 @@ from src.database import (
     bump_api_priority_for_list,
     bump_api_priority_for_detail,
     clear_subscription_queue_status,
-    get_queued_items,
+    get_subscription_queue_items,
     EXPECTED_VERSION,
 )
 
@@ -365,18 +365,18 @@ def test_get_item_details_missing_user(db_path):
     assert details.get("personaname") is None
 
 def test_toggle_and_query_queued_items(db_path):
-    from src.database import toggle_subscription_queue_status, get_queued_items
+    from src.database import toggle_subscription_queue_status, get_subscription_queue_items
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "Item A"})
     insert_or_update_item(db_path, {"workshop_id": 2, "title": "Item B"})
 
     toggle_subscription_queue_status(db_path, 1)
-    queued = get_queued_items(db_path)
+    queued = get_subscription_queue_items(db_path)
     assert len(queued) == 1
     assert queued[0]["workshop_id"] == 1
     assert queued[0]["title"] == "Item A"
 
     toggle_subscription_queue_status(db_path, 1)
-    queued = get_queued_items(db_path)
+    queued = get_subscription_queue_items(db_path)
     assert len(queued) == 0
 
 def test_get_db_stats_empty(db_path):
@@ -662,7 +662,7 @@ def test_clear_subscription_queue_status(db_path):
     """clear_subscription_queue_status sets flag to 0."""
     insert_or_update_item(db_path, {"workshop_id": 1, "is_queued_for_subscription": 1})
     clear_subscription_queue_status(db_path, 1)
-    queued = get_queued_items(db_path)
+    queued = get_subscription_queue_items(db_path)
     assert not any(q["workshop_id"] == 1 for q in queued)
 
 
