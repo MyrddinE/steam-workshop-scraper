@@ -135,6 +135,21 @@ DISCOVERY_FILL_TARGET = 200
 # as the fetch loop drains it.
 DISCOVERY_IDLE_SECONDS = 30.0
 
+# How long the daemon may spend waiting for its worker threads once it has told
+# every one of them to stop. It is one budget for the whole join phase, not a
+# timeout per thread: the sequence used to give each worker its own 5 s join in
+# turn, so the waits added up and a later worker was not even *told* to stop
+# until every earlier join had returned. Every worker is now signalled together
+# and waited for together, and whatever is still alive when this expires is named
+# in the log and left behind.
+#
+# It is deliberately a single-digit number well inside the controller's
+# ``STOP_TIMEOUT_SECONDS`` (15 s in ``src/daemon_control.py``): the notice of a
+# removed PID file can take up to about a second to reach the loop in
+# ``_wait_for_work``, the join phase adds this, and the closing snapshot and
+# failure-capture flush still have to fit in what remains before the kill.
+SHUTDOWN_BUDGET_SECONDS = 5.0
+
 # The owner's subscriptions are reconciled once per appid at startup and then on
 # this cadence. Daily is the right order for it: the list only moves when a
 # human subscribes or unsubscribes, the one moment that matters (a subscribe the
@@ -420,7 +435,12 @@ class Daemon:
         # only cheap way to ask "is there work?" is this event, because the count
         # query scans the whole table and nothing indexes api_priority.
         self._work_available = threading.Event()
+        # Assigned by run() just before each worker is started. Declared here so
+        # the shutdown helpers can be exercised (and a stop requested) on a
+        # daemon whose run() has not started them.
         self._discovery_thread = None
+        self._web_worker = None
+        self._image_worker = None
         self._cursor_exhausted = False
         self._saw_pid_file = False  # set True once PID file is seen; prevents false trigger in tests
 
@@ -585,19 +605,36 @@ class Daemon:
         logging.warning(f"Received signal {signum}, initiating shutdown...")
         self.running = False
         self.translator.running = False
-        if hasattr(self, '_web_worker'):
+        # The attributes exist from construction (declared as None), so a
+        # presence test would be true and this would dereference None; ask
+        # whether the worker was actually started instead.
+        if self._web_worker is not None:
             self._web_worker.running = False
-        if hasattr(self, '_image_worker'):
+        if self._image_worker is not None:
             self._image_worker.running = False
         if self._backup_worker is not None:
             self._backup_worker.running = False
 
-    def _discovery_alive(self) -> bool:
-        """Whether a discovery pass should keep going rather than abandon a wait."""
+    def _keep_running(self) -> bool:
+        """Whether an in-progress pass should keep going rather than be abandoned.
+
+        Both halves of the stop protocol are one answer to a caller: the flag a
+        signal handler sets, and the PID file a controller deletes. Asking here
+        -- rather than reading ``self.running`` alone -- is what lets a long walk
+        notice the PID-file route too. The call has the side effect of recording
+        a removed PID file, which is deliberate: whoever notices first logs the
+        one shutdown line.
+        """
         return self.running and not self._pid_file_removed()
 
     def process_batch(self):
         """Process one batch: housekeeping, acquire work, then process each item."""
+        # Housekeeping runs before any other check, so a stop requested between
+        # the previous batch and this one used to be noticed only after the
+        # whole staleness sweep, reconcile walk and download scan had run. Ask
+        # first: the check is a flag read plus a file existence test.
+        if not self._keep_running():
+            return
         self._maybe_promote_stale_items()
         self._maybe_reconcile_subscriptions()
         self._maybe_scan_downloaded_items()
@@ -646,6 +683,11 @@ class Daemon:
         """
         api_data_by_id: dict[int, dict] = {}
         for start in range(0, len(items), STEAM_API_MAX_IDS_PER_REQUEST):
+            # A batch larger than the endpoint ceiling is several requests, and
+            # each one can take up to the transport timeout; without this check a
+            # stop was noticed only after every chunk had been posted.
+            if not self._keep_running():
+                break
             chunk = items[start:start + STEAM_API_MAX_IDS_PER_REQUEST]
             ids = [row["workshop_id"] for row in chunk]
             results = get_workshop_details_batch(ids, self.api_key)
@@ -737,9 +779,15 @@ class Daemon:
         a database error) and keeps the contract testable from either side.
         """
         for appid in self.target_appids or []:
+            # The reconcile is the one piece of housekeeping that talks to Steam
+            # for many round trips, so it is the one that can outlast a shutdown
+            # request. Check between appids, and hand the walk a stop test that
+            # also observes the removed PID file rather than the flag alone.
+            if not self._keep_running():
+                break
             try:
                 reconcile_own_subscriptions(self.db_path, appid, self.config,
-                                            keep_running=lambda: self.running)
+                                            keep_running=self._keep_running)
             except Exception as exc:
                 logging.warning(
                     "Subscription reconcile for appid %s failed; housekeeping skipped "
@@ -1257,30 +1305,7 @@ class Daemon:
             self.process_batch()
             self._pid_file_removed()
         logging.info("Daemon gracefully exited.")
-        if self._discovery_thread is not None:
-            self._discovery_thread.stop()
-            self._discovery_thread.join(timeout=5)
-            logging.info("Discovery thread stopped.")
-        self._web_worker.running = False
-        self._web_worker.join(timeout=5)
-        logging.info("Web scraper thread stopped.")
-        self._image_worker.running = False
-        self._image_worker.join(timeout=5)
-        logging.info("Image download thread stopped.")
-        self.translator.running = False
-        self.translator.join(timeout=5)
-        logging.info("Translator thread stopped.")
-        if self._backup_worker is not None:
-            self._backup_worker.running = False
-            self._backup_worker.join(timeout=5)
-            logging.info("Backup thread stopped.")
-            # Final synchronous snapshot, taken only after every writer thread
-            # has been joined so no writer can be mid-transaction. Backup
-            # failures are logged and swallowed: shutdown must still complete.
-            try:
-                self._backup_worker.snapshot_now()
-            except Exception as e:
-                logging.error(f"Final database backup failed: {e}")
+        self._shutdown_workers()
 
         # Counters are flushed on a timer during the run; this catches whatever
         # was recorded since the last flush. Failures are logged, not raised:
@@ -1289,6 +1314,98 @@ class Daemon:
             capture.flush()
         except Exception as e:
             logging.error(f"Final failure-capture flush failed: {e}")
+
+    def _worker_threads(self) -> list[tuple[str, object]]:
+        """The workers, in the order shutdown joins them, paired with log names.
+
+        One ordered list so the signal phase, the join phase and the survivor
+        report cannot disagree about who a worker is. The names are the ones the
+        per-thread stop lines have always used.
+        """
+        return [
+            ("Discovery", self._discovery_thread),
+            ("Web scraper", self._web_worker),
+            ("Image download", self._image_worker),
+            ("Translator", self.translator),
+            ("Backup", self._backup_worker),
+        ]
+
+    def _shutdown_workers(self) -> None:
+        """Stop every worker concurrently, inside one shared shutdown budget.
+
+        Every stop flag is set before the first join is attempted. That ordering
+        is the fix for the serialised shutdown: the old sequence set one flag,
+        joined that worker with its own 5 s timeout, and only then moved to the
+        next, so a later worker was not even *told* to stop until every earlier
+        join had returned, and the waits added up. Signalling together lets the
+        workers unwind at the same time, and the joins share one deadline, so a
+        worker that ignores its flag cannot hold the others hostage or stretch
+        the phase past :data:`SHUTDOWN_BUDGET_SECONDS`.
+
+        Exposed as a method rather than inlined in :meth:`run` so the ordering
+        and budget properties can be pinned without starting real threads.
+        """
+        for _name, worker in self._worker_threads():
+            if worker is not None:
+                worker.running = False
+
+        deadline = time.monotonic() + SHUTDOWN_BUDGET_SECONDS
+        survivors = self._join_workers(deadline)
+        if survivors:
+            # Naming them is the point: an unqualified "still running" would
+            # leave the operator guessing which worker delayed the exit.
+            logging.warning(
+                "Shutdown budget of %gs expired with threads still running: %s. "
+                "Continuing without them.",
+                SHUTDOWN_BUDGET_SECONDS, ", ".join(survivors),
+            )
+
+        self._maybe_final_snapshot(survivors)
+
+    def _join_workers(self, deadline: float) -> list[str]:
+        """Join every worker under one deadline; return the names still alive.
+
+        Each join gets only the budget the previous ones left, and a worker that
+        is already past the deadline is not joined at all -- it is reported from
+        ``is_alive`` so the phase stays bounded. A worker that did stop gets the
+        single stop line for its kind; the workers no longer log their own, so
+        the owner's log carries one line per worker, not two.
+        """
+        survivors: list[str] = []
+        for name, worker in self._worker_threads():
+            if worker is None:
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                worker.join(timeout=remaining)
+            if worker.is_alive():
+                survivors.append(name)
+            else:
+                logging.info("%s thread stopped.", name)
+        return survivors
+
+    def _maybe_final_snapshot(self, survivors: list[str]) -> None:
+        """Take the closing backup only when every writer actually stopped.
+
+        The snapshot is taken after the joins so that no writer can be
+        mid-transaction while the database is copied. Since the joins are now
+        bounded, a worker can outlive them; when one does, that premise is false
+        and the snapshot is skipped with a line saying why, rather than taken
+        against a database something may still be writing.
+        """
+        if self._backup_worker is None:
+            return
+        if survivors:
+            logging.warning(
+                "Skipping final database snapshot: %s did not stop within the "
+                "shutdown budget, so a writer may still be mid-transaction.",
+                ", ".join(survivors),
+            )
+            return
+        try:
+            self._backup_worker.snapshot_now()
+        except Exception as e:
+            logging.error(f"Final database backup failed: {e}")
 
     def seed_database(self, fill_target: int = DISCOVERY_FILL_TARGET):
         """
@@ -1326,7 +1443,7 @@ class Daemon:
                 if self._pid_file_removed():
                     break
                 result = query_workshop_newest_page(appid, cursor=cursor, api_key=self.api_key,
-                                                    keep_running=self._discovery_alive)
+                                                    keep_running=self._keep_running)
                 if result.get("abandoned"):
                     logging.info("Abandoned discovery for AppID %s: the daemon is stopping.", appid)
                     break
@@ -1420,7 +1537,7 @@ class Daemon:
             page = 0
             while cursor and self.running and page < 500:
                 result = query_workshop_updated_page(
-                    appid, cursor, self.api_key, keep_running=self._discovery_alive)
+                    appid, cursor, self.api_key, keep_running=self._keep_running)
                 if result.get("abandoned"):
                     logging.info("Abandoned page discovery for AppID %s: the daemon is stopping.", appid)
                     break

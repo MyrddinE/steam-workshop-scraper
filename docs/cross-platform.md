@@ -29,10 +29,10 @@ The daemon registers `signal.SIGINT` and `signal.SIGTERM` handlers. On Unix, `SI
 The cross-platform solution uses the PID file as a shutdown indicator:
 
 1. The daemon writes `.daemon.pid` at startup and removes it via `atexit`.
-2. The daemon's main loop checks `os.path.exists(".daemon.pid")` after each `process_batch`. If the file is missing, it initiates graceful shutdown.
-3. The TUI's Stop button deletes the PID file (which the daemon detects on its next loop iteration).
+2. The daemon checks `os.path.exists(".daemon.pid")` at several points: at the top of `process_batch` before the housekeeping, after the batch read, per item, per details chunk, per discovery or subscription page, and every second in the idle wait. If the file is missing, it initiates graceful shutdown.
+3. The TUI's Stop button deletes the PID file (which the daemon detects at its next checkpoint).
 4. On Linux, the TUI also sends SIGTERM for faster response.
-5. On Windows, the TUI deletes the PID file and waits up to 5 seconds. If the daemon hasn't exited, `Popen.terminate()` is called as fallback (hard kill). The TUI also manually removes the PID file on Windows after forced termination, since `atexit` handlers don't fire on `TerminateProcess`.
+5. On Windows, the TUI deletes the PID file and waits up to `STOP_TIMEOUT_SECONDS` (15 s). If the daemon hasn't exited, `Popen.terminate()` is called as fallback (hard kill). The TUI also manually removes the PID file on Windows after forced termination, since `atexit` handlers don't fire on `TerminateProcess`.
 
 ---
 

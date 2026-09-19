@@ -307,10 +307,15 @@ def test_daemon_run_takes_final_snapshot_on_shutdown(tmp_path):
         },
     }
     # Replace the real network workers with no-op mocks; the final snapshot is
-    # taken after they are joined, which is what we assert.
-    with patch("src.daemon.TranslatorThread"), \
-         patch("src.daemon.WebScraperThread"), \
-         patch("src.daemon.ImageDownloadThread"):
+    # taken after they are joined, which is what we assert. The mocks must
+    # answer ``is_alive()`` with False -- the daemon now asks each worker
+    # whether it really stopped before it will trust the database for a
+    # snapshot, and a bare MagicMock's truthy answer reads as "still running".
+    with patch("src.daemon.TranslatorThread") as translator_cls, \
+         patch("src.daemon.WebScraperThread") as web_cls, \
+         patch("src.daemon.ImageDownloadThread") as image_cls:
+        for worker_cls in (translator_cls, web_cls, image_cls):
+            worker_cls.return_value.is_alive.return_value = False
         daemon = Daemon(config, config_path=str(tmp_path / "config.yaml"))
         with patch.object(Daemon, "process_batch",
                           side_effect=lambda: setattr(daemon, "running", False)):

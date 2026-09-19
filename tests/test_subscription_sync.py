@@ -203,6 +203,58 @@ def test_the_subscriptions_walk_waits_the_shared_interval(sync_env, monkeypatch)
     assert waits == [9.0]
 
 
+def test_the_page_walk_abandons_at_a_page_boundary_when_asked_to_stop(sync_env):
+    """A shutdown must not wait for a walk that can run to MAX_PAGES pages.
+
+    ``keep_running`` used to reach only the pacing wait inside ``_fetch_page``;
+    the page loop never consulted it, so a walk already under way kept
+    requesting pages after the daemon had been asked to stop. Here the stop
+    arrives after page one and the walk ends there.
+    """
+    db_path, configure = sync_env
+    ids = list(range(3000, 3025))
+    session = configure({1: _page(ids[0:10], 25), 2: _page(ids[10:20], 25),
+                         3: _page(ids[20:25], 25)})
+
+    calls = []
+
+    def keep_running():
+        calls.append(True)
+        return len(calls) < 2  # allowed before page one, false at the next page
+
+    collected, declared_total = subscription_sync.collect_subscribed_ids(
+        294100, {}, keep_running=keep_running)
+
+    assert len(session.urls) == 1
+    assert set(ids[0:10]) <= collected
+    assert declared_total == 25
+
+
+def test_a_walk_stopped_for_shutdown_changes_no_flags(sync_env):
+    """A stop is not a short read: the partial list must not be applied.
+
+    The caller's completeness check would otherwise see a short read, retry it,
+    and finally apply the ids it did see -- a write during shutdown, for a list
+    the next start will re-read anyway.
+    """
+    db_path, configure = sync_env
+    ids = list(range(4000, 4010))
+    _items(db_path, *ids)
+    configure({1: _page(ids[0:3], 10), 2: _page(ids[3:10], 10)})
+
+    calls = []
+
+    def keep_running():
+        calls.append(True)
+        return len(calls) < 2
+
+    counts = subscription_sync.reconcile_own_subscriptions(
+        db_path, 294100, {}, keep_running=keep_running)
+
+    assert counts is None
+    assert _own_subscription_ids(db_path, 294100) == set()
+
+
 def test_every_other_item_of_the_appid_is_cleared(sync_env):
     """A full read says what the owner is *not* subscribed to, too."""
     db_path, configure = sync_env

@@ -376,7 +376,7 @@ every screen update.
 
 Owns the daemon process for both UIs: `start`, `stop`, `restart`, `status`, `read_pid`, `is_running` and `tail_log`. It launches `python -m src.daemon_runner <config> --daemon` detached (`DETACHED_PROCESS` on Windows, `DEVNULL` stdio elsewhere) and keeps the Popen handle (`DaemonController.proc`) for liveness and forced shutdown.
 
-The PID-file protocol is unchanged. On Unix, stop sends SIGTERM then deletes `.daemon.pid`; on Windows it deletes the file. Either way it waits up to 15 s for exit, then escalates (Popen terminate/kill, `TerminateProcess` via ctypes on Windows, SIGKILL on Unix). `start` while running and `stop` while stopped are idempotent no-ops.
+The PID-file protocol is unchanged. On Unix, stop sends SIGTERM then deletes `.daemon.pid`; on Windows it deletes the file. Either way it waits up to 15 s for exit, then escalates (Popen terminate/kill, `TerminateProcess` via ctypes on Windows, SIGKILL on Unix). The daemon's side of that grace is now bounded rather than serialised: it signals every worker together and joins them under one shared `SHUTDOWN_BUDGET_SECONDS` (5 s) deadline, naming any thread still alive instead of giving each one its own timeout in turn, so the wait is well inside the 15 s; see [threading.md](threading.md). `start` while running and `stop` while stopped are idempotent no-ops.
 
 ### `DaemonManagerScreen` (`src/tui.py:842`)
 

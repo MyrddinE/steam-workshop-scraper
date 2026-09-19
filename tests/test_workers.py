@@ -20,6 +20,25 @@ def test_web_worker_thread_lifecycle(tmp_path):
     assert not worker.is_alive()
 
 
+def test_an_idle_worker_wakes_for_a_stop_instead_of_sleeping_it_out(db_path):
+    """The idle nap polls the stop flag; it used to be a blind ten-second sleep.
+
+    That blind sleep is why a shutdown with an empty queue waited out the
+    daemon's join timeout: the flag was set and the worker did not look at it
+    until the whole nap had run.
+    """
+    import time as _time
+    from src.web_worker import WebScraperThread
+
+    worker = WebScraperThread(db_path, ".pauselock")
+    with patch("src.web_worker.get_next_web_scrape_item", return_value=None):
+        worker.start()
+        _time.sleep(0.2)  # let it enter the idle wait
+        worker.running = False
+        worker.join(timeout=2)
+        assert not worker.is_alive(), "the idle wait must observe the stop flag"
+
+
 def test_web_worker_failure_sets_api_priority(db_path):
     """Web scrape failure updates api_priority to 2 via the else branch."""
     from src.web_worker import WebScraperThread

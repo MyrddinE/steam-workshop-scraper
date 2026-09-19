@@ -185,13 +185,42 @@ The detail poll runs at a fixed 3-second interval for the currently selected ite
 
 ### Graceful Shutdown
 
-**Unix**: The TUI sends SIGTERM via `Popen.send_signal()`. The daemon's `handle_shutdown` sets `self.running = False` and stops all threads. The main loop exits, joins threads, and the process terminates. `atexit` removes the PID file.
+The daemon has two stop signals and both end in the same sequence. On **Unix**
+the controller sends SIGTERM, which `handle_shutdown` answers by clearing
+`self.running` and the worker flags. On **Windows**, and as a fallback
+everywhere, the controller deletes `.daemon.pid`, and the daemon notices the file
+is gone at its next stop checkpoint. The checkpoints are the top of
+`process_batch` (before the housekeeping), `_wait_for_work` (every second), after
+`_acquire_batch`, per item, per details chunk, and per discovery or subscription
+page. A missing PID file is only read as a stop request once the daemon has seen
+it exist, so a daemon started without one — as in the tests — is not fooled by
+its absence.
 
-**Windows**: The TUI deletes `.daemon.pid`. The daemon's main loop checks for PID file existence after each `process_batch`. If missing, sets `self.running = False` and performs the same graceful shutdown sequence. If the daemon doesn't respond within 5 seconds, the TUI calls `Popen.terminate()` as fallback.
+The loop then exits and `_shutdown_workers()` runs. Every worker's stop flag is
+set **before the first join**: signalling them together is what lets them unwind
+at the same time. That ordering is the fix for the previous sequence, which
+signalled one worker, joined it with its own 5-second timeout, and only then
+told the next one to stop — five additive joins whose worst case was 25 seconds,
+long enough that the controller's grace expired while the workers were still
+logging. The joins now share one deadline, `SHUTDOWN_BUDGET_SECONDS` (5 s in
+`src/daemon.py`); each join gets only the budget the previous ones left, and once
+it is gone the remaining workers are not joined at all. Whatever is still alive
+at the deadline is named in a warning and left behind. Each worker that did stop
+gets exactly one line, logged by the daemon as it confirms the join rather than
+by the worker itself, so the owner's log no longer shows the same sentence
+twice.
 
-### Thread Join Order
+The closing database snapshot is taken only when every worker did stop. A
+survivor means a writer may still be mid-transaction, so the snapshot is skipped
+with a line naming the thread that outlived the budget. The daemon then exits,
+and `atexit` removes the PID file.
 
-On shutdown, threads are stopped in order: web_worker first, image_worker second, translator third. Each thread is signaled (`running = False`), then joined with a 5-second timeout. After all threads stop, the daemon process exits.
+The controller's side is unchanged: it waits `STOP_TIMEOUT_SECONDS` (15 s in
+`src/daemon_control.py`) for the process to exit before escalating to
+terminate/kill. The daemon's notice (up to about a second in `_wait_for_work`)
+plus its 5-second join budget and the failure-capture flush fit inside that
+grace. The closing snapshot, when a backup outbox is configured, runs after the
+joins and is bounded by the size of the database rather than by the budget.
 
 ---
 

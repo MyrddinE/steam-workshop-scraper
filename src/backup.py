@@ -470,4 +470,6 @@ class BackupThread(threading.Thread):
                 self._next_due = time.time() + self.interval_seconds
                 continue
             time.sleep(min(1.0, remaining))
-        logging.info("Backup thread stopped.")
+        # No "Backup thread stopped." here: the daemon logs one line per worker
+        # as it confirms the join, and this thread's own copy made the owner's
+        # log show the same sentence twice. See Daemon._join_workers.
