@@ -14,7 +14,6 @@ from src.database import (
     count_fetchable_items, 
     insert_or_update_user, 
     get_user, 
-    flag_for_translation,
     get_app_tracking,
     update_app_tracking_cursor,
     save_app_filter,
@@ -484,15 +483,41 @@ class Daemon:
         return True
 
     def _build_user_record(self, steamid: int, personaname: str) -> dict:
-        """Builds a user record dict for upsert, flagging for translation if non-ASCII."""
-        record = {
+        """Builds a pure user record dict for upsert.
+
+        Queueing a non-ASCII name is a side effect and lives in
+        `_store_user_record`, which is the only thing that writes this record:
+        keeping the builder pure means a record can be built without deciding
+        anything about the queue.
+        """
+        return {
             "steamid": steamid,
             "personaname": personaname,
             "api_fetched_at": int(time.time())
         }
+
+    def _store_user_record(self, steamid: int, personaname: str) -> None:
+        """Upsert a creator profile, then queue a non-ASCII name for translation.
+
+        The write comes **before** the queue call on purpose.
+        `flag_field_for_translation` inserts the `translation_queue` row and
+        raises `users.translation_priority` in one transaction, so it needs the
+        `users` row to exist: on a creator's first sighting there is nothing for
+        the mirror to land on, and queueing first would leave a queue row whose
+        mirror reads 0. Both helpers open their own connection and commit, so
+        neither may be called from inside another open write transaction -- no
+        caller of this method holds one.
+
+        This is the producer issue 45 restored: before the per-field queue was
+        introduced, `get_next_translation_item` scanned `users` by
+        `translation_priority`, so raising the mirror in the record was the whole
+        producer. The drain reads `translation_queue` now, so the name has to be
+        queued as a field like any other.
+        """
+        insert_or_update_user(self.db_path, self._build_user_record(steamid, personaname))
         if not is_ascii(personaname):
-            record["translation_priority"] = 1
-        return record
+            flag_field_for_translation(
+                self.db_path, "user", steamid, "personaname_en", personaname, 1)
 
     def _merge_and_clean_api_data(self, api_data: dict, existing_data: dict, item_id: int, now_ts: int) -> dict:
         """Merges API response into existing data, remaps column names, and filters to allowed keys."""
@@ -597,11 +622,11 @@ class Daemon:
                 for sid in missing_ids:
                     if sid in summaries:
                         pdata = summaries[sid]
-                        user_record = self._build_user_record(sid, pdata.get("personaname"))
-                        insert_or_update_user(self.db_path, user_record)
-                        logging.info(f"Updated profile for user {sid}: '{user_record['personaname']}'")
+                        personaname = pdata.get("personaname")
+                        self._store_user_record(sid, personaname)
+                        logging.info(f"Updated profile for user {sid}: '{personaname}'")
                     else:
-                        insert_or_update_user(self.db_path, self._build_user_record(sid, f"SteamID:{sid}"))
+                        self._store_user_record(sid, f"SteamID:{sid}")
             except Exception as e:
                 logging.error(f"Error expanding user discovery: {e}")
 
@@ -1176,8 +1201,7 @@ class Daemon:
         summaries = get_player_summaries(to_fetch, self.api_key)
         for creator_id in to_fetch:
             if creator_id in summaries:
-                insert_or_update_user(self.db_path, self._build_user_record(
-                    creator_id, summaries[creator_id].get("personaname")))
+                self._store_user_record(creator_id, summaries[creator_id].get("personaname"))
 
     def _record_api_request_failure(self) -> None:
         """Multiply the delay once for a refused request and clear the streak.

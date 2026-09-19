@@ -132,7 +132,7 @@ No formal locking protocol exists, but columns have clear ownership:
 - **Discovery thread**: nothing beyond the bare row it creates — `workshop_id` and `api_priority` — so every other column on a discovered item is the main loop's
 - **Web scraper**: extended_description, needs_web_scrape, `web_scraped_at` (our completion time, success only)
 - **Image thread**: image_extension, needs_image, `image_fetched_at` (our completion time, success only)
-- **Translator**: title_en, short_description_en, extended_description_en, personaname_en, translate_version, `translated_at` on both tables (on an item it is written when the last queued field completes)
+- **Translator**: title_en, short_description_en, extended_description_en, personaname_en, translate_version, `translated_at` on both tables (on an item it is written when the last queued field completes; for a creator the per-field write stamps `users.translated_at`, and completion only clears `users.translation_priority`, because a creator has no version key)
 - **Web scraper**: scrape_version, the revision the *page* was scraped at. The image thread used to write it too, which made an unscraped item claim a scrape; it no longer touches the column
 
 ### Priority Bumping

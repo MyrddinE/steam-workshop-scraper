@@ -880,8 +880,9 @@ def _coverage(conn, params) -> dict:
     the result set it is computed over. The same caveat the old filtered figure
     carried now applies to the Translations bar's population, whose rule
     (``_flag_translations``) is Python today and whose metric is this SQL, and to
-    the Creator Translation bar's population, whose rule is ``is_ascii`` in
-    ``_build_user_record`` and whose metric is :func:`_creator_current_sql`.
+    the Creator Translation bar's population, whose rule is the ``is_ascii`` test
+    in the daemon's ``_store_user_record`` and whose metric is
+    :func:`_creator_current_sql`.
 
     An unreadable or empty filter set means *everything* for that AppID
     (:func:`enrichment_filters_for`'s contract: ``None`` and ``[]`` both mean no

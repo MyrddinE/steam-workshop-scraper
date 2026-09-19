@@ -215,10 +215,18 @@ def test_migration_leaves_a_genuinely_queued_item_alone(db_path):
     assert _queue_count(db_path, 1) == 1
 
 
-def test_migration_does_not_touch_user_translation_priority(db_path):
-    """Users have no `translation_queue` rows by design; their mirror is separate."""
+def test_migration_queues_a_creator_name_and_keeps_its_mirror(db_path):
+    """The same stranded pair on `users`, which v22->v23 deliberately skipped.
+
+    At v22 a creator's name was tracked on `users.translation_priority` alone and
+    never got a queue row, so there was nothing for that migration to repair.
+    v27->v28 makes the user mirror a mirror of the queue as well, so the repair
+    now covers creator rows -- and this one, flagged with no work behind it, gains
+    the queue row it was owed.
+    """
+    steamid = 76561198000000000
     insert_or_update_user(db_path, {
-        "steamid": 76561198000000000, "personaname": "テスト", "translation_priority": 1,
+        "steamid": steamid, "personaname": "テスト", "translation_priority": 1,
     })
     _age_to_v22(db_path)
 
@@ -227,10 +235,15 @@ def test_migration_does_not_touch_user_translation_priority(db_path):
     conn = get_connection(db_path)
     priority = conn.execute(
         "SELECT translation_priority FROM users WHERE steamid=?",
-        (76561198000000000,),
+        (steamid,),
+    ).fetchone()[0]
+    queued = conn.execute(
+        "SELECT COUNT(*) FROM translation_queue WHERE item_type='user' AND item_id=?",
+        (steamid,),
     ).fetchone()[0]
     conn.close()
     assert priority == 1
+    assert queued == 1
 
 
 def test_migration_only_repairs_the_high_direction(db_path):

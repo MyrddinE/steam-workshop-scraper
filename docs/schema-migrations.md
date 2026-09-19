@@ -486,14 +486,15 @@ WHERE translation_priority > 0
   )
 ```
 
-Only `workshop_items` is touched. A user's name translation lives on
-`users.translation_priority` and never gets `translation_queue` rows, so that
-mirror is not expected to match this table. Only the high direction is repaired:
-a queue row whose mirror is zero still has its work picked up, because the
-translator selects on the queue and not on the mirror, so re-raising it would
-be a separate decision. Dead rows are not special-cased — a mirror with nothing
-queued is wrong for them too, and `status = -1` is the dead flag, not
-`translation_priority`.
+Only `workshop_items` is touched. At this version a creator's name translation
+lived on `users.translation_priority` alone and never got a `translation_queue`
+row, so that mirror was not expected to match this table; **v27 → v28** makes it a
+mirror of the queue as well and repairs the creator rows this one skipped. Only
+the high direction is repaired: a queue row whose mirror is zero still has its
+work picked up, because the translator selects on the queue and not on the
+mirror, so re-raising it would be a separate decision. Dead rows are not
+special-cased — a mirror with nothing queued is wrong for them too, and
+`status = -1` is the dead flag, not `translation_priority`.
 
 The helper change in the same release makes the two writes one transaction, so
 the interleaving cannot recur: while the helper holds the write lock, the
@@ -710,6 +711,71 @@ the partial index serves the whole three-part metric in 0.2 ms (`MAX` needs an
 explicit `WHERE <column> IS NOT NULL` to use a partial index at all). The
 one-time build is not benchmarked: the index is empty when it is built. The
 metric's `EXPLAIN QUERY PLAN` is pinned by `tests/test_queue_completion_times.py`.
+
+---
+
+### v27 → v28: A creator's name returns to the translation queue
+
+No schema change — the whole migration is data, and it is the user-side
+counterpart of **v22 → v23** above and of the item backfill in migration 2→3.
+
+A creator's name was queued by raising `users.translation_priority`: while
+`get_next_translation_item` scanned `workshop_items` and `users` by that flag, the
+mirror **was** the queue, so the daemon raising it was a complete producer. When
+the per-field `translation_queue` replaced that scan, the producer was never
+ported, and the flag has had no consumer since. *Measured in the 2026-09-18
+backup*: `translation_queue` held 127,385 rows, **every one `item_type='item'`**,
+and 5,540 creators held a translated name — the last written 45 minutes after the
+commit that replaced the scan, and none since. The regression is recorded as
+entries 45 and 46 in [code-issues.md](code-issues.md); `_build_user_record` now
+queues through `flag_field_for_translation`, and the translator's completion pass
+clears the user mirror.
+
+Two statements, in this order:
+
+```sql
+INSERT INTO translation_queue (item_type, item_id, field, original_text, priority, queued_at)
+SELECT 'user', steamid, 'personaname_en', personaname, translation_priority, :now
+FROM users
+WHERE translation_priority > 0
+  AND personaname IS NOT NULL AND personaname <> ''
+  AND NOT (length(CAST(personaname AS BLOB)) = length(personaname))
+  AND NOT (COALESCE(personaname_en, '') <> '' AND (
+             api_fetched_at IS NULL
+             OR (translated_at IS NOT NULL AND translated_at >= api_fetched_at)))
+  AND NOT EXISTS (
+      SELECT 1 FROM translation_queue q
+      WHERE q.item_type = 'user' AND q.item_id = users.steamid
+        AND q.field = 'personaname_en')
+
+UPDATE users SET translation_priority = 0
+WHERE translation_priority > 0
+  AND NOT EXISTS (
+      SELECT 1 FROM translation_queue q
+      WHERE q.item_type = 'user' AND q.item_id = users.steamid
+  )
+```
+
+The first statement gives every flagged creator whose name genuinely needs
+translating the queue row the producer owed it; the second clears the flags with
+nothing left to translate, so the mirror is a mirror again. The predicates are
+**inlined rather than imported**: a migration must keep meaning what it meant at
+this version, and a helper it imported could change under it. The non-ASCII test
+is the one `metrics._ascii_sql` documents — UTF-8 bytes equal characters exactly
+when the text is ASCII — and the currency rule is the one
+`metrics._creator_current_sql` applies to the Creator Translation bar, so the
+migration, the coverage bar and the new producer agree on what "needs
+translating" means. The mirror's own value carries into the queue row's
+`priority`, as in migration 2→3.
+
+*Measured in the 2026-09-18 backup*: of the 7,237 creators carrying the flag,
+**7,233** have a non-ASCII name and no current translation, so the first statement
+queues them; **4** have an ASCII name, which the second clears; and **0** creators
+needing translation were unflagged, so the flag was a complete census of the
+backlog and this migration need not look beyond it. No creator had a current
+translation *and* a raised flag, so the currency term changes no count today — it
+is there so the statement means "needs translating" rather than "is flagged".
+Both statements are idempotent, which `tests/test_user_translation.py` pins.
 
 ---
 

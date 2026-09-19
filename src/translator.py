@@ -353,34 +353,51 @@ Return ONLY a JSON array matching this exact format, preserving all 'id' values:
                 )
                 conn.execute("DELETE FROM translation_queue WHERE id = ?", (row["id"],))
                 translated_count += 1
-                translated_ids.add(row["item_id"])
+                translated_ids.add((row["item_type"], row["item_id"]))
                 logging.debug(f"[{row['item_id']}] {row['field']}: \"{row['original_text'][:40]}\" → \"{trans_text[:40]}\"")
 
-            for item_id in translated_ids:
+            for item_type, item_id in translated_ids:
+                # Keyed by type as well as id: a steamid and a workshop_id are
+                # both integers, so an unqualified id could count or complete a
+                # row belonging to the other table.
                 remaining = conn.execute(
-                    "SELECT COUNT(*) as cnt FROM translation_queue WHERE item_type='item' AND item_id=?",
-                    (item_id,)
+                    "SELECT COUNT(*) as cnt FROM translation_queue "
+                    "WHERE item_type=? AND item_id=?",
+                    (item_type, item_id)
                 ).fetchone()["cnt"]
-                if remaining == 0:
-                    ver = conn.execute(
-                        "SELECT steam_updated_at FROM workshop_items WHERE workshop_id = ?",
-                        (item_id,)
-                    ).fetchone()
-                    version_ts = ver["steam_updated_at"] if ver and ver["steam_updated_at"] else now_ts
-                    # translated_at is OUR clock, stamped when the item's last
-                    # queued field is gone -- the point at which the stage is
-                    # actually complete for this item. It is written in the same
-                    # statement (and so the same transaction) that zeroes the
-                    # queue mirror, so a mirror that reads 0 and a completion
-                    # that reads NULL can never both be observed. The per-field
-                    # write above deliberately does not stamp it: an item with
-                    # one field still queued is a partial stage, not a
-                    # completion.
+                if remaining:
+                    continue
+                if item_type == "user":
+                    # The per-field write above already stamped
+                    # `users.translated_at` -- our clock is the only version a
+                    # creator has, so completion needs no second stamp. Only the
+                    # mirror is left, and clearing it here keeps
+                    # `users.translation_priority` a mirror of the queue exactly
+                    # as the item column is.
                     conn.execute(
-                        "UPDATE workshop_items SET translation_priority = 0, "
-                        "translate_version = ?, translated_at = ? WHERE workshop_id = ?",
-                        (version_ts, int(time.time()), item_id)
+                        "UPDATE users SET translation_priority = 0 WHERE steamid = ?",
+                        (item_id,)
                     )
+                    continue
+                ver = conn.execute(
+                    "SELECT steam_updated_at FROM workshop_items WHERE workshop_id = ?",
+                    (item_id,)
+                ).fetchone()
+                version_ts = ver["steam_updated_at"] if ver and ver["steam_updated_at"] else now_ts
+                # translated_at is OUR clock, stamped when the item's last
+                # queued field is gone -- the point at which the stage is
+                # actually complete for this item. It is written in the same
+                # statement (and so the same transaction) that zeroes the
+                # queue mirror, so a mirror that reads 0 and a completion
+                # that reads NULL can never both be observed. The per-field
+                # write above deliberately does not stamp it: an item with
+                # one field still queued is a partial stage, not a
+                # completion.
+                conn.execute(
+                    "UPDATE workshop_items SET translation_priority = 0, "
+                    "translate_version = ?, translated_at = ? WHERE workshop_id = ?",
+                    (version_ts, int(time.time()), item_id)
+                )
 
             conn.commit()
 
