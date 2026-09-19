@@ -44,6 +44,14 @@ Deep-merges the in-memory config into the disk file, preserving keys not present
 | `openai.api_key` | string | None | OpenAI-compatible API key for translation. Overridden by `OPENAI_API_KEY` env var. |
 | `openai.model` | string | `"gpt-4o-mini"` | Model name passed to the OpenAI client. |
 | `openai.endpoint` | string | `"https://api.openai.com/v1"` | API endpoint URL (supports alternative providers like x.ai). |
+| `openai.batch` | int | 20 | Ceiling on fields per translation request. Bounds how many rows one bad reply can cost. |
+| `openai.batch_char_cap` | int | 4000 | Ceiling on the summed source length of one request. The first field is taken before the cap is checked; every later field is checked before it is taken, so only a single-field request may exceed it. |
+| `openai.temperature` | float | 0.0 | Sampling temperature. Translation is not a creative task, so sampling only adds variance; the value is clamped to 0–2. |
+
+There is deliberately no `max_tokens` key: a translation is never cut to a token
+budget, because a truncated translation is a corrupt one. The size ceiling is
+`openai.batch_char_cap` instead, which bounds what is *asked for* rather than
+silently truncating what comes back.
 
 ### `daemon`
 

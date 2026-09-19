@@ -1,7 +1,10 @@
 import pytest
-import json
 from unittest.mock import patch, MagicMock
 from src.translator import TranslatorThread, is_ascii
+
+# The boundary phrase is drawn per request, so these tests hold it still and write
+# their stub reply in the shape the request asks for.
+PHRASE = "goat smelt bob and"
 
 @pytest.fixture
 def mock_config():
@@ -87,16 +90,15 @@ def test_translate_batch_writes_translation_and_resets_priority(tmp_path):
     mock_client = MagicMock()
     mock_response = MagicMock()
     mock_response.choices = [MagicMock()]
-    mock_response.choices[0].message.content = json.dumps([
-        {"id": "item_1_title_en", "translated": "Hello"},
-    ])
+    mock_response.choices[0].message.content = f"{PHRASE} 1 title\nHello"
     mock_client.chat.completions.create.return_value = mock_response
 
     batch = [{
         "id": 1, "item_type": "item", "item_id": 1, "field": "title_en",
         "original_text": "\u30c6\u30b9\u30c8", "priority": 10,
     }]
-    thread._translate_batch(batch, mock_client, "gpt-test")
+    with patch("src.translator.choose_phrase", return_value=PHRASE):
+        thread._translate_batch(batch, mock_client, "gpt-test")
 
     conn = sqlite3.connect(db_path)
     result = conn.execute(
@@ -135,13 +137,12 @@ def test_translate_batch_stamps_steam_updated_at(tmp_path):
     mock_client = MagicMock()
     mock_response = MagicMock()
     mock_response.choices = [MagicMock()]
-    mock_response.choices[0].message.content = json.dumps([
-        {"id": "item_1_title_en", "translated": "Hello"},
-    ])
+    mock_response.choices[0].message.content = f"{PHRASE} 1 title\nHello"
     mock_client.chat.completions.create.return_value = mock_response
 
     batch = [{"id": 1, "item_type": "item", "item_id": 1, "field": "title_en", "original_text": "\u30c6\u30b9\u30c8", "priority": 10}]
-    thread._translate_batch(batch, mock_client, "gpt-test")
+    with patch("src.translator.choose_phrase", return_value=PHRASE):
+        thread._translate_batch(batch, mock_client, "gpt-test")
 
     conn = sqlite3.connect(db_path)
     result = conn.execute("SELECT translate_version FROM workshop_items WHERE workshop_id = 1").fetchone()
@@ -173,13 +174,12 @@ def test_translate_batch_falls_back_when_no_steam_updated_at(tmp_path):
     mock_client = MagicMock()
     mock_response = MagicMock()
     mock_response.choices = [MagicMock()]
-    mock_response.choices[0].message.content = json.dumps([
-        {"id": "item_1_title_en", "translated": "Hello"},
-    ])
+    mock_response.choices[0].message.content = f"{PHRASE} 1 title\nHello"
     mock_client.chat.completions.create.return_value = mock_response
 
     batch = [{"id": 1, "item_type": "item", "item_id": 1, "field": "title_en", "original_text": "\u30c6\u30b9\u30c8", "priority": 10}]
-    thread._translate_batch(batch, mock_client, "gpt-test")
+    with patch("src.translator.choose_phrase", return_value=PHRASE):
+        thread._translate_batch(batch, mock_client, "gpt-test")
 
     conn = sqlite3.connect(db_path)
     result = conn.execute("SELECT translate_version FROM workshop_items WHERE workshop_id = 1").fetchone()

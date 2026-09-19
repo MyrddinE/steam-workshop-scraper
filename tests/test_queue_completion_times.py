@@ -30,7 +30,6 @@ rather than silently scanning 2.6M rows.
 
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
 import time
@@ -490,9 +489,11 @@ def _translate(db_path, item_id, fields, returned, on_call=None):
     """Drive the real `_translate_batch` with a fake OpenAI client.
 
     ``fields`` is the queue's field list and ``returned`` the subset the model
-    answers, so a partial batch can be simulated.
+    answers, so a partial batch can be simulated. The boundary phrase is drawn per
+    request, so it is held still here and the reply is written in the shape the
+    request asks for.
     """
-    from src.translator import TranslatorThread
+    from src.translator import TranslatorThread, field_label
 
     config = {
         "database": {"path": db_path},
@@ -502,10 +503,10 @@ def _translate(db_path, item_id, fields, returned, on_call=None):
     thread = TranslatorThread(config)
     thread.db_path = db_path
 
-    payload = json.dumps([
-        {"id": f"item_{item_id}_{field}", "translated": f"EN {field}"}
-        for field in returned
-    ])
+    phrase = "goat smelt bob and"
+    payload = "\n".join(
+        f"{phrase} {item_id} {field_label(field)}\nEN {field}" for field in returned
+    )
     client = MagicMock()
     response = MagicMock()
     response.choices = [MagicMock()]
@@ -523,7 +524,8 @@ def _translate(db_path, item_id, fields, returned, on_call=None):
          "field": field, "original_text": "テキスト", "priority": 10}
         for index, field in enumerate(fields)
     ]
-    thread._translate_batch(batch, client, "gpt-test")
+    with patch("src.translator.choose_phrase", return_value=phrase):
+        thread._translate_batch(batch, client, "gpt-test")
 
 
 def test_the_translator_stamps_our_clock_when_the_items_last_field_completes(db_path, monkeypatch):
@@ -558,12 +560,21 @@ def test_a_partial_translation_does_not_stamp(db_path):
     assert _stored(db_path, 1, "translated_at") is None
 
 
-def test_a_translation_that_returns_no_text_does_not_stamp(db_path):
+def test_a_reply_with_no_text_is_a_failure_and_does_not_stamp(db_path):
+    """A reply that translates nothing is a failed request, not an empty success.
+
+    It has to raise: treating it as success would have the loop re-send the same
+    batch immediately, which is the tight loop the backoff exists to stop. The
+    field itself is untouched -- still queued, nothing stamped.
+    """
+    from src.translator import TranslationResponseError
+
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "テキスト",
                                     "status": 200, "steam_updated_at": 1710000000})
     flag_field_for_translation(db_path, "item", 1, "title_en", "テキスト", 10)
 
-    _translate(db_path, 1, ["title_en"], [])
+    with pytest.raises(TranslationResponseError):
+        _translate(db_path, 1, ["title_en"], [])
 
     assert _stored(db_path, 1, "translated_at") is None
     assert _stored(db_path, 1, "translation_priority") == 10, \

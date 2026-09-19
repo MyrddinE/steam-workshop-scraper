@@ -17,7 +17,6 @@ the item path is unchanged, and migration 27->28 returns the flags that were
 raised without a queue row behind them.
 """
 
-import json
 from unittest.mock import MagicMock, patch
 
 from src.daemon import Daemon
@@ -79,19 +78,29 @@ def _version(db_path):
     return _rows(db_path, "PRAGMA user_version")[0][0]
 
 
-def _translate(db_path, batch, translated_id, text="Author"):
-    """Run the real `_translate_batch` against a stubbed OpenAI client."""
+def _translate(db_path, batch, text="Author"):
+    """Run the real `_translate_batch` against a stubbed OpenAI client.
+
+    The boundary phrase is drawn per request, so it is held still here and the stub
+    reply is written in the shape the request asks for: boundary lines copied, the
+    translation beneath each one.
+    """
+    from src.translator import field_label
+
     thread = TranslatorThread({
         "database": {"path": db_path},
         "openai": {"api_key": "SK-TEST", "endpoint": "https://test/v1", "model": "gpt-test"},
     })
     thread.db_path = db_path
+    row = batch[0]
+    phrase = "goat smelt bob and"
     client = MagicMock()
     client.chat.completions.create.return_value.choices = [MagicMock()]
-    client.chat.completions.create.return_value.choices[0].message.content = json.dumps(
-        [{"id": translated_id, "translated": text}]
+    client.chat.completions.create.return_value.choices[0].message.content = (
+        f"{phrase} {row['item_id']} {field_label(row['field'])}\n{text}"
     )
-    thread._translate_batch(batch, client, "gpt-test")
+    with patch("src.translator.choose_phrase", return_value=phrase):
+        thread._translate_batch(batch, client, "gpt-test")
 
 
 # ── the producer: a fetched persona queues its name ──────────────────────────
@@ -161,7 +170,6 @@ def _translate_the_creator(db_path, text="Author"):
         db_path,
         [{"id": 1, "item_type": "user", "item_id": CREATOR,
           "field": "personaname_en", "original_text": "作者", "priority": 1}],
-        f"user_{CREATOR}_personaname_en",
         text,
     )
 
@@ -205,7 +213,7 @@ def test_the_item_completion_path_is_unchanged(db_path):
         db_path,
         [{"id": 1, "item_type": "item", "item_id": 7, "field": "title_en",
           "original_text": "テスト", "priority": 3}],
-        "item_7_title_en", "Test",
+        "Test",
     )
     partial = dict(_rows(
         db_path,
@@ -218,7 +226,7 @@ def test_the_item_completion_path_is_unchanged(db_path):
         db_path,
         [{"id": 2, "item_type": "item", "item_id": 7,
           "field": "short_description_en", "original_text": "説明", "priority": 3}],
-        "item_7_short_description_en", "Description",
+        "Description",
     )
     done = _rows(
         db_path,
