@@ -195,8 +195,8 @@ def _item_counts(conn, params) -> dict:
     return {"total": total, "dead": dead, "alive": total - dead}
 
 
-@metric("app_tracking", 3, "Discovery position per application.")
-def _app_tracking(conn, params) -> list[dict]:
+@metric("app_discovery", 3, "Discovery position per application.")
+def _app_discovery(conn, params) -> list[dict]:
     return [
         dict(r)
         for r in conn.execute(

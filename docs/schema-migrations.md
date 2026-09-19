@@ -833,7 +833,7 @@ pages while discovery walked them by number; `88397b7` replaced page-numbered
 discovery with cursor-based discovery, which resumes from `last_cursor`, and
 deleted `update_app_tracking_page` and the `page = last_page + 1` resume logic
 with it — but left every reader. So the TUI's "Last Page" column, the web table's
-equivalent, and the `app_tracking` metric that feeds both had, ever since, read a
+equivalent, and the `app_discovery` metric that feeds both had, ever since, read a
 column nothing writes and displayed its `DEFAULT 0`. Recorded as issue 47 and
 removed here. The stored value is not preserved because it stopped meaning
 anything the moment discovery moved to cursors.

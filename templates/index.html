@@ -2088,7 +2088,7 @@ document.getElementById('daemon-restart').onclick = async () => {
 const STATS_LABELS = {
   item_counts: 'Totals',
   high_water: 'Last successful API fetch',
-  app_tracking: 'App tracking',
+  app_discovery: 'App discovery',
   status_counts: 'Status counts',
   coverage: 'Coverage',
   stuck_work: 'Stuck work',
@@ -2291,7 +2291,7 @@ function _renderTags(tags) {
     + '<tbody>' + rows + '</tbody></table></div>';
 }
 
-function _renderAppTracking(apps) {
+function _renderAppDiscovery(apps) {
   if (!apps || !apps.length) return '<p class="stat-label">No tracked applications.</p>';
   const rows = apps.map(function(a) {
     return '<tr><td>' + a.appid + '</td>'
@@ -2387,7 +2387,7 @@ function _renderMetricBody(name, value) {
       || name === 'translation_throughput') return _renderThroughput(value);
   if (name === 'queue_eta') return _renderQueueEta(value);
   if (name === 'tag_counts') return _renderTags(value);
-  if (name === 'app_tracking') return _renderAppTracking(value);
+  if (name === 'app_discovery') return _renderAppDiscovery(value);
   return '<pre style="white-space:pre-wrap;margin:0">' + JSON.stringify(value) + '</pre>';
 }
 

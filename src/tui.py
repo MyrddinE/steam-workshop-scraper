@@ -201,7 +201,7 @@ class StatsScreen(Screen):
     METRIC_LABELS = {
         "high_water": "Last successful API fetch",
         "item_counts": "Totals",
-        "app_tracking": "App tracking",
+        "app_discovery": "App discovery",
         "status_counts": "Status counts",
         "stuck_work": "Stuck work",
         "dead_queued": "Dead but queued",
@@ -285,7 +285,7 @@ class StatsScreen(Screen):
                 id=f"stats-label-{name}",
                 classes="stats-header",
             )
-            if name == "app_tracking":
+            if name == "app_discovery":
                 yield DataTable(id="app-stats-table")
             else:
                 yield Static(id=self.METRIC_CONTENT_IDS[name])
@@ -428,9 +428,9 @@ class StatsScreen(Screen):
         elif value is None:
             if name in self.METRIC_CONTENT_IDS:
                 self._set_text(name, "[dim]unavailable[/dim]")
-            elif name in ("app_tracking", "tag_counts"):
+            elif name in ("app_discovery", "tag_counts"):
                 self.query_one(
-                    "#app-stats-table" if name == "app_tracking" else "#tag-stats-table",
+                    "#app-stats-table" if name == "app_discovery" else "#tag-stats-table",
                     DataTable,
                 ).clear(columns=True)
         elif name == "item_counts":
@@ -440,7 +440,7 @@ class StatsScreen(Screen):
                 f"[b]Dead:[/b] {value.get('dead', 0):,}   "
                 f"[dim](total {value.get('total', 0):,})[/dim]",
             )
-        elif name == "app_tracking":
+        elif name == "app_discovery":
             table = self.query_one("#app-stats-table", DataTable)
             table.clear(columns=True)
             table.add_columns("AppID", "Last Cursor")

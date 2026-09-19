@@ -306,7 +306,7 @@ def test_get_db_stats_matches_the_metrics_it_wraps(db_path):
     stats = get_db_stats(db_path)
     computed = metrics.values(metrics.compute(db_path, [
         "status_counts", "translation_status", "tag_counts", "fetch_recency",
-        "high_water", "app_tracking", "priority_breakdowns",
+        "high_water", "app_discovery", "priority_breakdowns",
     ]))
 
     assert stats["status_counts"] == computed["status_counts"]
@@ -314,7 +314,7 @@ def test_get_db_stats_matches_the_metrics_it_wraps(db_path):
     assert stats["tag_counts"] == computed["tag_counts"]
     assert stats["fetch_recency_counts"] == computed["fetch_recency"]
     assert stats["highest_api_fetched_at"] == computed["high_water"]
-    assert stats["app_stats"] == computed["app_tracking"]
+    assert stats["app_stats"] == computed["app_discovery"]
     assert stats["priority_breakdowns"] == computed["priority_breakdowns"]
 
 

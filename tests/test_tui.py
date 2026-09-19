@@ -527,7 +527,7 @@ def _fake_coverage(total=2, filtered_total=1):
 _FAKE_METRIC_VALUES = {
     "high_water": 1_700_000_000,
     "item_counts": {"total": 3, "alive": 2, "dead": 1},
-    "app_tracking": [{"appid": 294100, "last_cursor": "abc"}],
+    "app_discovery": [{"appid": 294100, "last_cursor": "abc"}],
     "status_counts": [{"status": 200, "count": 2}, {"status": -1, "count": 1}],
     "stuck_work": {"web": 1, "image": 0, "translation": 0, "api": 0},
     "dead_queued": 1,
@@ -591,7 +591,7 @@ def _fake_iter_metrics(record=None):
 #: cannot be left unwired by silence -- the guard test below walks the catalogue
 #: and names any other metric that is missing its label or content id.
 TUI_RENDER_EXEMPTIONS = {
-    "app_tracking": "special-cased onto a DataTable in `_compose_metric_section`",
+    "app_discovery": "special-cased onto a DataTable in `_compose_metric_section`",
     "tag_counts": "owns the right-hand column, not a scrolling chunk",
 }
 
