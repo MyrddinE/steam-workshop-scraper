@@ -88,7 +88,7 @@ def _seed(db_path, count: int = 1500):
     conn = database.get_connection(db_path)
     conn.executemany(
         "INSERT INTO translation_queue "
-        "(item_type, item_id, field, original_text, priority, queued_at) "
+        "(entity_type, entity_id, field, original_text, priority, queued_at) "
         "VALUES ('item', ?, 'title_en', 'テキスト', ?, ?)",
         [(i, i % 5, None if i % 3 == 0 else 1000 + i) for i in range(1, count + 1)],
     )
@@ -192,7 +192,7 @@ def _seed_ordering(db_path) -> dict[str, int]:
     for label, priority, queued_at in rows:
         cursor = conn.execute(
             "INSERT INTO translation_queue "
-            "(item_type, item_id, field, original_text, priority, queued_at) "
+            "(entity_type, entity_id, field, original_text, priority, queued_at) "
             "VALUES ('item', 1, ?, 'テキスト', ?, ?)",
             (label, priority, queued_at),
         )

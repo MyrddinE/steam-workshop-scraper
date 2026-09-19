@@ -62,7 +62,7 @@ PHRASE = "goat smelt bob and"
 
 def _row(item_id: int, field: str, text: str, priority: int = 3) -> dict:
     return {
-        "id": item_id, "item_type": "item", "item_id": item_id,
+        "id": item_id, "entity_type": "item", "entity_id": item_id,
         "field": field, "original_text": text, "priority": priority,
     }
 
@@ -159,7 +159,7 @@ def _queued_count(db_path, item_id: int = 1) -> int:
     conn = get_connection(db_path)
     try:
         return conn.execute(
-            "SELECT COUNT(*) AS n FROM translation_queue WHERE item_id = ?", (item_id,)
+            "SELECT COUNT(*) AS n FROM translation_queue WHERE entity_id = ?", (item_id,)
         ).fetchone()["n"]
     finally:
         conn.close()
@@ -295,7 +295,7 @@ def test_the_first_candidate_is_taken_even_when_it_alone_exceeds_the_cap():
         [_row(1, "extended_description_en", "x" * 5000), _row(2, "title_en", "y")],
         char_cap=4000, item_ceiling=20,
     )
-    assert [row["item_id"] for row in batch] == [1]
+    assert [row["entity_id"] for row in batch] == [1]
     assert len(batch[0]["original_text"]) > 4000
 
 
@@ -305,7 +305,7 @@ def test_the_cap_is_checked_before_the_second_candidate_is_taken():
          _row(2, "extended_description_en", "y" * 2000)],
         char_cap=4000, item_ceiling=20,
     )
-    assert [row["item_id"] for row in batch] == [1], "3000 + 2000 exceeds 4000"
+    assert [row["entity_id"] for row in batch] == [1], "3000 + 2000 exceeds 4000"
     assert had_more is True
 
 
@@ -316,7 +316,7 @@ def test_a_candidate_that_exactly_reaches_the_cap_is_taken():
          _row(2, "extended_description_en", "y" * 2000)],
         char_cap=4000, item_ceiling=20,
     )
-    assert [row["item_id"] for row in batch] == [1, 2]
+    assert [row["entity_id"] for row in batch] == [1, 2]
 
 
 def test_a_single_candidate_batch_may_exceed_the_cap():

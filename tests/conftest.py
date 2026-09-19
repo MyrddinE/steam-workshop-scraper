@@ -37,6 +37,11 @@ def restore_pre_rename_table_names(conn) -> None:
     reason: migrations 2->3, 3->4, 12->13, 16->17, 17->18, 21->22 and 25->26
     all read the historical names, so a marker rewound below 33 must present
     them. Migration 32->33 renames them forward again.
+
+    Migration 33->34 renamed the ``translation_queue`` discriminator columns to
+    ``entity_type``/``entity_id`` for the same reason: migrations 22->23 and
+    27->28 read ``item_type``/``item_id``, so a marker rewound below 34 must
+    present them. Migration 33->34 renames them forward again.
     """
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
@@ -59,6 +64,17 @@ def restore_pre_rename_table_names(conn) -> None:
         if new_name in columns and old_name not in columns:
             conn.execute(
                 f"ALTER TABLE workshop_items RENAME COLUMN {new_name} TO {old_name}"
+            )
+
+    queue_columns = {row[1] for row in conn.execute(
+        "PRAGMA table_info(translation_queue)").fetchall()}
+    for new_name, old_name in (
+        ("entity_type", "item_type"),
+        ("entity_id", "item_id"),
+    ):
+        if new_name in queue_columns and old_name not in queue_columns:
+            conn.execute(
+                f"ALTER TABLE translation_queue RENAME COLUMN {new_name} TO {old_name}"
             )
 
 # Deterministic test database constants

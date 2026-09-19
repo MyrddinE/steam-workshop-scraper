@@ -33,7 +33,7 @@ from tests.conftest import restore_pre_rename_table_names
 def _queue_count(db_path, item_id):
     conn = get_connection(db_path)
     count = conn.execute(
-        "SELECT COUNT(*) FROM translation_queue WHERE item_type='item' AND item_id=?",
+        "SELECT COUNT(*) FROM translation_queue WHERE entity_type='item' AND entity_id=?",
         (item_id,),
     ).fetchone()[0]
     conn.close()
@@ -63,7 +63,7 @@ def _drain_as_the_translator(db_path, item_id, translated_text="Test", version=1
         (translated_text, version, item_id),
     )
     conn.execute(
-        "DELETE FROM translation_queue WHERE item_type='item' AND item_id=?",
+        "DELETE FROM translation_queue WHERE entity_type='item' AND entity_id=?",
         (item_id,),
     )
     conn.execute(
@@ -132,7 +132,7 @@ def test_reflagging_never_downgrades(db_path):
 
     conn = get_connection(db_path)
     queued = conn.execute(
-        "SELECT priority FROM translation_queue WHERE item_id=1"
+        "SELECT priority FROM translation_queue WHERE entity_id=1"
     ).fetchone()[0]
     conn.close()
     assert queued == 10
@@ -175,7 +175,7 @@ def _age_to_v22(db_path):
 def _raw_queue_row(db_path, item_id, field="title_en", priority=5):
     conn = get_connection(db_path)
     conn.execute(
-        "INSERT INTO translation_queue (item_type, item_id, field, original_text, priority, queued_at) "
+        "INSERT INTO translation_queue (entity_type, entity_id, field, original_text, priority, queued_at) "
         "VALUES ('item', ?, ?, ?, ?, 1)",
         (item_id, field, "テスト", priority),
     )
@@ -240,7 +240,7 @@ def test_migration_queues_a_creator_name_and_keeps_its_mirror(db_path):
         (steamid,),
     ).fetchone()[0]
     queued = conn.execute(
-        "SELECT COUNT(*) FROM translation_queue WHERE item_type='user' AND item_id=?",
+        "SELECT COUNT(*) FROM translation_queue WHERE entity_type='user' AND entity_id=?",
         (steamid,),
     ).fetchone()[0]
     conn.close()

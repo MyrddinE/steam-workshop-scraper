@@ -45,7 +45,7 @@ def mock_config():
 
 def _full_batch(size: int = 20) -> list[dict]:
     return [
-        {"item_type": "item", "item_id": i, "field": "title_en",
+        {"entity_type": "item", "entity_id": i, "field": "title_en",
          "original_text": "x", "priority": 3}
         for i in range(size)
     ]

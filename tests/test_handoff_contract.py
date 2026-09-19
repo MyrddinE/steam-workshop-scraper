@@ -133,7 +133,7 @@ def _selected_for_translation(db_path, workshop_id: int, field: str) -> bool:
     try:
         return conn.execute(
             "SELECT 1 FROM translation_queue "
-            "WHERE item_type = 'item' AND item_id = ? AND field = ? "
+            "WHERE entity_type = 'item' AND entity_id = ? AND field = ? "
             f"AND ({database.translation_queue_predicate()})",
             (workshop_id, field),
         ).fetchone() is not None
@@ -448,7 +448,7 @@ def test_each_worker_poll_builds_its_query_from_the_named_predicate(db_path):
         ("image", "image_queue_predicate", "workshop_id = -12345",
          "FROM workshop_items",
          lambda: database.get_next_image_item(db_path)),
-        ("translation", "translation_queue_predicate", "item_id = -12345",
+        ("translation", "translation_queue_predicate", "entity_id = -12345",
          "FROM translation_queue",
          lambda: database.get_next_batch_for_translation(db_path, limit=1)),
     ]

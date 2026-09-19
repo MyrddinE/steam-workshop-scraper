@@ -822,7 +822,7 @@ def test_queue_field_for_translation_stamps_queued_at(db_path):
 
     conn = get_connection(db_path)
     row = conn.execute(
-        "SELECT queued_at FROM translation_queue WHERE item_id=1"
+        "SELECT queued_at FROM translation_queue WHERE entity_id=1"
     ).fetchone()
     conn.close()
     assert row["queued_at"] is not None
@@ -836,11 +836,11 @@ def test_translation_queue_legacy_null_queued_at_sorts_first(db_path):
 
     conn = get_connection(db_path)
     conn.execute(
-        "INSERT INTO translation_queue (item_type, item_id, field, original_text, priority, queued_at) "
+        "INSERT INTO translation_queue (entity_type, entity_id, field, original_text, priority, queued_at) "
         "VALUES ('item', 1, 'title_en', 'legacy', 5, NULL)"
     )
     conn.execute(
-        "INSERT INTO translation_queue (item_type, item_id, field, original_text, priority, queued_at) "
+        "INSERT INTO translation_queue (entity_type, entity_id, field, original_text, priority, queued_at) "
         "VALUES ('item', 2, 'title_en', 'dated', 5, ?)",
         (int(time.time()),)
     )
@@ -848,7 +848,7 @@ def test_translation_queue_legacy_null_queued_at_sorts_first(db_path):
     conn.close()
 
     batch = get_next_batch_for_translation(db_path, limit=2)
-    assert [row["item_id"] for row in batch] == [1, 2]
+    assert [row["entity_id"] for row in batch] == [1, 2]
 
 
 # ── get_db_stats classify fix ─────────────────────────────────────────────────

@@ -5,9 +5,9 @@ non-ASCII persona and nothing queued the name. That line was a complete producer
 while the (since removed) `get_next_translation_item` scanned `users` by the flag;
 when the per-field
 `translation_queue` replaced that scan the producer was never ported, so no
-`item_type='user'` row was ever written and no creator name was translated after
+`entity_type='user'` row was ever written and no creator name was translated after
 2026-05-10. Issue 46: the translator's completion pass was hard-coded to items, so
-a steamid would have counted against `item_type='item'` and completed against
+a steamid would have counted against `entity_type='item'` and completed against
 `workshop_items` keyed by that id, while the creator's own mirror was never
 cleared.
 
@@ -63,7 +63,7 @@ def _user_queue_rows(db_path, steamid):
         for row in _rows(
             db_path,
             "SELECT field, original_text, priority FROM translation_queue "
-            "WHERE item_type='user' AND item_id=?",
+            "WHERE entity_type='user' AND entity_id=?",
             (steamid,),
         )
     ]
@@ -100,7 +100,7 @@ def _translate(db_path, batch, text="Author"):
     client = MagicMock()
     client.chat.completions.create.return_value.choices = [MagicMock()]
     client.chat.completions.create.return_value.choices[0].message.content = (
-        f"{phrase} {row['item_id']} {field_label(row['field'])}\n{text}"
+        f"{phrase} {row['entity_id']} {field_label(row['field'])}\n{text}"
     )
     with patch("src.translator.choose_phrase", return_value=phrase):
         thread._translate_batch(batch, client, "gpt-test")
@@ -140,7 +140,7 @@ def _seed_creator_with_a_namesake_item(db_path):
 
     The item also carries a raised mirror with no queue row, so the old
     completion pass -- keyed on the id alone, with its count filtered to
-    `item_type='item'` -- would find "no fields left" for the creator, zero the
+    `entity_type='item'` -- would find "no fields left" for the creator, zero the
     item and stamp the item's completion.
     """
     insert_or_update_item(db_path, {
@@ -155,7 +155,7 @@ def _seed_creator_with_a_namesake_item(db_path):
 def _translate_the_creator(db_path, text="Author"):
     _translate(
         db_path,
-        [{"id": 1, "item_type": "user", "item_id": CREATOR,
+        [{"id": 1, "entity_type": "user", "entity_id": CREATOR,
           "field": "personaname_en", "original_text": "作者", "priority": 1}],
         text,
     )
@@ -198,7 +198,7 @@ def test_the_item_completion_path_is_unchanged(db_path):
 
     _translate(
         db_path,
-        [{"id": 1, "item_type": "item", "item_id": 7, "field": "title_en",
+        [{"id": 1, "entity_type": "item", "entity_id": 7, "field": "title_en",
           "original_text": "テスト", "priority": 3}],
         "Test",
     )
@@ -211,7 +211,7 @@ def test_the_item_completion_path_is_unchanged(db_path):
 
     _translate(
         db_path,
-        [{"id": 2, "item_type": "item", "item_id": 7,
+        [{"id": 2, "entity_type": "item", "entity_id": 7,
           "field": "short_description_en", "original_text": "説明", "priority": 3}],
         "Description",
     )

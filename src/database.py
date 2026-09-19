@@ -223,7 +223,7 @@ USER_PRIORITY_FLOOR = 5
 # than local to `initialize_database` because the migration tests assert that
 # the chain reaches it, and a magic number repeated in nine test files is a
 # number that will be wrong after the next migration.
-EXPECTED_VERSION = 33
+EXPECTED_VERSION = 34
 
 def _build_text_search_clauses(sql: str, params: list, query_string: str, cols: list[str]) -> tuple[str, list]:
     """Applies positive/negative text search tokens to SQL via LIKE clauses."""
@@ -783,6 +783,23 @@ def _current_table_name(cursor, new_name: str, old_name: str) -> str:
     return old_name
 
 
+def _current_column_name(cursor, table: str, new_name: str, old_name: str) -> str:
+    """Resolve one column's current name across a Batch 6 rename.
+
+    The column equivalent of :func:`_current_table_name`, for a statement
+    ``_create_legacy_schema`` runs on every startup and therefore on both sides
+    of a rename. Prefer the new name when the table already carries it, fall back
+    to the old one, and default to the old name so a brand-new file gets the
+    shape the migration chain expects.
+    """
+    columns = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
+    if new_name in columns:
+        return new_name
+    if old_name in columns:
+        return old_name
+    return old_name
+
+
 def _demote_filtered_out_queue_priorities(conn) -> tuple[int, int]:
     """Move filter-excluded items back to backlog priority. Returns (web, image).
 
@@ -1044,16 +1061,23 @@ def _create_legacy_schema(cursor, conn):
     # would still scan. It is created here, in the unversioned schema every caller
     # runs before the loop, which also means an existing database picks it up on
     # the next startup with no version bump and no new migration step.
-    # `IF NOT EXISTS` matches `_ensure_indexes`' idempotence. `item_type` and
-    # `item_id` have carried these names since the table was created (migration
-    # 6->7 only converts the `dt_queued` timestamp), so this is safe at every
-    # history, including one old enough to run the whole chain. The name avoids
-    # the column names deliberately: batch 6 renames these columns, and SQLite
-    # rewrites an index *definition* on RENAME COLUMN but keeps its *name*, so
+    # `IF NOT EXISTS` matches `_ensure_indexes`' idempotence. The two columns are
+    # resolved rather than hard-coded: this builder runs on every startup and on
+    # both sides of migration 33->34, so a fresh file still has `item_type` and
+    # `item_id` -- the chain it is about to replay names them, and
+    # `_create_current_schema` is where the new names are declared -- while an
+    # already-migrated database carries `entity_type` and `entity_id`. Naming
+    # either pair unconditionally raises "no such column" on the other side. The
+    # name avoids the column names deliberately: SQLite rewrites an index
+    # *definition* on RENAME COLUMN but keeps its *name*, so
     # `idx_translation_queue_item` would outlive its columns.
+    _queue_entity_type = _current_column_name(
+        cursor, "translation_queue", "entity_type", "item_type")
+    _queue_entity_id = _current_column_name(
+        cursor, "translation_queue", "entity_id", "item_id")
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_translation_queue_lookup "
-        "ON translation_queue (item_type, item_id, field)"
+        f"ON translation_queue ({_queue_entity_type}, {_queue_entity_id}, field)"
     )
 
     # Safe migrations for existing databases
@@ -1263,8 +1287,8 @@ def _create_current_schema(cursor, conn):
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS translation_queue (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        item_type TEXT NOT NULL,
-        item_id INTEGER NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_id INTEGER NOT NULL,
         field TEXT NOT NULL,
         original_text TEXT NOT NULL,
         priority INTEGER DEFAULT 0,
@@ -1373,7 +1397,7 @@ def _create_current_schema(cursor, conn):
     # creates it too rather than leaving it to `_ensure_indexes`.
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_translation_queue_lookup "
-        "ON translation_queue (item_type, item_id, field)"
+        "ON translation_queue (entity_type, entity_id, field)"
     )
 
     conn.commit()
@@ -2728,6 +2752,47 @@ def _migration_32_to_33(cursor, conn, db_path):
     conn.commit()
     logging.info("Migration 32->33 complete.")
 
+def _migration_33_to_34(cursor, conn, db_path):
+    logging.info("Running migration 33->34: renaming translation_queue.item_type/item_id to entity_type/entity_id...")
+
+    # `translation_queue` holds one row per text field awaiting translation, and
+    # the discriminator says which table the id belongs to: a workshop item or a
+    # creator. `item_type`/`item_id` read as if every row described an item --
+    # a creator row is `item_type = 'user'` -- and the bare `item_id` is the same
+    # vocabulary the workers use for a workshop id. They become
+    # `entity_type`/`entity_id`. The stored values, including the discriminators
+    # `'item'` and `'user'`, are untouched; only the names move.
+    #
+    # SQLite rewrites an index *definition* on RENAME COLUMN but keeps the index
+    # *name*. `idx_translation_queue_lookup` is named for the queue rather than a
+    # column, so it keeps its name and its definition follows both columns in
+    # place: there is nothing to drop or recreate. That is also what keeps the
+    # index correct for a migrated database, on which `_create_legacy_schema`
+    # next runs and resolves the two names dynamically.
+    #
+    # Each rename is guarded on the column that is present, so a re-run is
+    # harmless: a crash between the DDL commit and the version bump leaves the
+    # columns renamed under the old marker, and this step must then be a no-op
+    # rather than raise "no such column".
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(translation_queue)").fetchall()}
+    for old_name, new_name in (
+        ("item_type", "entity_type"),
+        ("item_id", "entity_id"),
+    ):
+        if new_name in columns:
+            logging.info("  translation_queue.%s already present; nothing to rename", new_name)
+        elif old_name in columns:
+            cursor.execute(f"ALTER TABLE translation_queue RENAME COLUMN {old_name} TO {new_name}")
+            logging.info("  renamed translation_queue.%s -> %s", old_name, new_name)
+        else:
+            logging.info("  neither %s nor %s exists; nothing to rename",
+                         old_name, new_name)
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 34")
+    conn.commit()
+    logging.info("Migration 33->34 complete.")
+
 def _ensure_indexes(cursor):
     """Create the query indexes, after the column renames migrations perform.
 
@@ -2816,6 +2881,7 @@ MIGRATIONS = [
     (31, _migration_30_to_31),
     (32, _migration_31_to_32),
     (33, _migration_32_to_33),
+    (34, _migration_33_to_34),
 ]
 
 def initialize_database(db_path: str, *, legacy_chain: bool = False):
@@ -3789,9 +3855,9 @@ def translation_is_current(translated_text, translate_version, steam_updated_at)
     return translate_version >= steam_updated_at
 
 
-def queue_field_for_translation(db_path: str, item_type: str, item_id: int, field: str, text: str, priority: int):
+def queue_field_for_translation(db_path: str, entity_type: str, entity_id: int, field: str, text: str, priority: int):
     """Inserts a field into translation_queue, or bumps its priority. Never downgrades.
-    Also bumps translation_priority on the parent item/user table.
+    Also bumps translation_priority on the parent item/creator table.
 
     The queue row and the parent mirror are written in ONE transaction on ONE
     connection. Splitting them was a live defect: the translator drains the
@@ -3802,14 +3868,17 @@ def queue_field_for_translation(db_path: str, item_type: str, item_id: int, fiel
     current. Holding the write lock across both statements makes the pair
     atomic: a drain either happens before the row is re-queued (mirror raised,
     row present) or after it (row deleted, mirror zeroed).
+
+    ``entity_type``/``entity_id`` are the queue row's columns, named for what
+    they are: the id may be a workshop item or a creator steamid.
     """
     if not text or text.isascii():
         return
     conn = get_connection(db_path)
     # Check if already exists
     existing = conn.execute(
-        "SELECT id, priority FROM translation_queue WHERE item_type=? AND item_id=? AND field=?",
-        (item_type, item_id, field)
+        "SELECT id, priority FROM translation_queue WHERE entity_type=? AND entity_id=? AND field=?",
+        (entity_type, entity_id, field)
     ).fetchone()
     if existing:
         if existing["priority"] < priority:
@@ -3824,17 +3893,17 @@ def queue_field_for_translation(db_path: str, item_type: str, item_id: int, fiel
         # get_next_batch_for_translation keeps that legacy backlog ahead of
         # newly queued work.
         conn.execute(
-            "INSERT INTO translation_queue (item_type, item_id, field, original_text, priority, queued_at) "
+            "INSERT INTO translation_queue (entity_type, entity_id, field, original_text, priority, queued_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (item_type, item_id, field, text, priority, int(time.time()))
+            (entity_type, entity_id, field, text, priority, int(time.time()))
         )
     # Sync translation_priority on the parent — use MAX so multiple fields
     # each set their priority without downgrading
-    table = "creators" if item_type == "user" else "workshop_items"
+    table = "creators" if entity_type == "user" else "workshop_items"
     id_col = "workshop_id" if table == "workshop_items" else "steamid"
     conn.execute(
         f"UPDATE {table} SET translation_priority = MAX(translation_priority, ?) WHERE {id_col} = ?",
-        (priority, item_id)
+        (priority, entity_id)
     )
     conn.commit()
     conn.close()

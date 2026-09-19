@@ -59,7 +59,7 @@ def _translation_queue_row(db_path, workshop_id):
     """
     conn = get_connection(db_path)
     conn.execute(
-        "INSERT INTO translation_queue (item_type, item_id, field, original_text, priority, queued_at) "
+        "INSERT INTO translation_queue (entity_type, entity_id, field, original_text, priority, queued_at) "
         "VALUES ('item', ?, 'title_en', 'テスト', 7, 1)",
         (workshop_id,),
     )

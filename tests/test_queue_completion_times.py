@@ -522,7 +522,7 @@ def _translate(db_path, item_id, fields, returned, on_call=None):
         client.chat.completions.create.side_effect = create
 
     batch = [
-        {"id": index + 1, "item_type": "item", "item_id": item_id,
+        {"id": index + 1, "entity_type": "item", "entity_id": item_id,
          "field": field, "original_text": "テキスト", "priority": 10}
         for index, field in enumerate(fields)
     ]
