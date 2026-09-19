@@ -742,7 +742,7 @@ def get_image_path(base_dir: str, workshop_id, ext: str) -> str:
 def _current_table_name(cursor, new_name: str, old_name: str) -> str:
     """Resolve a table's current name across the Batch 6 rename.
 
-    ``_create_schema`` runs on every startup, before the versioned migrations,
+    ``_create_legacy_schema`` runs on every startup, before the versioned migrations,
     so it sees a database on both sides of migration 29->30. It has to keep
     building a *fresh* database with the historical name -- the chain it is
     about to replay names these tables at earlier versions (13->14, 22->23,
@@ -874,7 +874,7 @@ def _demote_filtered_out_queue_priorities(conn) -> tuple[int, int]:
     return web_demoted, image_demoted
 
 
-def _create_schema(cursor, conn):
+def _create_legacy_schema(cursor, conn):
     """Create every table and baseline column that predates v1.
 
     This is the unversioned part of the schema: the tables and columns that
@@ -1131,6 +1131,221 @@ def _create_schema(cursor, conn):
             (json.dumps(filters), row["appid"])
         )
         conn.commit()
+
+def _create_current_schema(cursor, conn):
+    """Create a brand-new database directly at :data:`EXPECTED_VERSION`.
+
+    The statements below are the *terminal* shape the migration chain leaves
+    behind, dumped verbatim from ``sqlite_master`` of a database the chain
+    itself produced at ``user_version = 30`` -- no definition here was written
+    by reading the migrations. The index SQL in particular is the exact text
+    SQLite stores, so the fresh database's ``sqlite_master`` matches what the
+    chain leaves, including the early indexes whose definitions a ``RENAME
+    COLUMN`` rewrote (``idx_time_created``, ``idx_time_updated``; those two are
+    owned by :func:`_ensure_indexes` and are not repeated below).
+
+    A fresh database takes this path by default, so it never replays the
+    thirty migrations. An existing database always takes the legacy path,
+    because only the chain can carry it forward. The two endpoints must be
+    identical. ``_ensure_indexes`` still runs after this function, exactly as
+    it does after the chain, so the query indexes it owns are deliberately not
+    repeated here; the indexes a *migration* owns are created below, because
+    no migration runs on this path.
+
+    **Forward rule:** when a migration changes the schema, mirror it here as
+    well -- update the definition below and bump :data:`EXPECTED_VERSION` --
+    so both paths still end at the same shape.
+    :func:`tests.test_fresh_schema_path.test_schema_equivalence` builds one
+    database each way and fails the moment they diverge, which is what makes
+    this mechanical rather than a habit to remember.
+    """
+    # ── Tables ────────────────────────────────────────────────────────────
+    # The current column names, the current types and the current defaults.
+    # The legacy path reaches this same shape by renaming dt_found ->
+    # first_seen_at, dt_updated -> api_fetched_at and so on in migration
+    # 13->14, by dropping the legacy `tags` column in 5->6 and by ALTER-adding
+    # is_queued_for_subscription later.
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS workshop_items (
+        workshop_id INTEGER PRIMARY KEY,
+        first_seen_at INTEGER,
+        api_fetched_at INTEGER,
+        scrape_version INTEGER,
+        last_fetch_attempted_at INTEGER,
+        status INTEGER,
+        title TEXT,
+        creator INTEGER,
+        creator_appid INTEGER,
+        consumer_appid INTEGER,
+        filename TEXT,
+        file_size INTEGER,
+        preview_url TEXT,
+        hcontent_file TEXT,
+        hcontent_preview TEXT,
+        short_description TEXT,
+        steam_created_at INTEGER,
+        steam_updated_at INTEGER,
+        visibility INTEGER,
+        banned INTEGER,
+        ban_reason TEXT,
+        app_name TEXT,
+        file_type INTEGER,
+        subscriptions INTEGER,
+        favorited INTEGER,
+        views INTEGER,
+        extended_description TEXT,
+        lifetime_subscriptions INTEGER,
+        lifetime_favorited INTEGER,
+        title_en TEXT,
+        short_description_en TEXT,
+        extended_description_en TEXT,
+        translate_version INTEGER,
+        translation_priority INTEGER DEFAULT 0,
+        wilson_favorite_score REAL DEFAULT NULL,
+        wilson_subscription_score REAL DEFAULT NULL,
+        needs_web_scrape INTEGER DEFAULT 0,
+        image_extension TEXT DEFAULT NULL,
+        needs_image INTEGER DEFAULT 0,
+        api_priority INTEGER NOT NULL DEFAULT 3,
+        own_subscribed INTEGER DEFAULT 0,
+        own_first_subscribed_at INTEGER DEFAULT NULL,
+        downloaded_at INTEGER DEFAULT NULL,
+        web_scraped_at INTEGER DEFAULT NULL,
+        image_fetched_at INTEGER DEFAULT NULL,
+        translated_at INTEGER DEFAULT NULL,
+        is_queued_for_subscription INTEGER DEFAULT 0
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS creators (
+        steamid INTEGER PRIMARY KEY,
+        personaname TEXT,
+        personaname_en TEXT,
+        api_fetched_at INTEGER,
+        translated_at INTEGER,
+        translation_priority INTEGER DEFAULT 0
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS translation_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        item_type TEXT NOT NULL,
+        item_id INTEGER NOT NULL,
+        field TEXT NOT NULL,
+        original_text TEXT NOT NULL,
+        priority INTEGER DEFAULT 0,
+        queued_at INTEGER
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS app_discovery (
+        appid INTEGER PRIMARY KEY,
+        last_historical_date_scanned INTEGER,
+        filter_text TEXT DEFAULT '',
+        required_tags TEXT DEFAULT '[]',
+        excluded_tags TEXT DEFAULT '[]',
+        window_size INTEGER DEFAULT 2592000,
+        enrichment_filters TEXT DEFAULT '[]',
+        last_cursor TEXT DEFAULT ''
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS tags (
+        tag_id   INTEGER PRIMARY KEY,
+        tag_name TEXT UNIQUE NOT NULL
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS workshop_tags (
+        workshop_id INTEGER NOT NULL,
+        tag_id      INTEGER NOT NULL,
+        PRIMARY KEY (workshop_id, tag_id)
+    ) WITHOUT ROWID
+    """)
+
+    # ── Full-text search ─────────────────────────────────────────────────
+    # Content-sync FTS5 over the six translated/searchable columns. The
+    # shadow tables and the sync triggers are created here too: a fresh
+    # database never runs migrations 4->5 and 14->15, which created them on
+    # the chain path.
+    cursor.execute("""
+    CREATE VIRTUAL TABLE IF NOT EXISTS workshop_fts USING fts5(
+        title, title_en,
+        short_description, short_description_en,
+        extended_description, extended_description_en,
+        content='workshop_items', content_rowid='workshop_id'
+    )
+    """)
+    # The trigger bodies below keep migration 14->15's exact whitespace: the
+    # equivalence test compares the stored ``sqlite_master.sql``, so a
+    # reindented body would read as a divergence.
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS workshop_items_fts_insert AFTER INSERT ON workshop_items BEGIN
+            INSERT INTO workshop_fts(rowid, title, title_en, short_description, short_description_en, extended_description, extended_description_en)
+            VALUES (new.workshop_id, new.title, new.title_en, new.short_description, new.short_description_en, new.extended_description, new.extended_description_en);
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS workshop_items_fts_delete AFTER DELETE ON workshop_items BEGIN
+            INSERT INTO workshop_fts(workshop_fts, rowid, title, title_en, short_description, short_description_en, extended_description, extended_description_en)
+            VALUES ('delete', old.workshop_id, old.title, old.title_en, old.short_description, old.short_description_en, old.extended_description, old.extended_description_en);
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS workshop_items_fts_update
+        AFTER UPDATE OF title, title_en, short_description, short_description_en, extended_description, extended_description_en ON workshop_items BEGIN
+            INSERT INTO workshop_fts(workshop_fts, rowid, title, title_en, short_description, short_description_en, extended_description, extended_description_en)
+            VALUES ('delete', old.workshop_id, old.title, old.title_en, old.short_description, old.short_description_en, old.extended_description, old.extended_description_en);
+            INSERT INTO workshop_fts(rowid, title, title_en, short_description, short_description_en, extended_description, extended_description_en)
+            VALUES (new.workshop_id, new.title, new.title_en, new.short_description, new.short_description_en, new.extended_description, new.extended_description_en);
+        END
+    """)
+
+    # ── Indexes a migration owns ─────────────────────────────────────────
+    # These are created by migrations 4->5, 5->6, 24->25 and 26->27 on the
+    # legacy path, so they must be created here or the fresh path would have
+    # no copy of them. The query indexes `_ensure_indexes` owns are left to
+    # it, since it runs after this function on both paths.
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_title_en ON workshop_items (title_en)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_short_description_en ON workshop_items (short_description_en)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_extended_description_en ON workshop_items (extended_description_en)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_filename ON workshop_items (filename)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_workshop_tags_tag_id ON workshop_tags (tag_id)")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_web_scrape_queue "
+        "ON workshop_items (needs_web_scrape DESC, api_fetched_at ASC) "
+        "WHERE needs_web_scrape > 0"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_image_queue "
+        "ON workshop_items (needs_image DESC, api_fetched_at ASC) "
+        "WHERE needs_image > 0"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_api_queue "
+        "ON workshop_items (api_priority DESC, api_fetched_at ASC) "
+        "WHERE api_priority > 0"
+    )
+    for _column in ("web_scraped_at", "image_fetched_at", "translated_at"):
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{_column} "
+            f"ON workshop_items ({_column}) WHERE {_column} IS NOT NULL"
+        )
+
+    # Migration 22->23's repair runs *inside* the migration loop and needs
+    # this index before `_ensure_indexes` runs, which is why the legacy builder
+    # creates it too rather than leaving it to `_ensure_indexes`.
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_translation_queue_lookup "
+        "ON translation_queue (item_type, item_id, field)"
+    )
+
+    conn.commit()
+    cursor.execute(f"PRAGMA user_version = {EXPECTED_VERSION}")
 
 def _migration_0_to_1(cursor, conn, db_path):
     logging.info("Running migration 0→1: recalculating Wilson subscriber scores...")
@@ -2303,7 +2518,7 @@ def _migration_29_to_30(cursor, conn, db_path):
     # `app_discovery`.
     #
     # The rename satisfies three constraints that pull in opposite directions,
-    # all handled by `_create_schema`'s `_current_table_name` probe:
+    # all handled by `_create_legacy_schema`'s `_current_table_name` probe:
     #   * a fresh database still builds `users`/`app_tracking`, because the
     #     chain this file replays from 0 names them at earlier versions
     #     (6->7, 13->14, 21->22, 27->28);
@@ -2340,7 +2555,7 @@ def _migration_29_to_30(cursor, conn, db_path):
 def _ensure_indexes(cursor):
     """Create the query indexes, after the column renames migrations perform.
 
-    Separate from :func:`_create_schema` because several of these name columns
+    Separate from :func:`_create_legacy_schema` because several of these name columns
     that only exist once migration 13->14 has renamed them (``api_fetched_at``,
     ``scrape_version``), so they must run last. Idempotent: every statement is
     ``IF NOT EXISTS``.
@@ -2373,7 +2588,7 @@ def _ensure_indexes(cursor):
     # The translation poll (`get_next_batch_for_translation`) orders the whole
     # outstanding queue by priority then queue time on every pass, so that sort
     # belongs in an index. It has to be created here rather than in
-    # `_create_schema`: on a fresh database `_create_schema` runs while the
+    # `_create_legacy_schema`: on a fresh database `_create_legacy_schema` runs while the
     # column is still called `dt_queued` (migration 13->14 renames it to
     # `queued_at`), so an index naming `queued_at` there fails with
     # "no such column". `_ensure_indexes` runs after the migration chain, which
@@ -2424,7 +2639,7 @@ MIGRATIONS = [
     (30, _migration_29_to_30),
 ]
 
-def initialize_database(db_path: str):
+def initialize_database(db_path: str, *, legacy_chain: bool = False):
     """
     Initializes the SQLite database and creates the workshop_items table and indexes.
 
@@ -2436,23 +2651,38 @@ def initialize_database(db_path: str):
     nothing else holds a lock, which the connection's busy timeout does not
     wait out, and a reader that only wants a row must not risk it.
 
-    The driver is deliberately short: create the schema, read the recorded
-    version, then run the pending functions from ``MIGRATIONS`` in ascending
-    order. Each migration keeps the exact body it had at its version.
+    The path is chosen by the database's *recorded version*, never by whether
+    the file exists:
+
+    - a **fresh** database (``user_version = 0``) is built directly at
+      :data:`EXPECTED_VERSION` by :func:`_create_current_schema`, with no
+      migrations replayed;
+    - a fresh database with ``legacy_chain=True`` takes the historical shape
+      from :func:`_create_legacy_schema` and runs the whole ``MIGRATIONS``
+      table, exactly as every database did before the current-schema path
+      existed -- this is how the chain stays exercised;
+    - an **existing** database (``user_version > 0``) always runs
+      :func:`_create_legacy_schema` followed by its pending migrations, whatever
+      ``legacy_chain`` says, because the chain is the only thing that can carry
+      it forward.
+
+    ``_ensure_indexes`` runs last on every path.
     """
     conn = get_connection(db_path)
     cursor = conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL;")
 
-    _create_schema(cursor, conn)
-
     # Schema versioning: run migrations cumulatively from current to expected version
     db_version = cursor.execute("PRAGMA user_version").fetchone()[0]
     logging.info(f"Database schema version: {db_version} (expected: {EXPECTED_VERSION})")
 
-    for version, migrate in MIGRATIONS:
-        if db_version < version:
-            migrate(cursor, conn, db_path)
+    if db_version == 0 and not legacy_chain:
+        _create_current_schema(cursor, conn)
+    else:
+        _create_legacy_schema(cursor, conn)
+        for version, migrate in MIGRATIONS:
+            if db_version < version:
+                migrate(cursor, conn, db_path)
 
     _ensure_indexes(cursor)
     conn.commit()

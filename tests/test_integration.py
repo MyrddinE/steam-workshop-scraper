@@ -120,7 +120,9 @@ def test_database_migration_compatibility(tmp_path):
     conn.commit()
     conn.close()
 
-    initialize_database(old_schema_path)
+    # The hand-built file records user_version = 0, which the driver now treats
+    # as fresh; the chain is what this test wants, so it asks for it explicitly.
+    initialize_database(old_schema_path, legacy_chain=True)
 
     conn2 = get_connection(old_schema_path)
     cols = [row[1] for row in conn2.execute("PRAGMA table_info(workshop_items)")]

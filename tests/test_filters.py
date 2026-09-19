@@ -188,7 +188,10 @@ def test_legacy_filter_migration(tmp_path):
     conn.commit()
     conn.close()
 
-    initialize_database(db_path)
+    # The hand-built file records user_version = 0, which the driver now treats
+    # as fresh; this test is about the legacy conversion, so it asks for the
+    # historical schema plus the chain explicitly.
+    initialize_database(db_path, legacy_chain=True)
 
     tracking = get_app_tracking(db_path, 294100)
     assert tracking is not None
