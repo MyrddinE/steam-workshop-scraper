@@ -416,8 +416,8 @@ def test_stats_button_opens_a_panel_instead_of_navigating(web_client):
     assert daemon[0].getparent() is buttons[0].getparent(), \
         "#btn-stats and #btn-daemon must share a parent"
 
-    overlay = doc.xpath('//*[@id="stats-overlay"]')
-    assert overlay, "missing #stats-overlay"
+    overlay = doc.xpath('//*[@id="stats-modal"]')
+    assert overlay, "missing #stats-modal"
     assert doc.xpath('//*[@id="stats-metrics"]')[0] in overlay[0].iterdescendants(), \
         "#stats-metrics must live inside the overlay"
     assert doc.xpath('//*[@id="stats-close"]')[0] in overlay[0].iterdescendants(), \
@@ -1230,7 +1230,7 @@ def test_daemon_panel_and_toolbar_control_are_present(web_client):
     client, _ = web_client
     doc = lxml.html.fromstring(client.get('/').data.decode())
     assert doc.xpath('//*[@id="btn-daemon"]'), "toolbar control for the daemon panel is missing"
-    assert doc.xpath('//*[@id="daemon-overlay"]'), "daemon panel is missing"
+    assert doc.xpath('//*[@id="daemon-modal"]'), "daemon panel is missing"
     assert doc.xpath('//*[@id="daemon-status"]'), "daemon status line is missing"
     assert doc.xpath('//*[@id="daemon-log"]'), "daemon log view is missing"
 
@@ -2100,7 +2100,7 @@ def _author_driver(script, tmp_path):
               .replace("__INITAUTHORLIST__", "(" + _extract_function(script, "_initAuthorList") + ")()")
               .replace("__CLOSEAUTHORLIST__",
                        "(function(event) { _closedList += 1; "
-                       "_elements['author-overlay'].style.display = 'none'; })"))
+                       "_elements['author-modal'].style.display = 'none'; })"))
     return _run_node(driver, tmp_path)
 
 
@@ -2167,7 +2167,7 @@ const _elements = {
   'sort-order': fakeEl('select'),
   'subscribed-overlay': fakeEl('select'),
   'results-grid': fakeEl('div'),
-  'author-overlay': fakeEl('div'),
+  'author-modal': fakeEl('div'),
   'author-list': fakeEl('div'),
   'author-list-status': fakeEl('span'),
   'btn-authors': fakeEl('button'),
@@ -2249,12 +2249,12 @@ __INITAUTHORLIST__;
     count: _elements['author-list'].children.length,
     authors: _elements['author-list'].children.map((b) => b.dataset.author),
     texts: _elements['author-list'].children.map((b) => b.textContent),
-    overlayShown: _elements['author-overlay'].style.display
+    overlayShown: _elements['author-modal'].style.display
   };
   if (_elements['author-list'].children.length) {
     _elements['author-list'].onclick({target: _elements['author-list'].children[0]});
   }
-  const pickerAfterChoice = _elements['author-overlay'].style.display;
+  const pickerAfterChoice = _elements['author-modal'].style.display;
 
   console.log(JSON.stringify({
     sortBefore: sortBefore,
@@ -2372,7 +2372,7 @@ def test_author_mode_scaffold_is_in_the_served_page(web_client):
     doc = lxml.html.fromstring(client.get('/').data.decode())
 
     for el_id in ("author-mode-bar", "author-mode-name", "btn-return-author",
-                  "btn-authors", "author-overlay", "author-list", "author-list-status"):
+                  "btn-authors", "author-modal", "author-list", "author-list-status"):
         assert doc.xpath(f'//*[@id="{el_id}"]'), f"missing #{el_id}"
 
     bars = doc.xpath('//*[@id="author-mode-bar"]')
@@ -2487,7 +2487,7 @@ queueRows.forEach((r) => queueList.appendChild(r));
 queueList.querySelectorAll = (sel) => (sel === '.sub-queue-item' ? queueRows.slice() : []);
 
 const elements = {
-  'sub-queue-overlay': fakeEl('div'),
+  'sub-queue-modal': fakeEl('div'),
   'sub-queue-list': queueList,
   'sub-progress': fakeEl('span'),
   'sub-cancel': fakeEl('button'),
@@ -2629,8 +2629,8 @@ def test_analysis_panel_dom_contract(web_client):
     assert buttons[0].tag == "button", "the analysis affordance must not navigate away"
     assert not buttons[0].get("href"), "the analysis button must not be a link"
 
-    overlay = doc.xpath('//*[@id="analysis-overlay"]')
-    assert overlay, "missing #analysis-overlay"
+    overlay = doc.xpath('//*[@id="analysis-modal"]')
+    assert overlay, "missing #analysis-modal"
     for el_id in ('analysis-bucket-days', 'analysis-recalc', 'analysis-close',
                   'analysis-summary', 'analysis-table-host'):
         nodes = doc.xpath(f'//*[@id="{el_id}"]')

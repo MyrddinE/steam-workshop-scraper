@@ -208,7 +208,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
   </div>
 </main>
 
-<div id="daemon-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;overflow-y:auto;padding:2rem">
+<div id="daemon-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;overflow-y:auto;padding:2rem">
   <div style="max-width:700px;margin:0 auto">
     <h2>Daemon</h2>
     <p id="daemon-status" style="color:var(--pico-muted-color)">Loading...</p>
@@ -222,7 +222,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
   </div>
 </div>
 
-<div id="sub-queue-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;overflow-y:auto;padding:2rem">
+<div id="sub-queue-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;overflow-y:auto;padding:2rem">
   <div style="max-width:600px;margin:0 auto">
     <h2>Subscription Queue</h2>
     <p id="sub-progress" style="color:var(--pico-muted-color)"></p>
@@ -232,7 +232,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
   </div>
 </div>
 
-<div id="stats-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;overflow-y:auto;padding:2rem">
+<div id="stats-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;overflow-y:auto;padding:2rem">
   <div style="max-width:900px;margin:0 auto">
     <h2>Statistics</h2>
     <button id="stats-close" class="secondary" style="width:auto;margin-bottom:.75rem">Close</button>
@@ -240,7 +240,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
   </div>
 </div>
 
-<div id="analysis-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;overflow-y:auto;padding:2rem">
+<div id="analysis-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;overflow-y:auto;padding:2rem">
   <div style="max-width:900px;margin:0 auto">
     <h2>View Window Analysis</h2>
     <div class="analysis-controls">
@@ -258,7 +258,7 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 <!-- Every creator the database holds, from /api/authors. The route had no
      client before this; the item jump only reaches a creator whose item is
      already on screen, so this is the way to reach one that is not. -->
-<div id="author-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;overflow-y:auto;padding:2rem">
+<div id="author-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;overflow-y:auto;padding:2rem">
   <div style="max-width:600px;margin:0 auto">
     <h2>Creators</h2>
     <p id="author-list-status" style="color:var(--pico-muted-color)">Loading&hellip;</p>
@@ -1050,12 +1050,12 @@ async function returnFromAuthor() {
 // entry point for one that is not. The TUI has no list of its own, so this page
 // is the one place that endpoint is consumed.
 function _closeAuthorList() {
-  const overlay = document.getElementById('author-overlay');
+  const overlay = document.getElementById('author-modal');
   if (overlay) overlay.style.display = 'none';
 }
 
 async function showAuthorList() {
-  const overlay = document.getElementById('author-overlay');
+  const overlay = document.getElementById('author-modal');
   const list = document.getElementById('author-list');
   const status = document.getElementById('author-list-status');
   if (!overlay || !list) return;
@@ -1738,7 +1738,7 @@ async function _startAutoSubscribe() {
   const items = await resp.json();
   if (!items.length) { alert('No items queued for subscription.'); return; }
 
-  const overlay = document.getElementById('sub-queue-overlay');
+  const overlay = document.getElementById('sub-queue-modal');
   const list = document.getElementById('sub-queue-list');
   const progress = document.getElementById('sub-progress');
   overlay.style.display = 'block';
@@ -1913,7 +1913,7 @@ document.getElementById('sub-cancel').onclick = () => {
       });
     }
     fetch('/api/resume', {method:'POST'});
-    document.getElementById('sub-queue-overlay').style.display = 'none';
+    document.getElementById('sub-queue-modal').style.display = 'none';
   }
 };
 
@@ -2042,7 +2042,7 @@ async function _pollDaemonLog() {
 }
 
 function _openDaemonPanel() {
-  document.getElementById('daemon-overlay').style.display = 'block';
+  document.getElementById('daemon-modal').style.display = 'block';
   _daemonLogOffset = 0;
   _daemonLogLines = [];
   const pre = document.getElementById('daemon-log');
@@ -2058,7 +2058,7 @@ function _closeDaemonPanel() {
   // Release the poll timer when the panel closes; it is the only thing keeping
   // the daemon routes hot while the panel is hidden.
   if (_daemonPollIv) { clearInterval(_daemonPollIv); _daemonPollIv = null; }
-  document.getElementById('daemon-overlay').style.display = 'none';
+  document.getElementById('daemon-modal').style.display = 'none';
 }
 
 document.getElementById('btn-daemon').onclick = _openDaemonPanel;
@@ -2465,7 +2465,7 @@ function _loadMetric(name, token) {
 }
 
 function _openStatsPanel() {
-  const overlay = document.getElementById('stats-overlay');
+  const overlay = document.getElementById('stats-modal');
   const host = document.getElementById('stats-metrics');
   overlay.style.display = 'block';
   host.innerHTML = '<p>Loading…</p>';
@@ -2503,7 +2503,7 @@ function _closeStatsPanel() {
   Object.keys(_statsTimers).forEach(function(name) { clearTimeout(_statsTimers[name]); });
   _statsTimers = {};
   _saveStatsOrder();
-  document.getElementById('stats-overlay').style.display = 'none';
+  document.getElementById('stats-modal').style.display = 'none';
 }
 
 document.getElementById('btn-stats').onclick = _openStatsPanel;
@@ -2604,7 +2604,7 @@ function _runAnalysis() {
 }
 
 function _openAnalysisPanel() {
-  const overlay = document.getElementById('analysis-overlay');
+  const overlay = document.getElementById('analysis-modal');
   if (!overlay) return;
   const input = document.getElementById('analysis-bucket-days');
   // The TUI mounts a fresh screen at 7 days; so does this panel.
@@ -2615,7 +2615,7 @@ function _openAnalysisPanel() {
 
 function _closeAnalysisPanel() {
   _analysisToken += 1;  // discard every response still in flight
-  const overlay = document.getElementById('analysis-overlay');
+  const overlay = document.getElementById('analysis-modal');
   if (overlay) overlay.style.display = 'none';
 }
 

@@ -47,8 +47,8 @@ reading markup — the distinction proved to matter, because three endpoints exi
 
 | TUI feature | Web UI | Evidence |
 |---|---|---|
-| Statistics screen (`ctrl+r`) | Present | Both front ends stream the metrics as independent chunks: the TUI `StatsScreen` and the web `#stats-overlay` panel. The bare link to the raw JSON endpoint is gone, and each metric appears as soon as it is ready rather than waiting for the slowest. |
-| Analysis screen (`ctrl+?`) | Present | The `#analysis-overlay` panel calls `/api/analysis` and renders the bucket table, with the bucket width defaulting to the TUI's seven days. |
+| Statistics screen (`ctrl+r`) | Present | Both front ends stream the metrics as independent chunks: the TUI `StatsScreen` and the web `#stats-modal` panel. The bare link to the raw JSON endpoint is gone, and each metric appears as soon as it is ready rather than waiting for the slowest. |
+| Analysis screen (`ctrl+?`) | Present | The `#analysis-modal` panel calls `/api/analysis` and renders the bucket table, with the bucket width defaulting to the TUI's seven days. |
 | Tag statistics | Present | The panel renders a tag summary from the `tag_counts` metric. It is the most expensive single statistic (a 9.2M-row join); the owner has decided it stays because they want the results. |
 | Author list and jump-to-author | Present | Jump-to-author enters the same single-creator mode the TUI has — filters replaced, sort kept, `Return` restoring an in-memory snapshot (`jumpToAuthor`, `returnFromAuthor`). The author *list* is now consumed by a creator picker the TUI does not have; `/api/authors` existed with no client before it. See [web-ui.md](web-ui.md#the-creator-list) for why the list earns its place and [tui.md](tui.md#jump-to-author) for the one-sided position. |
 | Daemon start/stop/restart (`ctrl+d`) | Present | Both UIs drive one shared `DaemonController`. Routes: `/api/daemon`, `/api/daemon/start`, `/stop`, `/restart`, `/log`. |
