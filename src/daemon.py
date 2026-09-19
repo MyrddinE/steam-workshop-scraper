@@ -335,7 +335,8 @@ class DiscoveryThread(threading.Thread):
 
 
 class Daemon:
-    def __init__(self, config: dict, config_path: str = "config.yaml"):
+    def __init__(self, config: dict, config_path: str = "config.yaml",
+                 expect_pid_file: bool = False):
         self.config = config
         self.config_path = config_path
         self.running = True
@@ -442,7 +443,13 @@ class Daemon:
         self._web_worker = None
         self._image_worker = None
         self._cursor_exhausted = False
-        self._saw_pid_file = False  # set True once PID file is seen; prevents false trigger in tests
+        # Whether the absence of `.daemon.pid` is a stop request yet. The runner
+        # wrote the file before it constructed this Daemon, so for a launched
+        # daemon it is expected from the first check onward -- ``expect_pid_file``
+        # says so. A daemon constructed directly (tests, embedding) has no file
+        # and must not read "no file" as "the controller deleted it", so the flag
+        # then starts False and is set only once the file has actually been seen.
+        self._saw_pid_file = expect_pid_file
 
         # Enforce required target_appids
         self.target_appids = config.get("daemon", {}).get("target_appids")
@@ -1187,6 +1194,14 @@ class Daemon:
         but the request count drops from one per item to one per batch.
         """
         if not creator_ids:
+            return
+
+        # The item loop that collected these breaks on a stop, but the creators
+        # gathered before the break would otherwise still buy one more API
+        # request *after* the daemon already knows it is stopping -- up to the
+        # transport timeout of delay before the shutdown sequence can even
+        # begin. A stop is not the moment to refresh personas.
+        if not self._keep_running():
             return
 
         now = int(time.time())

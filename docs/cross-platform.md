@@ -22,17 +22,17 @@ Starts the daemon process via `subprocess.Popen`. Platform-specific behavior:
 
 ### Signal handling (`Daemon`)
 
-The daemon registers `signal.SIGINT` and `signal.SIGTERM` handlers. On Unix, `SIGTERM` is sent by the TUI's `Popen.send_signal()`. On Windows, neither signal is available for inter-process communication — `os.kill(pid, SIGTERM)` calls `TerminateProcess` (a hard kill that bypasses signal handlers).
+The daemon registers `signal.SIGINT` and `signal.SIGTERM` handlers, so a `SIGTERM` from the process that launched it is a graceful stop. On Windows a `SIGTERM` is not available for inter-process communication — `os.kill(pid, SIGTERM)` calls `TerminateProcess` (a hard kill that bypasses signal handlers) — so the PID file is the portable channel.
 
 ### PID file protocol
 
 The cross-platform solution uses the PID file as a shutdown indicator:
 
-1. The daemon writes `.daemon.pid` at startup and removes it via `atexit`.
-2. The daemon checks `os.path.exists(".daemon.pid")` at several points: at the top of `process_batch` before the housekeeping, after the batch read, per item, per details chunk, per discovery or subscription page, and every second in the idle wait. If the file is missing, it initiates graceful shutdown.
+1. The runner writes `.daemon.pid` before it constructs the daemon, and the daemon removes it via `atexit`. The runner tells the daemon the file is expected (`expect_pid_file=True`), so the file's absence counts as a stop from the daemon's first check; a stop landing during config load, migrations or thread startup is not lost. A daemon constructed without that flag (tests) is unaffected by a file it never had.
+2. The daemon checks `os.path.exists(".daemon.pid")` at several points: at the top of `process_batch` before the housekeeping, after the batch read, per item, per details chunk, before the creator refresh, per discovery or subscription page, and every second in the idle wait. If the file is missing, it initiates graceful shutdown.
 3. The TUI's Stop button deletes the PID file (which the daemon detects at its next checkpoint).
-4. On Linux, the TUI also sends SIGTERM for faster response.
-5. On Windows, the TUI deletes the PID file and waits up to `STOP_TIMEOUT_SECONDS` (15 s). If the daemon hasn't exited, `Popen.terminate()` is called as fallback (hard kill). The TUI also manually removes the PID file on Windows after forced termination, since `atexit` handlers don't fire on `TerminateProcess`.
+4. The controller signals a process directly only when it started that process itself and holds its `Popen` handle — on Windows that is the daemon; on Unix the `--daemon` double-fork makes the daemon a grandchild, so the file is the channel. A PID merely read out of the file is never signalled: a stale or corrupted file can name an unrelated process, and killing it would report the daemon stopped while it kept running.
+5. It waits up to `STOP_TIMEOUT_SECONDS` (15 s) for exit. If it owns the process it then force-kills it through the handle; if it does not, it removes the file and reports that the daemon did not exit rather than killing an unknown PID.
 
 ---
 

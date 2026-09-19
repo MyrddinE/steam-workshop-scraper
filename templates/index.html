@@ -2063,18 +2063,30 @@ function _closeDaemonPanel() {
 
 document.getElementById('btn-daemon').onclick = _openDaemonPanel;
 document.getElementById('daemon-close').onclick = _closeDaemonPanel;
-document.getElementById('daemon-start').onclick = async () => {
-  await fetch('/api/daemon/start', {method:'POST'});
+async function _daemonTransition(path) {
+  // The transition result carries a message the TUI shows as a warning
+  // notification -- for example a stop whose PID file named a process this
+  // controller did not start, which it refuses to signal and reports as "did
+  // not exit". Surface the same message here; it joins the log buffer so the
+  // two-second redraw does not wipe it.
+  let result = {};
+  try {
+    const resp = await fetch(path, {method:'POST'});
+    result = await resp.json();
+  } catch(e) { console.debug('Daemon transition error', e); /* refresh below still runs */ }
+  if (result.message && !result.changed) {
+    _daemonLogLines = _daemonLogLines.concat([result.message]).slice(-500);
+    const pre = document.getElementById('daemon-log');
+    if (pre) {
+      pre.innerHTML = _daemonLogLines.map(_ansiToHtml).join('\n') + '\n';
+      pre.scrollTop = pre.scrollHeight;
+    }
+  }
   _refreshDaemonStatus();
-};
-document.getElementById('daemon-stop').onclick = async () => {
-  await fetch('/api/daemon/stop', {method:'POST'});
-  _refreshDaemonStatus();
-};
-document.getElementById('daemon-restart').onclick = async () => {
-  await fetch('/api/daemon/restart', {method:'POST'});
-  _refreshDaemonStatus();
-};
+}
+document.getElementById('daemon-start').onclick = () => _daemonTransition('/api/daemon/start');
+document.getElementById('daemon-stop').onclick = () => _daemonTransition('/api/daemon/stop');
+document.getElementById('daemon-restart').onclick = () => _daemonTransition('/api/daemon/restart');
 
 // ── Statistics panel ──────────────────────────────────────────────────────
 // Every metric is an independent chunk: the panel asks the server for the

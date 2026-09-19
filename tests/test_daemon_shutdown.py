@@ -21,7 +21,7 @@ from src.database import initialize_database
 WORKER_NAMES = ("Discovery", "Web scraper", "Image download", "Translator", "Backup")
 
 
-def _daemon(tmp_path) -> Daemon:
+def _daemon(tmp_path, expect_pid_file=False) -> Daemon:
     db = str(tmp_path / "shutdown.db")
     initialize_database(db)
     return Daemon(
@@ -35,6 +35,7 @@ def _daemon(tmp_path) -> Daemon:
             },
         },
         config_path=str(tmp_path / "config.yaml"),
+        expect_pid_file=expect_pid_file,
     )
 
 
@@ -125,6 +126,52 @@ def test_pid_file_removal_triggers_the_stop_once(tmp_path, monkeypatch, caplog):
         assert daemon._pid_file_removed() is False
 
     assert caplog.text.count("PID file removed") == 1
+
+
+# --- the race: a stop before the first observation ---------------------------
+
+
+def test_a_pid_file_that_is_expected_is_a_stop_before_it_is_ever_seen(
+        tmp_path, monkeypatch):
+    """A daemon launched by the runner knows a PID file is part of the protocol.
+
+    This is the production race: the file is written by the runner and the
+    controller deletes it during config load, migrations, construction or thread
+    startup. The old "have I seen the file yet?" guard then ignored the absence
+    for ever and the daemon ran on. ``expect_pid_file`` says the file is real
+    from the first check, without requiring an observation first.
+    """
+    monkeypatch.chdir(tmp_path)
+    daemon = _daemon(tmp_path, expect_pid_file=True)
+    assert not os.path.exists(".daemon.pid")
+
+    assert daemon._pid_file_removed() is True
+    assert daemon.running is False
+
+
+def test_a_stop_that_lands_before_the_first_check_is_not_lost(tmp_path, monkeypatch):
+    """The loop must shut down on that early stop, not run another batch.
+
+    The file exists when the daemon is constructed -- as the runner leaves it --
+    and is gone before the first batch, so no housekeeping or queue read may
+    happen.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".daemon.pid").write_text("1", encoding="utf-8")
+    daemon = _daemon(tmp_path, expect_pid_file=True)
+    (tmp_path / ".daemon.pid").unlink()
+
+    with patch.object(Daemon, "_maybe_promote_stale_items") as sweep, \
+         patch.object(Daemon, "_maybe_reconcile_subscriptions") as reconcile, \
+         patch.object(Daemon, "_maybe_scan_downloaded_items") as scan, \
+         patch.object(Daemon, "_acquire_batch") as acquire:
+        daemon.run()
+
+    assert daemon.running is False
+    sweep.assert_not_called()
+    reconcile.assert_not_called()
+    scan.assert_not_called()
+    acquire.assert_not_called()
 
 
 # --- ordering: every flag before any join ------------------------------------
@@ -242,3 +289,19 @@ def test_fetch_details_stops_between_chunks(tmp_path):
 
     assert len(calls) == 1
     assert len(result) == 100
+
+
+def test_creator_refresh_is_skipped_once_stopping(tmp_path):
+    """No persona request after the daemon already knows it is stopping.
+
+    The item loop breaks on a stop but leaves the creators it gathered before
+    the break; refreshing them would add a request (up to the transport
+    timeout) between the stop being noticed and the shutdown sequence starting.
+    """
+    daemon = _daemon(tmp_path)
+    daemon.running = False
+
+    with patch("src.daemon.get_player_summaries") as summaries:
+        daemon._refresh_creators([42])
+
+    summaries.assert_not_called()

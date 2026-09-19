@@ -186,15 +186,24 @@ The detail poll runs at a fixed 3-second interval for the currently selected ite
 ### Graceful Shutdown
 
 The daemon has two stop signals and both end in the same sequence. On **Unix**
-the controller sends SIGTERM, which `handle_shutdown` answers by clearing
-`self.running` and the worker flags. On **Windows**, and as a fallback
-everywhere, the controller deletes `.daemon.pid`, and the daemon notices the file
-is gone at its next stop checkpoint. The checkpoints are the top of
-`process_batch` (before the housekeeping), `_wait_for_work` (every second), after
-`_acquire_batch`, per item, per details chunk, and per discovery or subscription
-page. A missing PID file is only read as a stop request once the daemon has seen
-it exist, so a daemon started without one — as in the tests — is not fooled by
-its absence.
+the controller signals the process it started, which `handle_shutdown` answers
+by clearing `self.running` and the worker flags. On **Windows**, and as a
+fallback everywhere, the controller deletes `.daemon.pid`, and the daemon
+notices the file is gone at its next stop checkpoint. The checkpoints are the
+top of `process_batch` (before the housekeeping), `_wait_for_work` (every
+second), after `_acquire_batch`, per item, per details chunk, before the
+creator refresh, and per discovery or subscription page.
+
+Whether the file's absence is a stop request at all is a property of how the
+daemon was launched. `src.daemon_runner` writes the file *before* it constructs
+the `Daemon`, so it passes `expect_pid_file=True` and the daemon reads the
+absence as a stop from its very first check. That closes the race the old
+"only once I have seen the file exist" guard left open: a stop landing during
+config load, the migrations, the constructor or thread startup — all of which
+happen after the file is written and before the first check — was previously
+ignored for ever. A daemon constructed directly (tests, embedding) has no file
+and is not fooled in the other direction: the flag starts unset and is armed
+only once the file has actually been seen.
 
 The loop then exits and `_shutdown_workers()` runs. Every worker's stop flag is
 set **before the first join**: signalling them together is what lets them unwind
