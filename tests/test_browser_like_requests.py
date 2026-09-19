@@ -90,7 +90,7 @@ def test_the_user_agent_is_firefox():
 # --- the cookie set matches the browser ------------------------------------
 
 def test_the_whole_profile_cookie_set_is_sent_when_enabled(monkeypatch):
-    monkeypatch.setattr(web_scraper, "browser_cookies",
+    monkeypatch.setattr(web_scraper, "steam_community_cookies",
                         lambda *args, **kwargs: dict(PROFILE_COOKIES))
 
     cookies = web_scraper._build_workshop_cookies({
@@ -104,7 +104,7 @@ def test_the_whole_profile_cookie_set_is_sent_when_enabled(monkeypatch):
 def test_the_profile_cookie_set_invents_nothing(monkeypatch):
     """Only what the profile has is sent; missing names are not backfilled."""
     profile = {"sessionid": "BROWSER_SID", "steamLoginSecure": "BROWSER_LOGIN"}
-    monkeypatch.setattr(web_scraper, "browser_cookies",
+    monkeypatch.setattr(web_scraper, "steam_community_cookies",
                         lambda *args, **kwargs: dict(profile))
 
     cookies = web_scraper._build_workshop_cookies(
@@ -121,7 +121,7 @@ def test_only_the_config_pair_is_sent_when_the_setting_is_off(monkeypatch):
         consulted.append(True)
         return {"sessionid": "BROWSER_SID", "steamLoginSecure": "BROWSER_LOGIN"}
 
-    monkeypatch.setattr(web_scraper, "browser_cookies", forbidden)
+    monkeypatch.setattr(web_scraper, "steam_community_cookies", forbidden)
 
     cookies = web_scraper._build_workshop_cookies(
         {"session": {"id": "CONFIG_SID", "login_secure": "CONFIG_LOGIN"}})
@@ -134,7 +134,7 @@ def test_only_the_config_pair_is_sent_when_the_setting_is_off(monkeypatch):
 
 @responses.activate
 def test_the_request_carries_the_whole_profile_cookie_set(monkeypatch):
-    monkeypatch.setattr(web_scraper, "browser_cookies",
+    monkeypatch.setattr(web_scraper, "steam_community_cookies",
                         lambda *args, **kwargs: dict(PROFILE_COOKIES))
     responses.add(responses.GET, DETAILS_URL, body=ITEM_HTML, status=200,
                   content_type="text/html")

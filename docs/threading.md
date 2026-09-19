@@ -55,7 +55,7 @@ Independent daemon thread. Picks up items with highest `needs_web_scrape` priori
 
 **Shared state**: Reads `workshop_items` (preview_url, extended_description, etc.), writes `extended_description`, `needs_web_scrape`, `scrape_version` and `web_scraped_at` (via `insert_or_update_item`). Writes `translation_queue` via `queue_field_for_translation`. On failure it raises `api_priority` to 2. `web_scraped_at` is written only on the success branch; a miss, a wall, a throttle and a transport failure all leave it alone.
 
-### Image Download Thread (`ImageScraperThread`)
+### Image Download Thread (`ImageDownloadThread`)
 
 Independent daemon thread. Picks up items with highest `needs_image` priority. Downloads the preview image, detects MIME/extension, saves to the bucketed `images/` directory. Writes `image_extension`, `needs_image` and `image_fetched_at`.
 

@@ -179,7 +179,7 @@ def _login_expired(value: str | None, now: float | None = None) -> bool:
     return expires_at <= (time.time() if now is None else now)
 
 
-def browser_cookies(refresh: bool = False, profiles_root: Path | None = None) -> dict:
+def steam_community_cookies(refresh: bool = False, profiles_root: Path | None = None) -> dict:
     """Every steamcommunity.com cookie in the profile, or {} if unavailable.
 
     The login cookie is the credential, but `sessionid` lives here too — it is
@@ -237,7 +237,7 @@ def steam_login_secure(refresh: bool = False,
     off the value with :func:`src.session_cookie.parse` rather than inferring it
     from a request that came back as the sign-in page.
     """
-    return browser_cookies(refresh=refresh, profiles_root=profiles_root).get(LOGIN_COOKIE)
+    return steam_community_cookies(refresh=refresh, profiles_root=profiles_root).get(LOGIN_COOKIE)
 
 
 def clear_cache() -> None:

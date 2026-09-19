@@ -206,7 +206,7 @@ def test_nothing_found_is_reported(tmp_path, caplog):
 
 def test_the_configured_value_is_used_when_the_lookup_is_off():
     config = {"session": {"login_secure": "FROM_CONFIG"}}
-    with patch("src.web_scraper.browser_cookies") as lookup:
+    with patch("src.web_scraper.steam_community_cookies") as lookup:
         assert _resolve_login_secure(config) == "FROM_CONFIG"
     lookup.assert_not_called()
 
@@ -218,19 +218,19 @@ def test_the_browser_wins_over_a_stale_config_value():
     such meant every scrape ran anonymously while the store held a good cookie.
     """
     config = {"session": {"login_secure": "STALE", "read_firefox_cookies": True}}
-    with patch("src.web_scraper.browser_cookies",
+    with patch("src.web_scraper.steam_community_cookies",
                return_value={"steamLoginSecure": "FROM_BROWSER"}):
         assert _resolve_login_secure(config) == "FROM_BROWSER"
 
 
 def test_the_config_is_the_fallback_when_the_browser_has_nothing():
     config = {"session": {"login_secure": "FROM_CONFIG", "read_firefox_cookies": True}}
-    with patch("src.web_scraper.browser_cookies", return_value={}):
+    with patch("src.web_scraper.steam_community_cookies", return_value={}):
         assert _resolve_login_secure(config) == "FROM_CONFIG"
 
 
 def test_an_empty_config_without_the_flag_stays_empty():
-    with patch("src.web_scraper.browser_cookies", return_value={"steamLoginSecure": "X"}) as lookup:
+    with patch("src.web_scraper.steam_community_cookies", return_value={"steamLoginSecure": "X"}) as lookup:
         assert _resolve_login_secure({"session": {}}) == ""
     lookup.assert_not_called()
 
@@ -238,13 +238,13 @@ def test_an_empty_config_without_the_flag_stays_empty():
 def test_the_session_id_comes_from_the_same_read():
     """A sessionid from a different session than the credential is worse than none."""
     config = {"session": {"id": "CONFIG_SID", "read_firefox_cookies": True}}
-    with patch("src.web_scraper.browser_cookies",
+    with patch("src.web_scraper.steam_community_cookies",
                return_value={"steamLoginSecure": "X", "sessionid": "BROWSER_SID"}):
         assert _csrf_token(config) == "BROWSER_SID"
 
 
 def test_the_session_id_falls_back_to_the_config():
-    with patch("src.web_scraper.browser_cookies", return_value={}):
+    with patch("src.web_scraper.steam_community_cookies", return_value={}):
         assert _csrf_token({"session": {"id": "CONFIG_SID", "read_firefox_cookies": True}}) == "CONFIG_SID"
 
 
@@ -256,8 +256,8 @@ def test_the_session_id_falls_back_to_the_config():
     ("", False),
 ])
 def test_looks_signed_out(body, expected):
-    from src.web_scraper import looks_signed_out
-    assert looks_signed_out(body) is expected
+    from src.web_scraper import looks_like_signed_out
+    assert looks_like_signed_out(body) is expected
 
 
 def test_refresh_forces_a_re_read(tmp_path):
@@ -362,21 +362,21 @@ def test_an_empty_read_is_still_not_cached(tmp_path):
 # --- telling a gate from a layout change ----------------------------------
 
 def test_a_withheld_page_looks_gated():
-    from src.web_scraper import looks_gated
-    assert looks_gated('<title>Steam Community :: Error</title>') is True
-    assert looks_gated('<div id="AgeCheck">verify</div>') is True
+    from src.web_scraper import looks_like_gated
+    assert looks_like_gated('<title>Steam Community :: Error</title>') is True
+    assert looks_like_gated('<div id="AgeCheck">verify</div>') is True
 
 
 def test_an_item_page_never_looks_gated():
     """Every normal page carries a Sign In link, so markup must veto the markers."""
-    from src.web_scraper import looks_gated
+    from src.web_scraper import looks_like_gated
     body = '<a>Sign In</a><div class="workshopItemTitle">T</div>'
-    assert looks_gated(body) is False
+    assert looks_like_gated(body) is False
 
 
 def test_an_empty_body_cannot_be_judged():
-    from src.web_scraper import looks_gated
-    assert looks_gated("") is False
+    from src.web_scraper import looks_like_gated
+    assert looks_like_gated("") is False
 
 
 # --- telling "no description" from "not the item page" ---------------------

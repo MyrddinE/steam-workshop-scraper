@@ -310,7 +310,7 @@ def test_daemon_run_takes_final_snapshot_on_shutdown(tmp_path):
     # taken after they are joined, which is what we assert.
     with patch("src.daemon.TranslatorThread"), \
          patch("src.daemon.WebScraperThread"), \
-         patch("src.daemon.ImageScraperThread"):
+         patch("src.daemon.ImageDownloadThread"):
         daemon = Daemon(config, config_path=str(tmp_path / "config.yaml"))
         with patch.object(Daemon, "process_batch",
                           side_effect=lambda: setattr(daemon, "running", False)):

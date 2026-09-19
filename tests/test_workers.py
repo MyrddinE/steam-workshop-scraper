@@ -97,10 +97,10 @@ def test_the_web_delay_floor_is_honoured_during_decay(db_path):
 
 def test_image_worker_thread_lifecycle(tmp_path):
     """Image worker starts, runs, and stops cleanly."""
-    from src.image_worker import ImageScraperThread
+    from src.image_worker import ImageDownloadThread
 
     db_path = str(tmp_path / "test.db")
-    worker = ImageScraperThread(db_path, '.pauselock')
+    worker = ImageDownloadThread(db_path, '.pauselock')
     assert worker.running is True
     worker.running = False
     worker.start()
@@ -110,7 +110,7 @@ def test_image_worker_thread_lifecycle(tmp_path):
 
 def test_image_worker_failure_sets_api_priority(db_path):
     """Image download failure bumps api_priority to 2."""
-    from src.image_worker import ImageScraperThread
+    from src.image_worker import ImageDownloadThread
     from src.database import insert_or_update_item, get_connection
 
     insert_or_update_item(db_path, {
@@ -118,7 +118,7 @@ def test_image_worker_failure_sets_api_priority(db_path):
         "preview_url": "http://example.com/img.jpg"
     })
 
-    worker = ImageScraperThread(db_path, '.pauselock')
+    worker = ImageDownloadThread(db_path, '.pauselock')
 
     call_count = [0]
     def fail_on_first(*args, **kwargs):
@@ -178,9 +178,9 @@ def _run_image_worker(db_path, response=None, error=None, images_root=None):
     """
     import os
     from contextlib import ExitStack
-    from src.image_worker import ImageScraperThread
+    from src.image_worker import ImageDownloadThread
 
-    worker = ImageScraperThread(db_path, ".pauselock")
+    worker = ImageDownloadThread(db_path, ".pauselock")
     item = {"workshop_id": 5, "preview_url": "http://example.com/img.jpg",
             "needs_image": 1, "steam_updated_at": 1}
     served = [0]

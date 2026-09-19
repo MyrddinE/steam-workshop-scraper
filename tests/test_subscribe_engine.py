@@ -118,11 +118,11 @@ def test_the_parser_says_unknown_when_the_button_is_absent():
 
 def test_the_session_id_parser_reads_a_quoted_g_session_id():
     """The parser for issue 38, against synthetic pages only."""
-    assert engine.parse_session_id(
+    assert engine.parse_csrf_token(
         "<script>var g_sessionID = 'PAGE_TOKEN';</script>") == "PAGE_TOKEN"
-    assert engine.parse_session_id(
+    assert engine.parse_csrf_token(
         '<script>var g_sessionID="X";</script>') == "X"
-    assert engine.parse_session_id(
+    assert engine.parse_csrf_token(
         '<script>g_sessionID = "SPACED";</script>') == "SPACED"
 
 
@@ -132,7 +132,7 @@ def test_the_session_id_parser_says_empty_when_the_page_has_no_g_session_id():
                  "<html>You have made too many requests</html>",
                  "<script>var g_sessionID = '';</script>",
                  "", None):
-        assert engine.parse_session_id(page) == ""
+        assert engine.parse_csrf_token(page) == ""
 
 
 def test_the_token_fingerprint_is_stable_and_different_for_another_token():
@@ -440,7 +440,7 @@ def test_a_refused_token_with_an_authenticated_page_is_not_a_session_problem(
     outcome = engine.subscribe_item(7, config=config, db_path=db_path)
 
     assert outcome.status == engine.TOKEN_REFUSED
-    assert outcome.queued is True
+    assert outcome.stays_queued is True
     assert outcome.steam_success == payload["success"]
     assert session_health.read(db_path) is None, "the login was proven good"
     assert _queued(db_path, 7) is True
@@ -528,7 +528,7 @@ def test_a_throttle_page_leaves_the_item_queued(engine_env, monkeypatch):
     outcome = engine.subscribe_item(7, config=config, db_path=db_path)
 
     assert outcome.status == engine.THROTTLED
-    assert outcome.queued is True
+    assert outcome.stays_queued is True
     assert session.calls == []
     assert _queued(db_path, 7) is True
 
@@ -544,7 +544,7 @@ def test_a_throttle_answer_to_the_post_leaves_the_item_queued(engine_env, monkey
     outcome = engine.subscribe_item(7, config=config, db_path=db_path)
 
     assert outcome.status == engine.THROTTLED
-    assert outcome.queued is True
+    assert outcome.stays_queued is True
     assert _queued(db_path, 7) is True
 
 

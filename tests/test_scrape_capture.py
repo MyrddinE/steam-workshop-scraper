@@ -273,8 +273,8 @@ def test_no_credential_value_reaches_the_outbox(tmp_path):
     ("", False),
 ])
 def test_looks_rate_limited(body, expected):
-    from src.web_scraper import looks_rate_limited
-    assert looks_rate_limited(body) is expected
+    from src.web_scraper import looks_like_rate_limited
+    assert looks_like_rate_limited(body) is expected
 
 
 def test_a_throttled_page_is_not_mistaken_for_a_stale_cookie():
@@ -368,7 +368,7 @@ def test_a_signed_out_page_refreshes_the_cookie_without_a_second_request():
 # queue is busy. The worker records the same fact through the same module, so the
 # warning says the same thing whichever path found it.
 #
-# The predicate is `looks_signed_out`, which reads the absent signed-in markers.
+# The predicate is `looks_like_signed_out`, which reads the absent signed-in markers.
 # It is a heuristic and is documented as one: a withheld page that arrived
 # without Steam's header (an error shell, an age check) reads the same way. That
 # cost is accepted because the warning names the remedy and Recheck clears it

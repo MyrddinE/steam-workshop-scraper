@@ -628,7 +628,7 @@ def api_subscribe(workshop_id):
         session_health.record_rejected(_db_path, problem)
         return jsonify({"success": -1, "message": problem}), 400
 
-    found, appid = subscribe_engine.consumer_appid(_db_path, workshop_id)
+    found, appid = subscribe_engine.lookup_consumer_appid(_db_path, workshop_id)
     if not found:
         logging.warning(f"[Subscribe] No item row for workshop_id={workshop_id} — cannot subscribe")
         return jsonify({"success": -1, "message": "Item not found."}), 404

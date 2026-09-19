@@ -6,7 +6,7 @@ import threading
 import requests.utils
 import logging
 from src.config import load_config, login_secure_value
-from src.firefox_cookies import browser_cookies, firefox_version
+from src.firefox_cookies import steam_community_cookies, firefox_version
 
 # The selectors scrape_extended_details depends on. Named so a selector miss can
 # be captured against the exact selector that failed.
@@ -172,7 +172,7 @@ TAGS_SELECTOR = '.workshopTags a'
 _RATE_LIMIT_MARKERS = ("too many requests", "you have made too many requests")
 
 
-def looks_rate_limited(body: str) -> bool:
+def looks_like_rate_limited(body: str) -> bool:
     """Whether Steam served its throttle page rather than the item.
 
     Worth separating from a miss: the item is fine and only the budget is spent,
@@ -184,7 +184,7 @@ def looks_rate_limited(body: str) -> bool:
     return any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
 
 
-def looks_signed_out(body: str) -> bool:
+def looks_like_signed_out(body: str) -> bool:
     """Whether the page was served to an anonymous visitor.
 
     The header carries an account dropdown once Steam recognises a session, so
@@ -201,7 +201,7 @@ def looks_signed_out(body: str) -> bool:
     return match is None or match.group(1).lower() == "false"
 
 
-def looks_gated(body: str) -> bool:
+def looks_like_gated(body: str) -> bool:
     """Whether a failed scrape looks like Steam withholding the page.
 
     A gated page and a changed layout both present as "the selector did not
@@ -283,7 +283,7 @@ def _csrf_token(config: dict) -> str:
     rejects the mismatch in a way that looks like an ordinary failure.
     """
     if config.get("session", {}).get("read_firefox_cookies"):
-        value = browser_cookies().get("sessionid")
+        value = steam_community_cookies().get("sessionid")
         if value:
             return value
     return config.get("session", {}).get("id", "") or ""
@@ -303,7 +303,7 @@ def _resolve_login_secure(config: dict) -> str:
     logs why it came up empty.
     """
     if config.get("session", {}).get("read_firefox_cookies"):
-        cookie = browser_cookies().get("steamLoginSecure")
+        cookie = steam_community_cookies().get("steamLoginSecure")
         if cookie:
             return cookie
     return login_secure_value(config)
@@ -332,7 +332,7 @@ def _build_workshop_cookies(config: dict) -> dict:
     when unset.
     """
     if config.get("session", {}).get("read_firefox_cookies"):
-        profile_cookies = browser_cookies()
+        profile_cookies = steam_community_cookies()
         if profile_cookies:
             return dict(profile_cookies)
         # The source is enabled but empty: no profile, or a profile with no

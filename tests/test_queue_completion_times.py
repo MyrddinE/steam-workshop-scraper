@@ -376,9 +376,9 @@ class _FakeImageResponse:
 
 def _run_image_stage(db_path, response=None, error=None, images_root=None,
                      on_request=None):
-    from src.image_worker import ImageScraperThread
+    from src.image_worker import ImageDownloadThread
 
-    worker = ImageScraperThread(db_path, ".pauselock")
+    worker = ImageDownloadThread(db_path, ".pauselock")
     item = {"workshop_id": 5, "preview_url": "http://example.com/img.jpg",
             "needs_image": 1, "steam_updated_at": 1}
     served = [0]

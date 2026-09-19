@@ -40,7 +40,7 @@ from src.config import login_secure_value, save_config
 from src.database import raise_web_scrape_priority, queue_field_for_translation, raise_image_priority, translation_is_current
 from src.firefox_cookies import steam_login_secure
 from src.web_worker import WebScraperThread
-from src.image_worker import ImageScraperThread
+from src.image_worker import ImageDownloadThread
 from src.backup import BackupThread
 from src.daemon_state import StateStore, state_path_for
 from src import pacing
@@ -1237,7 +1237,7 @@ class Daemon:
         self._web_worker = WebScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value,
                                               session_refresh=self._refresh_login_cookie)
         self._web_worker.start()
-        self._image_worker = ImageScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value)
+        self._image_worker = ImageDownloadThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value)
         self._image_worker.start()
         if self._backup_worker is not None:
             self._backup_worker.start()

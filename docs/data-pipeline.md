@@ -403,7 +403,7 @@ outbox.
 
 ## Image Download Phase
 
-### `ImageScraperThread` (image_worker)
+### `ImageDownloadThread` (image_worker)
 
 A daemon thread that picks up items from `get_next_image_item`, ordered by `needs_image DESC, api_fetched_at ASC`. For each item:
 
@@ -731,7 +731,7 @@ completion indexes migration 26→27 added. No new index was required.
     │      ▼
     │   [Scraped: extended_description populated, needs_web_scrape=0]
     │
-    ├─► Image Download (if preview_url): ImageScraperThread
+    ├─► Image Download (if preview_url): ImageDownloadThread
     │      │
     │      ▼
     │   [Image: image_extension set, needs_image=0]

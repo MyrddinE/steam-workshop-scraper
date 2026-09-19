@@ -41,7 +41,7 @@ def _response_metadata(resp) -> dict:
     }
 
 
-class ImageScraperThread(threading.Thread):
+class ImageDownloadThread(threading.Thread):
     def __init__(self, db_path: str, pause_lock_file: str, daemon_config: dict = None, save_callback = None):
         super().__init__(daemon=True)
         self.db_path = db_path
@@ -185,7 +185,7 @@ class ImageScraperThread(threading.Thread):
                     error=str(e), error_type=type(e).__name__)
 
                 status = resp.status_code if resp is not None else None
-                marker = images.status_marker(status)
+                marker = images.permanent_status_marker(status)
                 conn = self._get_conn()
                 if marker is not None:
                     # The server answered that the picture is not there, and

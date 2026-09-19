@@ -1142,7 +1142,7 @@ class SubscriptionQueueScreen(ModalScreen):
         item = self._items[index]
         outcome = self._outcomes.get(item["workshop_id"])
         if outcome is not None:
-            colour = "green" if outcome.ok else "yellow"
+            colour = "green" if outcome.is_subscribed else "yellow"
             return None, subscribe_engine.status_label(outcome.status), colour
         if not self._pass_running:
             return None, None, None
@@ -1304,7 +1304,7 @@ class SubscriptionQueueScreen(ModalScreen):
         refresh = getattr(self.app, "refresh_subscription_rows", None)
         if refresh is not None:
             self.app.call_after_refresh(refresh, [outcome.workshop_id])
-        if not outcome.ok and outcome.message:
+        if not outcome.is_subscribed and outcome.message:
             logging.info("[subscribe] %s: %s", outcome.workshop_id, outcome.message)
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
@@ -1322,7 +1322,7 @@ class SubscriptionQueueScreen(ModalScreen):
             button = self.query_one("#btn-subscribe-queue", Button)
             button.disabled = not self._items
             outcomes = event.worker.result if event.state == WorkerState.SUCCESS else []
-            done = sum(1 for o in outcomes if o.ok)
+            done = sum(1 for o in outcomes if o.is_subscribed)
             remaining = len(outcomes) - done
             self.query_one("#sub-queue-status", Static).update(
                 f"Pass finished: {done} subscribed, {remaining} left queued."
