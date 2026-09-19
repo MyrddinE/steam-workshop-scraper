@@ -95,6 +95,12 @@ the better reading of the data and the larger change. [architecture.md](architec
 
 Migration 34→35 drops three columns, and SQLite implements `DROP COLUMN` by rewriting the table: *measured* at **14.9 s** on the real 2.5 M-row `workshop_items` copy, on this machine's disk. Every connection is opened with a **15 s** busy timeout (`src/database.py:51`), so a second entry point — the TUI or the web runner — calling `initialize_database` while the first is still rewriting the table waits out its timeout and raises "database is locked" instead. All three call it, and whichever starts first owns the migration. The measured margin is about 0.1 s here and would be negative on slower hardware; the figure is from a copy, not from production. Workarounds, in order of preference: bring the entry points up one at a time and let the first finish, since the migration is one-time; raise the busy timeout for the initialising connection; or run the drops as a standalone maintenance step before deploying. [schema-migrations.md](schema-migrations.md), [threading.md](threading.md)
 
+### Issue 62
+
+**A build older than the database runs against a newer schema instead of refusing** — *Open*, High
+
+`initialize_database` reads `PRAGMA user_version` and logs it, but the only comparison is `db_version < version` inside the `MIGRATIONS` loop, so a build whose `EXPECTED_VERSION` is lower than the file's recorded version proceeds normally: it runs `_create_legacy_schema`, applies no migrations, and then reads and writes a schema it does not understand. The consequence is not an error but the silence Batch 6a measured — old code against a renamed database puts up its own empty `users` and a fabricated `app_tracking` beside the real tables and keeps using them, so creator joins blank, every creator looks stale, and discovery progress or filter edits made in that window are lost. Reading the version before any schema work and refusing when the database is newer turns that silence into a sentence the operator can act on. [schema-migrations.md](schema-migrations.md), [threading.md](threading.md)
+
 ## Recently closed
 
 Removed from the list above rather than marked resolved. Each is now documented as current
