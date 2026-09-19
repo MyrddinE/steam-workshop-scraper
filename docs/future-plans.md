@@ -52,7 +52,7 @@ reading markup — the distinction proved to matter, because three endpoints exi
 | Tag statistics | Present | The panel renders a tag summary from the `tag_counts` metric. It is the most expensive single statistic (a 9.2M-row join); the owner has decided it stays because they want the results. |
 | Author list and jump-to-author | Present | Jump-to-author enters the same single-creator mode the TUI has — filters replaced, sort kept, `Return` restoring an in-memory snapshot (`jumpToAuthor`, `returnFromAuthor`). The author *list* is now consumed by a creator picker the TUI does not have; `/api/authors` existed with no client before it. See [web-ui.md](web-ui.md#the-creator-list) for why the list earns its place and [tui.md](tui.md#jump-to-author) for the one-sided position. |
 | Daemon start/stop/restart (`ctrl+d`) | Present | Both UIs drive one shared `DaemonController`. Routes: `/api/daemon`, `/api/daemon/start`, `/stop`, `/restart`, `/log`. |
-| Daemon log view | Present | Both sides poll one `DaemonController.tail_log` incrementally — the web panel through `/api/daemon/log`, the TUI's pane through `_poll_tail` on a two-second timer (`src/tui.py:614`) — and every read is bounded to `TAIL_BYTES`, so neither scans the file. The subprocess-based `_start_tail` is gone. |
+| Daemon log view | Present | Both sides poll one `DaemonController.tail_log` incrementally — the web panel through `/api/daemon/log`, the TUI's pane through `_poll_tail` on a two-second timer (`src/tui.py:950`) — and every read is bounded to `TAIL_BYTES`, so neither scans the file. The subprocess-based `_start_tail` is gone. |
 | Translation toggle (`ctrl+w`) | Present | Both language variants ship in the detail payload, so switching costs no request. The toggle appears only when `translate_version` is set, as in the TUI. |
 | Translation-queued notice | Present | Shown above the description while `translation_priority > 0` and no translation is stored, matching the TUI. |
 | Subscription queue (`s`, `l`) | Present | Genuine parity: toggle, indicator, and queued list. The web queue additionally drains itself. |
@@ -343,7 +343,7 @@ colour are pinned by `tests/test_discovery_marker.py`. The measured evidence tha
 motivated the change is kept below.
 
 A discovery line carries a red `ignored` marker when the item failed its enrichment filters, and
-nothing at all when it did not (`src/daemon.py:845`):
+nothing at all when it did not (`src/daemon.py:924`):
 
 ```
 [A:2063560223] "gwiezdny papiesz" — ignored
@@ -510,15 +510,15 @@ notification path between a writer and the components that display an item; each
 refreshed by whichever code path happens to know about a change.
 
 - The TUI has exactly one list-refresh path, and it is **subscription-scoped by construction**:
-  `SubscriptionQueueScreen.refresh_subscription_rows` (`src/tui.py:2542`) documents that "Only the
+  `SubscriptionQueueScreen.refresh_subscription_rows` (`src/tui.py:2543`) documents that "Only the
   subscription columns are replaced, so the rest of the row's data is left as it was". A field
   that changes the marker's *precedence* — `downloaded_at`, which outranks `subscribed` in
   `src/subscription.py` — is therefore outside the scope of the only method that redraws a row.
-  It is driven by `_start_subscription_poll`/`_poll_queued_subscriptions` (`:2506`, `:2524`) and
+  It is driven by `_start_subscription_poll`/`_poll_queued_subscriptions` (`:2507`, `:2525`) and
   reached from the detail pane through `getattr(self.app, "refresh_subscription_rows", None)`
   (`:1304`), so it exists mainly while a subscribe pass is running.
 - The web grid's poll is conditional on rendered state: `_listNeedsPoll`
-  (`templates/index.html:843`) returns true only for a pending stage spinner or
+  (`templates/index.html:852`) returns true only for a pending stage spinner or
   `subscription_state === 'queued'`, and `_startListPoll`'s tick re-reads only rows that carry a
   spinner or a pending marker. When nothing is pending, the grid stops polling entirely. Its
   `refreshItemState(wid)` (`:1412`) is a per-item path, but it is called from specific actions

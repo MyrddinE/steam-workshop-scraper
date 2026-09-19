@@ -238,7 +238,7 @@ The stats screen's own read runs on a worker (`exit_on_error=False`), so it was 
 
 ## Stats Screen
 
-### `StatsScreen` (`src/tui.py:104`)
+### `StatsScreen` (`src/tui.py:165`)
 
 Opened by Ctrl+R. The screen asks `src.metrics` for named metrics and draws each into its own
 labelled section — one widget per metric — so a chunk appears the moment its own query
@@ -331,7 +331,7 @@ each drawn as a green sentence when it reads the healthy zero. `dead_items_by_qu
 are not duplicates: the scalar `dead_queued` is the invariant that must read zero, and the
 `dead_items_by_queue` breakdown says which queue still holds the dead rows, so a non-zero scalar sends
 the reader to the breakdown for the diagnosis. The
-priority section (`_format_priority`, `src/tui.py:439`) reads as queue state — "Translation
+priority section (`_format_priority`, `src/tui.py:753`) reads as queue state — "Translation
 queue: N waiting" followed by the priority mix — rather than a raw column dump. `high_water`
 is the one metric whose `None` is a real answer ("never"), not a failure.
 
@@ -341,23 +341,23 @@ visible without being a label.
 ### Ordering and per-metric refresh
 
 One thread worker streams the pass (`self.run_worker(..., thread=True, group="stats",
-exit_on_error=False)`, `src/tui.py:257`; worker body `_stream_metrics`, `src/tui.py:269`).
+exit_on_error=False)`, `src/tui.py:351`; worker body `_stream_metrics`, `src/tui.py:363`).
 It uses `metrics.iter_metrics(...)` — one shared connection — and applies each `(name, entry)`
-to its own widget from the UI thread as it arrives (`_apply_metric`, `src/tui.py:306`), so a
+to its own widget from the UI thread as it arrives (`_apply_metric`, `src/tui.py:401`), so a
 chunk is drawn as soon as its own query returns rather than when the slowest one does.
-`on_unmount` (`src/tui.py:211`) cancels the group so a late result cannot touch a closed
+`on_unmount` (`src/tui.py:305`) cancels the group so a late result cannot touch a closed
 screen.
 
 The order metrics are *requested* in is the only global decision. The first pass uses
-`metrics.all_names()`, the seed order; afterwards `_request_order` (`src/tui.py:224`) sorts by
+`metrics.all_names()`, the seed order; afterwards `_request_order` (`src/tui.py:318`) sorts by
 the duration each metric actually took last time, falling back to its seed hint while
 unmeasured, so the order follows the data. If a query gets cheap or expensive the display
 reorders itself with no code change, and cheapest-first means a slow query is never started
 ahead of a fast one that is already due.
 
 Refresh is likewise per metric. A metric is re-run once its own interval —
-`max(2 s, 50 × its own measured duration)` (`_interval_for`, `src/tui.py:220`) — has elapsed;
-the UI-thread scheduler asks `_due_metrics` (`src/tui.py:244`) and starts a pass over only the
+`max(2 s, 50 × its own measured duration)` (`_interval_for`, `src/tui.py:314`) — has elapsed;
+the UI-thread scheduler asks `_due_metrics` (`src/tui.py:338`) and starts a pass over only the
 due metrics. A slow metric's long interval therefore cannot stretch a fast metric's refresh
 out, and `_inflight` keeps a metric that is still computing from being started again. The
 pre-rework screen applied one `50 ×` rule to the whole payload.
@@ -365,7 +365,7 @@ pre-rework screen applied one `50 ×` rule to the whole payload.
 ### `compact_tag_ids` Integration
 
 The tag-frequency compaction still runs off the UI thread when the `tag_counts` chunk is
-computed — once per tag-metric arrival (`src/tui.py:284`) — rather than on the UI thread on
+computed — once per tag-metric arrival (`src/tui.py:379`) — rather than on the UI thread on
 every screen update.
 
 ---
@@ -378,13 +378,13 @@ Owns the daemon process for both UIs: `start`, `stop`, `restart`, `status`, `rea
 
 The PID-file protocol is unchanged. On Unix, stop sends SIGTERM then deletes `.daemon.pid`; on Windows it deletes the file. Either way it waits up to 15 s for exit, then escalates (Popen terminate/kill, `TerminateProcess` via ctypes on Windows, SIGKILL on Unix). `start` while running and `stop` while stopped are idempotent no-ops.
 
-### `DaemonManagerScreen` (`src/tui.py:528`)
+### `DaemonManagerScreen` (`src/tui.py:842`)
 
-Allows starting, stopping, and restarting the daemon process from within the TUI. It no longer holds the process logic; every button delegates to the app's single `DaemonController` (`src/tui.py:1353`), which is the same instance handed to the embedded web server, so a start or stop from either UI is visible to the other. The status text and `PID: n` display read through `DaemonController.status()`.
+Allows starting, stopping, and restarting the daemon process from within the TUI. It no longer holds the process logic; every button delegates to the app's single `DaemonController` (`src/tui.py:2281`), which is the same instance handed to the embedded web server, so a start or stop from either UI is visible to the other. The status text and `PID: n` display read through `DaemonController.status()`.
 
 Every transition runs on a worker thread (`_begin_transition`), because each one blocks: `stop()` polls the process every half second for up to `STOP_TIMEOUT_SECONDS` (15 s) and then waits up to another 3 s for a forced kill, and `restart()` is `stop()` followed by `start()`. Called straight from the button handler that held the Textual event loop for the whole shutdown — no keypress, no screen change and no timer, including the log poll below, which fell silent at the moment its output was most wanted. The result comes back through `call_from_thread`, the three transition buttons are disabled while one is in flight so a second press cannot start an overlapping shutdown, and `restart` is passed to the worker as a single call rather than stop-then-start so the halves cannot interleave. A controller fault puts the controls back rather than leaving the screen disabled with no way out.
 
-The screen's log pane (`RichLog`, `src/tui.py:551`) is fed by `_poll_tail` (`src/tui.py:593`) on a two-second timer: it calls `DaemonController.tail_log` with the byte offset of the last line shown, writes the returned lines, and clears the pane when the response sets `reset`. That call is the same bounded preview the web UI's daemon panel reads through `/api/daemon/log` — at most 64 KiB and 500 lines per poll — so the pane never scans the whole log. The screen previously spawned `tail -f` for this and the pane was disabled as too slow; that subprocess is gone, and the timer is stopped in `on_unmount`.
+The screen's log pane (`RichLog`, `src/tui.py:869`) is fed by `_poll_tail` (`src/tui.py:950`) on a two-second timer: it calls `DaemonController.tail_log` with the byte offset of the last line shown, writes the returned lines, and clears the pane when the response sets `reset`. That call is the same bounded preview the web UI's daemon panel reads through `/api/daemon/log` — at most 64 KiB and 500 lines per poll — so the pane never scans the whole log. The screen previously spawned `tail -f` for this and the pane was disabled as too slow; that subprocess is gone, and the timer is stopped in `on_unmount`.
 
 ---
 
