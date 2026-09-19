@@ -95,7 +95,7 @@ The table carries no index beyond its primary key — nothing on `(item_type, it
 
 ## Recently closed
 
-Removed from the table above rather than marked resolved. Each is now documented as current
+Removed from the list above rather than marked resolved. Each is now documented as current
 behaviour, or covered by a test:
 
 ### Dead items kept their queue priority
