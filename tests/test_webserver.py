@@ -1170,17 +1170,30 @@ def test_api_subscribe_failed(web_client):
     queued = client.get('/api/queued').get_json()
     assert not any(q["workshop_id"] == 999 for q in queued)
     # Failure should be tracked
-    failures = client.get('/api/sub_failures').get_json()
+    failures = client.get('/api/subscribe_failures').get_json()
     assert 999 in failures
 
 
-def test_api_sub_failures_empty(web_client):
-    """GET /api/sub_failures returns empty list when no failures."""
+def test_api_subscribe_failures_empty(web_client):
+    """GET /api/subscribe_failures returns empty list when no failures."""
     client, _ = web_client
     import src.webserver as ws
-    ws._sub_failures.clear()
-    failures = client.get('/api/sub_failures').get_json()
+    ws._subscribe_failures.clear()
+    failures = client.get('/api/subscribe_failures').get_json()
     assert failures == []
+
+
+def test_a_page_cached_before_the_rename_still_calls_the_old_routes(web_client):
+    """`templates/index.html` is served from the browser cache.
+
+    A tab opened before the Batch 4 route rename still polls the old paths, so
+    each one answers through the renamed view until the deploy has propagated.
+    """
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 4242, "is_queued_for_subscription": 0})
+    assert client.get('/api/sub_health').status_code == 200
+    assert client.get('/api/sub_failures').status_code == 200
+    assert client.post('/api/toggle_sub/4242').get_json() == {"ok": True}
 
 
 # ── Daemon control routes ────────────────────────────────────────────────────
@@ -2523,8 +2536,8 @@ global.fetch = async (url, opts) => {
   if (u === '/api/queued') {
     return {ok: true, status: 200, json: async () => queueItems};
   }
-  if (u === '/api/sub_failures') { return {ok: true, status: 200, json: async () => []}; }
-  if (u === '/api/sub_health') {
+  if (u === '/api/subscribe_failures') { return {ok: true, status: 200, json: async () => []}; }
+  if (u === '/api/subscribe_throttle') {
     return {ok: true, status: 200, json: async () => ({throttled_at: 0, retry_after: 300})};
   }
   return {ok: true, status: 200, json: async () => ({ok: true})};
@@ -2594,10 +2607,10 @@ def test_the_subscribe_bridge_scaffolding_is_left_in_place(web_client):
     assert client.get('/api/subscribed/1').status_code == 405
     assert client.get('/api/subscribe_failed/1').status_code == 405
     assert client.get('/api/subscribe_throttled/1').status_code == 405
-    assert client.get('/api/sub_health').status_code == 200
-    assert set(client.get('/api/sub_health').get_json()) == \
+    assert client.get('/api/subscribe_throttle').status_code == 200
+    assert set(client.get('/api/subscribe_throttle').get_json()) == \
         {"throttled_at", "throttled_id", "retry_after"}
-    assert client.get('/api/sub_failures').status_code == 200
+    assert client.get('/api/subscribe_failures').status_code == 200
 
     # The userscript is still served, and the page still carries the contract it
     # checks the script against.
@@ -2912,7 +2925,7 @@ def test_detail_payload_omits_creator_id_without_a_creator(web_client):
     assert "creator_id" not in data
 
 
-def test_toggle_sub_route_flips_the_queue_flag(web_client):
+def test_toggle_subscription_queue_route_flips_the_queue_flag(web_client):
     """/api/toggle_sub answers {ok} and flips is_queued_for_subscription.
 
     It is the route the detail pane's Queue/Unqueue button calls; the button's
@@ -2922,10 +2935,10 @@ def test_toggle_sub_route_flips_the_queue_flag(web_client):
     client, db_path = web_client
     insert_or_update_item(db_path, {"workshop_id": 4242, "title": "Q", "status": 200})
 
-    assert client.post('/api/toggle_sub/4242').get_json() == {"ok": True}
+    assert client.post('/api/toggle_subscription_queue/4242').get_json() == {"ok": True}
     assert client.get('/api/item/4242').get_json()["is_queued_for_subscription"] == 1
 
-    assert client.post('/api/toggle_sub/4242').get_json() == {"ok": True}
+    assert client.post('/api/toggle_subscription_queue/4242').get_json() == {"ok": True}
     assert client.get('/api/item/4242').get_json()["is_queued_for_subscription"] == 0
 
 
@@ -3163,7 +3176,7 @@ global._applySub = subFn;
 // about the toggle itself, so the poll is stubbed rather than run.
 global._startListPoll = () => {};
 global.fetch = async (url) => {
-  if (url.indexOf('/api/toggle_sub/') === 0) {
+  if (url.indexOf('/api/toggle_subscription_queue/') === 0) {
     serverQueued = serverQueued ? 0 : 1;
     return {ok: true, status: 200, statusText: 'OK'};
   }
@@ -3191,7 +3204,7 @@ global.fetch = async (url) => {
   const markerAfterExternalQueued = marker.getAttribute('data-sub-state');
 
   global.fetch = async (url) => {
-    if (url.indexOf('/api/toggle_sub/') === 0) {
+    if (url.indexOf('/api/toggle_subscription_queue/') === 0) {
       return {ok: false, status: 500, statusText: 'INTERNAL SERVER ERROR'};
     }
     throw new Error('the item must not be read after a failed toggle');

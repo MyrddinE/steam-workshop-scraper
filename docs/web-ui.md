@@ -241,7 +241,7 @@ computed by the server from the shared table, so the page holds no copy of the s
 
 Clicking the marker calls `toggleDetailQueue(wid)`, except for `subscribed`, which sends nothing —
 the only action available there would be an unsubscribe, and an accidental unsubscribe is not
-wanted. `toggleDetailQueue` POSTs the existing `/api/toggle_sub/<id>` route, which flips the
+wanted. `toggleDetailQueue` POSTs the existing `/api/toggle_subscription_queue/<id>` route, which flips the
 database flag and answers only `{ok: true}`. Since the route does not report which way the flag
 moved, the client reads the item back through the read-only `/api/item/<id>` route and re-renders
 the pane and the matching cell's marker (`_applySub`) from that payload — the same path the `s`
@@ -423,7 +423,7 @@ unchanged value still costs no request until the stale re-push window elapses.
 carrying "too many requests", so the subscribe button is simply absent. The plugin checks for that
 wording before concluding anything, and reports it to `/api/subscribe_throttled/<id>` rather than
 `/api/subscribe_failed/<id>`. The difference matters: a throttled item is **left queued** so the next
-drain retries it, whereas a genuine failure is cleared. The UI polls `/api/sub_health` once per tab it
+drain retries it, whereas a genuine failure is cleared. The UI polls `/api/subscribe_throttle` once per tab it
 opens and stops opening more while Steam is refusing us, telling the user when the rest can be retried.
 The budget is per account or address and refills over minutes.
 
@@ -527,7 +527,7 @@ Performs the subscribe against Steam directly, with no browser tab, and returns 
 
 It refuses before spending a request when the set has no `steamLoginSecure` (**400**, with a message naming the remedy: sign in to Steam in the browser the daemon reads cookies from, or configure `session.login_secure`), and when `session_health.evaluate_login` says the credential's own token has expired (**400**, the reason recorded through `session_health.record_rejected` so the [session warning](#the-session-warning) shows it). A Steam `success` of `2` or `15`, or an **HTTP 401**, is a refusal of the CSRF token, and what it means depends on the page read the same attempt made: beside an **authenticated** page read the credential is proven good, so **no session problem is recorded** and the refusal is logged as a token refusal (recording one is what used to tell the owner to sign in again while the login was working); beside an **anonymous** page read it is recorded as a session problem the same way as before. The response body is passed through untouched either way. A `success` of `1` records the confirmation with `mark_own_subscribed`, setting `own_subscribed` and clearing `is_queued_for_subscription` exactly as `/api/subscribed/<id>` does, and clears any recorded session problem. A missing item still answers **404** `Item not found.`, an item with no AppID still **400** `Item has no AppID.`, and a transport failure still **502**. Each of those refusals logs the `workshop_id` and the reason, and the POST line carries a SHA-256 **fingerprint** of the token — never the token itself.
 
-### `/api/toggle_sub/<id>` — POST
+### `/api/toggle_subscription_queue/<id>` — POST
 
 Flips `is_queued_for_subscription` for one item and answers `{ok: true}`. It is the route behind both the `s` shortcut on a grid cell and the detail pane's Queue/Unqueue button. It returns no new state, so the detail pane reads the item back through the read-only `/api/item/<id>` route to label its button.
 

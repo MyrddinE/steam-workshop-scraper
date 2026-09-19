@@ -55,12 +55,12 @@ def test_a_failed_subscription_is_cleared_for_contrast(client):
     assert _queue(db_path) == []
 
 
-def test_sub_health_reports_the_throttle(client):
+def test_subscribe_throttle_reports_the_throttle(client):
     c, _ = client
-    assert c.get("/api/sub_health").get_json()["throttled_at"] == 0.0
+    assert c.get("/api/subscribe_throttle").get_json()["throttled_at"] == 0.0
 
     c.post("/api/subscribe_throttled/4242")
-    health = c.get("/api/sub_health").get_json()
+    health = c.get("/api/subscribe_throttle").get_json()
     assert health["throttled_id"] == 4242
     assert health["throttled_at"] > 0
     assert health["retry_after"] > 0

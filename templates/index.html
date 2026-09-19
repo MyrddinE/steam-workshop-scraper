@@ -1220,7 +1220,7 @@ function renderDetail(item) {
   _refreshOpenFolderButton(item);
 }
 
-// /api/toggle_sub answers only {ok: true} and says nothing about which way the
+// /api/toggle_subscription_queue answers only {ok: true} and says nothing about which way the
 // flag moved, so read the item back instead of flipping a cached guess. The `s`
 // shortcut and the subscribe drain's /api/subscribed calls change the same flag
 // without going through this pane, so a guess could name the wrong next action.
@@ -1230,7 +1230,7 @@ function renderDetail(item) {
 async function toggleDetailQueue(wid) {
   let resp;
   try {
-    resp = await fetch('/api/toggle_sub/' + wid, {method: 'POST'});
+    resp = await fetch('/api/toggle_subscription_queue/' + wid, {method: 'POST'});
   } catch (e) {
     alert('Queue update failed: ' + e.message);
     return;
@@ -1777,7 +1777,7 @@ async function _startAutoSubscribe() {
     try {
       const [qresp, fresp] = await Promise.all([
         fetch('/api/queued'),
-        fetch('/api/sub_failures')
+        fetch('/api/subscribe_failures')
       ]);
       const queued = await qresp.json();
       const failures = await fresp.json();
@@ -1823,7 +1823,7 @@ async function _startAutoSubscribe() {
   // pass -- the poll's normal release only runs when every item is verified.
   async function _checkSubThrottle() {
     try {
-      const hresp = await fetch('/api/sub_health');
+      const hresp = await fetch('/api/subscribe_throttle');
       const health = await hresp.json();
       if (!health.throttled_at) return false;
       const since = (Date.now() / 1000) - health.throttled_at;
@@ -1843,7 +1843,7 @@ async function _startAutoSubscribe() {
         'queued and can be retried in about ' +
         Math.ceil((health.retry_after - since) / 60) + ' minute(s).';
       return true;
-    } catch (e) { console.debug('sub_health check failed', e); /* keep the drain running */ return false; }
+    } catch (e) { console.debug('subscribe_throttle check failed', e); /* keep the drain running */ return false; }
   }
 
   // The schedule is one awaited request per item and nothing else: no timer
