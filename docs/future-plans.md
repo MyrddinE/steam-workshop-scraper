@@ -494,3 +494,71 @@ is on screen for a minute or two. A rolling mean of the last few item durations 
 rejected for the same reason: the running mean over the pass already converges within two or three
 items, and seeding it with the configured guess is enough.
 
+---
+
+## One item-update path: a change to an item reaches every display of it
+
+**Status: Deferred.** Agreed direction, deliberately parked: the refresh paths should be replaced
+by a single per-item notification, not patched one call site at a time.
+
+**Reported symptom.** Three items were subscribed and the stars turned yellow correctly, but when
+they downloaded, the detail pane showed the green star and the list did not. The two displays of
+the same item disagreed.
+
+**What the code does today — the cause is structural, not a missing trigger.** There is no
+notification path between a writer and the components that display an item; each display is
+refreshed by whichever code path happens to know about a change.
+
+- The TUI has exactly one list-refresh path, and it is **subscription-scoped by construction**:
+  `SubscriptionQueueScreen.refresh_subscription_rows` (`src/tui.py:2542`) documents that "Only the
+  subscription columns are replaced, so the rest of the row's data is left as it was". A field
+  that changes the marker's *precedence* — `downloaded_at`, which outranks `subscribed` in
+  `src/subscription.py` — is therefore outside the scope of the only method that redraws a row.
+  It is driven by `_start_subscription_poll`/`_poll_pending_subscriptions` (`:2506`, `:2524`) and
+  reached from the detail pane through `getattr(self.app, "refresh_subscription_rows", None)`
+  (`:1304`), so it exists mainly while a subscribe pass is running.
+- The web grid's poll is conditional on rendered state: `_listNeedsPoll`
+  (`templates/index.html:843`) returns true only for a pending stage spinner or
+  `subscription_state === 'pending'`, and `_startListPoll`'s tick re-reads only rows that carry a
+  spinner or a pending marker. When nothing is pending, the grid stops polling entirely. Its
+  `refreshItemState(wid)` (`:1412`) is a per-item path, but it is called from specific actions
+  rather than from a general "this item changed" signal.
+- Changes made by **background workers have no path at all**: `src/workshop_folders.py:362` writes
+  `downloaded_at` from the daemon's folder scan, and neither front end has a channel to that.
+
+So the two front ends do not merely differ in detail — they have differently shaped mechanisms
+(one subscription-column-only refresh, one state-conditional poll), which is why the same item can
+be current in one component and stale in another.
+
+**The invariant to state and test.** *Any data a front end obtains about an item — from a callback,
+a poll, or an action — is reflected in every component that displays that item.* The list row and
+the detail pane must never disagree about the same `workshop_id`, and neither may be current while
+the other is stale.
+
+**Approach.**
+
+1. **One notification per front end, keyed by `workshop_id`** — `item_changed(wid)` in the TUI and
+   the equivalent in the page. Every path that learns of a change calls that, whatever the change
+   was and whichever component learned it.
+2. **One implementation of "re-read the item and push it to every display of it."** The read returns
+   the whole displayed shape (marker state, subscription columns, `downloaded_at`, the fields the
+   detail pane shows), not a column subset, so a change to any input of the marker's precedence
+   reaches the row. Components become **subscribers** to that update rather than targets a caller
+   has to remember.
+3. **One source of truth for the value**: the item's row (or the search payload built from it),
+   never a value a particular call site happens to be holding.
+4. **A refresh trigger that is not conditional on one state.** A general poll while either front end
+   is open, or better a daemon-side signal for background changes — the folder scan writing
+   `downloaded_at`, a scrape or translation completing — so a change made while the user is watching
+   arrives without the user having to act. Whatever the mechanism, the web must not stop updating
+   merely because nothing is `pending`.
+5. **Tests that pin the invariant rather than the paths**: a change written to the database behind
+   the front end's back appears in the list row *and* the detail pane; a marker change reaches both
+   front ends; a non-subscription change (a download) moves the marker in both.
+
+**What this would have caught.** The owner's report directly: `downloaded_at` moving while the list
+held the previous marker. It also covers the general class — any new column that feeds a display
+and any new writer of an existing one — because the fix is defined by the invariant rather than by
+enumerating the paths.
+
+
