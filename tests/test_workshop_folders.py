@@ -210,7 +210,7 @@ def test_a_lookup_that_finds_nothing_re_resolves(tmp_path):
 
 # --- the scan ---------------------------------------------------------------
 
-def test_scan_stamps_a_subscribed_item_whose_folder_exists(tmp_path):
+def test_scan_downloads_stamps_a_subscribed_item_whose_folder_exists(tmp_path):
     db = _db(tmp_path)
     content = tmp_path / "content"
     (content / "294100" / "5").mkdir(parents=True)
@@ -223,7 +223,7 @@ def test_scan_stamps_a_subscribed_item_whose_folder_exists(tmp_path):
     assert _row(db, 5)["downloaded_at"] == 1234
 
 
-def test_scan_leaves_an_item_that_is_not_subscribed_alone(tmp_path):
+def test_scan_downloads_leaves_an_item_that_is_not_subscribed_alone(tmp_path):
     db = _db(tmp_path)
     content = tmp_path / "content"
     (content / "294100" / "5").mkdir(parents=True)
@@ -234,7 +234,7 @@ def test_scan_leaves_an_item_that_is_not_subscribed_alone(tmp_path):
     assert _row(db, 5)["downloaded_at"] is None
 
 
-def test_scan_leaves_an_item_whose_folder_is_missing_unstamped(tmp_path):
+def test_scan_downloads_leaves_an_item_whose_folder_is_missing_unstamped(tmp_path):
     db = _db(tmp_path)
     _seed(db, 5)
     svc, _ = _service(db, [str(tmp_path / "content")])
@@ -243,7 +243,7 @@ def test_scan_leaves_an_item_whose_folder_is_missing_unstamped(tmp_path):
     assert _row(db, 5)["downloaded_at"] is None
 
 
-def test_scan_checks_every_candidate_directory(tmp_path):
+def test_scan_downloads_checks_every_candidate_directory(tmp_path):
     db = _db(tmp_path)
     first, second = tmp_path / "one", tmp_path / "two"
     (second / "294100" / "5").mkdir(parents=True)
@@ -254,7 +254,7 @@ def test_scan_checks_every_candidate_directory(tmp_path):
     assert _row(db, 5)["downloaded_at"] == 9
 
 
-def test_scan_never_revisits_a_confirmed_item(tmp_path):
+def test_scan_downloads_never_revisits_a_confirmed_item(tmp_path):
     db = _db(tmp_path)
     content = tmp_path / "content"
     (content / "294100" / "5").mkdir(parents=True)
@@ -265,7 +265,7 @@ def test_scan_never_revisits_a_confirmed_item(tmp_path):
     assert _row(db, 5)["downloaded_at"] == 111, "the latch must not move"
 
 
-def test_scan_never_clears_when_the_folder_disappears(tmp_path):
+def test_scan_downloads_never_clears_when_the_folder_disappears(tmp_path):
     db = _db(tmp_path)
     content = tmp_path / "content"
     folder = content / "294100" / "5"
@@ -283,7 +283,7 @@ def test_scan_never_clears_when_the_folder_disappears(tmp_path):
         "a missing folder must never take the green star away"
 
 
-def test_scan_never_clears_a_stray_latch_without_a_subscription(tmp_path):
+def test_scan_downloads_never_clears_a_stray_latch_without_a_subscription(tmp_path):
     db = _db(tmp_path)
     _seed(db, 5, own_subscribed=0, downloaded_at=7)
     svc, _ = _service(db, [])
@@ -293,7 +293,7 @@ def test_scan_never_clears_a_stray_latch_without_a_subscription(tmp_path):
     assert _row(db, 5)["downloaded_at"] == 7
 
 
-def test_scan_off_windows_is_a_silent_noop(tmp_path, caplog):
+def test_scan_downloads_off_windows_is_a_silent_noop(tmp_path, caplog):
     db = _db(tmp_path)
     content = tmp_path / "content"
     (content / "294100" / "5").mkdir(parents=True)
@@ -315,7 +315,7 @@ def test_scan_off_windows_is_a_silent_noop(tmp_path, caplog):
     assert scan_lines == [], "the disabled scan must not log per check"
 
 
-def test_scan_logs_once_when_it_changed_something(tmp_path, caplog):
+def test_scan_downloads_logs_once_when_it_changed_something(tmp_path, caplog):
     db = _db(tmp_path)
     content = tmp_path / "content"
     (content / "294100" / "5").mkdir(parents=True)
@@ -355,7 +355,7 @@ def _green(db, tmp_path, *, wid=5):
     return content, folder
 
 
-def test_open_refuses_an_item_that_is_not_downloaded(tmp_path):
+def test_open_folder_refuses_an_item_that_is_not_downloaded(tmp_path):
     db = _db(tmp_path)
     _seed(db, 5, own_subscribed=1)
     svc, launched = _service(db, [str(tmp_path / "content")])
@@ -367,7 +367,7 @@ def test_open_refuses_an_item_that_is_not_downloaded(tmp_path):
     assert _row(db, 5)["downloaded_at"] is None
 
 
-def test_open_refuses_a_stray_latch_without_a_subscription(tmp_path):
+def test_open_folder_refuses_a_stray_latch_without_a_subscription(tmp_path):
     db = _db(tmp_path)
     content, folder = _green(db, tmp_path)
     conn = get_connection(db)
@@ -383,7 +383,7 @@ def test_open_refuses_a_stray_latch_without_a_subscription(tmp_path):
     assert _row(db, 5)["downloaded_at"] is not None, "the refusal changes nothing"
 
 
-def test_open_warns_naming_the_missing_folder_without_changing_state(tmp_path):
+def test_open_folder_warns_naming_the_missing_folder_without_changing_state(tmp_path):
     db = _db(tmp_path)
     content, folder = _green(db, tmp_path)
     os.rmdir(folder)
@@ -397,7 +397,7 @@ def test_open_warns_naming_the_missing_folder_without_changing_state(tmp_path):
     assert _row(db, 5)["downloaded_at"] is not None, "a missing folder clears nothing"
 
 
-def test_open_launches_the_folder_when_the_item_is_green(tmp_path):
+def test_open_folder_launches_the_folder_when_the_item_is_green(tmp_path):
     db = _db(tmp_path)
     content, folder = _green(db, tmp_path)
     svc, launched = _service(db, [str(content)])
@@ -408,7 +408,7 @@ def test_open_launches_the_folder_when_the_item_is_green(tmp_path):
     assert launched == [str(folder)]
 
 
-def test_open_never_launches_off_windows(tmp_path):
+def test_open_folder_never_launches_off_windows(tmp_path):
     db = _db(tmp_path)
     content, folder = _green(db, tmp_path)
     svc, launched = _service(db, [str(content)], platform="linux")
@@ -421,7 +421,7 @@ def test_open_never_launches_off_windows(tmp_path):
     assert folder.exists()
 
 
-def test_open_reports_an_unknown_item(tmp_path):
+def test_open_folder_reports_an_unknown_item(tmp_path):
     svc, launched = _service(_db(tmp_path), [])
     result = svc.open_folder(12345)
 

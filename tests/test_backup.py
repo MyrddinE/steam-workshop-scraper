@@ -210,14 +210,14 @@ def test_update_manifest_recovers_from_corrupt_manifest(tmp_path):
 
 # ── BackupThread ─────────────────────────────────────────────────────────────
 
-def test_backup_thread_run_now_swallows_failure(tmp_path):
+def test_backup_thread_snapshot_now_swallows_failure(tmp_path):
     worker = BackupThread(str(tmp_path / "test.db"), str(tmp_path / "outbox"), 60)
 
     with patch("src.backup.snapshot_database", side_effect=RuntimeError("boom")):
         assert worker.snapshot_now() is None  # logged and swallowed, no exception
 
 
-def test_backup_thread_run_now_publishes_snapshot_and_manifest(db_path, tmp_path):
+def test_backup_thread_snapshot_now_publishes_snapshot_and_manifest(db_path, tmp_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 5})
     outbox = str(tmp_path / "outbox")
     worker = BackupThread(db_path, outbox, 60)

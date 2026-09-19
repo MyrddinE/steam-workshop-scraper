@@ -37,7 +37,7 @@ def test_query_workshop_items_success():
     assert ids == [1001, 1002]
 
 @responses.activate
-def test_get_workshop_details_api_success():
+def test_get_workshop_details_success():
     """Test successful 200 OK response from Steam API using a real-world snapshot."""
     mock_json = {
         "response": {
@@ -90,7 +90,7 @@ def test_get_workshop_details_api_success():
     pytest.param(lambda url: responses.add(responses.POST, url, json={"response": {"result": 1, "resultcount": 0, "publishedfiledetails": []}}, status=200), 500, id="empty_details"),
     pytest.param(lambda url: responses.add(responses.POST, url, json={"response": {"result": 1, "resultcount": 1, "publishedfiledetails": [{"publishedfileid": "123", "result": 9}]}}, status=200), 404, id="invalid_item"),
 ])
-def test_get_workshop_details_api_errors(setup_fn, expected_status):
+def test_get_workshop_details_errors(setup_fn, expected_status):
     setup_fn(STEAM_API_URL)
     details = get_workshop_details(item_id=123, api_key="TEST_KEY")
     assert details["status"] == expected_status
@@ -126,7 +126,7 @@ def test_get_player_summaries_exception():
     assert result == {}
 
 @responses.activate
-def test_query_workshop_files_success():
+def test_query_workshop_newest_page_success():
     url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
     mock_data = {
         "response": {
@@ -146,7 +146,7 @@ def test_query_workshop_files_success():
     assert result["next_cursor"] == "abc"
 
 @responses.activate
-def test_query_workshop_files_empty():
+def test_query_workshop_newest_page_empty():
     url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
     responses.add(responses.GET, url, json={"response": {}}, status=200)
     result = query_workshop_newest_page(4000, cursor="*", api_key="TEST_KEY")
@@ -155,7 +155,7 @@ def test_query_workshop_files_empty():
     assert result["next_cursor"] == ""
 
 @responses.activate
-def test_query_workshop_files_error():
+def test_query_workshop_newest_page_error():
     url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
     responses.add(responses.GET, url, status=500)
     result = query_workshop_newest_page(4000, cursor="*", api_key="TEST_KEY")
@@ -163,7 +163,7 @@ def test_query_workshop_files_error():
     assert len(result["items"]) == 0
 
 @responses.activate
-def test_query_workshop_files_partial_response():
+def test_query_workshop_newest_page_partial_response():
     url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
     responses.add(responses.GET, url, json={}, status=200)
     result = query_workshop_newest_page(4000, cursor="*", api_key="TEST_KEY")

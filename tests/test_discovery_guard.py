@@ -59,7 +59,7 @@ def test_count_fetchable_items_is_disjoint_from_unscraped(db_path):
     assert count_fetchable_items(db_path) == 0
 
 
-def test_count_unscraped_items_keeps_its_meaning(db_path):
+def test_count_never_fetched_items_keeps_its_meaning(db_path):
     """Pinned: this still means 'never successfully fetched', not 'queued'."""
     _insert(db_path, [
         (1, 200, 5, 100),   # fetched -> not unscraped

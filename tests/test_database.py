@@ -21,7 +21,7 @@ from src.database import (
     EXPECTED_VERSION,
 )
 
-def test_count_unscraped_items(db_path):
+def test_count_never_fetched_items(db_path):
     """Test counting items that have never been attempted."""
     assert count_never_fetched_items(db_path) == 0
     
@@ -67,7 +67,7 @@ def test_insert_or_update_item(db_path):
     assert cursor.fetchone()[0] == "Updated Item"
     conn.close()
 
-def test_get_next_items_to_scrape(db_path):
+def test_get_next_items_to_fetch(db_path):
     """Tests that items are fetched in order of oldest api_fetched_at (NULLs first)."""
     insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "api_fetched_at": 1696118400})
     insert_or_update_item(db_path, {"workshop_id": 2, "status": None}) # NULL status, should come first
@@ -105,7 +105,7 @@ def test_search_items(db_path):
     assert len(results_tags) == 1
     assert results_tags[0]["workshop_id"] == 4
 
-def test_clear_pending_items(db_path):
+def test_delete_never_fetched_items(db_path):
     """Test clearing pending items (status NULL or 404 AND api_fetched_at NULL)."""
     # 1. Pending (status NULL, api_fetched_at NULL) - Should be removed
     insert_or_update_item(db_path, {"workshop_id": 1, "status": None, "api_fetched_at": None})
@@ -253,7 +253,7 @@ def test_search_items_advanced_queries(db_path):
     assert len(results) == 1
     assert results[0]["workshop_id"] == 2
 
-def test_get_all_authors(db_path):
+def test_get_all_creator_ids(db_path):
     from src.database import insert_or_update_item, get_all_creator_ids
     insert_or_update_item(db_path, {"workshop_id": 1, "creator": 999})
     insert_or_update_item(db_path, {"workshop_id": 2, "creator": 888})
@@ -321,7 +321,7 @@ def test_app_tracking(db_path):
     assert tracking["excluded_tags"] == '[]'
 
 
-def test_get_next_items_to_scrape_priority(db_path):
+def test_get_next_items_to_fetch_priority(db_path):
     from src.database import get_next_items_to_fetch, insert_or_update_item
     import time
     
@@ -564,7 +564,7 @@ def test_build_fts_clause_operators(db_path):
         {"field": "Full Text", "op": "is_not_empty", "value": ""}])
     assert len(results) > 0
 
-def test_save_app_filter_defaults(db_path):
+def test_save_enrichment_filters_defaults(db_path):
     from src.database import save_enrichment_filters, get_app_tracking
     save_enrichment_filters(db_path, 5000)
     tracking = get_app_tracking(db_path, 5000)
@@ -594,7 +594,7 @@ def test_stats_with_real_data(deterministic_db):
     assert sum(stats["tag_counts"].values()) > 0
 
 
-def test_get_next_items_to_scrape_priority_order(db_path):
+def test_get_next_items_to_fetch_priority_order(db_path):
     """Higher api_priority items are returned first."""
     insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 1, "api_fetched_at": 100})
     insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 10, "api_fetched_at": 200})
@@ -603,7 +603,7 @@ def test_get_next_items_to_scrape_priority_order(db_path):
     assert [i["workshop_id"] for i in items] == [2, 3, 1]
 
 
-def test_get_next_items_to_scrape_excludes_dead(db_path):
+def test_get_next_items_to_fetch_excludes_dead(db_path):
     """Items with status=-1 are not returned."""
     insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 10, "status": -1})
     insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 5, "status": 200})
@@ -611,7 +611,7 @@ def test_get_next_items_to_scrape_excludes_dead(db_path):
     assert [i["workshop_id"] for i in items] == [2]
 
 
-def test_flag_for_web_scrape_sets_priority(db_path):
+def test_raise_web_scrape_priority_sets_priority(db_path):
     """raise_web_scrape_priority updates the needs_web_scrape column."""
     insert_or_update_item(db_path, {"workshop_id": 1})
     raise_web_scrape_priority(db_path, 1, 7)
@@ -621,7 +621,7 @@ def test_flag_for_web_scrape_sets_priority(db_path):
     assert val == 7
 
 
-def test_flag_for_image_max_semantics(db_path):
+def test_raise_image_priority_max_semantics(db_path):
     """raise_image_priority uses MAX — never downgrades."""
     insert_or_update_item(db_path, {"workshop_id": 1, "needs_image": 10})
     raise_image_priority(db_path, 1, 3)
@@ -631,7 +631,7 @@ def test_flag_for_image_max_semantics(db_path):
     assert val == 10  # not downgraded to 3
 
 
-def test_bump_api_priority_for_list_and_detail(db_path):
+def test_raise_api_priority_for_list_and_detail(db_path):
     """Bump functions set correct priority and skip dead items."""
     insert_or_update_item(db_path, {"workshop_id": 1})  # unscraped
     insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 8})  # already high
@@ -658,7 +658,7 @@ def test_bump_api_priority_for_list_and_detail(db_path):
     assert p1 == 10  # bumped to 10
 
 
-def test_clear_subscription_queue_status(db_path):
+def test_clear_subscription_queue(db_path):
     """clear_subscription_queue sets flag to 0."""
     insert_or_update_item(db_path, {"workshop_id": 1, "is_queued_for_subscription": 1})
     clear_subscription_queue(db_path, 1)
@@ -813,7 +813,7 @@ def test_insert_first_seen_at_defaults_when_explicitly_none(db_path):
 
 # ── translation_queue.queued_at ──────────────────────────────────────────────
 
-def test_flag_field_for_translation_stamps_queued_at(db_path):
+def test_queue_field_for_translation_stamps_queued_at(db_path):
     """New queue rows record our queue time; legacy NULLs are not fabricated."""
     from src.database import queue_field_for_translation
 

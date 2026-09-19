@@ -272,7 +272,7 @@ def test_no_credential_value_reaches_the_outbox(tmp_path):
     ("<div class='workshopItemDescription' id='highlightContent'>x</div>", False),
     ("", False),
 ])
-def test_looks_rate_limited(body, expected):
+def test_looks_like_rate_limited(body, expected):
     from src.web_scraper import looks_like_rate_limited
     assert looks_like_rate_limited(body) is expected
 

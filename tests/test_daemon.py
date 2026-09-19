@@ -371,7 +371,7 @@ def test_the_api_merge_never_carries_the_downloaded_latch(mock_config):
 @patch('src.daemon.raise_image_priority')
 @patch('src.daemon.get_connection')
 @patch('src.daemon.get_user')
-def test_process_batch_404_status_marker(
+def test_process_batch_404_permanent_status_marker(
     mock_user, mock_conn, mock_img, mock_web, mock_insert,
     mock_api, mock_count, mock_items, mock_save, mock_init, mock_config
 ):

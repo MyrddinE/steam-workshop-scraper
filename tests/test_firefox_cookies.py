@@ -255,7 +255,7 @@ def test_the_session_id_falls_back_to_the_config():
     ('<script>var g_steamID = "76561198000000000";</script>', False),  # a real id is signed in
     ("", False),
 ])
-def test_looks_signed_out(body, expected):
+def test_looks_like_signed_out(body, expected):
     from src.web_scraper import looks_like_signed_out
     assert looks_like_signed_out(body) is expected
 
@@ -361,13 +361,13 @@ def test_an_empty_read_is_still_not_cached(tmp_path):
 
 # --- telling a gate from a layout change ----------------------------------
 
-def test_a_withheld_page_looks_gated():
+def test_a_withheld_page_looks_like_gated():
     from src.web_scraper import looks_like_gated
     assert looks_like_gated('<title>Steam Community :: Error</title>') is True
     assert looks_like_gated('<div id="AgeCheck">verify</div>') is True
 
 
-def test_an_item_page_never_looks_gated():
+def test_an_item_page_never_looks_like_gated():
     """Every normal page carries a Sign In link, so markup must veto the markers."""
     from src.web_scraper import looks_like_gated
     body = '<a>Sign In</a><div class="workshopItemTitle">T</div>'
