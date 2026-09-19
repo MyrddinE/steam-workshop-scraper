@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 WORKSHOP_ITEM_COLUMNS = frozenset({
     "workshop_id", "first_seen_at", "api_fetched_at", "last_fetch_attempted_at",
     "scrape_version", "translate_version",
-    "status", "title", "title_en", "creator", "creator_appid", "consumer_appid",
+    "fetch_status", "title", "title_en", "creator", "creator_appid", "consumer_appid",
     "filename", "file_size", "preview_url", "hcontent_file", "hcontent_preview",
     "short_description", "short_description_en", "steam_created_at", "steam_updated_at",
     "visibility", "banned", "ban_reason", "app_name", "file_type",
@@ -223,7 +223,7 @@ USER_PRIORITY_FLOOR = 5
 # than local to `initialize_database` because the migration tests assert that
 # the chain reaches it, and a magic number repeated in nine test files is a
 # number that will be wrong after the next migration.
-EXPECTED_VERSION = 30
+EXPECTED_VERSION = 31
 
 def _build_text_search_clauses(sql: str, params: list, query_string: str, cols: list[str]) -> tuple[str, list]:
     """Applies positive/negative text search tokens to SQL via LIKE clauses."""
@@ -1137,7 +1137,7 @@ def _create_current_schema(cursor, conn):
 
     The statements below are the *terminal* shape the migration chain leaves
     behind, dumped verbatim from ``sqlite_master`` of a database the chain
-    itself produced at ``user_version = 30`` -- no definition here was written
+    itself produced at ``user_version = 31`` -- no definition here was written
     by reading the migrations. The index SQL in particular is the exact text
     SQLite stores, so the fresh database's ``sqlite_master`` matches what the
     chain leaves, including the early indexes whose definitions a ``RENAME
@@ -1145,7 +1145,7 @@ def _create_current_schema(cursor, conn):
     owned by :func:`_ensure_indexes` and are not repeated below).
 
     A fresh database takes this path by default, so it never replays the
-    thirty migrations. An existing database always takes the legacy path,
+    thirty-one migrations. An existing database always takes the legacy path,
     because only the chain can carry it forward. The two endpoints must be
     identical. ``_ensure_indexes`` still runs after this function, exactly as
     it does after the chain, so the query indexes it owns are deliberately not
@@ -1172,7 +1172,7 @@ def _create_current_schema(cursor, conn):
         api_fetched_at INTEGER,
         scrape_version INTEGER,
         last_fetch_attempted_at INTEGER,
-        status INTEGER,
+        fetch_status INTEGER,
         title TEXT,
         creator INTEGER,
         creator_appid INTEGER,
@@ -2552,6 +2552,54 @@ def _migration_29_to_30(cursor, conn, db_path):
     conn.commit()
     logging.info("Migration 29->30 complete.")
 
+def _migration_30_to_31(cursor, conn, db_path):
+    logging.info("Running migration 30->31: renaming workshop_items.status to fetch_status...")
+
+    # `status` in a 47-column `workshop_items` table is unqualified: it competes
+    # with the HTTP status code, the subscribe outcome, the controller status and
+    # the `status_counts` metric, and a reader cannot tell which one a bare
+    # `status` means. The column holds this app's synthetic fetch outcome
+    # (200 fetched, 206 partial, -1 dead, 500 retry, NULL never fetched), not an
+    # HTTP response code, so it becomes `fetch_status`. The *values* are
+    # untouched; only the name moves.
+    #
+    # SQLite rewrites an index *definition* on RENAME COLUMN but keeps the index
+    # *name*, so the three indexes whose names embed the old column would be left
+    # named for a column that no longer exists. Drop and recreate each under a
+    # name that matches what it indexes. `idx_web_scrape_queue` and
+    # `idx_image_queue` are named for their queue rather than the column, so their
+    # names may stay; SQLite rewrites their definitions in place.
+    #
+    # Guarded on the column that is present so a re-run is harmless: a crash
+    # between the DDL commit and the version bump leaves the column renamed under
+    # the old marker, and this step must then be a no-op rather than raise
+    # "no such column: status". The index drop/create pair is likewise idempotent.
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(workshop_items)").fetchall()}
+    if "fetch_status" in columns:
+        logging.info("  workshop_items.fetch_status already present; nothing to rename")
+    elif "status" in columns:
+        cursor.execute("ALTER TABLE workshop_items RENAME COLUMN status TO fetch_status")
+        logging.info("  renamed workshop_items.status -> fetch_status")
+    else:
+        logging.info("  neither status nor fetch_status exists; nothing to rename")
+
+    for old_name, new_name, columns_sql in (
+        ("idx_status", "idx_fetch_status", "fetch_status"),
+        ("idx_appid_status", "idx_appid_fetch_status", "consumer_appid, fetch_status"),
+        ("idx_status_scraped_version", "idx_fetch_status_scraped_version",
+         "fetch_status, scrape_version"),
+    ):
+        cursor.execute(f"DROP INDEX IF EXISTS {old_name}")
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS {new_name} ON workshop_items ({columns_sql})"
+        )
+        logging.info("  recreated %s as %s", old_name, new_name)
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 31")
+    conn.commit()
+    logging.info("Migration 30->31 complete.")
+
 def _ensure_indexes(cursor):
     """Create the query indexes, after the column renames migrations perform.
 
@@ -2561,15 +2609,15 @@ def _ensure_indexes(cursor):
     ``IF NOT EXISTS``.
     """
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON workshop_items (status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fetch_status ON workshop_items (fetch_status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_fetched_at ON workshop_items (api_fetched_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_scraped_version ON workshop_items (scrape_version)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_title ON workshop_items (title)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator ON workshop_items (creator)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_short_description ON workshop_items (short_description)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_extended_description ON workshop_items (extended_description)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_status_scraped_version ON workshop_items (status, scrape_version)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_appid_status ON workshop_items (consumer_appid, status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fetch_status_scraped_version ON workshop_items (fetch_status, scrape_version)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_appid_fetch_status ON workshop_items (consumer_appid, fetch_status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_api_fetched_at ON workshop_items (creator, api_fetched_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_translation_priority ON workshop_items (translation_priority)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_is_queued ON workshop_items (is_queued_for_subscription)")
@@ -2637,6 +2685,7 @@ MIGRATIONS = [
     (28, _migration_27_to_28),
     (29, _migration_28_to_29),
     (30, _migration_29_to_30),
+    (31, _migration_30_to_31),
 ]
 
 def initialize_database(db_path: str, *, legacy_chain: bool = False):
@@ -3028,7 +3077,7 @@ def api_fetch_queue_predicate() -> str:
     ``api_priority`` was left at the column default is issue 20: in no queue at
     all.
     """
-    return "api_priority > 0 AND (status IS NULL OR status != -1)"
+    return "api_priority > 0 AND (fetch_status IS NULL OR fetch_status != -1)"
 
 
 def web_scrape_queue_predicate() -> str:
@@ -3077,7 +3126,7 @@ def translation_priority_predicate() -> str:
 def queued_anywhere_predicate() -> str:
     """Any stage → dead: the union a dead item has to fail.
 
-    ``_settle_api_failure`` clears all four flags when it writes ``status = -1``;
+    ``_settle_api_failure`` clears all four flags when it writes ``fetch_status = -1``;
     the web, image and translation polls have no dead-item guard of their own, so
     this union is how "in no queue" is stated at the item level. It is built from
     the named queue predicates so a change to one of them moves this with it.
@@ -3774,12 +3823,12 @@ def update_app_tracking_cursor(db_path: str, appid: int, cursor: str) -> None:
 def delete_never_fetched_items(db_path: str) -> int:
     """
     Removes all workshop items that are 'pending' (never successfully scraped).
-    Criteria: (status IS NULL OR status = 404) AND api_fetched_at IS NULL.
+    Criteria: (fetch_status IS NULL OR fetch_status = 404) AND api_fetched_at IS NULL.
     Returns the number of rows deleted.
     """
     conn = get_connection(db_path)
     cursor = conn.execute(
-        "DELETE FROM workshop_items WHERE (status IS NULL OR status = 404) AND api_fetched_at IS NULL"
+        "DELETE FROM workshop_items WHERE (fetch_status IS NULL OR fetch_status = 404) AND api_fetched_at IS NULL"
     )
     count = cursor.rowcount
     conn.commit()
@@ -3792,7 +3841,7 @@ def raise_api_priority_for_list(db_path: str, workshop_id: int):
     conn = get_connection(db_path)
     conn.execute(
         "UPDATE workshop_items SET api_priority = 5 "
-        "WHERE workshop_id = ? AND api_priority < 5 AND (status IS NULL OR status != -1)",
+        "WHERE workshop_id = ? AND api_priority < 5 AND (fetch_status IS NULL OR fetch_status != -1)",
         (workshop_id,)
     )
     conn.commit()
@@ -3804,7 +3853,7 @@ def raise_api_priority_for_detail(db_path: str, workshop_id: int):
     conn = get_connection(db_path)
     conn.execute(
         "UPDATE workshop_items SET api_priority = 10 "
-        "WHERE workshop_id = ? AND api_priority < 10 AND (status IS NULL OR status != -1)",
+        "WHERE workshop_id = ? AND api_priority < 10 AND (fetch_status IS NULL OR fetch_status != -1)",
         (workshop_id,)
     )
     conn.commit()

@@ -121,8 +121,8 @@ def test_served_inline_script_is_valid_javascript(web_client, tmp_path):
 
 def test_search_returns_json(web_client):
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Test Mod", "creator": 100, "status": 200})
-    insert_or_update_item(db_path, {"workshop_id": 2, "title": "Other Mod", "creator": 200, "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Test Mod", "creator": 100, "fetch_status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": "Other Mod", "creator": 200, "fetch_status": 200})
 
     resp = client.post('/api/search', json={"sort_by": "title", "sort_order": "ASC", "limit": 10})
     assert resp.status_code == 200
@@ -132,8 +132,8 @@ def test_search_returns_json(web_client):
 
 def test_search_with_filters(web_client):
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Apple Mod", "subscriptions": 500, "status": 200})
-    insert_or_update_item(db_path, {"workshop_id": 2, "title": "Banana Mod", "subscriptions": 10, "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Apple Mod", "subscriptions": 500, "fetch_status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": "Banana Mod", "subscriptions": 10, "fetch_status": 200})
 
     resp = client.post('/api/search', json={
         "filters": [{"field": "Subs", "op": "gte", "value": 100}],
@@ -148,7 +148,7 @@ def test_search_with_filters(web_client):
 def test_search_pagination(web_client):
     client, db_path = web_client
     for i in range(1, 11):
-        insert_or_update_item(db_path, {"workshop_id": i, "title": f"Item {i}", "status": 200})
+        insert_or_update_item(db_path, {"workshop_id": i, "title": f"Item {i}", "fetch_status": 200})
 
     resp = client.post('/api/search', json={"limit": 5, "offset": 0, "sort_by": "workshop_id"})
     data = json.loads(resp.data)
@@ -164,7 +164,7 @@ def test_item_detail(web_client):
     client, db_path = web_client
     insert_or_update_item(db_path, {
         "workshop_id": 99, "title": "Detail Mod", "creator": 111,
-        "subscriptions": 100, "views": 1000, "status": 200,
+        "subscriptions": 100, "views": 1000, "fetch_status": 200,
         "tags": normalize_tags(["Mod", "Test"]),
     })
 
@@ -191,7 +191,7 @@ def test_item_detail_is_read_only(web_client):
     """
     client, db_path = web_client
     insert_or_update_item(db_path, {
-        "workshop_id": 99, "title": "Detail Mod", "creator": 111, "status": 200,
+        "workshop_id": 99, "title": "Detail Mod", "creator": 111, "fetch_status": 200,
         "api_priority": 0, "needs_web_scrape": 0, "needs_image": 0,
         "translation_priority": 0,
     })
@@ -214,7 +214,7 @@ def test_open_item_applies_detail_priority(web_client):
     """Opening a pane is the one path that re-queues at detail priority."""
     client, db_path = web_client
     insert_or_update_item(db_path, {
-        "workshop_id": 99, "title": "Detail Mod", "creator": 111, "status": 200,
+        "workshop_id": 99, "title": "Detail Mod", "creator": 111, "fetch_status": 200,
         "api_priority": 0, "needs_web_scrape": 1, "needs_image": 0,
         "translation_priority": 0,
     })
@@ -238,8 +238,8 @@ def test_open_item_not_found(web_client):
 
 def test_authors(web_client):
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 1, "creator": 123, "title": "A", "status": 200})
-    insert_or_update_item(db_path, {"workshop_id": 2, "creator": 456, "title": "B", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "creator": 123, "title": "A", "fetch_status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 2, "creator": 456, "title": "B", "fetch_status": 200})
 
     resp = client.get('/api/authors')
     assert resp.status_code == 200
@@ -250,7 +250,7 @@ def test_authors(web_client):
 def test_tags(web_client):
     client, db_path = web_client
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "Tagged", "status": 200,
+        "workshop_id": 1, "title": "Tagged", "fetch_status": 200,
         "tags": normalize_tags(["RTS", "Sci-Fi"]),
     })
 
@@ -262,7 +262,7 @@ def test_tags(web_client):
 
 def test_stats(web_client):
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Stats Mod", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Stats Mod", "fetch_status": 200})
 
     resp = client.get('/api/stats')
     assert resp.status_code == 200
@@ -318,7 +318,7 @@ def test_metric_endpoint_returns_value_and_measured_cost(web_client):
     client, db_path = web_client
     # The fixture config targets AppID 294100, so the route must pass that
     # through: the item belongs to the target and both scopes count it.
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "x", "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "x", "fetch_status": 200,
                                     "consumer_appid": 294100})
 
     resp = client.get('/api/metrics/coverage')
@@ -552,8 +552,8 @@ def test_image_serve_flat_id_resolves_to_bucket(web_client):
 def test_api_items_bulk_lookup(web_client):
     from src.database import insert_or_update_item
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "A", "status": 200})
-    insert_or_update_item(db_path, {"workshop_id": 3, "title": "C", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "A", "fetch_status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 3, "title": "C", "fetch_status": 200})
 
     resp = client.post('/api/items', json={"ids": [1, 3, 999]})
     assert resp.status_code == 200
@@ -580,7 +580,7 @@ def test_api_items_reports_the_image_state_the_page_branches_on(web_client):
     from src.database import insert_or_update_item
     client, db_path = web_client
     for wid, ext in ((11, "jpg"), (12, "404"), (13, "html"), (14, None), (15, "503")):
-        row = {"workshop_id": wid, "title": f"item {wid}", "status": 200}
+        row = {"workshop_id": wid, "title": f"item {wid}", "fetch_status": 200}
         if ext is not None:
             row["image_extension"] = ext
         insert_or_update_item(db_path, row)
@@ -604,7 +604,7 @@ def test_the_api_image_resolved_agrees_with_the_shared_predicate(web_client):
     client, db_path = web_client
     stored = ((21, "jpg"), (22, "404"), (23, "html"), (24, None), (25, "503"))
     for wid, ext in stored:
-        row = {"workshop_id": wid, "title": f"item {wid}", "status": 200}
+        row = {"workshop_id": wid, "title": f"item {wid}", "fetch_status": 200}
         if ext is not None:
             row["image_extension"] = ext
         insert_or_update_item(db_path, row)
@@ -624,7 +624,7 @@ def test_the_api_image_resolved_is_decided_by_images_py(web_client, monkeypatch)
     from src.database import insert_or_update_item
 
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 31, "title": "x", "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 31, "title": "x", "fetch_status": 200,
                                     "image_extension": "jpg"})
 
     calls = []
@@ -732,7 +732,7 @@ def subscribe_env(tmp_path, monkeypatch):
     """
     db_path = str(tmp_path / "subscribe.db")
     initialize_database(db_path)
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "T", "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "T", "fetch_status": 200,
                                     "consumer_appid": 294100})
     config = {"database": {"path": db_path}, "daemon": {"target_appids": [294100]},
               "session": {}}
@@ -850,7 +850,7 @@ def test_subscribe_refuses_an_expired_credential_before_the_request(subscribe_en
 def test_subscribe_success_marks_the_item_and_clears_the_session_problem(subscribe_env):
     """(e) `success: 1` stamps the subscribe and clears a recorded problem."""
     db_path, state = subscribe_env
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "T", "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "T", "fetch_status": 200,
                                     "consumer_appid": 294100,
                                     "is_queued_for_subscription": 1})
     session_health.record_rejected(db_path, "an older problem")
@@ -973,7 +973,7 @@ def test_subscribe_item_error_branches_are_unchanged(subscribe_env):
     db_path, state = subscribe_env
     state["cookies"] = {"sessionid": "TOK",
                         "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
-    insert_or_update_item(db_path, {"workshop_id": 2, "title": "No appid", "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": "No appid", "fetch_status": 200,
                                     "consumer_appid": None})
     client = app.test_client()
 
@@ -997,7 +997,7 @@ def test_subscribe_item_error_branches_are_logged(subscribe_env, caplog):
     db_path, state = subscribe_env
     state["cookies"] = {"sessionid": "TOK",
                         "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
-    insert_or_update_item(db_path, {"workshop_id": 2, "title": "No appid", "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": "No appid", "fetch_status": 200,
                                     "consumer_appid": None})
     client = app.test_client()
 
@@ -1327,7 +1327,7 @@ def test_detail_payload_ships_both_language_variants(web_client):
         "workshop_id": 77, "title": "Original Title", "title_en": "Translated Title",
         "extended_description": "[b]Original[/b]",
         "extended_description_en": "[b]Translated[/b]",
-        "translate_version": 12345, "status": 200,
+        "translate_version": 12345, "fetch_status": 200,
     })
 
     data = client.get('/api/item/77').get_json()
@@ -1347,7 +1347,7 @@ def test_detail_payload_without_a_translation_offers_no_toggle(web_client):
     client, db_path = web_client
     insert_or_update_item(db_path, {
         "workshop_id": 78, "title": "Only Original",
-        "extended_description": "[b]Nur Original[/b]", "status": 200,
+        "extended_description": "[b]Nur Original[/b]", "fetch_status": 200,
     })
 
     data = client.get('/api/item/78').get_json()
@@ -1366,12 +1366,12 @@ def test_detail_translation_flag_follows_translate_version(web_client):
     client, db_path = web_client
     insert_or_update_item(db_path, {
         "workshop_id": 80, "title": "Same", "title_en": "Same",
-        "translate_version": 0, "status": 200,
+        "translate_version": 0, "fetch_status": 200,
     })
     assert client.get('/api/item/80').get_json()["has_translation"] is False
 
     insert_or_update_item(db_path, {
-        "workshop_id": 81, "title": "A", "translate_version": 5, "status": 200,
+        "workshop_id": 81, "title": "A", "translate_version": 5, "fetch_status": 200,
     })
     assert client.get('/api/item/81').get_json()["has_translation"] is True
 
@@ -1594,13 +1594,13 @@ def test_header_port_display_is_filled_from_the_pages_own_location(web_client, t
 
 def test_delete_never_fetched_route_deletes_only_the_never_fetched_rows(web_client):
     client, db_path = web_client
-    # Removed: never successfully fetched, with no status or a 404.
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": None, "api_fetched_at": None})
-    insert_or_update_item(db_path, {"workshop_id": 2, "status": 404, "api_fetched_at": None})
-    # Kept: a real status, or a recorded successful fetch, or both.
-    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "api_fetched_at": None})
-    insert_or_update_item(db_path, {"workshop_id": 4, "status": None, "api_fetched_at": 1672531200})
-    insert_or_update_item(db_path, {"workshop_id": 5, "status": 404, "api_fetched_at": 1672531200})
+    # Removed: never successfully fetched, with no fetch_status or a 404.
+    insert_or_update_item(db_path, {"workshop_id": 1, "fetch_status": None, "api_fetched_at": None})
+    insert_or_update_item(db_path, {"workshop_id": 2, "fetch_status": 404, "api_fetched_at": None})
+    # Kept: a real fetch_status, or a recorded successful fetch, or both.
+    insert_or_update_item(db_path, {"workshop_id": 3, "fetch_status": 200, "api_fetched_at": None})
+    insert_or_update_item(db_path, {"workshop_id": 4, "fetch_status": None, "api_fetched_at": 1672531200})
+    insert_or_update_item(db_path, {"workshop_id": 5, "fetch_status": 404, "api_fetched_at": 1672531200})
 
     resp = client.post('/api/delete_never_fetched_items')
     assert resp.status_code == 200
@@ -1615,7 +1615,7 @@ def test_delete_never_fetched_route_deletes_only_the_never_fetched_rows(web_clie
 
 def test_delete_never_fetched_route_reports_zero_and_is_post_only(web_client):
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "api_fetched_at": 1672531200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "fetch_status": 200, "api_fetched_at": 1672531200})
 
     assert client.get('/api/delete_never_fetched_items').status_code == 405
     resp = client.post('/api/delete_never_fetched_items')
@@ -2915,7 +2915,7 @@ def test_detail_payload_ships_the_creator_id_as_an_exact_string(web_client):
     client, db_path = web_client
     steamid = 76561198765432109  # as a float64 this rounds to ...110
     insert_or_update_item(db_path, {
-        "workshop_id": 90, "title": "Big ID", "creator": steamid, "status": 200,
+        "workshop_id": 90, "title": "Big ID", "creator": steamid, "fetch_status": 200,
     })
 
     data = client.get('/api/item/90').get_json()
@@ -2927,7 +2927,7 @@ def test_detail_payload_ships_the_creator_id_as_an_exact_string(web_client):
 def test_detail_payload_omits_creator_id_without_a_creator(web_client):
     """No creator means no jump target, so no string is invented for one."""
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 91, "title": "Anonymous", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 91, "title": "Anonymous", "fetch_status": 200})
 
     data = client.get('/api/item/91').get_json()
     assert data["creator"] is None
@@ -2942,7 +2942,7 @@ def test_toggle_subscription_queue_route_flips_the_queue_flag(web_client):
     through the database is the state that has to be right.
     """
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 4242, "title": "Q", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 4242, "title": "Q", "fetch_status": 200})
 
     assert client.post('/api/toggle_subscription_queue/4242').get_json() == {"ok": True}
     assert client.get('/api/item/4242').get_json()["is_queued_for_subscription"] == 1

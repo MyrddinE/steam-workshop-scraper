@@ -99,15 +99,15 @@ async def test_return_button_leaves_single_creator_mode_and_restores_filters(
 
 @pytest.mark.asyncio
 async def test_update_visible_does_not_requeue_dead_items(db_path):
-    """Issue 13: the TUI bulk update must carry the web route's status guard."""
+    """Issue 13: the TUI bulk update must carry the web route's fetch_status guard."""
     insert_or_update_item(
-        db_path, {"workshop_id": 1, "title": "Dead Item", "status": -1, "api_priority": 0}
+        db_path, {"workshop_id": 1, "title": "Dead Item", "fetch_status": -1, "api_priority": 0}
     )
     insert_or_update_item(
-        db_path, {"workshop_id": 2, "title": "Live Item", "status": 200, "api_priority": 0}
+        db_path, {"workshop_id": 2, "title": "Live Item", "fetch_status": 200, "api_priority": 0}
     )
     insert_or_update_item(
-        db_path, {"workshop_id": 3, "title": "Unfetched Item", "status": None, "api_priority": 0}
+        db_path, {"workshop_id": 3, "title": "Unfetched Item", "fetch_status": None, "api_priority": 0}
     )
 
     config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}

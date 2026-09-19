@@ -91,7 +91,7 @@ def _seed(db_path, item_count: int = 1500):
     conn = database.get_connection(db_path)
     conn.executemany(
         "INSERT OR REPLACE INTO workshop_items "
-        "(workshop_id, title, status, api_priority, translation_priority) "
+        "(workshop_id, title, fetch_status, api_priority, translation_priority) "
         "VALUES (?, ?, 200, 0, ?)",
         [(i, f"item {i}", (i % 3) + 1) for i in range(1, item_count + 1)],
     )

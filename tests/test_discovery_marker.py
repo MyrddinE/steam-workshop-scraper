@@ -74,7 +74,7 @@ def _discovery_line(db_path, tmp_path, caplog, *, enrich: bool,
     the API payload, so a test can present an item on both sides of the revision
     test (the same number means "current", a different one means "changed").
     """
-    row = {"workshop_id": 1, "title": "Sample", "status": 200, "api_priority": 5}
+    row = {"workshop_id": 1, "title": "Sample", "fetch_status": 200, "api_priority": 5}
     row.update(existing or {})
     insert_or_update_item(db_path, row)
     daemon = _daemon(db_path, tmp_path)

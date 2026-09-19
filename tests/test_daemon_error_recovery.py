@@ -30,10 +30,10 @@ def _daemon(db_path, **overrides):
 def _priority(db_path, wid):
     conn = get_connection(db_path)
     row = conn.execute(
-        "SELECT api_priority, status FROM workshop_items WHERE workshop_id = ?", (wid,)
+        "SELECT api_priority, fetch_status FROM workshop_items WHERE workshop_id = ?", (wid,)
     ).fetchone()
     conn.close()
-    return (row["api_priority"], row["status"]) if row else (None, None)
+    return (row["api_priority"], row["fetch_status"]) if row else (None, None)
 
 
 def test_process_batch_with_db_locked(tmp_path):
@@ -60,11 +60,11 @@ def test_transient_failure_keeps_the_item_queued(tmp_path):
     """A 500 must leave the item in the queue, one priority level lower.
 
     Regression: the 500 path cleared api_priority and _promote_stale_items only
-    promotes status 200, so a transient failure left every queue permanently.
+    promotes fetch_status 200, so a transient failure left every queue permanently.
     """
     db_path = str(tmp_path / "transient.db")
     initialize_database(db_path)
-    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 5, "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 5, "fetch_status": 200})
 
     daemon = _daemon(db_path)
     with patch("src.daemon.get_workshop_details_batch", return_value=None):
@@ -79,7 +79,7 @@ def test_transient_failure_floors_at_priority_one(tmp_path):
     """Repeated failures keep stepping down but never leave the queue."""
     db_path = str(tmp_path / "floor.db")
     initialize_database(db_path)
-    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 1, "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 1, "fetch_status": 200})
 
     daemon = _daemon(db_path)
     with patch("src.daemon.get_workshop_details_batch", return_value=None):
@@ -95,7 +95,7 @@ def test_permanent_failure_dequeues_and_marks_dead(tmp_path):
     """A 404 is recorded and the item is dequeued for good."""
     db_path = str(tmp_path / "permanent.db")
     initialize_database(db_path)
-    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 5, "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 5, "fetch_status": 200})
 
     daemon = _daemon(db_path)
     with patch("src.daemon.get_workshop_details_batch",
@@ -111,7 +111,7 @@ def test_unhandled_status_is_treated_as_temporary_not_success(tmp_path):
     """An unhandled code must not fall through and be counted as a success."""
     db_path = str(tmp_path / "unhandled.db")
     initialize_database(db_path)
-    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 5, "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 5, "fetch_status": 200})
 
     daemon = _daemon(db_path)
     with patch("src.daemon.get_workshop_details_batch",
@@ -130,7 +130,7 @@ def test_transport_exception_is_temporary(tmp_path):
     """A failed batch request settles every id as a temporary 500, so they retry."""
     db_path = str(tmp_path / "transport.db")
     initialize_database(db_path)
-    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 3, "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 3, "fetch_status": 200})
 
     daemon = _daemon(db_path)
     # What the API helper returns for requests.exceptions.RequestException.

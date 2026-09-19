@@ -72,7 +72,7 @@ def _discover(db_path, tmp_path, workshop_id: int = 999) -> int:
 def _fetch(db_path, tmp_path, *, api_data: dict, existing: dict | None = None,
            enrich: bool = True, workshop_id: int = 1) -> int:
     """Run the real `_process_item` over a synthetic API payload (no network)."""
-    row = {"workshop_id": workshop_id, "title": "Sample", "status": 200, "api_priority": 5}
+    row = {"workshop_id": workshop_id, "title": "Sample", "fetch_status": 200, "api_priority": 5}
     row.update(existing or {})
     insert_or_update_item(db_path, row)
 
@@ -170,7 +170,7 @@ def _assert_fetch_handoff(db_path, workshop_id: int) -> None:
 def test_discovery_hands_a_new_item_to_the_fetch_queue(db_path, tmp_path):
     workshop_id = _discover(db_path, tmp_path)
 
-    assert _row_value(db_path, workshop_id, "status") is None
+    assert _row_value(db_path, workshop_id, "fetch_status") is None
     assert _row_value(db_path, workshop_id, "api_fetched_at") is None
     _assert_fetch_handoff(db_path, workshop_id)
 
@@ -222,7 +222,7 @@ def test_the_web_contract_catches_issue_19s_shape(db_path):
     queue and nothing to show for the stage.
     """
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "fetched", "status": 200, "api_fetched_at": 1000,
+        "workshop_id": 1, "title": "fetched", "fetch_status": 200, "api_fetched_at": 1000,
         "api_priority": 0, "needs_web_scrape": 0,
     })
 
@@ -233,7 +233,7 @@ def test_the_web_contract_catches_issue_19s_shape(db_path):
 def test_a_flipped_web_predicate_is_caught(db_path):
     """A predicate the producer's write no longer satisfies must be reported."""
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "queued", "status": 200, "api_fetched_at": 1000,
+        "workshop_id": 1, "title": "queued", "fetch_status": 200, "api_fetched_at": 1000,
         "needs_web_scrape": 3,
     })
 
@@ -278,7 +278,7 @@ def test_a_served_image_extension_settles_the_image_handoff(db_path, tmp_path):
 def test_the_image_contract_catches_a_preview_queued_nowhere(db_path):
     """A preview the API reported, no image queued, and no answer recorded."""
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "with preview", "status": 200, "api_fetched_at": 1000,
+        "workshop_id": 1, "title": "with preview", "fetch_status": 200, "api_fetched_at": 1000,
         "api_priority": 0, "needs_image": 0, "image_extension": None,
         "preview_url": "https://example.invalid/p.png",
     })
@@ -289,7 +289,7 @@ def test_the_image_contract_catches_a_preview_queued_nowhere(db_path):
 
 def test_a_flipped_image_predicate_is_caught(db_path):
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "queued", "status": 200, "api_fetched_at": 1000,
+        "workshop_id": 1, "title": "queued", "fetch_status": 200, "api_fetched_at": 1000,
         "needs_image": 3,
     })
 
@@ -323,7 +323,7 @@ def test_a_stored_translation_settles_the_handoff(db_path):
     """Not selected, and the translated text the stage would produce is stored."""
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "Caf\u00e9", "title_en": "Cafe",
-        "status": 200, "api_fetched_at": 1000, "translation_priority": 0,
+        "fetch_status": 200, "api_fetched_at": 1000, "translation_priority": 0,
     })
 
     _assert_translation_handoff(db_path, 1, "title_en")
@@ -338,7 +338,7 @@ def test_the_translation_contract_catches_a_mirror_with_no_queue_row(db_path):
     """
     insert_or_update_item(db_path, {
         "workshop_id": 1, "title": "Caf\u00e9",
-        "status": 200, "api_fetched_at": 1000, "translation_priority": 3,
+        "fetch_status": 200, "api_fetched_at": 1000, "translation_priority": 3,
     })
 
     with pytest.raises(AssertionError, match="translation \\(title_en\\)"):
@@ -347,7 +347,7 @@ def test_the_translation_contract_catches_a_mirror_with_no_queue_row(db_path):
 
 def test_a_flipped_translation_predicate_is_caught(db_path):
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "Caf\u00e9", "status": 200, "api_fetched_at": 1000,
+        "workshop_id": 1, "title": "Caf\u00e9", "fetch_status": 200, "api_fetched_at": 1000,
     })
     queue_field_for_translation(db_path, "item", 1, "title_en", "Caf\u00e9", 3)
 
@@ -361,7 +361,7 @@ def test_a_flipped_translation_predicate_is_caught(db_path):
 
 
 def _assert_dead_handoff(db_path, workshop_id: int) -> None:
-    assert _row_value(db_path, workshop_id, "status") == -1, "the producer marked it dead"
+    assert _row_value(db_path, workshop_id, "fetch_status") == -1, "the producer marked it dead"
     assert not _selected(db_path, database.queued_anywhere_predicate(), workshop_id), (
         "any stage -> dead: the item is dead and the union of the queue "
         "predicates still selects it (issue 17's shape)"
@@ -370,7 +370,7 @@ def _assert_dead_handoff(db_path, workshop_id: int) -> None:
 
 def test_a_missing_item_is_settled_dead_and_in_no_queue(db_path, tmp_path):
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "gone", "status": 200, "api_priority": 5,
+        "workshop_id": 1, "title": "gone", "fetch_status": 200, "api_priority": 5,
         "needs_web_scrape": 5, "needs_image": 5, "translation_priority": 5,
     })
 
@@ -382,7 +382,7 @@ def test_a_missing_item_is_settled_dead_and_in_no_queue(db_path, tmp_path):
 def test_the_dead_contract_catches_issue_17s_shape(db_path):
     """Dead, yet still holding a queue flag -- the third outcome for this handoff."""
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "gone", "status": -1, "api_priority": 0,
+        "workshop_id": 1, "title": "gone", "fetch_status": -1, "api_priority": 0,
         "needs_image": 5,
     })
 
@@ -393,11 +393,11 @@ def test_the_dead_contract_catches_issue_17s_shape(db_path):
 def test_a_flipped_dead_predicate_is_caught(db_path):
     """A union that no longer asks each queue lets a dead item slip through."""
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "gone", "status": -1, "api_priority": 0,
+        "workshop_id": 1, "title": "gone", "fetch_status": -1, "api_priority": 0,
     })
 
     with mock.patch.object(database, "queued_anywhere_predicate",
-                           return_value="status = -1"):
+                           return_value="fetch_status = -1"):
         with pytest.raises(AssertionError, match="any stage -> dead"):
             _assert_dead_handoff(db_path, 1)
 
@@ -428,7 +428,7 @@ def test_each_worker_poll_builds_its_query_from_the_named_predicate(db_path):
     extraction removes, and what a test restating the SQL could not notice.
     """
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "title": "queued", "status": 200, "api_fetched_at": 1000,
+        "workshop_id": 1, "title": "queued", "fetch_status": 200, "api_fetched_at": 1000,
         "api_priority": 1, "needs_web_scrape": 1, "needs_image": 1,
         "translation_priority": 1,
     })

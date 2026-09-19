@@ -51,7 +51,7 @@ def _set_filters(db_path, appid, filters):
 
 def _item(db_path, workshop_id, appid, tags=(), **over):
     record = {"workshop_id": workshop_id, "title": f"item {workshop_id}",
-              "status": 200, "consumer_appid": appid, "tags": list(tags)}
+              "fetch_status": 200, "consumer_appid": appid, "tags": list(tags)}
     record.update(over)
     insert_or_update_item(db_path, record)
 
@@ -242,7 +242,7 @@ def test_the_filtered_query_uses_the_appid_index(db_path):
     _set_filters(db_path, 2, _tag_filter("B"))
     conn = get_connection(db_path)
     conn.executemany(
-        "INSERT INTO workshop_items (workshop_id, status, consumer_appid) "
+        "INSERT INTO workshop_items (workshop_id, fetch_status, consumer_appid) "
         "VALUES (?, 200, ?)",
         [(i, 1 if i % 2 else 2) for i in range(1, 401)],
     )

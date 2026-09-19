@@ -187,7 +187,7 @@ def _high_water(conn, params):
 def _item_counts(conn, params) -> dict:
     row = conn.execute(
         "SELECT COUNT(*) AS total, "
-        "       COALESCE(SUM(CASE WHEN status = -1 THEN 1 ELSE 0 END), 0) AS dead "
+        "       COALESCE(SUM(CASE WHEN fetch_status = -1 THEN 1 ELSE 0 END), 0) AS dead "
         "FROM workshop_items"
     ).fetchone()
     total = row["total"] or 0
@@ -281,7 +281,7 @@ _DRAIN_QUEUES = (
     ("translation", "translated_at", translation_priority_predicate(), False, False),
 )
 
-_LIVE_ITEM_UNALIASED = "(status IS NULL OR status <> -1)"
+_LIVE_ITEM_UNALIASED = "(fetch_status IS NULL OR fetch_status <> -1)"
 
 
 def _drain_estimate(outstanding: int, completed: int, active_seconds: float) -> dict:
@@ -405,7 +405,7 @@ def _status_counts(conn, params) -> list[dict]:
     return [
         dict(r)
         for r in conn.execute(
-            "SELECT status, COUNT(*) AS count FROM workshop_items GROUP BY status"
+            "SELECT fetch_status, COUNT(*) AS count FROM workshop_items GROUP BY fetch_status"
         )
     ]
 
@@ -432,7 +432,7 @@ def _dead_items_by_queue(conn, params) -> dict:
                COALESCE(SUM(CASE WHEN translation_priority > 0 THEN 1 ELSE 0 END), 0) AS translation,
                COALESCE(SUM(CASE WHEN api_priority > 0 THEN 1 ELSE 0 END), 0) AS api
         FROM workshop_items
-        WHERE status = -1
+        WHERE fetch_status = -1
         """
     ).fetchone()
     return {k: row[k] for k in ("web", "image", "translation", "api")}
@@ -445,11 +445,11 @@ def _dead_queued(conn, params) -> int:
     The handoff invariant is that every item is in exactly one state: queued for
     the API fetch (``api_priority > 0``), a web scrape (``needs_web_scrape > 0``),
     an image (``needs_image > 0``) or a translation (``translation_priority > 0``);
-    complete for the stage that owns it; or deliberately dead (``status = -1``)
+    complete for the stage that owns it; or deliberately dead (``fetch_status = -1``)
     and therefore in **no** queue.
 
     A dead item holding a queue flag is the second kind of violation: the stage
-    that marked it dead wrote ``status = -1`` but left a flag set, so the web,
+    that marked it dead wrote ``fetch_status = -1`` but left a flag set, so the web,
     image or translation poll -- each of which selects on its flag alone, with no
     dead-item guard -- keeps handing out a row that can never complete.
 
@@ -463,12 +463,12 @@ def _dead_queued(conn, params) -> int:
     """
     # The union comes from the named queue predicates, so a change to one of them
     # moves this with it. ``api_priority`` is then added on its own, because the
-    # API fetch predicate guards on status -- it reads ``api_priority > 0 AND
-    # (status IS NULL OR status != -1)`` -- and this metric's population is
-    # ``status = -1`` by definition, so that guarded term can never be true here.
+    # API fetch predicate guards on fetch_status -- it reads ``api_priority > 0 AND
+    # (fetch_status IS NULL OR fetch_status != -1)`` -- and this metric's population is
+    # ``fetch_status = -1`` by definition, so that guarded term can never be true here.
     # Without the extra term a dead row whose only leftover flag is the fetch
     # priority would stop being counted, and it is the same violation:
-    # `_settle_api_failure` clears all four flags when it writes ``status = -1``.
+    # `_settle_api_failure` clears all four flags when it writes ``fetch_status = -1``.
     #
     # Measured against the 2026-09-18 backup: the hand-written union and this one
     # both count 4, and all 4 are dead rows holding only ``api_priority > 0``;
@@ -477,7 +477,7 @@ def _dead_queued(conn, params) -> int:
         f"""
         SELECT COUNT(*) AS n
         FROM workshop_items
-        WHERE status = -1
+        WHERE fetch_status = -1
           AND (({queued_anywhere_predicate()}) OR api_priority > 0)
         """
     ).fetchone()["n"]
@@ -490,13 +490,13 @@ def _queued_nowhere(conn, params) -> int:
     The handoff invariant is that every item is in exactly one state: queued for
     the API fetch (``api_priority > 0``), a web scrape (``needs_web_scrape > 0``),
     an image (``needs_image > 0``) or a translation (``translation_priority > 0``);
-    complete for the stage that owns it; or deliberately dead (``status = -1``) in
+    complete for the stage that owns it; or deliberately dead (``fetch_status = -1``) in
     no queue. This counts the first kind of violation -- an item that fell out of
     the pipeline without being finished:
 
-    * discovered but never fetched (``status IS NULL``) with no fetch priority,
+    * discovered but never fetched (``fetch_status IS NULL``) with no fetch priority,
       which is issue 20; or
-    * fetched (``status = 200``) with no stored description and no scrape queued,
+    * fetched (``fetch_status = 200``) with no stored description and no scrape queued,
       which is issue 19.
 
     Zero is the healthy reading: every live item is queued somewhere or has been
@@ -510,16 +510,16 @@ def _queued_nowhere(conn, params) -> int:
     """
     # Stated as the negation of the same union, so the two halves of the handoff
     # invariant cannot drift apart. Inside this population the API predicate's
-    # status guard is always true -- an item here is either ``status IS NULL`` or
-    # ``status = 200``, never dead -- so the negation says exactly what the four
+    # fetch_status guard is always true -- an item here is either ``fetch_status IS NULL`` or
+    # ``fetch_status = 200``, never dead -- so the negation says exactly what the four
     # hand-written ``<= 0`` terms said. Verified equal on the 2026-09-18 backup:
     # both forms count 3456.
     return conn.execute(
         f"""
         SELECT COUNT(*) AS n
         FROM workshop_items
-        WHERE (status IS NULL
-               OR (status = 200 AND COALESCE(extended_description, '') = ''))
+        WHERE (fetch_status IS NULL
+               OR (fetch_status = 200 AND COALESCE(extended_description, '') = ''))
           AND NOT ({queued_anywhere_predicate()})
         """
     ).fetchone()["n"]
@@ -559,7 +559,7 @@ def _fetch_recency(conn, params) -> dict:
 NOTHING_TO_TRANSLATE = "Nothing to translate"
 
 #: Live items only: dead items can never be covered.
-_LIVE_ITEM_ALIASED = "(w.status IS NULL OR w.status <> -1)"
+_LIVE_ITEM_ALIASED = "(w.fetch_status IS NULL OR w.fetch_status <> -1)"
 
 
 def _ascii_sql(column: str) -> str:
@@ -1006,7 +1006,7 @@ def _priority_breakdowns(conn, params) -> dict:
             dict(r)
             for r in conn.execute(
                 f"SELECT {column} AS prio, COUNT(*) AS cnt FROM workshop_items "
-                f"WHERE {column} > 0 AND (status IS NULL OR status <> -1) "
+                f"WHERE {column} > 0 AND (fetch_status IS NULL OR fetch_status <> -1) "
                 f"GROUP BY {column} ORDER BY prio DESC"
             )
         ]

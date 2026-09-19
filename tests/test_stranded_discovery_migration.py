@@ -10,7 +10,7 @@ daemon change in the same release stops new ones. This migration requeues the
 same population one more time.
 
 The migration is an API-fetch queue repair only: it must not disturb dead rows
-(``status = -1``) or the scrape, image and translation flags.
+(``fetch_status = -1``) or the scrape, image and translation flags.
 """
 
 import logging
@@ -77,9 +77,9 @@ def _version(db_path):
 def test_migration_18_to_19_requeues_never_attempted_rows(db_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 0})
     insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 0, "api_fetched_at": 12345})
-    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "api_priority": 0,
+    insert_or_update_item(db_path, {"workshop_id": 3, "fetch_status": 200, "api_priority": 0,
                                     "api_fetched_at": 12345})
-    insert_or_update_item(db_path, {"workshop_id": 4, "status": -1, "api_priority": 0})
+    insert_or_update_item(db_path, {"workshop_id": 4, "fetch_status": -1, "api_priority": 0})
     insert_or_update_item(db_path, {"workshop_id": 5, "api_priority": 1})
     _age_to_v17(db_path)
 

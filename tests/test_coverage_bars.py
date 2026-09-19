@@ -61,7 +61,7 @@ COVERAGE_MARKER_END = "// ── end coverage rows"
 
 def _item(db_path, workshop_id, appid=294100, tags=(), **over):
     record = {"workshop_id": workshop_id, "title": f"item {workshop_id}",
-              "status": 200, "consumer_appid": appid, "tags": list(tags)}
+              "fetch_status": 200, "consumer_appid": appid, "tags": list(tags)}
     record.update(over)
     insert_or_update_item(db_path, record)
 

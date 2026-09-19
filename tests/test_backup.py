@@ -248,7 +248,7 @@ def test_daemon_runs_batch_normally_with_backup_config_absent(tmp_path):
     assert daemon._backup_worker is None
 
     with patch("src.daemon.get_next_items_to_fetch",
-               return_value=[{"workshop_id": 1, "api_priority": 0, "status": 200}]) as mock_batch, \
+               return_value=[{"workshop_id": 1, "api_priority": 0, "fetch_status": 200}]) as mock_batch, \
          patch("src.daemon.get_workshop_details_batch",
                return_value={1: {"title": "T", "status": 200, "publishedfileid": 1}}) as mock_api, \
          patch("src.daemon.raise_web_scrape_priority"), \

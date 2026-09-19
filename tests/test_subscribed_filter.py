@@ -66,7 +66,7 @@ def subscribed_db(tmp_path):
             "workshop_id": wid,
             "title": f"Item {wid}",
             "consumer_appid": 294100,
-            "status": 200,
+            "fetch_status": 200,
             **flags,
         })
     return db_path
@@ -702,7 +702,7 @@ def test_web_detail_pane_shows_subscribed_at_only_when_set(web_client, tmp_path)
 def test_the_detail_payload_carries_the_first_subscribed_stamp(web_client):
     """The pane can only render what the payload ships, on both sides."""
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 88, "title": "Dated", "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 88, "title": "Dated", "fetch_status": 200,
                                     "own_subscribed": 1, "own_first_subscribed_at": 1700000000})
     data = client.get('/api/item/88').get_json()
     assert data["own_first_subscribed_at"] == 1700000000

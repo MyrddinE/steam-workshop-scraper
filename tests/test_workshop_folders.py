@@ -42,7 +42,7 @@ def _db(tmp_path) -> str:
 def _seed(db_path, wid, *, appid=294100, own_subscribed=1, downloaded_at=None,
           title=None):
     insert_or_update_item(db_path, {
-        "workshop_id": wid, "title": title or f"Item {wid}", "status": 200,
+        "workshop_id": wid, "title": title or f"Item {wid}", "fetch_status": 200,
         "consumer_appid": appid, "own_subscribed": own_subscribed,
         "downloaded_at": downloaded_at,
     })

@@ -38,8 +38,8 @@ def _priority(db_path, workshop_id):
 
 
 def test_dead_items_lose_their_queue_priority(db_path):
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": -1, "api_priority": 7})
-    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "api_priority": 3})
+    insert_or_update_item(db_path, {"workshop_id": 1, "fetch_status": -1, "api_priority": 7})
+    insert_or_update_item(db_path, {"workshop_id": 2, "fetch_status": 200, "api_priority": 3})
     _age_to_v19(db_path)
 
     initialize_database(db_path)
@@ -49,7 +49,7 @@ def test_dead_items_lose_their_queue_priority(db_path):
 
 
 def test_a_dead_item_already_at_zero_is_left_alone(db_path):
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": -1, "api_priority": 0})
+    insert_or_update_item(db_path, {"workshop_id": 1, "fetch_status": -1, "api_priority": 0})
     _age_to_v19(db_path)
 
     initialize_database(db_path)
@@ -58,8 +58,8 @@ def test_a_dead_item_already_at_zero_is_left_alone(db_path):
 
 
 def test_the_migration_reports_what_it_cleared(db_path, caplog):
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": -1, "api_priority": 5})
-    insert_or_update_item(db_path, {"workshop_id": 2, "status": -1, "api_priority": 0})
+    insert_or_update_item(db_path, {"workshop_id": 1, "fetch_status": -1, "api_priority": 5})
+    insert_or_update_item(db_path, {"workshop_id": 2, "fetch_status": -1, "api_priority": 0})
     _age_to_v19(db_path)
 
     with caplog.at_level(logging.INFO):
@@ -70,7 +70,7 @@ def test_the_migration_reports_what_it_cleared(db_path, caplog):
 
 
 def test_the_terminal_version_is_reached(db_path):
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": -1, "api_priority": 5})
+    insert_or_update_item(db_path, {"workshop_id": 1, "fetch_status": -1, "api_priority": 5})
     _age_to_v19(db_path)
 
     initialize_database(db_path)

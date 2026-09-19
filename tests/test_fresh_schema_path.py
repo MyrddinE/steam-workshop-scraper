@@ -135,7 +135,7 @@ def _seed_item(db_path: str, workshop_id: int = 123, title: str = "Fresh path it
         "short_description": "short",
         "creator": 7,
         "consumer_appid": 4000,
-        "status": 200,
+        "fetch_status": 200,
         "steam_created_at": 1,
         "steam_updated_at": 2,
         "tags": ["mod", "map"],

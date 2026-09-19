@@ -59,7 +59,7 @@ def _seed(db_path, count: int = 400):
     conn = database.get_connection(db_path)
     conn.executemany(
         "INSERT INTO workshop_items "
-        "(workshop_id, title, status, api_priority, needs_web_scrape, "
+        "(workshop_id, title, fetch_status, api_priority, needs_web_scrape, "
         " needs_image, translation_priority, api_fetched_at) "
         "VALUES (?, ?, 200, ?, ?, ?, ?, ?)",
         [
@@ -256,7 +256,7 @@ def test_api_breakdown_shape_has_no_shipped_caller_but_is_served(db_path):
     _seed(db_path)
     sql = (
         "SELECT api_priority AS prio, COUNT(*) AS cnt FROM workshop_items "
-        "WHERE api_priority > 0 AND (status IS NULL OR status <> -1) "
+        "WHERE api_priority > 0 AND (fetch_status IS NULL OR fetch_status <> -1) "
         "GROUP BY api_priority ORDER BY prio DESC"
     )
     _assert_served_by(db_path, sql, API_INDEX, why="API queue breakdown shape")

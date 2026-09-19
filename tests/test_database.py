@@ -69,9 +69,9 @@ def test_insert_or_update_item(db_path):
 
 def test_get_next_items_to_fetch(db_path):
     """Tests that items are fetched in order of oldest api_fetched_at (NULLs first)."""
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "api_fetched_at": 1696118400})
-    insert_or_update_item(db_path, {"workshop_id": 2, "status": None}) # NULL status, should come first
-    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "api_fetched_at": 1696204800})
+    insert_or_update_item(db_path, {"workshop_id": 1, "fetch_status": 200, "api_fetched_at": 1696118400})
+    insert_or_update_item(db_path, {"workshop_id": 2, "fetch_status": None}) # NULL fetch_status, should come first
+    insert_or_update_item(db_path, {"workshop_id": 3, "fetch_status": 200, "api_fetched_at": 1696204800})
     
     items = get_next_items_to_fetch(db_path, limit=3)
     assert len(items) == 3
@@ -106,17 +106,17 @@ def test_search_items(db_path):
     assert results_tags[0]["workshop_id"] == 4
 
 def test_delete_never_fetched_items(db_path):
-    """Test clearing pending items (status NULL or 404 AND api_fetched_at NULL)."""
-    # 1. Pending (status NULL, api_fetched_at NULL) - Should be removed
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": None, "api_fetched_at": None})
-    # 2. Pending (status 404, api_fetched_at NULL) - Should be removed
-    insert_or_update_item(db_path, {"workshop_id": 2, "status": 404, "api_fetched_at": None})
-    # 3. Not Pending (status 200) - Should NOT be removed
-    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200, "api_fetched_at": None})
+    """Test clearing pending items (fetch_status NULL or 404 AND api_fetched_at NULL)."""
+    # 1. Pending (fetch_status NULL, api_fetched_at NULL) - Should be removed
+    insert_or_update_item(db_path, {"workshop_id": 1, "fetch_status": None, "api_fetched_at": None})
+    # 2. Pending (fetch_status 404, api_fetched_at NULL) - Should be removed
+    insert_or_update_item(db_path, {"workshop_id": 2, "fetch_status": 404, "api_fetched_at": None})
+    # 3. Not Pending (fetch_status 200) - Should NOT be removed
+    insert_or_update_item(db_path, {"workshop_id": 3, "fetch_status": 200, "api_fetched_at": None})
     # 4. Not Pending (has api_fetched_at) - Should NOT be removed
-    insert_or_update_item(db_path, {"workshop_id": 4, "status": None, "api_fetched_at": 1672531200})
+    insert_or_update_item(db_path, {"workshop_id": 4, "fetch_status": None, "api_fetched_at": 1672531200})
 
-    insert_or_update_item(db_path, {"workshop_id": 5, "status": 200, "api_fetched_at": 1672531200})
+    insert_or_update_item(db_path, {"workshop_id": 5, "fetch_status": 200, "api_fetched_at": 1672531200})
 
     deleted_count = delete_never_fetched_items(db_path)
     assert deleted_count == 2
@@ -158,7 +158,7 @@ def test_creator_join_in_queries(db_path):
         "workshop_id": 999,
         "title": "Awesome Mod",
         "creator": steamid,
-        "status": 200
+        "fetch_status": 200
     })
     
     # Test search_items join
@@ -325,22 +325,22 @@ def test_get_next_items_to_fetch_priority(db_path):
     from src.database import get_next_items_to_fetch, insert_or_update_item
     import time
     
-    # 1. Successfully scraped items, stalest first (status = 200)
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "api_fetched_at": 1672531200})
+    # 1. Successfully scraped items, stalest first (fetch_status = 200)
+    insert_or_update_item(db_path, {"workshop_id": 1, "fetch_status": 200, "api_fetched_at": 1672531200})
     # Item 2 is recent, so it should be excluded from re-scraping
     recent_epoch = int(time.time()) - 86400
-    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "api_fetched_at": recent_epoch})
+    insert_or_update_item(db_path, {"workshop_id": 2, "fetch_status": 200, "api_fetched_at": recent_epoch})
     
-    # 2. Partially failed items (status = 206) - with different subscription counts
-    insert_or_update_item(db_path, {"workshop_id": 3, "status": 206, "api_fetched_at": 1735689600, "subscriptions": 100})
-    insert_or_update_item(db_path, {"workshop_id": 4, "status": 206, "api_fetched_at": 1738368000, "subscriptions": 500})
+    # 2. Partially failed items (fetch_status = 206) - with different subscription counts
+    insert_or_update_item(db_path, {"workshop_id": 3, "fetch_status": 206, "api_fetched_at": 1735689600, "subscriptions": 100})
+    insert_or_update_item(db_path, {"workshop_id": 4, "fetch_status": 206, "api_fetched_at": 1738368000, "subscriptions": 500})
     
-    # 3. Unscraped new items (status IS NULL)
+    # 3. Unscraped new items (fetch_status IS NULL)
     insert_or_update_item(db_path, {"workshop_id": 5})
     insert_or_update_item(db_path, {"workshop_id": 6})
     
     # 4. Old items (older than 7 days)
-    insert_or_update_item(db_path, {"workshop_id": 7, "status": 200, "api_fetched_at": 1640995200})
+    insert_or_update_item(db_path, {"workshop_id": 7, "fetch_status": 200, "api_fetched_at": 1640995200})
 
     items = get_next_items_to_fetch(db_path, limit=7)
     item_ids = [item['workshop_id'] for item in items]
@@ -387,8 +387,8 @@ def test_get_db_stats_empty(db_path):
 
 def test_get_db_stats_with_data(db_path):
     from src.database import get_db_stats, insert_or_update_item
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Test", "status": 200, "tags": json.dumps([{"tag": "mod"}])})
-    insert_or_update_item(db_path, {"workshop_id": 2, "title": None, "status": None})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Test", "fetch_status": 200, "tags": json.dumps([{"tag": "mod"}])})
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": None, "fetch_status": None})
     stats = get_db_stats(db_path)
     assert len(stats["status_counts"]) == 2
     assert stats["tag_counts"].get("mod", 0) >= 1
@@ -408,7 +408,7 @@ def test_translation_priority_set_on_flag(db_path):
     on the parent item so the web UI detail poll detects queued work."""
     from src.database import insert_or_update_item, queue_field_for_translation, get_connection
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト", "fetch_status": 200})
 
     queue_field_for_translation(db_path, "item", 1, "title_en", "テスト", 10)
 
@@ -425,7 +425,7 @@ def test_classify_translation_queued(db_path):
     non-ASCII text that have been flagged for translation."""
     from src.database import insert_or_update_item, queue_field_for_translation, get_db_stats
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト", "fetch_status": 200})
     queue_field_for_translation(db_path, "item", 1, "title_en", "テスト", 5)
 
     stats = get_db_stats(db_path)
@@ -441,7 +441,7 @@ def test_wilson_cutoffs_with_full_text(db_path):
         insert_or_update_item(db_path, {
             "workshop_id": i, "title": f"item {i}",
             "subscriptions": i * 100, "lifetime_subscriptions": 500,
-            "favorited": i * 10, "views": 1000, "status": 200,
+            "favorited": i * 10, "views": 1000, "fetch_status": 200,
             "wilson_subscription_score": min(1.0, i / 100), "wilson_favorite_score": min(1.0, i / 200),
         })
 
@@ -479,8 +479,8 @@ def test_ensure_tag_ids_new_and_existing(db_path):
 def test_swap_tag_ids_preserves_associations(db_path):
     from src.database import insert_or_update_item, _ensure_tag_ids, swap_tag_ids, get_connection
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Mod A", "status": 200})
-    insert_or_update_item(db_path, {"workshop_id": 2, "title": "Mod B", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Mod A", "fetch_status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": "Mod B", "fetch_status": 200})
 
     ids = _ensure_tag_ids(db_path, ["Common", "Rare"])
     assert len(ids) == 2
@@ -540,7 +540,7 @@ def test_build_fts_clause_operators(db_path):
             "workshop_id": i, "title": f"sword mod {i}",
             "short_description": "test", "extended_description": "test",
             "subscriptions": 100, "lifetime_subscriptions": 200,
-            "favorited": 10, "views": 1000, "status": 200,
+            "favorited": 10, "views": 1000, "fetch_status": 200,
             "wilson_subscription_score": 0.5, "wilson_favorite_score": 0.1,
         })
 
@@ -604,9 +604,9 @@ def test_get_next_items_to_fetch_priority_order(db_path):
 
 
 def test_get_next_items_to_fetch_excludes_dead(db_path):
-    """Items with status=-1 are not returned."""
-    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 10, "status": -1})
-    insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 5, "status": 200})
+    """Items with fetch_status=-1 are not returned."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 10, "fetch_status": -1})
+    insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 5, "fetch_status": 200})
     items = get_next_items_to_fetch(db_path, limit=2)
     assert [i["workshop_id"] for i in items] == [2]
 
@@ -635,7 +635,7 @@ def test_raise_api_priority_for_list_and_detail(db_path):
     """Bump functions set correct priority and skip dead items."""
     insert_or_update_item(db_path, {"workshop_id": 1})  # unscraped
     insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 8})  # already high
-    insert_or_update_item(db_path, {"workshop_id": 3, "status": -1, "api_priority": 0})  # dead
+    insert_or_update_item(db_path, {"workshop_id": 3, "fetch_status": -1, "api_priority": 0})  # dead
 
     raise_api_priority_for_list(db_path, 1)
     raise_api_priority_for_list(db_path, 2)
@@ -817,7 +817,7 @@ def test_queue_field_for_translation_stamps_queued_at(db_path):
     """New queue rows record our queue time; legacy NULLs are not fabricated."""
     from src.database import queue_field_for_translation
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト", "fetch_status": 200})
     queue_field_for_translation(db_path, "item", 1, "title_en", "テスト", 5)
 
     conn = get_connection(db_path)
@@ -858,12 +858,12 @@ def test_get_db_stats_fetch_recency_uses_last_fetch_attempted_at(db_path):
     from src.database import get_db_stats
 
     now = int(time.time())
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 1, "fetch_status": 200,
                                     "last_fetch_attempted_at": now})
-    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 2, "fetch_status": 200,
                                     "last_fetch_attempted_at": now - 40 * 86400})
     # A Steam-version value must NOT influence the fetch-recency breakdown.
-    insert_or_update_item(db_path, {"workshop_id": 3, "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 3, "fetch_status": 200,
                                     "scrape_version": now - 40 * 86400})
 
     stats = get_db_stats(db_path)

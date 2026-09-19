@@ -144,7 +144,7 @@ def _seed_creator_with_a_namesake_item(db_path):
     item and stamp the item's completion.
     """
     insert_or_update_item(db_path, {
-        "workshop_id": CREATOR, "status": 200, "translation_priority": 5,
+        "workshop_id": CREATOR, "fetch_status": 200, "translation_priority": 5,
     })
     insert_or_update_creator(db_path, {
         "steamid": CREATOR, "personaname": "作者", "translation_priority": 1,
@@ -191,7 +191,7 @@ def test_a_creator_completion_clears_the_creator_mirror(db_path):
 def test_the_item_completion_path_is_unchanged(db_path):
     """An item still completes only when its last queued field drains."""
     insert_or_update_item(db_path, {
-        "workshop_id": 7, "status": 200, "steam_updated_at": 1000,
+        "workshop_id": 7, "fetch_status": 200, "steam_updated_at": 1000,
     })
     queue_field_for_translation(db_path, "item", 7, "title_en", "テスト", 3)
     queue_field_for_translation(db_path, "item", 7, "short_description_en", "説明", 3)
@@ -271,7 +271,7 @@ def test_migration_leaves_a_current_creator_translation_alone(db_path):
 def test_migration_does_not_touch_an_item_mirror(db_path):
     """The item side is migration 22->23's repair, not this one's."""
     insert_or_update_item(db_path, {
-        "workshop_id": 9, "title": "テスト", "status": 200, "translation_priority": 5,
+        "workshop_id": 9, "title": "テスト", "fetch_status": 200, "translation_priority": 5,
     })
     _age_to_v27(db_path)
 

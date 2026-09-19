@@ -96,7 +96,7 @@ def test_daemon_process_batch_api_failure(mock_sleep, mock_insert, mock_api, moc
     daemon.process_batch()
     
     inserted_data = mock_insert.call_args[0][1]
-    assert inserted_data["status"] == 500
+    assert inserted_data["fetch_status"] == 500
 
 def test_daemon_graceful_shutdown(mock_config):
     daemon = Daemon(mock_config)
@@ -259,16 +259,16 @@ def test_mixed_outcome_batch_is_a_healthy_request_not_a_refusal(db_path, tmp_pat
     """
     from src.database import insert_or_update_item, get_connection
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 5, "status": 200})
-    insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 5, "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 5, "fetch_status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 5, "fetch_status": 200})
     daemon = _real_db_daemon(db_path, tmp_path)
     daemon.api_batch_size = 2
     daemon.api_delay = API_DELAY_FLOOR
     initial = daemon.api_delay
 
     with patch("src.daemon.get_next_items_to_fetch", return_value=[
-            {"workshop_id": 1, "api_priority": 5, "status": 200},
-            {"workshop_id": 2, "api_priority": 5, "status": 200}]), \
+            {"workshop_id": 1, "api_priority": 5, "fetch_status": 200},
+            {"workshop_id": 2, "api_priority": 5, "fetch_status": 200}]), \
          patch("src.daemon.get_workshop_details_batch", return_value={
              1: {"title": "still here", "status": 200},
              2: {"status": 404, "publishedfileid": 2},
@@ -283,8 +283,8 @@ def test_mixed_outcome_batch_is_a_healthy_request_not_a_refusal(db_path, tmp_pat
     rows = {r["workshop_id"]: dict(r)
             for r in conn.execute("SELECT * FROM workshop_items")}
     conn.close()
-    assert rows[1]["status"] == 200
-    assert rows[2]["status"] == -1, "the not-found item is still marked dead"
+    assert rows[1]["fetch_status"] == 200
+    assert rows[2]["fetch_status"] == -1, "the not-found item is still marked dead"
     assert rows[2]["api_priority"] == 0
 
 
@@ -375,17 +375,17 @@ def test_process_batch_404_permanent_status_marker(
     mock_user, mock_conn, mock_img, mock_web, mock_insert,
     mock_api, mock_count, mock_items, mock_save, mock_init, mock_config
 ):
-    """Verify 404 item gets status=-1 passed to insert."""
+    """Verify 404 item gets fetch_status=-1 passed to insert."""
     mock_api.return_value = {1: {"status": 404, "publishedfileid": 1}}
     mock_items.return_value = [{"workshop_id": 1}]
     mock_user.return_value = None
     daemon = Daemon(mock_config)
     daemon.process_batch()
-    # Check that insert was called with status=-1 somewhere in the call args
+    # Check that insert was called with fetch_status=-1 somewhere in the call args
     for call in mock_insert.call_args_list:
         data = call[0][1] if len(call[0]) > 1 else {}
         if data.get("workshop_id") == 1:
-            assert data.get("status") == -1
+            assert data.get("fetch_status") == -1
             assert data.get("api_priority") == 0
 
 
@@ -413,7 +413,7 @@ def test_process_batch_inherits_priority(
     do not survive; see test_process_batch_does_not_inherit_the_discovery_priority.
     """
     mock_api.return_value = {1: {"title": "Test", "creator": "111", "preview_url": "http://x", "status": 200}}
-    mock_items.return_value = [{"workshop_id": 1, "api_priority": 5, "status": 200}]
+    mock_items.return_value = [{"workshop_id": 1, "api_priority": 5, "fetch_status": 200}]
     mock_user.return_value = None
     daemon = Daemon(mock_config)
     daemon.process_batch()
@@ -453,7 +453,7 @@ def test_process_batch_does_not_inherit_the_discovery_priority(
         "title": "Test", "creator": "111", "status": 200, "consumer_appid": 123,
         "preview_url": "http://x", "steam_updated_at": 1000,
     }}
-    mock_items.return_value = [{"workshop_id": 1, "api_priority": 3, "status": 200}]
+    mock_items.return_value = [{"workshop_id": 1, "api_priority": 3, "fetch_status": 200}]
     mock_track.return_value = {"enrichment_filters": json.dumps(
         [{"field": "Tags", "op": "contains", "value": "Mature"}])}
     mock_user.return_value = None
@@ -495,9 +495,9 @@ def test_promote_stale_items_only_promotes_stale_live_unqueued(db_path, tmp_path
     temporary database.
 
     The sweep must:
-      * promote  api_priority = 0 + status = 200 + api_fetched_at stale  -> 1
-      * leave    fresh status = 200 rows alone
-      * leave    dead rows (status = -1) alone
+      * promote  api_priority = 0 + fetch_status = 200 + api_fetched_at stale  -> 1
+      * leave    fresh fetch_status = 200 rows alone
+      * leave    dead rows (fetch_status = -1) alone
       * leave    rows already queued (api_priority != 0) alone
     """
     import time
@@ -507,10 +507,10 @@ def test_promote_stale_items_only_promotes_stale_live_unqueued(db_path, tmp_path
     stale = now - 40 * 86400  # default item_staleness_days is 30
     fresh = now
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "status": 200, "api_priority": 0, "api_fetched_at": stale})
-    insert_or_update_item(db_path, {"workshop_id": 2, "status": 200, "api_priority": 0, "api_fetched_at": fresh})
-    insert_or_update_item(db_path, {"workshop_id": 3, "status": -1, "api_priority": 0, "api_fetched_at": stale})
-    insert_or_update_item(db_path, {"workshop_id": 4, "status": 200, "api_priority": 5, "api_fetched_at": stale})
+    insert_or_update_item(db_path, {"workshop_id": 1, "fetch_status": 200, "api_priority": 0, "api_fetched_at": stale})
+    insert_or_update_item(db_path, {"workshop_id": 2, "fetch_status": 200, "api_priority": 0, "api_fetched_at": fresh})
+    insert_or_update_item(db_path, {"workshop_id": 3, "fetch_status": -1, "api_priority": 0, "api_fetched_at": stale})
+    insert_or_update_item(db_path, {"workshop_id": 4, "fetch_status": 200, "api_priority": 5, "api_fetched_at": stale})
 
     config = {
         "database": {"path": db_path},
@@ -550,11 +550,11 @@ def test_process_item_500_records_attempt_but_not_fetch(db_path, tmp_path):
     from src.database import insert_or_update_item, get_connection
 
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "status": 200, "api_priority": 5,
+        "workshop_id": 1, "fetch_status": 200, "api_priority": 5,
         "api_fetched_at": 1000, "last_fetch_attempted_at": 1000,
     })
     daemon = _real_db_daemon(db_path, tmp_path)
-    existing = {"workshop_id": 1, "status": 200, "api_priority": 5,
+    existing = {"workshop_id": 1, "fetch_status": 200, "api_priority": 5,
                 "api_fetched_at": 1000, "last_fetch_attempted_at": 1000}
 
     with patch("src.daemon.get_workshop_details", return_value={"status": 500}):
@@ -571,11 +571,11 @@ def test_process_item_404_records_attempt_but_not_fetch(db_path, tmp_path):
     from src.database import insert_or_update_item, get_connection
 
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "status": 200, "api_priority": 5,
+        "workshop_id": 1, "fetch_status": 200, "api_priority": 5,
         "api_fetched_at": 1000, "last_fetch_attempted_at": 1000,
     })
     daemon = _real_db_daemon(db_path, tmp_path)
-    existing = {"workshop_id": 1, "status": 200, "api_priority": 5,
+    existing = {"workshop_id": 1, "fetch_status": 200, "api_priority": 5,
                 "api_fetched_at": 1000, "last_fetch_attempted_at": 1000}
 
     with patch("src.daemon.get_workshop_details", return_value={"status": 404}):
@@ -584,7 +584,7 @@ def test_process_item_404_records_attempt_but_not_fetch(db_path, tmp_path):
     conn = get_connection(db_path)
     row = dict(conn.execute("SELECT * FROM workshop_items WHERE workshop_id=1").fetchone())
     conn.close()
-    assert row["status"] == -1
+    assert row["fetch_status"] == -1
     assert row["api_fetched_at"] == 1000
     assert row["last_fetch_attempted_at"] > 1000
 
@@ -599,11 +599,11 @@ def test_process_item_404_clears_every_queue_flag(db_path, tmp_path):
     from src.database import insert_or_update_item, get_connection
 
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "status": 200, "api_priority": 5,
+        "workshop_id": 1, "fetch_status": 200, "api_priority": 5,
         "needs_web_scrape": 5, "needs_image": 10, "translation_priority": 3,
     })
     daemon = _real_db_daemon(db_path, tmp_path)
-    existing = {"workshop_id": 1, "status": 200, "api_priority": 5,
+    existing = {"workshop_id": 1, "fetch_status": 200, "api_priority": 5,
                 "needs_web_scrape": 5, "needs_image": 10,
                 "translation_priority": 3}
 
@@ -613,7 +613,7 @@ def test_process_item_404_clears_every_queue_flag(db_path, tmp_path):
     conn = get_connection(db_path)
     row = dict(conn.execute("SELECT * FROM workshop_items WHERE workshop_id=1").fetchone())
     conn.close()
-    assert row["status"] == -1
+    assert row["fetch_status"] == -1
     assert row["api_priority"] == 0
     assert row["needs_web_scrape"] == 0
     assert row["needs_image"] == 0
@@ -624,11 +624,11 @@ def test_process_item_success_moves_both_clocks(db_path, tmp_path):
     from src.database import insert_or_update_item, get_connection
 
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "status": 200, "api_priority": 5,
+        "workshop_id": 1, "fetch_status": 200, "api_priority": 5,
         "api_fetched_at": 1000, "last_fetch_attempted_at": 1000,
     })
     daemon = _real_db_daemon(db_path, tmp_path)
-    existing = {"workshop_id": 1, "status": 200, "api_priority": 5,
+    existing = {"workshop_id": 1, "fetch_status": 200, "api_priority": 5,
                 "api_fetched_at": 1000, "last_fetch_attempted_at": 1000}
 
     with patch("src.daemon.get_workshop_details",
@@ -680,7 +680,7 @@ def test_creator_refresh_makes_one_call_for_several_creators(
     daemon = _real_db_daemon(db_path, tmp_path)
     daemon.api_batch_size = 4
     mock_items.return_value = [
-        {"workshop_id": i, "api_priority": 5, "status": 200} for i in (1, 2, 3, 4)
+        {"workshop_id": i, "api_priority": 5, "fetch_status": 200} for i in (1, 2, 3, 4)
     ]
     # Creator 111 appears twice and is fresh; 222 and 333 are stale.
     mock_batch.return_value = {
@@ -711,13 +711,13 @@ def test_only_enriched_items_propose_a_creator(mock_batch, db_path, tmp_path):
     from src.daemon import Daemon
     from src.database import insert_or_update_item
 
-    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 5, "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 5, "fetch_status": 200})
     daemon = _real_db_daemon(db_path, tmp_path)
     daemon.api_batch_size = 1
     mock_batch.return_value = {1: {"title": "x", "creator": "111", "status": 200}}
     with patch.object(daemon, "_should_enrich", return_value=False), \
          patch("src.daemon.get_next_items_to_fetch",
-               return_value=[{"workshop_id": 1, "api_priority": 5, "status": 200}]), \
+               return_value=[{"workshop_id": 1, "api_priority": 5, "fetch_status": 200}]), \
          patch("src.daemon.get_player_summaries") as mock_summaries, \
          patch("src.daemon.get_creator") as mock_get_creator:
         daemon.process_batch()

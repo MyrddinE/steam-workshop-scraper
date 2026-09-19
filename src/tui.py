@@ -456,7 +456,7 @@ class StatsScreen(Screen):
                 )
         elif name == "status_counts":
             lines = [
-                f"  Status {row.get('status')}: {row.get('count', 0):,}"
+                f"  Status {row.get('fetch_status')}: {row.get('count', 0):,}"
                 for row in value
             ]
             self._set_text(
@@ -3074,11 +3074,11 @@ class ScraperApp(App):
             return
         conn = get_connection(self.db_path)
         placeholders = ",".join("?" * len(visible_ids))
-        # Same guard as the web route: an item known to be gone (status -1) must
+        # Same guard as the web route: an item known to be gone (fetch_status -1) must
         # not be put back in the API fetch queue by a bulk update.
         conn.execute(
             f"UPDATE workshop_items SET api_priority = 10 WHERE workshop_id IN ({placeholders}) "
-            "AND (status IS NULL OR status != -1)",
+            "AND (fetch_status IS NULL OR fetch_status != -1)",
             visible_ids,
         )
         conn.commit()

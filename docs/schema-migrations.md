@@ -6,11 +6,11 @@ The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_
 - a fresh database built with `legacy_chain=True` takes the historical shape from `_create_legacy_schema` and runs every migration — this is how the chain stays exercised;
 - an **existing** database (`user_version > 0`) always takes `_create_legacy_schema` followed by its pending migrations, whatever the flag says, because the chain is the only thing that can carry it forward.
 
-The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v31) for what that means when you add one.
+The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v32) for what that means when you add one.
 
 ---
 
-## Current Schema (v30)
+## Current Schema (v31)
 
 The application-level reference for every table and column is
 [data-model.md](data-model.md); the timestamp conventions are in
@@ -36,7 +36,7 @@ Primary key: `workshop_id INTEGER PRIMARY KEY` (aliased from rowid). Columns:
 | subscriptions, lifetime_subscriptions | INTEGER | Current and lifetime subscriber counts |
 | favorited, lifetime_favorited, views | INTEGER | Engagement metrics |
 | visibility, banned, ban_reason, app_name, file_type | Various | Steam metadata |
-| status | INTEGER | 200 = fetched, -1 = dead, 500 = retry, NULL = discovered but never fetched |
+| fetch_status | INTEGER | 200 = fetched, -1 = dead, 500 = retry, NULL = discovered but never fetched |
 | api_priority | INTEGER | Steam API fetch queue priority |
 | translation_priority | INTEGER | Translation-queue mirror (0 = no queued fields) |
 | wilson_favorite_score, wilson_subscription_score | REAL | Wilson lower-bound scores (0-1), NULL default |
@@ -48,7 +48,7 @@ Primary key: `workshop_id INTEGER PRIMARY KEY` (aliased from rowid). Columns:
 | own_first_subscribed_at | INTEGER | When we first *saw* the owner subscribed; sticky, and the only source of the `previously` state |
 | downloaded_at | INTEGER | Local latch: when this app first saw Steam's downloaded copy of a subscribed item on disk (v26). Set only by `src/workshop_folders`, cleared only beside `own_subscribed` when the item leaves the subscription list. NULL means not confirmed on disk |
 
-The columns above are what the database holds at v30, and they are reached two ways.
+The columns above are what the database holds at v31, and they are reached two ways.
 `_create_current_schema` creates them directly, so a fresh database starts at `EXPECTED_VERSION`
 with these names. `_create_legacy_schema`'s `CREATE TABLE` instead declares the historical names
 (`dt_found`, `dt_updated`, `dt_attempted`, `dt_translated`, `time_created`, `time_updated`) and a
@@ -124,11 +124,11 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 | idx_time_updated | steam_updated_at | "Updated Time" sort (historical index name) |
 | idx_api_fetched_at | api_fetched_at | "Fetched Time" sort, user staleness |
 | idx_scraped_version | scrape_version | Scrape staleness, priority ordering |
-| idx_status_scraped_version | (status, scrape_version) | Scrape item selection |
+| idx_fetch_status_scraped_version | (fetch_status, scrape_version) | Scrape item selection |
 | idx_creator_api_fetched_at | (creator, api_fetched_at) | Author filtering with staleness |
-| idx_appid_status | (consumer_appid, status) | AppID + status filtering |
+| idx_appid_fetch_status | (consumer_appid, fetch_status) | AppID + status filtering |
 | idx_consumer_appid | consumer_appid | AppID filtering |
-| idx_status | status | Status filtering |
+| idx_fetch_status | fetch_status | Status filtering |
 | idx_creator | creator | Author ID search |
 | idx_title | title | Title search/sort |
 | idx_title_en | title_en | Translated title search |
@@ -199,15 +199,15 @@ independently, allowing crash recovery on a per-migration basis.
 from 1 to `EXPECTED_VERSION`, that each entry names the function for its own
 version, and that a fresh database reaches `EXPECTED_VERSION`.
 
-### Adding the next migration (target v31)
+### Adding the next migration (target v32)
 
-1. bump `EXPECTED_VERSION` in `src/database.py` to `31`;
-2. append `def _migration_30_to_31(cursor, conn, db_path): ...` immediately
-   after `_migration_29_to_30`, keeping the body self-contained and preserving
+1. bump `EXPECTED_VERSION` in `src/database.py` to `32`;
+2. append `def _migration_31_to_32(cursor, conn, db_path): ...` immediately
+   after `_migration_30_to_31`, keeping the body self-contained and preserving
    what the step meant at v31 (no tidying an older step, no changing a
    `PRAGMA user_version = N` target);
-3. append `(31, _migration_30_to_31)` as the last entry of `MIGRATIONS`;
-4. add a `### v30 → v31: ...` entry below, in the same shape as the others;
+3. append `(32, _migration_31_to_32)` as the last entry of `MIGRATIONS`;
+4. add a `### v31 → v32: ...` entry below, in the same shape as the others;
 5. **mirror the step in `_create_current_schema`.** It is the shape a fresh
    database is created at now, so a schema change that lands only in the chain
    moves the legacy endpoint and not the fresh one. Update the table, index or
@@ -920,6 +920,52 @@ this one keeps its historical SQL byte-identical, so the chain still means what 
 its version. `tests/test_table_rename_migration.py` pins the fresh path, the v29 upgrade, the
 re-initialisation (including the resurrection trap of initialising twice) and the
 already-renamed-under-the-old-marker case.
+
+---
+
+### v30 → v31: `status` → `fetch_status`
+
+`status` in a 47-column `workshop_items` table is unqualified: it competes with the HTTP
+status code, the subscribe outcome, the daemon-controller status and the `status_counts`
+metric, and a bare `status` does not say which one a reader means. The column holds this
+app's synthetic fetch outcome — `200` fetched, `206` partial, `-1` dead, `500` retry,
+`NULL` discovered but never fetched — not an HTTP response code, so it becomes
+`fetch_status`. The stored **values are unchanged**; only the name moves. The metric key
+`status_counts` and the unrelated `SubscribeOutcome.status` / `DaemonController.status`
+names deliberately keep theirs.
+
+```sql
+ALTER TABLE workshop_items RENAME COLUMN status TO fetch_status;
+
+DROP INDEX IF EXISTS idx_status;
+CREATE INDEX IF NOT EXISTS idx_fetch_status ON workshop_items (fetch_status);
+
+DROP INDEX IF EXISTS idx_appid_status;
+CREATE INDEX IF NOT EXISTS idx_appid_fetch_status ON workshop_items (consumer_appid, fetch_status);
+
+DROP INDEX IF EXISTS idx_status_scraped_version;
+CREATE INDEX IF NOT EXISTS idx_fetch_status_scraped_version ON workshop_items (fetch_status, scrape_version);
+```
+
+SQLite rewrites an index *definition* on `RENAME COLUMN` but keeps the index *name*, so the
+three indexes whose names embed the old column would otherwise be left named for a column
+that no longer exists. Their names are recreated to match what they index.
+`idx_web_scrape_queue` and `idx_image_queue` are named for the queue rather than the column,
+so their names stay; SQLite rewrites their definitions in place. `_ensure_indexes` creates
+the three under their new names too, because it runs on every startup after the migration
+chain and would otherwise fail with "no such column: status".
+
+The step is guarded on the column that is present, so a re-run is harmless: a crash between
+the DDL commit and the version bump leaves the column renamed under the old marker, and the
+step must then be a no-op rather than raise `no such column: status`. The index
+drop/create pairs are idempotent for the same reason. Every migration before this one keeps
+its historical SQL byte-identical, including those that name `status`, so the chain still
+means what it meant at its version.
+
+`_create_current_schema` declares the column as `fetch_status`, so a fresh database is
+created at the new endpoint and `tests/test_fresh_schema_path.py::test_schema_equivalence`
+stays green. `tests/test_status_column_migration.py` pins the fresh path, the v30 upgrade,
+the re-initialisation and the already-renamed-under-the-old-marker case.
 
 ---
 

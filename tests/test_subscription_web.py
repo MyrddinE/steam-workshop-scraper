@@ -54,7 +54,7 @@ def _row(db_path, wid):
 
 def test_the_item_payload_carries_the_whole_marker(web_client):
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "T", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "T", "fetch_status": 200})
 
     item = client.get('/api/item/1').get_json()
 
@@ -76,7 +76,7 @@ def test_the_item_payload_carries_the_whole_marker(web_client):
 ])
 def test_the_item_payload_derives_every_state(web_client, columns, state):
     client, db_path = web_client
-    insert_or_update_item(db_path, dict({"workshop_id": 7, "title": "T", "status": 200},
+    insert_or_update_item(db_path, dict({"workshop_id": 7, "title": "T", "fetch_status": 200},
                                         **columns))
 
     item = client.get('/api/item/7').get_json()
@@ -90,9 +90,9 @@ def test_the_item_payload_derives_every_state(web_client, columns, state):
 def test_the_search_payload_carries_the_marker_for_every_cell(web_client):
     """The grid draws its marker from the search rows, so they must carry it."""
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "A", "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "A", "fetch_status": 200,
                                     "own_subscribed": 1, "own_first_subscribed_at": 5})
-    insert_or_update_item(db_path, {"workshop_id": 2, "title": "B", "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": "B", "fetch_status": 200,
                                     "is_queued_for_subscription": 1})
 
     rows = client.post('/api/search', json={"limit": 10}).get_json()
@@ -109,7 +109,7 @@ def test_the_search_payload_carries_the_marker_for_every_cell(web_client):
 def test_the_items_payload_carries_the_marker(web_client):
     """The list poll updates markers in place from this route."""
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 3, "title": "C", "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 3, "title": "C", "fetch_status": 200,
                                     "own_first_subscribed_at": 42})
 
     rows = client.post('/api/items', json={"ids": [3]}).get_json()
@@ -121,7 +121,7 @@ def test_the_items_payload_carries_the_marker(web_client):
 def test_the_items_payload_carries_the_downloaded_latch(web_client):
     """Without the latch on the payload a subscribed cell could only ever be yellow."""
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 3, "title": "C", "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 3, "title": "C", "fetch_status": 200,
                                     "own_subscribed": 1, "downloaded_at": 1000})
 
     rows = client.post('/api/items', json={"ids": [3]}).get_json()
@@ -134,7 +134,7 @@ def test_the_items_payload_carries_the_downloaded_latch(web_client):
 def test_the_queued_payload_carries_the_whole_marker(web_client):
     """The queue overlay is a marker surface too, so /api/queued derives it."""
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 4, "title": "D", "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 4, "title": "D", "fetch_status": 200,
                                     "is_queued_for_subscription": 1,
                                     "own_subscribed": 1, "downloaded_at": 1000})
 
@@ -164,7 +164,7 @@ def _enable_open_folder(monkeypatch, db_path, content_dir, launcher):
 
 def _green_item(db_path, wid=7, *, content_dir, make_folder=True):
     insert_or_update_item(db_path, {
-        "workshop_id": wid, "title": "T", "status": 200, "consumer_appid": 294100,
+        "workshop_id": wid, "title": "T", "fetch_status": 200, "consumer_appid": 294100,
         "own_subscribed": 1, "downloaded_at": 1000,
     })
     if make_folder:
@@ -173,7 +173,7 @@ def _green_item(db_path, wid=7, *, content_dir, make_folder=True):
 
 def test_open_folder_refuses_off_windows(web_client):
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 7, "title": "T", "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 7, "title": "T", "fetch_status": 200,
                                     "own_subscribed": 1, "downloaded_at": 1000})
 
     resp = client.post('/api/open_folder/7')
@@ -187,7 +187,7 @@ def test_open_folder_refuses_off_windows(web_client):
 def test_open_folder_refuses_an_item_that_is_not_downloaded(web_client, monkeypatch,
                                                             tmp_path):
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 7, "title": "T", "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 7, "title": "T", "fetch_status": 200,
                                     "consumer_appid": 294100, "own_subscribed": 1})
     launched = []
     _enable_open_folder(monkeypatch, db_path, tmp_path / "content", launched.append)
@@ -266,7 +266,7 @@ def test_the_open_folder_control_is_rendered_only_on_windows(web_client, monkeyp
 def test_api_subscribed_stamps_the_subscription_and_clears_the_queue(web_client):
     """The userscript's confirmation is the highest-fidelity signal there is."""
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "fetch_status": 200,
                                     "is_queued_for_subscription": 1})
 
     assert client.post('/api/subscribed/9').get_json() == {"ok": True}
@@ -280,7 +280,7 @@ def test_api_subscribed_stamps_the_subscription_and_clears_the_queue(web_client)
 
 def test_api_subscribed_does_not_move_an_existing_stamp(web_client):
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "status": 200,
+    insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "fetch_status": 200,
                                     "own_first_subscribed_at": 1000})
 
     client.post('/api/subscribed/9')
@@ -290,7 +290,7 @@ def test_api_subscribed_does_not_move_an_existing_stamp(web_client):
 
 def test_api_subscribed_makes_the_marker_subscribed(web_client):
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "fetch_status": 200})
 
     client.post('/api/subscribed/9')
 
@@ -300,7 +300,7 @@ def test_api_subscribed_makes_the_marker_subscribed(web_client):
 def test_toggle_subscription_queue_still_only_flips_the_queue_flag(web_client):
     """/api/toggle_subscription_queue is unchanged: it is the route both directions use."""
     client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "fetch_status": 200})
 
     client.post('/api/toggle_subscription_queue/9')
     assert _row(db_path, 9)["is_queued_for_subscription"] == 1

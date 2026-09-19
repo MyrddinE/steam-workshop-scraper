@@ -165,7 +165,7 @@ def get_workshop_details_batch(item_ids: list[int], api_key: str) -> dict[int, d
             # result=9 -- so an omission means the response did not arrive whole,
             # not that Steam has deleted the item. Reporting it as 404 would mark
             # every omitted item dead, permanently and irreversibly: a truncated
-            # response is one event, and `status = -1` is never revived by
+            # response is one event, and `fetch_status = -1` is never revived by
             # anything. It is reported as a temporary failure instead, which
             # requeues the item one priority lower -- it survives, and sinks.
             by_id.setdefault(item_id, {"status": 500, "publishedfileid": item_id})

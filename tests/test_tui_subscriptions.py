@@ -61,8 +61,8 @@ async def test_queue_lists_items_without_urls(mock_config, tmp_path):
     from src.database import initialize_database, toggle_subscription_queue, insert_or_update_item
     db_path = str(tmp_path / "queue_render.db")
     initialize_database(db_path)
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "[b]Bold Title[/b]", "status": 200})
-    insert_or_update_item(db_path, {"workshop_id": 2, "title": "Plain Title", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "[b]Bold Title[/b]", "fetch_status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 2, "title": "Plain Title", "fetch_status": 200})
     toggle_subscription_queue(db_path, 1)
     toggle_subscription_queue(db_path, 2)
 
@@ -92,7 +92,7 @@ async def test_the_queue_button_runs_the_engine_and_shows_progress(mock_config, 
     from src.database import initialize_database, toggle_subscription_queue, insert_or_update_item
     db_path = str(tmp_path / "queue_run.db")
     initialize_database(db_path)
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Item One", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "Item One", "fetch_status": 200})
     toggle_subscription_queue(db_path, 1)
     config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
 

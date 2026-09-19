@@ -53,7 +53,7 @@ def _regress_to_v23(db_path, language=6):
 
 
 def test_migration_drops_the_language_column_and_its_index(db_path):
-    insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト", "status": 200})
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "テスト", "fetch_status": 200})
     _regress_to_v23(db_path)
 
     initialize_database(db_path)
@@ -65,10 +65,10 @@ def test_migration_drops_the_language_column_and_its_index(db_path):
     # The rest of the row is untouched.
     conn = get_connection(db_path)
     row = conn.execute(
-        "SELECT title, status FROM workshop_items WHERE workshop_id = 1"
+        "SELECT title, fetch_status FROM workshop_items WHERE workshop_id = 1"
     ).fetchone()
     conn.close()
-    assert dict(row) == {"title": "テスト", "status": 200}
+    assert dict(row) == {"title": "テスト", "fetch_status": 200}
 
 
 def test_fresh_database_never_has_the_column(db_path):

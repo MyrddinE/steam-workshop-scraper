@@ -59,11 +59,11 @@ def _translation_queue_row(db_path, workshop_id):
 def test_migration_18_requeues_descriptionless_done_rows(db_path):
     """A row marked done with no description is work that was never done."""
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "status": 200, "needs_web_scrape": 0,
+        "workshop_id": 1, "fetch_status": 200, "needs_web_scrape": 0,
         "extended_description": None,
     })
     insert_or_update_item(db_path, {
-        "workshop_id": 2, "status": 200, "needs_web_scrape": 0,
+        "workshop_id": 2, "fetch_status": 200, "needs_web_scrape": 0,
         "extended_description": "",
     })
     _age_to_v17(db_path)
@@ -81,7 +81,7 @@ def test_migration_18_requeues_descriptionless_done_rows(db_path):
 def test_migration_18_leaves_rows_that_have_a_description_alone(db_path):
     """A done row that produced a description is finished, not stranded."""
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "status": 200, "needs_web_scrape": 0,
+        "workshop_id": 1, "fetch_status": 200, "needs_web_scrape": 0,
         "extended_description": "a real description",
     })
     _age_to_v17(db_path)
@@ -94,7 +94,7 @@ def test_migration_18_leaves_rows_that_have_a_description_alone(db_path):
 def test_migration_18_leaves_dead_rows_alone(db_path):
     """A dead item can never complete, so it must not re-enter the queue."""
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "status": -1, "needs_web_scrape": 0,
+        "workshop_id": 1, "fetch_status": -1, "needs_web_scrape": 0,
         "extended_description": None,
     })
     _age_to_v17(db_path)
@@ -107,7 +107,7 @@ def test_migration_18_leaves_dead_rows_alone(db_path):
 def test_migration_18_leaves_rows_still_queued_alone(db_path):
     """A row already waiting in the queue keeps the priority a producer gave it."""
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "status": 200, "needs_web_scrape": 5,
+        "workshop_id": 1, "fetch_status": 200, "needs_web_scrape": 5,
         "extended_description": None,
     })
     _age_to_v17(db_path)
@@ -120,7 +120,7 @@ def test_migration_18_leaves_rows_still_queued_alone(db_path):
 def test_migration_18_touches_no_other_queue(db_path):
     """Only needs_web_scrape is requeued; the other queues are separate work."""
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "status": 200, "needs_web_scrape": 0,
+        "workshop_id": 1, "fetch_status": 200, "needs_web_scrape": 0,
         "needs_image": 10, "api_priority": 3, "translation_priority": 3,
         "extended_description": None,
     })
@@ -138,11 +138,11 @@ def test_migration_18_touches_no_other_queue(db_path):
 
 def test_migration_18_logs_the_number_of_rows_it_requeued(db_path, caplog):
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "status": 200, "needs_web_scrape": 0,
+        "workshop_id": 1, "fetch_status": 200, "needs_web_scrape": 0,
         "extended_description": None,
     })
     insert_or_update_item(db_path, {
-        "workshop_id": 2, "status": 200, "needs_web_scrape": 0,
+        "workshop_id": 2, "fetch_status": 200, "needs_web_scrape": 0,
         "extended_description": None,
     })
     _age_to_v17(db_path)
@@ -156,7 +156,7 @@ def test_migration_18_logs_the_number_of_rows_it_requeued(db_path, caplog):
 def test_migration_18_is_idempotent(db_path):
     """Re-running finds nothing to do: a requeued row is no longer at zero."""
     insert_or_update_item(db_path, {
-        "workshop_id": 1, "status": 200, "needs_web_scrape": 0,
+        "workshop_id": 1, "fetch_status": 200, "needs_web_scrape": 0,
         "extended_description": None,
     })
     _age_to_v17(db_path)
