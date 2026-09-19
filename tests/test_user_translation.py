@@ -2,7 +2,8 @@
 
 Issue 45: `_build_user_record` raised `users.translation_priority` for a
 non-ASCII persona and nothing queued the name. That line was a complete producer
-while `get_next_translation_item` scanned `users` by the flag; when the per-field
+while the (since removed) `get_next_translation_item` scanned `users` by the flag;
+when the per-field
 `translation_queue` replaced that scan the producer was never ported, so no
 `item_type='user'` row was ever written and no creator name was translated after
 2026-05-10. Issue 46: the translator's completion pass was hard-coded to items, so
@@ -10,8 +11,8 @@ a steamid would have counted against `item_type='item'` and completed against
 `workshop_items` keyed by that id, while the creator's own mirror was never
 cleared.
 
-These tests pin both halves and the repair: the daemon queues the name on both
-paths that fetch a persona, the translator writes `personaname_en` and clears the
+These tests pin both halves and the repair: the daemon queues the name whenever
+it fetches a persona, the translator writes `personaname_en` and clears the
 user's mirror without touching `workshop_items`, an ASCII name is never queued,
 the item path is unchanged, and migration 27->28 returns the flags that were
 raised without a queue row behind them.
@@ -116,22 +117,6 @@ def test_a_stale_creator_refresh_queues_a_non_ascii_name(db_path, tmp_path):
     assert _user(db_path, 222)["translation_priority"] == 1
     assert _user(db_path, 222)["personaname_en"] is None
 
-
-def test_discovery_queues_a_non_ascii_name_and_raises_its_mirror(db_path, tmp_path):
-    """Discovery is a first sighting: the row must exist for the mirror to land.
-
-    `flag_field_for_translation` raises `users.translation_priority` in the same
-    transaction as the queue row, so queueing before the profile is written would
-    leave the row inserted and the mirror at 0.
-    """
-    insert_or_update_item(db_path, {"workshop_id": 1, "creator": "333", "status": 200})
-    daemon = _daemon(db_path, tmp_path)
-    with patch("src.daemon.get_player_summaries",
-               return_value={333: {"personaname": "テスト"}}):
-        daemon.expand_user_discovery()
-
-    assert _user_queue_rows(db_path, 333) == [("personaname_en", "テスト", 1)]
-    assert _user(db_path, 333)["translation_priority"] == 1
 
 
 def test_an_ascii_creator_is_not_queued(db_path, tmp_path):

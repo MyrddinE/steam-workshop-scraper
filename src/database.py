@@ -182,13 +182,6 @@ _EN_FIELDS = {
     "extended_description": "extended_description_en",
 }
 
-# Full Text search spans all these columns
-_FULL_TEXT_COLS = [
-    "title", "title_en",
-    "short_description", "short_description_en",
-    "extended_description", "extended_description_en",
-]
-
 # Operators that trigger dual-field (original + translated) search
 _TEXT_OPS = {"contains", "does_not_contain", "is", "is_not"}
 # Positive operators join with OR (match if either column matches);
@@ -217,7 +210,7 @@ USER_PRIORITY_FLOOR = 5
 # than local to `initialize_database` because the migration tests assert that
 # the chain reaches it, and a magic number repeated in nine test files is a
 # number that will be wrong after the next migration.
-EXPECTED_VERSION = 28
+EXPECTED_VERSION = 29
 
 def _build_text_search_clauses(sql: str, params: list, q_str: str, cols: list[str]) -> tuple[str, list]:
     """Applies positive/negative text search tokens to SQL via LIKE clauses."""
@@ -1015,7 +1008,6 @@ def initialize_database(db_path: str):
         required_tags TEXT DEFAULT '[]',
         excluded_tags TEXT DEFAULT '[]',
         window_size INTEGER DEFAULT 2592000,
-        last_page_scanned INTEGER DEFAULT 0,
         enrichment_filters TEXT DEFAULT '[]',
         last_cursor TEXT DEFAULT ''
     )
@@ -1027,7 +1019,6 @@ def initialize_database(db_path: str):
         ("required_tags", "TEXT DEFAULT '[]'"),
         ("excluded_tags", "TEXT DEFAULT '[]'"),
         ("window_size", "INTEGER DEFAULT 2592000"),
-        ("last_page_scanned", "INTEGER DEFAULT 0"),
         ("enrichment_filters", "TEXT DEFAULT '[]'"),
         ("last_cursor", "TEXT DEFAULT ''"),
     ])
@@ -1418,7 +1409,6 @@ def initialize_database(db_path: str):
 
     if db_version < 11:
         logging.info("Running migration 10->11: repurposing dt_* columns...")
-        from datetime import datetime, timezone as _tz
 
         # Step 1: dt_attempted (fetch time) → dt_found where dt_found is NULL.
         # Preserves our best approximation of when the item was first found,
@@ -2153,10 +2143,11 @@ def initialize_database(db_path: str):
 
         # Issue 45: a creator's name was queued by raising
         # `users.translation_priority`, which was the whole producer while
-        # `get_next_translation_item` scanned both tables by that flag. When the
-        # per-field `translation_queue` replaced that scan the producer was never
-        # ported, so every creator flagged since has had no queue row behind it
-        # and `translation_queue` has never held an `item_type='user'` row. This
+        # `get_next_translation_item` (since removed) scanned both tables by that
+        # flag. When the per-field `translation_queue` replaced that scan the
+        # producer was never ported, so every creator flagged since has had no
+        # queue row behind it and `translation_queue` has never held an
+        # `item_type='user'` row. This
         # is the user-side counterpart of v22->v23, which repaired the item side
         # of the same stranded-mirror state, and of migration 2->3, which
         # backfilled raised item mirrors into per-field queue rows.
@@ -2221,6 +2212,31 @@ def initialize_database(db_path: str):
             "translate.",
             queued, cleared,
         )
+
+    if db_version < 29:
+        logging.info("Running migration 28->29: dropping the dead page counter...")
+
+        # `app_tracking.last_page_scanned` counted pages while discovery walked
+        # them by number. `88397b7` replaced that with cursor discovery, which
+        # resumes from `last_cursor`, and the writer went with it -- so ever
+        # since, the TUI column, the web table and the `app_tracking` metric have
+        # all read a column nothing sets, and displayed its DEFAULT 0. Nothing
+        # references an index on it, so the column alone is dropped. The PRAGMA
+        # guard keeps this idempotent and resumable, matching the `language`
+        # drop: a fresh database never has the column, and a partial run that
+        # already dropped it skips cleanly.
+        cols = {r[1] for r in cursor.execute("PRAGMA table_info(app_tracking)").fetchall()}
+        if "last_page_scanned" in cols:
+            cursor.execute("ALTER TABLE app_tracking DROP COLUMN last_page_scanned")
+            conn.commit()
+            cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            logging.info("  dropped app_tracking.last_page_scanned")
+        else:
+            logging.info("  app_tracking.last_page_scanned already absent; nothing to drop")
+
+        cursor.execute("PRAGMA user_version = 29")
+        conn.commit()
+        logging.info("Migration 28->29 complete.")
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
@@ -2315,18 +2331,6 @@ def mark_own_subscribed(db_path: str, workshop_id: int, seen_at: int | None = No
         return stamped
     finally:
         conn.close()
-
-
-def own_subscription_ids(db_path: str, appid: int) -> set[int]:
-    """The ids of this app's items the owner is currently recorded as subscribed to."""
-    conn = get_connection(db_path)
-    rows = conn.execute(
-        "SELECT workshop_id FROM workshop_items "
-        "WHERE consumer_appid = ? AND own_subscribed = 1",
-        (appid,)
-    ).fetchall()
-    conn.close()
-    return {row["workshop_id"] for row in rows}
 
 
 def apply_own_subscriptions(db_path: str, appid: int, subscribed_ids,
@@ -2740,46 +2744,6 @@ def get_user(db_path: str, steamid: int) -> dict | None:
     conn.close()
     return dict(row) if row else None
 
-def flag_for_translation(db_path: str, item_id: int, priority: int, table: str = "workshop_items"):
-    """Updates the translation priority for a specific item or user."""
-    conn = get_connection(db_path)
-    id_col = "workshop_id" if table == "workshop_items" else "steamid"
-    conn.execute(
-        f"UPDATE {table} SET translation_priority = ? WHERE {id_col} = ?",
-        (priority, item_id)
-    )
-    conn.commit()
-    conn.close()
-
-def get_next_translation_item(db_path: str) -> tuple[str, int, int] | None:
-    """
-    Returns (type, id, priority) of the next item needing translation,
-    checking both workshop_items and users, ordered by priority descending.
-    """
-    conn = get_connection(db_path)
-    # Check workshop_items
-    cursor = conn.execute(
-        "SELECT workshop_id, translation_priority FROM workshop_items WHERE translation_priority > 0 ORDER BY translation_priority DESC LIMIT 1"
-    )
-    mod_row = cursor.fetchone()
-    
-    # Check users
-    cursor = conn.execute(
-        "SELECT steamid, translation_priority FROM users WHERE translation_priority > 0 ORDER BY translation_priority DESC LIMIT 1"
-    )
-    user_row = cursor.fetchone()
-    conn.close()
-    
-    if not mod_row and not user_row:
-        return None
-        
-    mod_prio = mod_row["translation_priority"] if mod_row else 0
-    user_prio = user_row["translation_priority"] if user_row else 0
-    
-    if user_prio > mod_prio:
-        return ("user", user_row["steamid"], user_prio)
-    else:
-        return ("workshop_item", mod_row["workshop_id"], mod_prio)
 
 def _parse_query(query: str) -> tuple[list[str], list[str]]:
     """

@@ -23,8 +23,28 @@ import pytest
 from src import session_health, subscription_sync
 from src.database import (
     apply_own_subscriptions, get_connection, initialize_database,
-    insert_or_update_item, mark_own_subscribed, own_subscription_ids,
+    insert_or_update_item, mark_own_subscribed,
 )
+
+
+def _own_subscription_ids(db_path, appid):
+    """The ids this app's items are recorded as subscribed to.
+
+    This read used to live in `src/database.py` as `own_subscription_ids`.
+    Production never called it -- `apply_own_subscriptions` writes those flags and
+    reads nothing back -- so when the only callers turned out to be these tests,
+    the capability moved here instead of staying in the main tree.
+    """
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT workshop_id FROM workshop_items "
+            "WHERE consumer_appid = ? AND own_subscribed = 1",
+            (appid,)
+        ).fetchall()
+    finally:
+        conn.close()
+    return {row["workshop_id"] for row in rows}
 
 
 def _page(ids, declared_total):
@@ -151,7 +171,7 @@ def test_paging_reaches_every_page_and_stops_at_the_declared_total(sync_env):
     assert counts["subscribed"] == 25
     # Three pages fetched, and no fourth: the declared total ends the walk.
     assert len(session.urls) == 3
-    assert own_subscription_ids(db_path, 294100) == set(ids)
+    assert _own_subscription_ids(db_path, 294100) == set(ids)
 
 
 def test_a_single_page_account_is_one_request(sync_env):
@@ -163,7 +183,7 @@ def test_a_single_page_account_is_one_request(sync_env):
     subscription_sync.reconcile_own_subscriptions(db_path, 294100, {})
 
     assert len(session.urls) == 1
-    assert own_subscription_ids(db_path, 294100) == set(ids)
+    assert _own_subscription_ids(db_path, 294100) == set(ids)
 
 
 def test_the_subscriptions_walk_waits_the_shared_interval(sync_env, monkeypatch):
@@ -192,7 +212,7 @@ def test_every_other_item_of_the_appid_is_cleared(sync_env):
 
     subscription_sync.reconcile_own_subscriptions(db_path, 294100, {})
 
-    assert own_subscription_ids(db_path, 294100) == {1, 2}
+    assert _own_subscription_ids(db_path, 294100) == {1, 2}
     assert _row(db_path, 3)["own_subscribed"] == 0
     assert _row(db_path, 4)["own_subscribed"] == 0
 
@@ -291,7 +311,7 @@ def test_a_short_read_is_retried_and_never_clears(sync_env, monkeypatch):
     assert len(session.urls) > 2, "the walk must have been retried"
     # Every id the walk actually saw is marked, and the unseen one keeps its
     # state rather than being taken as unsubscribed.
-    assert own_subscription_ids(db_path, 294100) == set(range(1, 11)) | set(range(12, 21))
+    assert _own_subscription_ids(db_path, 294100) == set(range(1, 11)) | set(range(12, 21))
     assert _row(db_path, 11)["own_subscribed"] == 0, \
         "an id never seen must not be marked subscribed"
     assert _row(db_path, 20)["own_subscribed"] == 1, \
@@ -322,7 +342,7 @@ def test_a_short_read_that_clears_on_retry_is_applied(sync_env, monkeypatch):
     counts = subscription_sync.reconcile_own_subscriptions(db_path, 294100, {})
 
     assert counts is not None and counts["subscribed"] == 20
-    assert own_subscription_ids(db_path, 294100) == set(range(1, 21))
+    assert _own_subscription_ids(db_path, 294100) == set(range(1, 21))
 
 
 def test_a_page_with_no_declared_total_is_not_treated_as_complete(sync_env):
@@ -338,7 +358,7 @@ def test_a_page_with_no_declared_total_is_not_treated_as_complete(sync_env):
     # The id is a real subscription and is recorded, but with no total to verify
     # against, the unread id 2 must not be cleared.
     assert counts["cleared"] == 0
-    assert own_subscription_ids(db_path, 294100) == {1, 2}
+    assert _own_subscription_ids(db_path, 294100) == {1, 2}
 
 
 # --- one-way safety ---------------------------------------------------------
@@ -352,7 +372,7 @@ def test_a_transport_error_never_raises_and_changes_nothing(sync_env):
     result = subscription_sync.reconcile_own_subscriptions(db_path, 294100, {})
 
     assert result is None
-    assert own_subscription_ids(db_path, 294100) == {1, 2}, \
+    assert _own_subscription_ids(db_path, 294100) == {1, 2}, \
         "a failed sync must leave the previous state standing"
 
 
@@ -488,7 +508,7 @@ def test_the_sign_in_page_stops_the_walk_and_changes_nothing(sync_env):
     assert result is None
     assert len(session.urls) == 1, \
         "a sign-in page ends the walk; retrying only asks Steam again"
-    assert own_subscription_ids(db_path, 294100) == {1, 2}, \
+    assert _own_subscription_ids(db_path, 294100) == {1, 2}, \
         "a sign-in page is not a list, so it may clear nothing"
 
 

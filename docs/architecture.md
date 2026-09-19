@@ -136,7 +136,7 @@ The database is designed for high-concurrency and complex querying. See
   * **`tags` / `workshop_tags`**: A normalized tag store and an item-to-tag junction table.
     `workshop_items` has no tags column.
   * **`users`**: Creator information, keyed by `steamid`, with translated name fields.
-  * **`app_tracking`**: Per-AppID discovery state (`last_cursor`, `last_page_scanned`) and the
+  * **`app_tracking`**: Per-AppID discovery state (`last_cursor`) and the
     enrichment filters that gate web scraping.
 * **Schema evolution**: Built-in migration logic adds and renames columns on existing databases
   without data loss. See [schema-migrations.md](schema-migrations.md).

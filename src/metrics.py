@@ -38,6 +38,7 @@ from src.database import (
     enrichment_filters_for,
     get_connection,
     image_queue_predicate,
+    queued_anywhere_predicate,
     translation_priority_predicate,
     web_scrape_queue_predicate,
 )
@@ -199,7 +200,7 @@ def _app_tracking(conn, params) -> list[dict]:
     return [
         dict(r)
         for r in conn.execute(
-            "SELECT appid, last_page_scanned, last_cursor FROM app_tracking"
+            "SELECT appid, last_cursor FROM app_tracking"
         )
     ]
 
@@ -460,13 +461,24 @@ def _dead_queued(conn, params) -> int:
     invariant, the breakdown is the diagnosis -- so one is not a replacement for
     the other.
     """
+    # The union comes from the named queue predicates, so a change to one of them
+    # moves this with it. ``api_priority`` is then added on its own, because the
+    # API fetch predicate guards on status -- it reads ``api_priority > 0 AND
+    # (status IS NULL OR status != -1)`` -- and this metric's population is
+    # ``status = -1`` by definition, so that guarded term can never be true here.
+    # Without the extra term a dead row whose only leftover flag is the fetch
+    # priority would stop being counted, and it is the same violation:
+    # `_settle_api_failure` clears all four flags when it writes ``status = -1``.
+    #
+    # Measured against the 2026-09-18 backup: the hand-written union and this one
+    # both count 4, and all 4 are dead rows holding only ``api_priority > 0``;
+    # the bare named union counts 0.
     return conn.execute(
-        """
+        f"""
         SELECT COUNT(*) AS n
         FROM workshop_items
         WHERE status = -1
-          AND (api_priority > 0 OR needs_web_scrape > 0
-               OR needs_image > 0 OR translation_priority > 0)
+          AND (({queued_anywhere_predicate()}) OR api_priority > 0)
         """
     ).fetchone()["n"]
 
@@ -496,16 +508,19 @@ def _queued_nowhere(conn, params) -> int:
     Statuses the pipeline settles otherwise -- dead (``-1``) and the legacy
     ``404`` rows of issue 36 -- are outside the population.
     """
+    # Stated as the negation of the same union, so the two halves of the handoff
+    # invariant cannot drift apart. Inside this population the API predicate's
+    # status guard is always true -- an item here is either ``status IS NULL`` or
+    # ``status = 200``, never dead -- so the negation says exactly what the four
+    # hand-written ``<= 0`` terms said. Verified equal on the 2026-09-18 backup:
+    # both forms count 3456.
     return conn.execute(
-        """
+        f"""
         SELECT COUNT(*) AS n
         FROM workshop_items
         WHERE (status IS NULL
                OR (status = 200 AND COALESCE(extended_description, '') = ''))
-          AND api_priority <= 0
-          AND needs_web_scrape <= 0
-          AND needs_image <= 0
-          AND translation_priority <= 0
+          AND NOT ({queued_anywhere_predicate()})
         """
     ).fetchone()["n"]
 

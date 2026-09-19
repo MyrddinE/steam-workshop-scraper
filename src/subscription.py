@@ -146,16 +146,6 @@ def colour(state: str) -> str:
     return spec(state)[1]
 
 
-def css_class(state: str) -> str:
-    """The class the web marker element carries for ``state``."""
-    return spec(state)[2]
-
-
-def label(state: str) -> str:
-    """A short human label for ``state``."""
-    return spec(state)[3]
-
-
 def tooltip(state: str) -> str:
     """The web element's ``title`` text for ``state``.
 

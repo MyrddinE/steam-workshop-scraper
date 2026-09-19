@@ -164,7 +164,7 @@ def test_downloaded_is_a_solid_star_in_a_green_of_its_own():
 
 
 def test_the_downloaded_label_and_tooltip_say_what_it_means():
-    assert subscription.label(subscription.DOWNLOADED) == "Subscribed, and downloaded"
+    assert subscription.spec(subscription.DOWNLOADED)[3] == "Subscribed, and downloaded"
     assert (subscription.tooltip(subscription.DOWNLOADED)
             == "You are subscribed to this item and Steam has downloaded it.")
 
@@ -180,9 +180,8 @@ def test_pending_and_previously_share_a_glyph_but_not_a_colour():
 def test_the_spec_and_the_named_getters_agree():
     for state in subscription.PRECEDENCE:
         glyph, colour, css, label = subscription.spec(state)
-        assert (glyph, colour, css, label) == (
-            subscription.glyph(state), subscription.colour(state),
-            subscription.css_class(state), subscription.label(state))
+        assert (glyph, colour) == (
+            subscription.glyph(state), subscription.colour(state))
         assert css and label
 
 
@@ -200,7 +199,7 @@ def test_only_the_three_actionable_states_are_clickable():
 
 
 def test_every_css_class_is_distinct():
-    assert len({subscription.css_class(s) for s in subscription.PRECEDENCE}) == len(
+    assert len({subscription.spec(s)[2] for s in subscription.PRECEDENCE}) == len(
         subscription.PRECEDENCE)
 
 

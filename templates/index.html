@@ -2285,10 +2285,10 @@ function _renderTags(tags) {
 function _renderAppTracking(apps) {
   if (!apps || !apps.length) return '<p class="stat-label">No tracked applications.</p>';
   const rows = apps.map(function(a) {
-    return '<tr><td>' + a.appid + '</td><td>' + (a.last_page_scanned || 0) + '</td>'
+    return '<tr><td>' + a.appid + '</td>'
       + '<td>' + (a.last_cursor || '') + '</td></tr>';
   }).join('');
-  return '<table class="stats-table"><thead><tr><th>AppID</th><th>Last page</th><th>Last cursor</th></tr></thead>'
+  return '<table class="stats-table"><thead><tr><th>AppID</th><th>Last cursor</th></tr></thead>'
     + '<tbody>' + rows + '</tbody></table>';
 }
 
