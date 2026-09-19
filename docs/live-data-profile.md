@@ -129,5 +129,5 @@ control characters anywhere.
 ## The live target
 
 `app_tracking` holds exactly one row: **appid 431960 (Wallpaper Engine)**, with `last_cursor`
-`AoJckZidMXaL38lT`, `last_page_scanned` 13, and enrichment filters
+`AoJckZidMXaL38lT` and enrichment filters
 `Tags contains Mature AND Tags contains Video AND File Size > 100000000`.

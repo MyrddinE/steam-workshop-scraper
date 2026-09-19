@@ -578,7 +578,6 @@ class Daemon:
             app_tracking = get_app_tracking(self.db_path, appid)
             if app_tracking:
                 self.last_filters[appid] = {
-                    "last_page": app_tracking.get("last_page_scanned", 0) or 0,
                     "last_cursor": app_tracking.get("last_cursor") or ""
                 }
 

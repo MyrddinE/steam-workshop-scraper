@@ -527,7 +527,7 @@ def _fake_coverage(total=2, filtered_total=1):
 _FAKE_METRIC_VALUES = {
     "high_water": 1_700_000_000,
     "totals": {"total": 3, "alive": 2, "dead": 1},
-    "app_tracking": [{"appid": 294100, "last_page_scanned": 7, "last_cursor": "abc"}],
+    "app_tracking": [{"appid": 294100, "last_cursor": "abc"}],
     "status_counts": [{"status": 200, "count": 2}, {"status": -1, "count": 1}],
     "stuck_work": {"web": 1, "image": 0, "translation": 0, "api": 0},
     "dead_queued": 1,

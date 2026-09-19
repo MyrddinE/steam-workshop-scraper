@@ -210,7 +210,7 @@ USER_PRIORITY_FLOOR = 5
 # than local to `initialize_database` because the migration tests assert that
 # the chain reaches it, and a magic number repeated in nine test files is a
 # number that will be wrong after the next migration.
-EXPECTED_VERSION = 28
+EXPECTED_VERSION = 29
 
 def _build_text_search_clauses(sql: str, params: list, q_str: str, cols: list[str]) -> tuple[str, list]:
     """Applies positive/negative text search tokens to SQL via LIKE clauses."""
@@ -1008,7 +1008,6 @@ def initialize_database(db_path: str):
         required_tags TEXT DEFAULT '[]',
         excluded_tags TEXT DEFAULT '[]',
         window_size INTEGER DEFAULT 2592000,
-        last_page_scanned INTEGER DEFAULT 0,
         enrichment_filters TEXT DEFAULT '[]',
         last_cursor TEXT DEFAULT ''
     )
@@ -1020,7 +1019,6 @@ def initialize_database(db_path: str):
         ("required_tags", "TEXT DEFAULT '[]'"),
         ("excluded_tags", "TEXT DEFAULT '[]'"),
         ("window_size", "INTEGER DEFAULT 2592000"),
-        ("last_page_scanned", "INTEGER DEFAULT 0"),
         ("enrichment_filters", "TEXT DEFAULT '[]'"),
         ("last_cursor", "TEXT DEFAULT ''"),
     ])
@@ -2214,6 +2212,31 @@ def initialize_database(db_path: str):
             "translate.",
             queued, cleared,
         )
+
+    if db_version < 29:
+        logging.info("Running migration 28->29: dropping the dead page counter...")
+
+        # `app_tracking.last_page_scanned` counted pages while discovery walked
+        # them by number. `88397b7` replaced that with cursor discovery, which
+        # resumes from `last_cursor`, and the writer went with it -- so ever
+        # since, the TUI column, the web table and the `app_tracking` metric have
+        # all read a column nothing sets, and displayed its DEFAULT 0. Nothing
+        # references an index on it, so the column alone is dropped. The PRAGMA
+        # guard keeps this idempotent and resumable, matching the `language`
+        # drop: a fresh database never has the column, and a partial run that
+        # already dropped it skips cleanly.
+        cols = {r[1] for r in cursor.execute("PRAGMA table_info(app_tracking)").fetchall()}
+        if "last_page_scanned" in cols:
+            cursor.execute("ALTER TABLE app_tracking DROP COLUMN last_page_scanned")
+            conn.commit()
+            cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            logging.info("  dropped app_tracking.last_page_scanned")
+        else:
+            logging.info("  app_tracking.last_page_scanned already absent; nothing to drop")
+
+        cursor.execute("PRAGMA user_version = 29")
+        conn.commit()
+        logging.info("Migration 28->29 complete.")
 
     # Create indexes for faster querying
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")

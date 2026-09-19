@@ -443,12 +443,11 @@ class StatsScreen(Screen):
         elif name == "app_tracking":
             table = self.query_one("#app-stats-table", DataTable)
             table.clear(columns=True)
-            table.add_columns("AppID", "Last Page", "Last Cursor")
+            table.add_columns("AppID", "Last Cursor")
             for app in value:
                 cursor = str(app.get("last_cursor", "") or "")
                 table.add_row(
                     str(app.get("appid")),
-                    str(app.get("last_page_scanned", 0) or 0),
                     escape_markup(cursor[:30] + "..." if len(cursor) > 30 else cursor),
                 )
         elif name == "status_counts":

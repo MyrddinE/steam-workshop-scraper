@@ -97,7 +97,6 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 | Column | Type | Purpose |
 |---|---|---|
 | appid | INTEGER PK | Steam AppID |
-| last_page_scanned | INTEGER | Page number for page-based discovery |
 | last_cursor | TEXT | Cursor for cursor-based discovery |
 | window_size | INTEGER | View window size |
 | filter_text, required_tags, excluded_tags | TEXT | Legacy filter columns |
@@ -776,6 +775,32 @@ backlog and this migration need not look beyond it. No creator had a current
 translation *and* a raised flag, so the currency term changes no count today — it
 is there so the statement means "needs translating" rather than "is flagged".
 Both statements are idempotent, which `tests/test_user_translation.py` pins.
+
+---
+
+### v28 → v29: Drop the never-written page counter
+
+A schema change with nothing to backfill. `app_tracking.last_page_scanned` counted
+pages while discovery walked them by number; `88397b7` replaced page-numbered
+discovery with cursor-based discovery, which resumes from `last_cursor`, and
+deleted `update_app_tracking_page` and the `page = last_page + 1` resume logic
+with it — but left every reader. So the TUI's "Last Page" column, the web table's
+equivalent, and the `app_tracking` metric that feeds both had, ever since, read a
+column nothing writes and displayed its `DEFAULT 0`. Recorded as issue 47 and
+removed here. The stored value is not preserved because it stopped meaning
+anything the moment discovery moved to cursors.
+
+```sql
+ALTER TABLE app_tracking DROP COLUMN last_page_scanned
+```
+
+No index names the column, so the column alone goes. A `PRAGMA table_info` guard
+keeps the step idempotent and resumable — a fresh database never has the column,
+and a re-run neither finds it nor fails reaching for it — which is the shape
+migration 23→24 established for `language`. All three readers are removed in the
+same change, in both front ends, so parity holds by both losing the same column.
+`tests/test_last_page_column_migration.py` pins the drop, the surviving row, the
+fresh-database case and the idempotent re-run.
 
 ---
 

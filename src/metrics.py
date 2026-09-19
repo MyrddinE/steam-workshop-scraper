@@ -200,7 +200,7 @@ def _app_tracking(conn, params) -> list[dict]:
     return [
         dict(r)
         for r in conn.execute(
-            "SELECT appid, last_page_scanned, last_cursor FROM app_tracking"
+            "SELECT appid, last_cursor FROM app_tracking"
         )
     ]
 
