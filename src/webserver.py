@@ -904,7 +904,10 @@ def api_daemon_restart():
 
 @app.route('/api/daemon/log')
 def api_daemon_log():
-    since_offset = request.args.get('since', 0, type=int) or 0
+    # A page cached before the Batch 4 rename still sends `since`; it is the
+    # same byte offset under its new name.
+    since_offset = request.args.get(
+        'since_offset', request.args.get('since', 0, type=int), type=int) or 0
     return jsonify(_get_daemon_controller().tail_log(since_offset))
 
 

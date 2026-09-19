@@ -2022,7 +2022,7 @@ async function _pollDaemonLog() {
   const pre = document.getElementById('daemon-log');
   if (!pre) return;
   try {
-    const resp = await fetch('/api/daemon/log?since=' + _daemonLogOffset);
+    const resp = await fetch('/api/daemon/log?since_offset=' + _daemonLogOffset);
     const data = await resp.json();
     if (data.reset) {
       // The server jumped to the tail — first poll of a large log, rotation or

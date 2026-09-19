@@ -1270,9 +1270,17 @@ def test_daemon_start_stop_restart_routes(daemon_client):
 def test_daemon_log_route_passes_offset(daemon_client):
     client, fake = daemon_client
     fake._tail = {"lines": ["a line"], "offset": 9, "reset": False}
-    resp = client.get('/api/daemon/log?since=5')
+    resp = client.get('/api/daemon/log?since_offset=5')
     assert resp.status_code == 200
     assert resp.get_json() == {"lines": ["a line"], "offset": 9, "reset": False}
+    assert ("log", 5) in fake.calls
+
+
+def test_daemon_log_route_still_accepts_the_pre_rename_since_key(daemon_client):
+    """A page cached before the Batch 4 rename polls the offset under `since`."""
+    client, fake = daemon_client
+    resp = client.get('/api/daemon/log?since=5')
+    assert resp.status_code == 200
     assert ("log", 5) in fake.calls
 
 
@@ -1285,13 +1293,13 @@ def test_daemon_log_route_reads_configured_file_incrementally(tmp_path):
     init_webserver(db_path, config)
     client = app.test_client()
 
-    first = client.get('/api/daemon/log?since=0').get_json()
+    first = client.get('/api/daemon/log?since_offset=0').get_json()
     assert first["lines"] == ["hello", "world"]
     assert first["reset"] is False
 
     with open(log_path, "a") as f:
         f.write("again\n")
-    second = client.get(f"/api/daemon/log?since={first['offset']}").get_json()
+    second = client.get(f"/api/daemon/log?since_offset={first['offset']}").get_json()
     assert second["lines"] == ["again"]
     assert second["reset"] is False
 
@@ -1303,7 +1311,7 @@ def test_daemon_log_route_missing_file_returns_empty(tmp_path):
     init_webserver(db_path, config)
     client = app.test_client()
 
-    resp = client.get('/api/daemon/log?since=0')
+    resp = client.get('/api/daemon/log?since_offset=0')
     assert resp.status_code == 200
     assert resp.get_json() == {"lines": [], "offset": 0, "reset": False}
 
