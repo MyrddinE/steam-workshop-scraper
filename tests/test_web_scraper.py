@@ -40,7 +40,7 @@ def test_discover_items_by_date_html_url_construction():
     # Mock the actual request to verify the URL
     with patch('src.web_scraper.HTMLSession') as mock_session_class, \
          patch('src.web_scraper.load_config') as mock_load_config:
-        mock_load_config.return_value = {"session": {"id": "test_session"}}
+        mock_load_config.return_value = {"session": {"csrf_token": "test_session"}}
         mock_session = mock_session_class.return_value
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -180,7 +180,7 @@ def test_discover_items_by_date_html_success():
     )
 
     with patch('src.web_scraper.load_config') as mock_load_config:
-        mock_load_config.return_value = {"session": {"id": "test_session"}}
+        mock_load_config.return_value = {"session": {"csrf_token": "test_session"}}
         ids, total_pages = discover_items_by_date_html(appid, start_date, end_date, page)
     assert len(ids) == 2
     assert 5001 in ids
@@ -192,7 +192,7 @@ def test_discover_items_by_date_html_exception():
     """Test handling of exceptions during discover_items_by_date_html."""
     with patch('src.web_scraper.HTMLSession') as mock_session, \
          patch('src.web_scraper.load_config') as mock_load_config:
-        mock_load_config.return_value = {"session": {"id": "test_session"}}
+        mock_load_config.return_value = {"session": {"csrf_token": "test_session"}}
         mock_instance = mock_session.return_value
         mock_instance.get.side_effect = requests.exceptions.RequestException("Timeout")
         
@@ -266,7 +266,7 @@ def test_the_scraper_applies_no_delay_of_its_own():
                   status=200, content_type="text/html")
     sleeps = []
     with patch("src.web_scraper.load_config",
-               return_value={"session": {"id": "x"}}), \
+               return_value={"session": {"csrf_token": "x"}}), \
          patch("time.sleep", side_effect=lambda *a, **k: sleeps.append(a)):
         web_scraper.scrape_extended_details(STEAM_WORKSHOP_URL + "?id=1")
         web_scraper.scrape_extended_details(STEAM_WORKSHOP_URL + "?id=2")

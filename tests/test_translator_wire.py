@@ -15,6 +15,7 @@ per character, and a nonce -- not the shape of the line -- is what makes a
 boundary unambiguous.
 """
 
+import logging
 import random
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
@@ -490,11 +491,38 @@ def test_the_packing_keys_default_from_the_measurable_distribution(db_path):
     thread = _thread(db_path)
     assert thread.batch_size == DEFAULT_BATCH_ITEMS == 20
     assert thread.batch_char_cap == DEFAULT_BATCH_CHAR_CAP == 4000
-    assert _thread(db_path, batch=5).batch_size == 5
+    assert _thread(db_path, batch_items=5).batch_size == 5
     assert _thread(db_path, batch_char_cap=500).batch_char_cap == 500
     # Unusable values fall back rather than disabling the bounds.
-    assert _thread(db_path, batch=0).batch_size == DEFAULT_BATCH_ITEMS
+    assert _thread(db_path, batch_items=0).batch_size == DEFAULT_BATCH_ITEMS
     assert _thread(db_path, batch_char_cap="wide").batch_char_cap == DEFAULT_BATCH_CHAR_CAP
+
+
+# --- the renamed openai batch key -------------------------------------------
+#
+# `openai.batch` said "batch" while meaning fields per request, beside the
+# daemon's own `daemon.batch_size`; it took the qualified name. A config written
+# before the rename must keep working, with a warning.
+
+def test_the_legacy_openai_batch_key_is_honoured_and_warns(caplog):
+    with caplog.at_level(logging.WARNING):
+        thread = TranslatorThread({"openai": {"batch": 5}})
+    assert thread.batch_size == 5
+    assert any("deprecated" in record.message for record in caplog.records)
+
+
+def test_the_current_openai_batch_key_does_not_warn(caplog):
+    with caplog.at_level(logging.WARNING):
+        thread = TranslatorThread({"openai": {"batch_items": 5}})
+    assert thread.batch_size == 5
+    assert not any("deprecated" in record.message for record in caplog.records)
+
+
+def test_the_current_openai_batch_key_wins_when_both_are_present(caplog):
+    with caplog.at_level(logging.WARNING):
+        thread = TranslatorThread({"openai": {"batch_items": 3, "batch": 9}})
+    assert thread.batch_size == 3
+    assert not any("deprecated" in record.message for record in caplog.records)
 
 
 # ── partial success through the real writer ──────────────────────────────────

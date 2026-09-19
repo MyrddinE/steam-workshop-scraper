@@ -11,7 +11,7 @@ def test_load_config_yaml(tmp_path):
         "api": {"key": "test_key"},
         "database": {"path": "test.db"},
         "daemon": {
-            "batch_size": 5,
+            "api_batch_size": 5,
             "request_delay_seconds": 2.0,
             "target_appids": [123, 456]
         },
@@ -25,7 +25,7 @@ def test_load_config_yaml(tmp_path):
     
     assert config["api"]["key"] == "test_key"
     assert config["database"]["path"] == "test.db"
-    assert config["daemon"]["batch_size"] == 5
+    assert config["daemon"]["api_batch_size"] == 5
     assert config["daemon"]["request_delay_seconds"] == 2.0
     assert config["daemon"]["target_appids"] == [123, 456]
     assert config["logging"]["level"] == "DEBUG"

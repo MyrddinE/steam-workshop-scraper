@@ -12,7 +12,7 @@ def mock_config(db_path):
     return {
         "database": {"path": db_path},
         "api": {"key": "TEST_KEY"},
-        "daemon": {"batch_size": 2, "request_delay_seconds": 0.01, "target_appids": [123]}
+        "daemon": {"api_batch_size": 2, "request_delay_seconds": 0.01, "target_appids": [123]}
     }
 
 def test_daemon_init_defaults(tmp_path, monkeypatch):
@@ -30,10 +30,10 @@ def test_daemon_init_defaults(tmp_path, monkeypatch):
     
     assert daemon.db_path == "workshop.db"
     assert daemon.api_key == ""
-    assert daemon.batch_size == 10
+    assert daemon.api_batch_size == 10
     assert daemon.api_delay == 1.5
     assert daemon.item_staleness_days == 30
-    assert daemon.user_staleness_days == 90
+    assert daemon.creator_staleness_days == 90
     assert daemon.target_appids == [456]
 
 
@@ -164,7 +164,7 @@ def test_api_delay_decays_on_every_healthy_request(mock_sleep, mock_flag_web, mo
     mock_get_user.return_value = {"steamid": 111, "api_fetched_at": 1767225600}
 
     daemon = Daemon(mock_config)
-    daemon.batch_size = 5
+    daemon.api_batch_size = 5
     daemon.api_delay = 1.0
     # The batch is one request and therefore one interval; pretend the interval
     # lasted a half-life.
@@ -262,7 +262,7 @@ def test_mixed_outcome_batch_is_a_healthy_request_not_a_refusal(db_path, tmp_pat
     insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 5, "status": 200})
     insert_or_update_item(db_path, {"workshop_id": 2, "api_priority": 5, "status": 200})
     daemon = _real_db_daemon(db_path, tmp_path)
-    daemon.batch_size = 2
+    daemon.api_batch_size = 2
     daemon.api_delay = API_DELAY_FLOOR
     initial = daemon.api_delay
 
@@ -515,7 +515,7 @@ def test_promote_stale_items_only_promotes_stale_live_unqueued(db_path, tmp_path
     config = {
         "database": {"path": db_path},
         "api": {"key": "TEST"},
-        "daemon": {"batch_size": 1, "target_appids": [1]},
+        "daemon": {"api_batch_size": 1, "target_appids": [1]},
     }
     # Daemon.__init__ calls save_config(self.config_path, ...), and save_config
     # writes to the file when it exists. Point config_path at a path that does not
@@ -540,7 +540,7 @@ def _real_db_daemon(db_path, tmp_path):
     config = {
         "database": {"path": db_path},
         "api": {"key": "TEST"},
-        "daemon": {"batch_size": 1, "target_appids": [1]},
+        "daemon": {"api_batch_size": 1, "target_appids": [1]},
     }
     return Daemon(config, config_path=str(tmp_path / "config.yaml"))
 
@@ -678,7 +678,7 @@ def test_creator_refresh_makes_one_call_for_several_creators(
     per-item request is gone.
     """
     daemon = _real_db_daemon(db_path, tmp_path)
-    daemon.batch_size = 4
+    daemon.api_batch_size = 4
     mock_items.return_value = [
         {"workshop_id": i, "api_priority": 5, "status": 200} for i in (1, 2, 3, 4)
     ]
@@ -713,7 +713,7 @@ def test_only_enriched_items_propose_a_creator(mock_batch, db_path, tmp_path):
 
     insert_or_update_item(db_path, {"workshop_id": 1, "api_priority": 5, "status": 200})
     daemon = _real_db_daemon(db_path, tmp_path)
-    daemon.batch_size = 1
+    daemon.api_batch_size = 1
     mock_batch.return_value = {1: {"title": "x", "creator": "111", "status": 200}}
     with patch.object(daemon, "_should_enrich", return_value=False), \
          patch("src.daemon.get_next_items_to_fetch",

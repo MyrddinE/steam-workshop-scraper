@@ -55,7 +55,7 @@ def test_login_secure_absent_is_empty(config):
 # --- what the request carries ---------------------------------------------
 
 def test_cookies_include_the_login_cookie_when_configured():
-    cookies = _build_workshop_cookies({"session": {"id": "abc", "login_secure": "LOGIN"}})
+    cookies = _build_workshop_cookies({"session": {"csrf_token": "abc", "login_secure": "LOGIN"}})
     assert cookies["steamLoginSecure"] == "LOGIN"
     assert cookies["sessionid"] == "abc"
     assert cookies["workshop_preferences_v2"]          # mature-content opt-in
@@ -63,7 +63,7 @@ def test_cookies_include_the_login_cookie_when_configured():
 
 def test_cookies_omit_the_login_cookie_when_unset():
     """An anonymous configuration must send exactly what it did before."""
-    cookies = _build_workshop_cookies({"session": {"id": "abc"}})
+    cookies = _build_workshop_cookies({"session": {"csrf_token": "abc"}})
     assert "steamLoginSecure" not in cookies
     assert cookies["sessionid"] == "abc"
 
@@ -80,7 +80,7 @@ def _fake_response():
 def test_scrape_sends_the_login_cookie():
     with patch("src.web_scraper.HTMLSession") as session_cls, \
          patch("src.web_scraper.load_config",
-               return_value={"session": {"id": "abc", "login_secure": "LOGIN"}}):
+               return_value={"session": {"csrf_token": "abc", "login_secure": "LOGIN"}}):
         session_cls.return_value.get.return_value = _fake_response()
         scrape_extended_details(ITEM_URL)
         _, kwargs = session_cls.return_value.get.call_args
@@ -104,7 +104,7 @@ def test_sessionid_endpoint_persists_the_login_cookie(tmp_path):
     """The daemon is a separate process; without persisting, it never sees it."""
     from src.webserver import app, init_webserver
 
-    config = {"session": {"id": "abc"}}
+    config = {"session": {"csrf_token": "abc"}}
     init_webserver(":memory:", config, config_path=str(tmp_path / "config.yaml"))
 
     with patch("src.webserver.save_config") as save:
@@ -120,7 +120,7 @@ def test_sessionid_endpoint_persists_the_login_cookie(tmp_path):
 def test_sessionid_endpoint_does_not_persist_when_the_cookie_is_absent(tmp_path):
     from src.webserver import app, init_webserver
 
-    init_webserver(":memory:", {"session": {"id": "abc"}},
+    init_webserver(":memory:", {"session": {"csrf_token": "abc"}},
                    config_path=str(tmp_path / "config.yaml"))
 
     with patch("src.webserver.save_config") as save:
@@ -148,7 +148,7 @@ def test_the_scrape_does_not_use_the_requests_html_default_ua():
 
 def test_both_scrape_paths_send_the_browser_ua():
     with patch("src.web_scraper.HTMLSession") as session_cls, \
-         patch("src.web_scraper.load_config", return_value={"session": {"id": "x"}}):
+         patch("src.web_scraper.load_config", return_value={"session": {"csrf_token": "x"}}):
         session_cls.return_value.get.return_value = _fake_response()
         scrape_extended_details(ITEM_URL)
         _, kwargs = session_cls.return_value.get.call_args

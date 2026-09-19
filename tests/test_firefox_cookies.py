@@ -8,6 +8,7 @@ neither a plugin nor a hand-copied value.
 
 import base64
 import json
+import logging
 import os
 import sqlite3
 from unittest.mock import patch
@@ -237,7 +238,7 @@ def test_an_empty_config_without_the_flag_stays_empty():
 
 def test_the_session_id_comes_from_the_same_read():
     """A sessionid from a different session than the credential is worse than none."""
-    config = {"session": {"id": "CONFIG_SID", "read_firefox_cookies": True}}
+    config = {"session": {"csrf_token": "CONFIG_SID", "read_firefox_cookies": True}}
     with patch("src.web_scraper.steam_community_cookies",
                return_value={"steamLoginSecure": "X", "sessionid": "BROWSER_SID"}):
         assert _csrf_token(config) == "BROWSER_SID"
@@ -245,7 +246,34 @@ def test_the_session_id_comes_from_the_same_read():
 
 def test_the_session_id_falls_back_to_the_config():
     with patch("src.web_scraper.steam_community_cookies", return_value={}):
-        assert _csrf_token({"session": {"id": "CONFIG_SID", "read_firefox_cookies": True}}) == "CONFIG_SID"
+        assert _csrf_token({"session": {"csrf_token": "CONFIG_SID", "read_firefox_cookies": True}}) == "CONFIG_SID"
+
+
+# --- the renamed session CSRF-token key -------------------------------------
+#
+# `session.id` held the `sessionid` CSRF token, not a session identity, beside
+# `session.login_secure`, the real credential. `_csrf_token` is where the alias
+# is exercised; the scraper's other readers go through the same helper.
+
+def test_the_legacy_session_token_key_is_honoured_and_warns(caplog):
+    with caplog.at_level(logging.WARNING):
+        token = _csrf_token({"session": {"id": "TOKEN"}})
+    assert token == "TOKEN"
+    assert any("deprecated" in record.message for record in caplog.records)
+
+
+def test_the_current_session_token_key_does_not_warn(caplog):
+    with caplog.at_level(logging.WARNING):
+        token = _csrf_token({"session": {"csrf_token": "TOKEN"}})
+    assert token == "TOKEN"
+    assert not any("deprecated" in record.message for record in caplog.records)
+
+
+def test_the_current_session_token_key_wins_when_both_are_present(caplog):
+    with caplog.at_level(logging.WARNING):
+        token = _csrf_token({"session": {"csrf_token": "CURRENT", "id": "LEGACY"}})
+    assert token == "CURRENT"
+    assert not any("deprecated" in record.message for record in caplog.records)
 
 
 @pytest.mark.parametrize("body,expected", [

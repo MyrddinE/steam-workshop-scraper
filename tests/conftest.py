@@ -160,7 +160,7 @@ def mock_config_with_api(db_path):
     return {
         "database": {"path": db_path},
         "api": {"key": "TEST_KEY"},
-        "daemon": {"batch_size": 2, "request_delay_seconds": 0.01, "target_appids": [123]}
+        "daemon": {"api_batch_size": 2, "request_delay_seconds": 0.01, "target_appids": [123]}
     }
 
 @pytest.fixture

@@ -108,7 +108,7 @@ def test_the_dump_file_holds_the_traceback_and_the_context(tmp_path):
 
 def test_a_cookie_value_in_a_local_and_in_the_message_is_elided(tmp_path):
     config = _config(tmp_path, session={"login_secure": COOKIE_SECRET,
-                                        "id": CSRF_SECRET})
+                                        "csrf_token": CSRF_SECRET})
 
     def explode():
         payload = COOKIE_SECRET
@@ -121,6 +121,29 @@ def test_a_cookie_value_in_a_local_and_in_the_message_is_elided(tmp_path):
     assert CSRF_SECRET not in text
     assert "***" in text
     assert "secrets_elided: none known" not in text
+
+
+@pytest.mark.parametrize("spelling", ["csrf_token", "id"])
+def test_a_session_token_key_is_still_elided(tmp_path, monkeypatch, spelling):
+    """The CSRF token must be elided under either spelling of the config key.
+
+    `session.id` is the deprecated spelling of `session.csrf_token`. The secret
+    collector must know a value under either name, or a dump from an
+    un-migrated (or half-migrated) config would write the CSRF token out
+    verbatim. The cookie read is stubbed out so only the config read can supply
+    the secret, pinning the config key itself.
+    """
+    config = _config(tmp_path, session={spelling: CSRF_SECRET})
+    monkeypatch.setattr(crash, "_cookie_secrets", lambda config: [])
+
+    def explode():
+        raise RuntimeError(f"echoed {CSRF_SECRET}")
+
+    path = _dump_path(config, explode)
+    text = open(path, encoding="utf-8").read()
+
+    assert CSRF_SECRET not in text
+    assert "***" in text
 
 
 def test_the_configured_steam_and_openai_keys_are_elided(tmp_path):

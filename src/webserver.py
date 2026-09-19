@@ -600,7 +600,7 @@ def api_subscribe(workshop_id):
     never writes to ``cookies.sqlite``, so the profile read can never carry the
     current one; the page's own ``g_sessionID`` is the token that belongs to the
     credential that authenticated that read. The pushed ``_pushed_sessionid`` global and
-    ``session.id`` are only a fallback for a page that carries no token, which is
+    ``session.csrf_token`` are only a fallback for a page that carries no token, which is
     what keeps the userscript-driven flow working for an anonymous page. The read
     is gated on the shared web interval -- ``daemon.web_delay_seconds`` through
     ``configured_web_delay`` and ``pacing.wait`` -- so it honours the same rate

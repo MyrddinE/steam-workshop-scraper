@@ -7,7 +7,7 @@ database:
   path: "workshop.db"
 
 daemon:
-  batch_size: 10
+  api_batch_size: 10
   api_delay_seconds: 1.5
   target_appids:
     - 294100 # RimWorld
@@ -21,7 +21,7 @@ openai:
   model: "gpt-4o-mini"
   # Ceiling on fields per translation request: bounds how many rows one bad reply
   # can cost.
-  batch: 20
+  batch_items: 20
   # Ceiling on the summed source length of one request. The first field is always
   # taken, so only a single-field request may exceed it.
   batch_char_cap: 4000

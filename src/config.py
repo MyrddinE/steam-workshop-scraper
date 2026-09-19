@@ -74,6 +74,32 @@ def login_secure_value(config: dict) -> str:
 
 
 
+def config_value_with_legacy(section: dict, current_key: str, legacy_key: str,
+                             default=None, section_name: str = ""):
+    """A config value read under its current name, still honouring the old one.
+
+    A config file already on disk is a contract we do not control, so a renamed
+    key keeps working under its old spelling: the current key wins when both are
+    present, and a value the legacy spelling supplied is used with a single
+    warning naming both. This is the rule ``capture.web_download_switch`` applies
+    to the capture switch, shared here for the other renamed config keys.
+
+    ``section_name`` is only for the warning, so it can name the key the way the
+    operator wrote it (``daemon.batch_size``, not ``batch_size``).
+    """
+    value = section.get(current_key)
+    legacy = section.get(legacy_key)
+    if value is None and legacy is not None:
+        where = f"{section_name}." if section_name else ""
+        logging.warning(
+            "Config key '%s%s' is deprecated and still honoured; rename it to '%s%s'.",
+            where, legacy_key, where, current_key,
+        )
+    if value is None:
+        return legacy if legacy is not None else default
+    return value
+
+
 def save_config(path: str, config: dict):
     """
     Saves the configuration to a YAML file. To avoid writing secrets to disk, 

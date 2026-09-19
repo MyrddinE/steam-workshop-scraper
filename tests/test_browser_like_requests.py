@@ -64,7 +64,7 @@ def _assert_browser_headers(prepared):
 def test_item_request_sends_the_browser_header_set():
     responses.add(responses.GET, DETAILS_URL, body=ITEM_HTML, status=200,
                   content_type="text/html")
-    with patch("src.web_scraper.load_config", return_value={"session": {"id": "x"}}):
+    with patch("src.web_scraper.load_config", return_value={"session": {"csrf_token": "x"}}):
         details = web_scraper.scrape_extended_details(ITEM_URL)
 
     assert details is not None
@@ -75,7 +75,7 @@ def test_item_request_sends_the_browser_header_set():
 def test_browse_request_sends_the_browser_header_set():
     responses.add(responses.GET, BROWSE_URL, body="<html></html>", status=200,
                   content_type="text/html")
-    with patch("src.web_scraper.load_config", return_value={"session": {"id": "x"}}):
+    with patch("src.web_scraper.load_config", return_value={"session": {"csrf_token": "x"}}):
         web_scraper.discover_items_by_date_html(294100, 0, 0)
 
     _assert_browser_headers(responses.calls[0].request)
@@ -95,7 +95,7 @@ def test_the_whole_profile_cookie_set_is_sent_when_enabled(monkeypatch):
 
     cookies = web_scraper._build_workshop_cookies({
         "session": {"read_firefox_cookies": True,
-                    "id": "CONFIG_SID", "login_secure": "CONFIG_LOGIN"},
+                    "csrf_token": "CONFIG_SID", "login_secure": "CONFIG_LOGIN"},
     })
 
     assert cookies == PROFILE_COOKIES
@@ -124,7 +124,7 @@ def test_only_the_config_pair_is_sent_when_the_setting_is_off(monkeypatch):
     monkeypatch.setattr(web_scraper, "steam_community_cookies", forbidden)
 
     cookies = web_scraper._build_workshop_cookies(
-        {"session": {"id": "CONFIG_SID", "login_secure": "CONFIG_LOGIN"}})
+        {"session": {"csrf_token": "CONFIG_SID", "login_secure": "CONFIG_LOGIN"}})
 
     assert cookies["sessionid"] == "CONFIG_SID"
     assert cookies["steamLoginSecure"] == "CONFIG_LOGIN"
@@ -206,7 +206,7 @@ def test_both_request_sites_share_one_session(monkeypatch):
     response.html.find.return_value = []
     mock_session_class.return_value.get.return_value = response
 
-    with patch("src.web_scraper.load_config", return_value={"session": {"id": "x"}}):
+    with patch("src.web_scraper.load_config", return_value={"session": {"csrf_token": "x"}}):
         web_scraper.scrape_extended_details(ITEM_URL)
         web_scraper.discover_items_by_date_html(1, 0, 0)
 

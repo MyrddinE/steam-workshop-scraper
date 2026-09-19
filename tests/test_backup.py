@@ -242,7 +242,7 @@ def test_daemon_runs_batch_normally_with_backup_config_absent(tmp_path):
     config = {
         "database": {"path": db},
         "api": {"key": "K"},
-        "daemon": {"batch_size": 1, "target_appids": [1]},
+        "daemon": {"api_batch_size": 1, "target_appids": [1]},
     }
     daemon = Daemon(config, config_path=str(tmp_path / "config.yaml"))
     assert daemon._backup_worker is None
@@ -274,7 +274,7 @@ def test_daemon_constructs_backup_worker_when_configured(tmp_path):
         "database": {"path": db},
         "api": {"key": "K"},
         "daemon": {
-            "batch_size": 1,
+            "api_batch_size": 1,
             "target_appids": [1],
             "outbox_dir": str(tmp_path / "outbox"),
             "backup_interval_seconds": 30,
@@ -300,7 +300,7 @@ def test_daemon_run_takes_final_snapshot_on_shutdown(tmp_path):
         "database": {"path": db},
         "api": {"key": "K"},
         "daemon": {
-            "batch_size": 1,
+            "api_batch_size": 1,
             "target_appids": [1],
             "outbox_dir": outbox,
             "backup_interval_seconds": 3600,

@@ -396,7 +396,7 @@ def test_the_daemon_gives_the_translator_a_state_store(tmp_path, mock_config):
     from src.daemon import Daemon
 
     config = dict(mock_config)
-    config["daemon"] = {"batch_size": 1, "target_appids": [1]}
+    config["daemon"] = {"api_batch_size": 1, "target_appids": [1]}
 
     with patch("src.daemon.TranslatorThread") as translator_cls:
         Daemon(config, config_path=str(tmp_path / "config.yaml"))

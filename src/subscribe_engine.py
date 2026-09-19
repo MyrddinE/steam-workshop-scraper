@@ -98,7 +98,7 @@ import re
 from dataclasses import dataclass
 
 from src import activity, capture, pacing, session_health, web_scraper
-from src.config import save_config
+from src.config import config_value_with_legacy, save_config
 from src.database import get_connection, mark_own_subscribed
 from src.web_worker import (
     WEB_DELAY_FLOOR,
@@ -375,7 +375,7 @@ def resolve_subscribe_credentials(config: dict, token_fallback: str = ""):
     cookie Firefox never persists, so the profile read cannot supply the current
     one. :func:`resolve_subscribe_token` prefers the page's own ``g_sessionID``;
     the value returned here is only the pushed ``token_fallback`` or the
-    configured ``session.id``, for a page that carries no token.
+    configured ``session.csrf_token``, for a page that carries no token.
 
     Returns ``(cookies, fallback_token, login)``; the fallbacks may be empty, and
     the caller decides whether that is a refusal.
@@ -383,7 +383,9 @@ def resolve_subscribe_credentials(config: dict, token_fallback: str = ""):
     cookies = web_scraper._build_workshop_cookies(config)
     token = (
         token_fallback
-        or config.get("session", {}).get("id", "")
+        or config_value_with_legacy(
+            config.get("session", {}), "csrf_token", "id", "", section_name="session"
+        )
         or ""
     )
     login = cookies.get("steamLoginSecure", "")

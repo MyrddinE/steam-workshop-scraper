@@ -21,7 +21,7 @@ def _daemon(db_path, **overrides):
     config = {
         "database": {"path": db_path},
         "api": {"key": "TEST_KEY"},
-        "daemon": {"target_appids": [1], "batch_size": 1, "request_delay_seconds": 0},
+        "daemon": {"target_appids": [1], "api_batch_size": 1, "request_delay_seconds": 0},
     }
     config["daemon"].update(overrides)
     return Daemon(config)
@@ -43,7 +43,7 @@ def test_process_batch_with_db_locked(tmp_path):
 
     config = {
         "database": {"path": db_path},
-        "daemon": {"target_appids": [1], "batch_size": 1}
+        "daemon": {"target_appids": [1], "api_batch_size": 1}
     }
     daemon = Daemon(config)
 

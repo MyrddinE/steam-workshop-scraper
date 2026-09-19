@@ -5,6 +5,7 @@ import re
 import threading
 from datetime import datetime, timezone
 from openai import OpenAI
+from src.config import config_value_with_legacy
 from src.database import get_connection, get_next_batch_for_translation
 from src.wordlist import WORDS
 
@@ -445,11 +446,17 @@ class TranslatorThread(threading.Thread):
         self.config = config
         self.db_path = config.get("database", {}).get("path", "workshop.db")
         openai_config = config.get("openai", {}) or {}
-        # `batch` is the item ceiling and `batch_char_cap` the size cap; a request
-        # is packed by both, so the smaller one binds. They are separate because
-        # they bound different costs: the cap bounds what the model must emit in
-        # one reply, the ceiling bounds how many rows one bad reply can strand.
-        self.batch_size = _positive_int(openai_config.get("batch"), DEFAULT_BATCH_ITEMS)
+        # `batch_items` is the item ceiling and `batch_char_cap` the size cap; a
+        # request is packed by both, so the smaller one binds. They are separate
+        # because they bound different costs: the cap bounds what the model must
+        # emit in one reply, the ceiling bounds how many rows one bad reply can
+        # strand.
+        self.batch_size = _positive_int(
+            config_value_with_legacy(
+                openai_config, "batch_items", "batch", section_name="openai"
+            ),
+            DEFAULT_BATCH_ITEMS,
+        )
         self.batch_char_cap = _positive_int(
             openai_config.get("batch_char_cap"), DEFAULT_BATCH_CHAR_CAP
         )
