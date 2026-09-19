@@ -526,7 +526,7 @@ def _fake_coverage(total=2, filtered_total=1):
 #: screen's real per-metric renderers run.
 _FAKE_METRIC_VALUES = {
     "high_water": 1_700_000_000,
-    "totals": {"total": 3, "alive": 2, "dead": 1},
+    "item_counts": {"total": 3, "alive": 2, "dead": 1},
     "app_tracking": [{"appid": 294100, "last_cursor": "abc"}],
     "status_counts": [{"status": 200, "count": 2}, {"status": -1, "count": 1}],
     "stuck_work": {"web": 1, "image": 0, "translation": 0, "api": 0},
@@ -686,8 +686,8 @@ async def test_stats_screen_puts_every_metric_in_its_own_chunk(mock_config):
             assert requested and requested[0] == metrics.all_names(), \
                 "the first pass must request metrics in seed order"
 
-            totals = str(screen.query_one("#totals-content", Static).render())
-            assert "Live items" in totals and "2" in totals
+            item_counts = str(screen.query_one("#item-counts-content", Static).render())
+            assert "Live items" in item_counts and "2" in item_counts
             coverage = str(screen.query_one("#coverage-content", Static).render())
             assert "API Data" in coverage and "100.0%" in coverage
             assert "Extended Web" in coverage
@@ -707,7 +707,7 @@ async def test_stats_screen_puts_every_metric_in_its_own_chunk(mock_config):
             # own a widget without owning a chunk in the scrolling list.
             assert len(screen.query(".stats-section")) == len(metrics.all_names()) - 1
             assert len(screen.query("#tier-costs")) == 0
-            label = str(screen.query_one("#stats-label-totals", Label).render())
+            label = str(screen.query_one("#stats-label-item_counts", Label).render())
             assert "1.0 ms" in label
 
 
@@ -811,8 +811,8 @@ def test_stats_refresh_is_per_metric_not_global():
 def test_stats_does_not_restart_a_metric_that_is_still_computing():
     screen = StatsScreen("unused.db")
     now = time.monotonic()
-    screen._inflight = {"totals"}
-    assert screen._is_due("totals", now) is False
+    screen._inflight = {"item_counts"}
+    assert screen._is_due("item_counts", now) is False
     assert screen._is_due("coverage", now) is True
 
 

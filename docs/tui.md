@@ -248,7 +248,7 @@ metrics and what each section renders:
 | Metric | Rendered as |
 |---|---|
 | `high_water` | the last successful API fetch as a timestamp, or "never" |
-| `totals` | live/dead item counts with the overall total |
+| `item_counts` | live/dead item counts with the overall total |
 | `app_tracking` | the per-AppID tracking table |
 | `status_counts` | the status distribution |
 | `dead_queued` | the dead-items-still-queued counter, with an all-clear at zero |

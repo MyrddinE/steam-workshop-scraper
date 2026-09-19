@@ -68,7 +68,7 @@ classification, per-level priority counts, app tracking, and tag frequencies. Th
 not progress. The useful question is the state of the backlog: what is outstanding, how fast it is
 draining, and how long it will take. The presentation half of that has landed: the queue signals
 below that do not need new history are now metrics, and both front ends render them
-(`coverage`, `stuck_work`, `priority_breakdowns`, `totals`).
+(`coverage`, `stuck_work`, `priority_breakdowns`, `item_counts`).
 
 For each of the four work queues — API fetch, web scrape, image download, translation — the signals
 that answer that are:

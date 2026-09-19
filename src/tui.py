@@ -200,7 +200,7 @@ class StatsScreen(Screen):
     #: Human labels for the section headings, kept in step with the web panel's.
     METRIC_LABELS = {
         "high_water": "Last successful API fetch",
-        "totals": "Totals",
+        "item_counts": "Totals",
         "app_tracking": "App tracking",
         "status_counts": "Status counts",
         "stuck_work": "Stuck work",
@@ -221,7 +221,7 @@ class StatsScreen(Screen):
     #: in `_compose_metric_section` and `_render_metric`.
     METRIC_CONTENT_IDS = {
         "high_water": "high-water-content",
-        "totals": "totals-content",
+        "item_counts": "item-counts-content",
         "status_counts": "status-content",
         "stuck_work": "stuck-content",
         "dead_queued": "dead-queued-content",
@@ -433,7 +433,7 @@ class StatsScreen(Screen):
                     "#app-stats-table" if name == "app_tracking" else "#tag-stats-table",
                     DataTable,
                 ).clear(columns=True)
-        elif name == "totals":
+        elif name == "item_counts":
             self._set_text(
                 name,
                 f"[b]Live items:[/b] {value.get('alive', 0):,}   "

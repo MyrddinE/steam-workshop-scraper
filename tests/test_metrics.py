@@ -93,12 +93,12 @@ def test_catalogue_matches_the_registry_in_seed_order():
 
 
 def test_compute_reports_value_cost_and_seed(db_path):
-    result = metrics.compute(db_path, ["totals"])
-    entry = result["totals"]
+    result = metrics.compute(db_path, ["item_counts"])
+    entry = result["item_counts"]
     assert entry["value"] == {"total": 0, "dead": 0, "alive": 0}
     assert entry["ms"] >= 0.0
     assert entry["note"]
-    assert entry["seed_ms"] == metrics.REGISTRY["totals"].seed_ms
+    assert entry["seed_ms"] == metrics.REGISTRY["item_counts"].seed_ms
     assert "tier" not in entry, "a cost hint is not a classification"
 
 
@@ -116,7 +116,7 @@ def test_iter_metrics_yields_every_metric_as_it_finishes(db_path):
 
 
 def test_iter_metrics_honours_a_requested_order(db_path):
-    requested = ["totals", "high_water", "coverage"]
+    requested = ["item_counts", "high_water", "coverage"]
     seen = [name for name, _ in metrics.iter_metrics(db_path, requested)]
     assert seen == requested
 
@@ -143,7 +143,7 @@ def test_iter_metrics_shares_one_connection(db_path, monkeypatch):
 
 def test_unknown_metric_is_rejected(db_path):
     with pytest.raises(KeyError, match="unknown metric"):
-        metrics.compute(db_path, ["totals", "not_a_metric"])
+        metrics.compute(db_path, ["item_counts", "not_a_metric"])
     with pytest.raises(KeyError, match="unknown metric"):
         list(metrics.iter_metrics(db_path, ["not_a_metric"]))
 
@@ -156,14 +156,14 @@ def test_a_broken_metric_does_not_take_down_the_others(db_path, monkeypatch):
     boom = metrics.Metric(name="boom", seed_ms=0.0, note="explodes", run=explode)
     monkeypatch.setitem(metrics.REGISTRY, "boom", boom)
 
-    result = metrics.compute(db_path, ["totals", "boom"])
-    assert result["totals"]["value"]["total"] == 0
+    result = metrics.compute(db_path, ["item_counts", "boom"])
+    assert result["item_counts"]["value"]["total"] == 0
     assert result["boom"]["value"] is None
 
 
 def test_values_strips_the_timing_wrapper(db_path):
-    assert metrics.values(metrics.compute(db_path, ["totals"])) == {
-        "totals": {"total": 0, "dead": 0, "alive": 0}
+    assert metrics.values(metrics.compute(db_path, ["item_counts"])) == {
+        "item_counts": {"total": 0, "dead": 0, "alive": 0}
     }
 
 
@@ -318,11 +318,11 @@ def test_get_db_stats_matches_the_metrics_it_wraps(db_path):
     assert stats["priority_breakdowns"] == computed["priority_breakdowns"]
 
 
-def test_totals_separates_dead_items(db_path):
+def test_item_counts_separates_dead_items(db_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "title": "alive", "status": 200})
     insert_or_update_item(db_path, {"workshop_id": 2, "title": "gone", "status": -1})
 
-    assert metrics.values(metrics.compute(db_path, ["totals"]))["totals"] == {
+    assert metrics.values(metrics.compute(db_path, ["item_counts"]))["item_counts"] == {
         "total": 2, "dead": 1, "alive": 1,
     }
 

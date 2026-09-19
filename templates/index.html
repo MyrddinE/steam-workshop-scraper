@@ -2086,7 +2086,7 @@ document.getElementById('daemon-restart').onclick = async () => {
 // table. Refresh is per metric too: each chunk re-requests itself after a delay
 // derived from its own last duration, so a slow metric cannot hold up a fast one.
 const STATS_LABELS = {
-  totals: 'Totals',
+  item_counts: 'Totals',
   high_water: 'Last successful API fetch',
   app_tracking: 'App tracking',
   status_counts: 'Status counts',
@@ -2233,7 +2233,7 @@ function _renderStuck(stuck) {
     + '<p class="stat-label">These rows can never complete; the queues will not drain until they are cleared.</p>';
 }
 
-function _renderTotals(t) {
+function _renderItemCounts(t) {
   return '<p><b>Alive:</b> ' + fmtCount(t.alive || 0)
     + ' &nbsp; <b>Dead:</b> ' + fmtCount(t.dead || 0)
     + ' &nbsp; <span class="stat-label">Total: ' + fmtCount(t.total || 0) + '</span></p>';
@@ -2370,7 +2370,7 @@ function _renderQueueEta(value) {
 
 function _renderMetricBody(name, value) {
   if (value === null || value === undefined) return '<span class="stat-label">failed</span>';
-  if (name === 'totals') return _renderTotals(value);
+  if (name === 'item_counts') return _renderItemCounts(value);
   if (name === 'high_water') return '<p>' + _fmtTimestamp(value) + '</p>';
   if (name === 'coverage') return _renderCoverage(value);
   if (name === 'stuck_work') return _renderStuck(value);

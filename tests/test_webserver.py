@@ -338,7 +338,7 @@ def test_metric_endpoint_returns_value_and_measured_cost(web_client):
 
 
 def test_metric_endpoint_runs_only_the_requested_metric(web_client, monkeypatch):
-    """One request is one metric: asking for totals must not pay for tags."""
+    """One request is one metric: asking for item_counts must not pay for tags."""
     client, _ = web_client
     ran = []
 
@@ -351,10 +351,10 @@ def test_metric_endpoint_runs_only_the_requested_metric(web_client, monkeypatch)
         metrics.Metric(name="tag_counts", seed_ms=358.0, note="spy", run=spy),
     )
 
-    resp = client.get('/api/metrics/totals')
+    resp = client.get('/api/metrics/item_counts')
     assert resp.status_code == 200
-    assert resp.get_json()["name"] == "totals"
-    assert ran == [], "the totals request ran the tag metric"
+    assert resp.get_json()["name"] == "item_counts"
+    assert ran == [], "the item_counts request ran the tag metric"
 
 
 def test_metrics_unknown_metric_is_a_404(web_client):
