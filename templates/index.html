@@ -280,15 +280,15 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .sub-queue-item.failed::before { content:'\2717 '; color:#ff4444; flex-shrink:0; }
 @keyframes spin { to { transform:rotate(360deg); } }
 .translation-notice { color:var(--pico-muted-color);font-style:italic;font-size:.9em;margin:.4em 0; }
-.stats-chunk { margin-bottom:1.25rem; }
-.stats-chunk h3 { margin-bottom:.35rem; }
-.stats-chunk-ms { color:var(--pico-muted-color);font-size:.75em;font-weight:normal; }
-.stats-chunk-note { color:var(--pico-muted-color);font-size:.8em;margin-left:.4em;font-weight:normal; }
-.stats-chunk-body { margin-top:.2rem; }
+.stats-section { margin-bottom:1.25rem; }
+.stats-section h3 { margin-bottom:.35rem; }
+.stats-section-ms { color:var(--pico-muted-color);font-size:.75em;font-weight:normal; }
+.stats-section-note { color:var(--pico-muted-color);font-size:.8em;margin-left:.4em;font-weight:normal; }
+.stats-section-body { margin-top:.2rem; }
 .stats-stuck { color:#ff6347;font-weight:bold;margin:.2rem 0; }
 .stats-stuck ul { margin:.2rem 0 0 1rem; }
-.stats-chunk-body ul { margin:.2rem 0 0 1rem; }
-.stats-chunk-body progress { margin:0; }
+.stats-section-body ul { margin:.2rem 0 0 1rem; }
+.stats-section-body progress { margin:0; }
 .stats-table td, .stats-table th { padding:.15rem .5rem .15rem 0; }
 /* Coverage bars share one width, so a shorter bar means less coverage. A
    subsidiary bar (a stage hanging off the bar above it) is half the height of
@@ -2481,11 +2481,11 @@ function _openStatsPanel() {
     _statsCatalogue = cat.metrics || [];
     // One section per metric, each with its own body element to fill.
     host.innerHTML = _statsOrder().map(function(meta) {
-      return '<section class="stats-chunk" data-metric="' + meta.name + '">'
+      return '<section class="stats-section" data-metric="' + meta.name + '">'
         + '<h3>' + _statLabel(meta.name)
-        + ' <small class="stats-chunk-ms" data-metric-ms="' + meta.name + '"></small>'
-        + '<span class="stats-chunk-note">' + (meta.note || '') + '</span></h3>'
-        + '<div class="stats-chunk-body" data-metric-body="' + meta.name + '">'
+        + ' <small class="stats-section-ms" data-metric-ms="' + meta.name + '"></small>'
+        + '<span class="stats-section-note">' + (meta.note || '') + '</span></h3>'
+        + '<div class="stats-section-body" data-metric-body="' + meta.name + '">'
         + '<p class="stat-label">Computing…</p></div>'
         + '</section>';
     }).join('');
