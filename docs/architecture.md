@@ -140,7 +140,12 @@ The database is designed for high-concurrency and complex querying. See
     enrichment filters that gate web scraping.
 * **Schema evolution**: A brand-new database is created directly at the current schema version; an
   existing one is carried forward by built-in migration logic that adds and renames columns without
-  data loss. See [schema-migrations.md](schema-migrations.md).
+  data loss. A database whose recorded version is **newer** than the running build is refused before
+  anything is written — the older build cannot know what the newer schema means, so it stops with
+  `SchemaVersionError` and a message naming the file and both versions rather than reading and
+  writing a schema it does not understand. The remedy is a build at least as new as the file: the
+  database is not corrupt, and rolling back to an older build is not a way out once the schema
+  renames have run. See [schema-migrations.md](schema-migrations.md).
 
 ### The Translator
 

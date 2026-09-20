@@ -5,7 +5,7 @@ import sys
 import os
 from src.daemon import Daemon
 from src.config import ConfigError, load_config
-from src.database import initialize_database
+from src.database import initialize_database, SchemaVersionError
 from src import crash
 
 
@@ -145,7 +145,15 @@ def main():
     logging.info(f"Daemon starting — handlers: {handler_types}")
     
     db_path = config.get("database", {}).get("path", "workshop.db")
-    initialize_database(db_path)
+    try:
+        initialize_database(db_path)
+    except SchemaVersionError as exc:
+        # The same shape as the ConfigError refusal above: the operator gets the
+        # sentence, not a traceback, and the process exits 2 without starting the
+        # daemon against a schema it cannot understand. Logging is configured by
+        # now, so the line reaches both stderr and the log file.
+        logging.error("%s", exc)
+        sys.exit(2)
 
     # The PID file was written above, before the (possibly slow) migrations, so
     # this daemon must treat its absence as a stop from the very first check.
