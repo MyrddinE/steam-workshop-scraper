@@ -163,7 +163,7 @@ def test_a_changed_shape_is_captured_again(outbox):
 
 def test_rotating_content_cannot_defeat_the_file_bound(outbox):
     """The weakness the hard cap exists for: a new digest on every fetch."""
-    for i in range(capture.MAX_VARIANTS_PER_GROUP * 4):
+    for i in range(capture.MAX_DIGESTS_PER_GROUP * 4):
         # A different class set each time would otherwise capture a file per fetch.
         capture.record_failure("web_selector_miss", workshop_id=i,
                                body=_html(classes=f"layout{i} rotating"))
@@ -171,14 +171,14 @@ def test_rotating_content_cannot_defeat_the_file_bound(outbox):
     group = capture.group_id("web_selector_miss", None, None)
     files = _samples(outbox, group)
     # 20 distinct shapes arrived; each was seen once, so the first
-    # MAX_VARIANTS_PER_GROUP shapes are kept with one sample apiece.
-    assert len(files) == capture.MAX_VARIANTS_PER_GROUP
-    assert len(files) <= capture.MAX_VARIANTS_PER_GROUP * capture.SAMPLES_PER_DIGEST
+    # MAX_DIGESTS_PER_GROUP shapes are kept with one sample apiece.
+    assert len(files) == capture.MAX_DIGESTS_PER_GROUP
+    assert len(files) <= capture.MAX_DIGESTS_PER_GROUP * capture.SAMPLES_PER_DIGEST
 
     state = _group_state(outbox, group)
     assert state["variants_truncated"] is True
-    assert len(state["digests"]) == capture.MAX_VARIANTS_PER_GROUP
-    assert state["total_misses"] == capture.MAX_VARIANTS_PER_GROUP * 4
+    assert len(state["digests"]) == capture.MAX_DIGESTS_PER_GROUP
+    assert state["total_misses"] == capture.MAX_DIGESTS_PER_GROUP * 4
 
 
 def test_a_flapping_shape_stays_bounded(outbox):

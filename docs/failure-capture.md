@@ -230,7 +230,7 @@ are constants in `src/capture.py`:
   **`SAMPLES_PER_DIGEST`** (3) samples of each distinct per-shape key are kept and
   no more: a body-carrying record's `shape.class_digest`, and an image-failure
   record's `failure_digest`.
-* A group tracks at most **`MAX_VARIANTS_PER_GROUP`** (5) distinct digests. Past
+* A group tracks at most **`MAX_DIGESTS_PER_GROUP`** (5) distinct digests. Past
   that, a new shape is counted but not written — otherwise a page whose content
   rotates would produce a new digest per fetch and the per-shape cap would mean
   nothing. The group records `variants_truncated: true` when this happens.

@@ -12,7 +12,7 @@ Three design points carry the weight:
 * **Bounded.** A persistent break must cost a bounded number of files. Captures
   are grouped by ``(kind, selector)`` and, within a group, by the page's shape
   digest. The first ``SAMPLES_PER_DIGEST`` samples of each distinct shape are
-  kept and no more; a group tracks at most ``MAX_VARIANTS_PER_GROUP`` distinct
+  kept and no more; a group tracks at most ``MAX_DIGESTS_PER_GROUP`` distinct
   shapes, so a digest that flaps (rotating page content) cannot defeat the cap.
   After that the group keeps counting misses and stops writing files. The
   counters, not the samples, are what convey scale — a sample cannot.
@@ -66,7 +66,7 @@ SAMPLES_PER_DIGEST = 3
 # How many distinct shapes are tracked for one (kind, selector) group. Past this,
 # a new shape is counted but not captured: otherwise rotating page content would
 # produce a new digest per fetch and the per-shape cap would mean nothing.
-MAX_VARIANTS_PER_GROUP = 5
+MAX_DIGESTS_PER_GROUP = 5
 
 # Bytes of a response body written to the .body file.
 MAX_BODY_BYTES = 64 * 1024
@@ -948,7 +948,7 @@ def _select_sample_slot(gid, digest, now):
 
     variant = group["digests"].get(digest)
     if variant is None:
-        if len(group["digests"]) >= MAX_VARIANTS_PER_GROUP:
+        if len(group["digests"]) >= MAX_DIGESTS_PER_GROUP:
             # Stop capturing new shapes for this group; keep counting.
             group["variants_truncated"] = True
             return None
