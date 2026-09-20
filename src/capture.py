@@ -98,6 +98,7 @@ _capture_web_downloads = False
 # to collect pages to do it.
 _capture_image_downloads = False
 
+FAILURES_DIR_NAME = "failures"
 WEB_DOWNLOADS_DIR_NAME = "web_downloads"
 IMAGE_DOWNLOADS_DIR_NAME = "image_downloads"
 
@@ -245,7 +246,7 @@ def is_enabled() -> bool:
 
 
 def failures_dir(outbox_dir) -> str:
-    return os.path.join(outbox_dir, "failures")
+    return os.path.join(outbox_dir, FAILURES_DIR_NAME)
 
 
 def web_downloads_dir(outbox_dir) -> str:
