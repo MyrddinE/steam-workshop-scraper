@@ -82,10 +82,40 @@ def fixture_name(record: dict, record_path: str) -> str:
     return f"{kind}_{stem}"
 
 
+# Capture-record body fields renamed in Batch 7. A record written by an older
+# build still carries the old spelling, and every reader of a record goes
+# through :func:`load_capture`, so the current names are back-filled there.
+_LEGACY_RECORD_FIELDS = (
+    ("body_bytes", "full_body_bytes"),
+    ("body_sha256", "full_body_sha256"),
+    ("body_noise_stripped", "body_scripts_stripped"),
+)
+
+
+def _apply_current_field_names(record):
+    """Expose the current body-field names on a record from an older build.
+
+    ``body_complete`` is not a spelling change: the old field recorded
+    completeness and the new one records truncation, so an old
+    ``body_complete: true`` becomes ``body_truncated: false``. The value is
+    mapped by meaning, never copied, and a record that already carries the
+    current name is left untouched.
+    """
+    if not isinstance(record, dict):
+        return record
+    for old, new in _LEGACY_RECORD_FIELDS:
+        if new not in record and old in record:
+            record[new] = record[old]
+    if "body_truncated" not in record and "body_complete" in record:
+        record["body_truncated"] = not record["body_complete"]
+    return record
+
+
 def load_capture(record_path: str, outbox_root: str) -> tuple:
-    """Return ``(record, body_bytes)`` for one capture record."""
+    """Return ``(record, body)`` for one capture record."""
     with open(record_path, "r", encoding="utf-8") as handle:
         record = json.load(handle)
+    record = _apply_current_field_names(record)
     body_rel = record.get("body_file")
     body = b""
     if body_rel:

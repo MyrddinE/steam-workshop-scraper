@@ -114,6 +114,37 @@ def test_credentials_are_scrubbed_from_the_fixture(outbox, tmp_path):
     assert "SUPERSECRET" not in json.dumps(meta)
 
 
+# ── legacy records ───────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("legacy_complete, expected_truncated",
+                         [(True, False), (False, True)])
+def test_a_record_written_by_the_old_build_still_loads(tmp_path, legacy_complete,
+                                                       expected_truncated):
+    """Batch 7 renamed the body fields; an old outbox must still read.
+
+    ``body_complete`` inverts -- it recorded completeness, ``body_truncated``
+    records truncation -- so the mapping is by meaning, not by copying the
+    value across.
+    """
+    record = {
+        "kind": "web_selector_miss",
+        "body_file": "failures/g/aaaaaaaa-1.body",
+        "body_bytes": 1234,
+        "body_sha256": "deadbeef",
+        "body_noise_stripped": True,
+        "body_complete": legacy_complete,
+    }
+    path = tmp_path / "old.json"
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+    loaded, _body = capture_promote.load_capture(str(path), str(tmp_path))
+
+    assert loaded["full_body_bytes"] == 1234
+    assert loaded["full_body_sha256"] == "deadbeef"
+    assert loaded["body_scripts_stripped"] is True
+    assert loaded["body_truncated"] is expected_truncated
+
+
 # ── the generated module ─────────────────────────────────────────────────────
 
 def test_generated_module_compiles_and_carries_every_case(outbox, tmp_path):

@@ -77,7 +77,7 @@ def test_record_carries_every_required_field(outbox):
     )
 
     for field in ("kind", "stage", "workshop_id", "selector", "http_status",
-                  "final_url", "body_file", "body_bytes", "body_sha256",
+                  "final_url", "body_file", "full_body_bytes", "full_body_sha256",
                   "shape", "captured_at", "app_version"):
         assert field in record, f"capture record is missing {field}"
 
@@ -97,8 +97,8 @@ def test_body_file_matches_the_recorded_hash(outbox):
         stored = handle.read()
 
     assert stored == body.encode()
-    assert hashlib.sha256(stored).hexdigest() == record["body_sha256"]
-    assert record["body_bytes"] == len(body.encode())
+    assert hashlib.sha256(stored).hexdigest() == record["full_body_sha256"]
+    assert record["full_body_bytes"] == len(body.encode())
     assert record["body_truncated"] is False
 
 
@@ -109,8 +109,8 @@ def test_oversized_body_is_truncated_but_hashed_in_full(outbox):
     body_path = os.path.join(outbox, record["body_file"])
     assert os.path.getsize(body_path) == capture.MAX_BODY_BYTES
     assert record["body_truncated"] is True
-    assert record["body_bytes"] == len(body.encode())
-    assert record["body_sha256"] == hashlib.sha256(body.encode()).hexdigest()
+    assert record["full_body_bytes"] == len(body.encode())
+    assert record["full_body_sha256"] == hashlib.sha256(body.encode()).hexdigest()
 
 
 # ── shape digest ─────────────────────────────────────────────────────────────
@@ -340,7 +340,7 @@ def test_an_image_failure_is_captured_with_status_and_headers(outbox):
     assert record["content_type"] == "text/html"
     assert record["content_length"] == "123"
     assert record["body_file"] is None
-    assert record["body_bytes"] == 0
+    assert record["full_body_bytes"] == 0
 
 
 def test_an_image_failure_does_not_store_the_failure_digest_as_a_class_digest(outbox):

@@ -195,9 +195,9 @@ One JSON record per sample:
 | `workshop_id` | The item being processed |
 | `selector` | The CSS selector that failed. Set only for a `web_selector_miss` capture, which the worker no longer emits: a description-less page, a gate, an unknown page and a missing item are not about the selector, so they record `null` here |
 | `http_status`, `final_url`, `content_type` | How the response arrived |
-| `body_file`, `body_bytes`, `body_sha256` | The retained bytes, and the hash and length of the **full** response, so a re-fetch can be matched against it |
+| `body_file`, `full_body_bytes`, `full_body_sha256` | The retained bytes, and the hash and length of the **full** response, so a re-fetch can be matched against it |
 | `body_truncated` | The 64 KB cap cut the retained content |
-| `body_noise_stripped` | `<script>` and `<style>` bodies were removed before capping |
+| `body_scripts_stripped` | `<script>` and `<style>` bodies were removed before capping |
 | `shape` | `class_digest`, `class_count`, `title_tag` — see below |
 | `signature`, `failure_digest` | Image-failure records only: the stable failure signature (status, content type and exception class) and its hash, which is the per-shape key for an image group |
 | `captured_at`, `app_version` | When, and which build |

@@ -523,9 +523,9 @@ def _write_web_download(outbox, kind, workshop_id, url, data, appid, page, ok) -
         "final_url": data.get("final_url"),
         "response_headers": response_headers,
         "body_file": _relative(outbox, body_path) if raw else None,
-        "body_bytes": len(raw),
-        "body_complete": True,
-        "body_sha256": hashlib.sha256(raw).hexdigest() if raw else None,
+        "full_body_bytes": len(raw),
+        "body_truncated": False,
+        "full_body_sha256": hashlib.sha256(raw).hexdigest() if raw else None,
         "auth_markers": auth_markers(body),
         "g_steamID": steam_id_from(body),
         "captured_at": _utc_now_iso(),
@@ -640,7 +640,7 @@ def _write_image_failure_sample(gid, digest, sample_number, signature, workshop_
         # artefact, and writing an empty one would only add noise the puller
         # has to transfer.
         "body_file": None,
-        "body_bytes": 0,
+        "full_body_bytes": 0,
         "signature": signature,
         # An image failure has no body, so there are no CSS class names and no
         # class digest to record. `failure_digest` is the hash of `signature`,
@@ -1077,10 +1077,10 @@ def _write_sample(gid, digest, sample_number, raw, retained, retention, kind, st
         "final_url": final_url,
         "content_type": content_type,
         "body_file": _relative(_outbox_dir, body_path),
-        "body_bytes": len(raw),
+        "full_body_bytes": len(raw),
         "body_truncated": retention["truncated"],
-        "body_noise_stripped": retention["noise_stripped"],
-        "body_sha256": hashlib.sha256(raw).hexdigest(),
+        "body_scripts_stripped": retention["noise_stripped"],
+        "full_body_sha256": hashlib.sha256(raw).hexdigest(),
         "shape": {
             "class_digest": digest,
             "class_count": class_count,
