@@ -95,6 +95,12 @@ the better reading of the data and the larger change. [architecture.md](architec
 
 The daemon is a detached process, so closing the TUI leaves it running, and both UI entry points call `initialize_database` at startup with nothing stopping it first (`src/tui.py:2284`, `src/web_runner.py:33`). Relaunching the UI after an update therefore applies pending migrations while the daemon is writing: the 34→35 `DROP COLUMN` rewrote `workshop_items` in **283 s** in production, and the two renames either side of it took 84 ms between them. Afterwards the daemon keeps running old code against the new schema, which Batch 6a measured as a silent split rather than an error. The fix follows the owner's recommendation: stop a running daemon before a pending migration, refuse to migrate if it will not stop, and restart it once the migration succeeds. [threading.md](threading.md), [schema-migrations.md](schema-migrations.md)
 
+### Issue 64
+
+**One untranslatable record stalls the whole translation queue and is never named** — *Open*, Medium
+
+A batch whose reply yields no usable block raises (`_translate_batch`), and the failure path never touches the queue rows — no priority change, no delete — so the next poll rebuilds the *identical* batch from the same head (`ORDER BY priority DESC, queued_at ASC`). One record the model will not answer therefore fails forever: the streak doubles the backoff to its cap (300 s retryable, 3600 s account-level) while every other field queued behind it waits. The failure log names the kind, the attempt and the exception, but not the rows it sent, although `_row_key` already exists and is used for the partial-reply warning. *Observed live*: 25 consecutive failures with 1242 s still to wait, from a single record that failed once in 20–30 calls. [data-pipeline.md](data-pipeline.md), [threading.md](threading.md)
+
 ## Recently closed
 
 Removed from the list above rather than marked resolved. Each is now documented as current
