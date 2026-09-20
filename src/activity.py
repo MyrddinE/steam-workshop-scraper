@@ -160,16 +160,39 @@ def end_pause(lock_path: str, db_path: str | None = None, *,
         return False
 
 
+def _open_value(section: dict):
+    """The open interval, under the current or the legacy key.
+
+    Batch 7 renamed the state-file keys ``open`` and ``closed`` to
+    ``open_interval`` and ``closed_intervals``; a file written by an older
+    build is still read under the old spelling.
+    """
+    if "open_interval" in section:
+        return section["open_interval"]
+    return section.get("open")
+
+
+def _closed_value(section: dict) -> list:
+    """The closed intervals, under the current or the legacy key."""
+    if "closed_intervals" in section:
+        return list(section["closed_intervals"] or [])
+    return list(section.get("closed") or [])
+
+
 def _open_interval(db_path: str, source: str, now: int | None) -> bool:
     store = StateStore(state_path_for(db_path))
     document = store.load()
     section = document.get(PAUSE_SECTION)
     section = section if isinstance(section, dict) else {}
-    if isinstance(section.get("open"), dict):
+    if isinstance(_open_value(section), dict):
         return False  # already inside an interval; the file edge is the signal
     timestamp = _now(now)
-    section["open"] = {"at": timestamp, "source": str(source)}
-    section["closed"] = _prune(section.get("closed") or [], timestamp - RETENTION_SECONDS)
+    section["open_interval"] = {"at": timestamp, "source": str(source)}
+    section["closed_intervals"] = _prune(
+        _closed_value(section), timestamp - RETENTION_SECONDS)
+    # Drop the legacy spelling so the file converges on the current keys.
+    section.pop("open", None)
+    section.pop("closed", None)
     return store.save({PAUSE_SECTION: section})
 
 
@@ -178,14 +201,16 @@ def _close_interval(db_path: str, now: int | None) -> bool:
     document = store.load()
     section = document.get(PAUSE_SECTION)
     section = section if isinstance(section, dict) else {}
-    opened = section.get("open")
+    opened = _open_value(section)
     if not isinstance(opened, dict) or "at" not in opened:
         return False
     timestamp = _now(now)
-    closed = list(section.get("closed") or [])
+    closed = _closed_value(section)
     closed.append([int(opened["at"]), timestamp])
-    section["open"] = None
-    section["closed"] = _prune(closed, timestamp - RETENTION_SECONDS)
+    section["open_interval"] = None
+    section["closed_intervals"] = _prune(closed, timestamp - RETENTION_SECONDS)
+    section.pop("open", None)
+    section.pop("closed", None)
     return store.save({PAUSE_SECTION: section})
 
 
@@ -205,9 +230,9 @@ def paused_seconds(db_path: str, window_start: int, now: int | None = None) -> f
         section = None
     if not isinstance(section, dict):
         return _merged_seconds([], window_start, reference)
-    intervals = [entry for entry in (section.get("closed") or [])
+    intervals = [entry for entry in _closed_value(section)
                  if isinstance(entry, (list, tuple)) and len(entry) == 2]
-    opened = section.get("open")
+    opened = _open_value(section)
     if isinstance(opened, dict) and "at" in opened:
         intervals.append((opened["at"], reference))
     return _merged_seconds(intervals, window_start, reference)
