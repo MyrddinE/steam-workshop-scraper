@@ -380,13 +380,19 @@ def _context_lines(exc_type, process, config, config_path, elision, locals_note,
         database = config.get("database")
         if isinstance(database, dict):
             database_path = database.get("path", "")
+    captured_at = _utc_now_iso()
     return [
         "# steam-workshop-scraper crash dump",
         f"process: {process}",
         f"error_occurrence: {occurrence}",
         f"errors_this_run: {occurrence} (at the time of writing; a later crash "
         "would raise this)",
-        f"timestamp: {_utc_now_iso()}",
+        f"captured_at: {captured_at}",
+        # Legacy alias for one release: a parser that only knows `timestamp:`
+        # (a tool not yet updated for the rename) still finds it, and a dump
+        # written by an older build carries `timestamp:` alone, so a reader
+        # must accept either spelling.
+        f"timestamp: {captured_at}",
         f"app_version: {capture.app_version()}",
         f"python: {platform.python_version()} ({platform.python_implementation()})",
         f"platform: {platform.platform()}",
@@ -792,6 +798,10 @@ def _register_dump(outbox, path, payload, process, occurrence):
                 os.path.getmtime(path), timezone.utc).isoformat(),
             "taken_at": _utc_now_iso(),
             "process": process,
+            "error_occurrence": occurrence,
+            # Legacy alias, honoured for one release: the puller reads the
+            # manifest outside this repo, so the old key stays beside the new
+            # one rather than being replaced in place.
             "error": occurrence,
         }
         update_manifest(outbox, entry)

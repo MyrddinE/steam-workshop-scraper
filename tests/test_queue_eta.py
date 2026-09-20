@@ -280,8 +280,35 @@ def test_the_engine_pause_lock_records_its_interval(db_path, tmp_path):
         assert os.path.exists(lock), "the lock is still the pause"
 
     section = StateStore(state_path_for(db_path)).load().get(activity.PAUSE_SECTION)
-    assert section["open"] is None
-    assert len(section["closed"]) == 1
+    assert section["open_interval"] is None
+    assert len(section["closed_intervals"]) == 1
+
+
+def test_a_pause_record_written_by_the_old_build_still_reads(db_path):
+    """Batch 7 renamed the pause keys; an old .daemon_state.yaml still counts."""
+    now = int(time.time())
+    StateStore(state_path_for(db_path)).save({activity.PAUSE_SECTION: {
+        "open": None,
+        "closed": [[now - 100, now - 50]],
+    }})
+
+    assert activity.paused_seconds(db_path, now - 1000, now) == pytest.approx(50)
+
+
+def test_closing_a_legacy_open_interval_migrates_the_keys(db_path, tmp_path):
+    """An interval opened by the old build closes and is written back renamed."""
+    now = int(time.time())
+    StateStore(state_path_for(db_path)).save({activity.PAUSE_SECTION: {
+        "open": {"at": now - 30, "source": "legacy"},
+        "closed": [[now - 200, now - 150]],
+    }})
+
+    assert activity.end_pause(str(tmp_path / "lock"), db_path, now=now) is True
+
+    section = StateStore(state_path_for(db_path)).load().get(activity.PAUSE_SECTION)
+    assert section["open_interval"] is None
+    assert "open" not in section and "closed" not in section
+    assert len(section["closed_intervals"]) == 2
 
 
 # --------------------------------------------------------------------------

@@ -385,9 +385,9 @@ def test_the_pause_routes_record_one_interval(web_client, tmp_path, monkeypatch)
             os.remove('.pauselock')
 
     section = StateStore(state_path_for(db_path)).load().get(activity.PAUSE_SECTION)
-    assert section["open"] is None
-    assert len(section["closed"]) == 1
-    start, end = section["closed"][0]
+    assert section["open_interval"] is None
+    assert len(section["closed_intervals"]) == 1
+    start, end = section["closed_intervals"][0]
     assert end >= start
 
 

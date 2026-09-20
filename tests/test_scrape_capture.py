@@ -126,7 +126,7 @@ def test_the_body_is_kept_whole(tmp_path):
                '<div class="account_pulldown">me</div></html>'
         _record_item_page(1, body=body)
         record = _records(str(tmp_path))[0]
-        assert record["body_complete"] is True
+        assert record["body_truncated"] is False
         saved = open(os.path.join(str(tmp_path), "web_downloads",
                                   os.path.basename(record["body_file"]))).read()
         assert "g_steamID" in saved
@@ -153,7 +153,7 @@ def test_a_record_carries_both_sides_of_the_exchange(tmp_path):
         assert record["http_status"] == 200
         assert record["final_url"] == data["final_url"]
         assert record["response_headers"] == {"Content-Type": "text/html"}
-        assert record["body_file"] and record["body_bytes"] > 0
+        assert record["body_file"] and record["full_body_bytes"] > 0
     finally:
         capture.configure(None)
 

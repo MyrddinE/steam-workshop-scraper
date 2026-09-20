@@ -12,7 +12,7 @@ Three design points carry the weight:
 * **Bounded.** A persistent break must cost a bounded number of files. Captures
   are grouped by ``(kind, selector)`` and, within a group, by the page's shape
   digest. The first ``SAMPLES_PER_DIGEST`` samples of each distinct shape are
-  kept and no more; a group tracks at most ``MAX_VARIANTS_PER_GROUP`` distinct
+  kept and no more; a group tracks at most ``MAX_DIGESTS_PER_GROUP`` distinct
   shapes, so a digest that flaps (rotating page content) cannot defeat the cap.
   After that the group keeps counting misses and stops writing files. The
   counters, not the samples, are what convey scale — a sample cannot.
@@ -66,7 +66,7 @@ SAMPLES_PER_DIGEST = 3
 # How many distinct shapes are tracked for one (kind, selector) group. Past this,
 # a new shape is counted but not captured: otherwise rotating page content would
 # produce a new digest per fetch and the per-shape cap would mean nothing.
-MAX_VARIANTS_PER_GROUP = 5
+MAX_DIGESTS_PER_GROUP = 5
 
 # Bytes of a response body written to the .body file.
 MAX_BODY_BYTES = 64 * 1024
@@ -98,6 +98,7 @@ _capture_web_downloads = False
 # to collect pages to do it.
 _capture_image_downloads = False
 
+FAILURES_DIR_NAME = "failures"
 WEB_DOWNLOADS_DIR_NAME = "web_downloads"
 IMAGE_DOWNLOADS_DIR_NAME = "image_downloads"
 
@@ -165,7 +166,7 @@ _TITLE_RE = re.compile(rb"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 # 64 KB of a 303 KB page was <script> and <link> tags with no markup that
 # identified the document, so neither the artefact nor its shape digest
 # described the page. Removing these first spends the byte budget on markup.
-_NOISE_RE = re.compile(rb"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+_SCRIPT_STYLE_RE = re.compile(rb"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
 
 
 def _strip_script_and_style(raw: bytes) -> bytes:
@@ -177,7 +178,7 @@ def _strip_script_and_style(raw: bytes) -> bytes:
     """
     if not raw:
         return raw
-    return _NOISE_RE.sub(rb"<\1/>", raw)
+    return _SCRIPT_STYLE_RE.sub(rb"<\1/>", raw)
 
 
 # ── configuration ────────────────────────────────────────────────────────────
@@ -245,7 +246,7 @@ def is_enabled() -> bool:
 
 
 def failures_dir(outbox_dir) -> str:
-    return os.path.join(outbox_dir, "failures")
+    return os.path.join(outbox_dir, FAILURES_DIR_NAME)
 
 
 def web_downloads_dir(outbox_dir) -> str:
@@ -522,9 +523,9 @@ def _write_web_download(outbox, kind, workshop_id, url, data, appid, page, ok) -
         "final_url": data.get("final_url"),
         "response_headers": response_headers,
         "body_file": _relative(outbox, body_path) if raw else None,
-        "body_bytes": len(raw),
-        "body_complete": True,
-        "body_sha256": hashlib.sha256(raw).hexdigest() if raw else None,
+        "full_body_bytes": len(raw),
+        "body_truncated": False,
+        "full_body_sha256": hashlib.sha256(raw).hexdigest() if raw else None,
         "auth_markers": auth_markers(body),
         "g_steamID": steam_id_from(body),
         "captured_at": _utc_now_iso(),
@@ -639,7 +640,7 @@ def _write_image_failure_sample(gid, digest, sample_number, signature, workshop_
         # artefact, and writing an empty one would only add noise the puller
         # has to transfer.
         "body_file": None,
-        "body_bytes": 0,
+        "full_body_bytes": 0,
         "signature": signature,
         # An image failure has no body, so there are no CSS class names and no
         # class digest to record. `failure_digest` is the hash of `signature`,
@@ -857,13 +858,40 @@ def _new_group(gid) -> dict:
         "total_misses": 0,
         "first_seen": None,
         "last_seen": None,
-        "variants_truncated": False,
+        "digests_truncated": False,
         "digests": {},
     }
 
 
 def _group_state_path(gid) -> str:
     return os.path.join(failures_dir(_outbox_dir), gid, GROUP_STATE_NAME)
+
+
+def _apply_legacy_group_keys(loaded: dict) -> None:
+    """Normalise a ``_group.json`` written before the Batch 7 key rename.
+
+    The old file stores ``variants_truncated`` at the top level and
+    ``count``/``samples`` inside each digest entry; this build stores
+    ``digests_truncated`` and ``misses``/``samples_written``. Each old key is
+    mapped only when its replacement is absent, then removed, so a state file
+    is migrated in place the first time it is read and a file this build wrote
+    is left untouched.
+    """
+    if "digests_truncated" not in loaded and "variants_truncated" in loaded:
+        loaded["digests_truncated"] = loaded["variants_truncated"]
+    loaded.pop("variants_truncated", None)
+    digests = loaded.get("digests")
+    if not isinstance(digests, dict):
+        return
+    for entry in digests.values():
+        if not isinstance(entry, dict):
+            continue
+        if "misses" not in entry and "count" in entry:
+            entry["misses"] = entry["count"]
+        entry.pop("count", None)
+        if "samples_written" not in entry and "samples" in entry:
+            entry["samples_written"] = entry["samples"]
+        entry.pop("samples", None)
 
 
 def _load_group(gid) -> dict:
@@ -878,6 +906,7 @@ def _load_group(gid) -> dict:
         with open(path, "r", encoding="utf-8") as handle:
             loaded = json.load(handle)
         if isinstance(loaded, dict):
+            _apply_legacy_group_keys(loaded)
             group.update(loaded)
     # No state file yet is the normal first-run case; the group is rebuilt from
     # the samples on disk below.
@@ -923,8 +952,8 @@ def _reconstruct_from_samples(gid, group) -> None:
         if not digest:
             continue
         entry = group["digests"].setdefault(
-            digest, {"count": 0, "samples": 0, "first_seen": None, "last_seen": None})
-        entry["samples"] += 1
+            digest, {"misses": 0, "samples_written": 0, "first_seen": None, "last_seen": None})
+        entry["samples_written"] += 1
         group["sample_count"] += 1
 
 
@@ -948,22 +977,22 @@ def _select_sample_slot(gid, digest, now):
 
     variant = group["digests"].get(digest)
     if variant is None:
-        if len(group["digests"]) >= MAX_VARIANTS_PER_GROUP:
+        if len(group["digests"]) >= MAX_DIGESTS_PER_GROUP:
             # Stop capturing new shapes for this group; keep counting.
-            group["variants_truncated"] = True
+            group["digests_truncated"] = True
             return None
-        variant = {"count": 0, "samples": 0, "first_seen": now, "last_seen": now}
+        variant = {"misses": 0, "samples_written": 0, "first_seen": now, "last_seen": now}
         group["digests"][digest] = variant
-    elif variant["samples"] >= SAMPLES_PER_DIGEST:
-        variant["count"] += 1
+    elif variant["samples_written"] >= SAMPLES_PER_DIGEST:
+        variant["misses"] += 1
         variant["last_seen"] = now
         return None
 
-    variant["count"] += 1
+    variant["misses"] += 1
     variant["last_seen"] = now
-    variant["samples"] += 1
+    variant["samples_written"] += 1
     group["sample_count"] += 1
-    return variant["samples"]
+    return variant["samples_written"]
 
 
 def _flush_group(gid) -> None:
@@ -991,7 +1020,10 @@ def _flush_group(gid) -> None:
         total_misses=group["total_misses"],
         first_seen=group["first_seen"],
         last_seen=group["last_seen"],
-        variants_truncated=group["variants_truncated"],
+        digests_truncated=group["digests_truncated"],
+        # Legacy alias, honoured for one release: the puller reads this manifest
+        # outside this repo, so the old key stays beside the new one.
+        variants_truncated=group["digests_truncated"],
     ))
 
 
@@ -1076,10 +1108,10 @@ def _write_sample(gid, digest, sample_number, raw, retained, retention, kind, st
         "final_url": final_url,
         "content_type": content_type,
         "body_file": _relative(_outbox_dir, body_path),
-        "body_bytes": len(raw),
+        "full_body_bytes": len(raw),
         "body_truncated": retention["truncated"],
-        "body_noise_stripped": retention["noise_stripped"],
-        "body_sha256": hashlib.sha256(raw).hexdigest(),
+        "body_scripts_stripped": retention["noise_stripped"],
+        "full_body_sha256": hashlib.sha256(raw).hexdigest(),
         "shape": {
             "class_digest": digest,
             "class_count": class_count,

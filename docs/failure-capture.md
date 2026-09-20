@@ -151,7 +151,12 @@ One run can report more than one error: Textual calls `_handle_exception` once
 per unhandled error and prints only the first in normal mode, so the second
 traceback used to be discarded at print time. Every error therefore gets its own
 file, numbered in the order the process reported it; `error_occurrence` and
-`errors_this_run` in the header say which one it is. Each dump is written
+`errors_this_run` in the header say which one it is. `captured_at:` records when
+it was written, and the manifest entry's `error_occurrence` names the same count.
+For one release after the rename the old header line `timestamp:` and the old
+manifest key `error` are written beside the new ones, because the puller and any
+dump parser live outside this repository; a parser reading a dump written by an
+older build must likewise accept `timestamp:`. Each dump is written
 synchronously, because Textual closes its message loop as it exits.
 
 The file is a context header, the full traceback **with each frame's locals**,
@@ -195,9 +200,9 @@ One JSON record per sample:
 | `workshop_id` | The item being processed |
 | `selector` | The CSS selector that failed. Set only for a `web_selector_miss` capture, which the worker no longer emits: a description-less page, a gate, an unknown page and a missing item are not about the selector, so they record `null` here |
 | `http_status`, `final_url`, `content_type` | How the response arrived |
-| `body_file`, `body_bytes`, `body_sha256` | The retained bytes, and the hash and length of the **full** response, so a re-fetch can be matched against it |
+| `body_file`, `full_body_bytes`, `full_body_sha256` | The retained bytes, and the hash and length of the **full** response, so a re-fetch can be matched against it |
 | `body_truncated` | The 64 KB cap cut the retained content |
-| `body_noise_stripped` | `<script>` and `<style>` bodies were removed before capping |
+| `body_scripts_stripped` | `<script>` and `<style>` bodies were removed before capping |
 | `shape` | `class_digest`, `class_count`, `title_tag` — see below |
 | `signature`, `failure_digest` | Image-failure records only: the stable failure signature (status, content type and exception class) and its hash, which is the per-shape key for an image group |
 | `captured_at`, `app_version` | When, and which build |
@@ -221,6 +226,24 @@ tags, `class_count` was 2, and the artefact contained nothing that identified th
 nor did a digest of it describe the document. A body already under the cap strips to the
 same digest as before, so existing variants are not re-keyed.
 
+## An outbox written by an older build
+
+The field names above were renamed in Batch 7, and the outbox is not reset with a
+build: `capture_promote.load_capture` maps the old spellings onto the current names
+as it reads a record, so an old outbox stays promotable and parseable. `body_bytes`,
+`body_sha256` and `body_noise_stripped` are back-filled as `full_body_bytes`,
+`full_body_sha256` and `body_scripts_stripped`. `body_complete` is not a spelling
+change but its opposite — it recorded completeness while `body_truncated` records
+truncation — so an old `body_complete: true` becomes `body_truncated: false`, mapped
+by meaning rather than copied.
+
+The same holds for a group state file: `capture._load_group` migrates an old
+`_group.json` (top-level `variants_truncated`, and per-digest `count` and `samples`)
+onto `digests_truncated`, `misses` and `samples_written` the first time it is read,
+then drops the old keys, so the caps an earlier build already enforced survive a
+restart. The manifest's group entry keeps both spellings for one release, because
+the puller that reads it lives outside this repository.
+
 ## Bounds
 
 A persistent break must cost a bounded number of files. Two caps do that, and both
@@ -230,10 +253,10 @@ are constants in `src/capture.py`:
   **`SAMPLES_PER_DIGEST`** (3) samples of each distinct per-shape key are kept and
   no more: a body-carrying record's `shape.class_digest`, and an image-failure
   record's `failure_digest`.
-* A group tracks at most **`MAX_VARIANTS_PER_GROUP`** (5) distinct digests. Past
+* A group tracks at most **`MAX_DIGESTS_PER_GROUP`** (5) distinct digests. Past
   that, a new shape is counted but not written — otherwise a page whose content
   rotates would produce a new digest per fetch and the per-shape cap would mean
-  nothing. The group records `variants_truncated: true` when this happens.
+  nothing. The group records `digests_truncated: true` when this happens.
 
 Every miss increments `total_misses` whether or not it produced a file. Those
 counters, not the samples, are what convey the size of a break. They live on the

@@ -77,7 +77,7 @@ def test_record_carries_every_required_field(outbox):
     )
 
     for field in ("kind", "stage", "workshop_id", "selector", "http_status",
-                  "final_url", "body_file", "body_bytes", "body_sha256",
+                  "final_url", "body_file", "full_body_bytes", "full_body_sha256",
                   "shape", "captured_at", "app_version"):
         assert field in record, f"capture record is missing {field}"
 
@@ -97,8 +97,8 @@ def test_body_file_matches_the_recorded_hash(outbox):
         stored = handle.read()
 
     assert stored == body.encode()
-    assert hashlib.sha256(stored).hexdigest() == record["body_sha256"]
-    assert record["body_bytes"] == len(body.encode())
+    assert hashlib.sha256(stored).hexdigest() == record["full_body_sha256"]
+    assert record["full_body_bytes"] == len(body.encode())
     assert record["body_truncated"] is False
 
 
@@ -109,8 +109,8 @@ def test_oversized_body_is_truncated_but_hashed_in_full(outbox):
     body_path = os.path.join(outbox, record["body_file"])
     assert os.path.getsize(body_path) == capture.MAX_BODY_BYTES
     assert record["body_truncated"] is True
-    assert record["body_bytes"] == len(body.encode())
-    assert record["body_sha256"] == hashlib.sha256(body.encode()).hexdigest()
+    assert record["full_body_bytes"] == len(body.encode())
+    assert record["full_body_sha256"] == hashlib.sha256(body.encode()).hexdigest()
 
 
 # ── shape digest ─────────────────────────────────────────────────────────────
@@ -163,7 +163,7 @@ def test_a_changed_shape_is_captured_again(outbox):
 
 def test_rotating_content_cannot_defeat_the_file_bound(outbox):
     """The weakness the hard cap exists for: a new digest on every fetch."""
-    for i in range(capture.MAX_VARIANTS_PER_GROUP * 4):
+    for i in range(capture.MAX_DIGESTS_PER_GROUP * 4):
         # A different class set each time would otherwise capture a file per fetch.
         capture.record_failure("web_selector_miss", workshop_id=i,
                                body=_html(classes=f"layout{i} rotating"))
@@ -171,14 +171,14 @@ def test_rotating_content_cannot_defeat_the_file_bound(outbox):
     group = capture.group_id("web_selector_miss", None, None)
     files = _samples(outbox, group)
     # 20 distinct shapes arrived; each was seen once, so the first
-    # MAX_VARIANTS_PER_GROUP shapes are kept with one sample apiece.
-    assert len(files) == capture.MAX_VARIANTS_PER_GROUP
-    assert len(files) <= capture.MAX_VARIANTS_PER_GROUP * capture.SAMPLES_PER_DIGEST
+    # MAX_DIGESTS_PER_GROUP shapes are kept with one sample apiece.
+    assert len(files) == capture.MAX_DIGESTS_PER_GROUP
+    assert len(files) <= capture.MAX_DIGESTS_PER_GROUP * capture.SAMPLES_PER_DIGEST
 
     state = _group_state(outbox, group)
-    assert state["variants_truncated"] is True
-    assert len(state["digests"]) == capture.MAX_VARIANTS_PER_GROUP
-    assert state["total_misses"] == capture.MAX_VARIANTS_PER_GROUP * 4
+    assert state["digests_truncated"] is True
+    assert len(state["digests"]) == capture.MAX_DIGESTS_PER_GROUP
+    assert state["total_misses"] == capture.MAX_DIGESTS_PER_GROUP * 4
 
 
 def test_a_flapping_shape_stays_bounded(outbox):
@@ -193,7 +193,7 @@ def test_a_flapping_shape_stays_bounded(outbox):
     state = _group_state(outbox, group)
     assert state["total_misses"] == 30
     assert len(state["digests"]) == 2
-    assert state["variants_truncated"] is False
+    assert state["digests_truncated"] is False
 
 
 def test_caps_survive_a_restart(outbox):
@@ -223,6 +223,47 @@ def test_group_state_is_rebuilt_when_it_is_missing(outbox):
 
     state = _group_state(outbox, group)
     assert state["sample_count"] == 2, "samples on disk are the authority"
+
+
+def test_group_state_written_by_the_old_build_still_loads(outbox):
+    """Batch 7 renamed the _group.json keys; an old state file must still count.
+
+    The old file stores ``variants_truncated`` and, per digest, ``count`` and
+    ``samples``. The reader maps them onto ``digests_truncated``, ``misses``
+    and ``samples_written`` so a restart on an existing outbox keeps the caps
+    the old writer had already enforced.
+    """
+    group = capture.group_id("web_selector_miss", None, None)
+    group_dir = os.path.join(outbox, "failures", group)
+    os.makedirs(group_dir, exist_ok=True)
+    legacy = {
+        "group": group,
+        "sample_count": 2,
+        "total_misses": 9,
+        "first_seen": None,
+        "last_seen": None,
+        "variants_truncated": True,
+        "digests": {"abc": {"count": 7, "samples": 2,
+                            "first_seen": None, "last_seen": None}},
+    }
+    with open(os.path.join(group_dir, capture.GROUP_STATE_NAME), "w",
+              encoding="utf-8") as handle:
+        json.dump(legacy, handle)
+
+    capture.configure(outbox)  # drop in-memory state, as a restart does
+    loaded = capture._load_group(group)
+
+    assert loaded["digests_truncated"] is True
+    assert loaded["digests"]["abc"]["misses"] == 7
+    assert loaded["digests"]["abc"]["samples_written"] == 2
+
+    # The migrated state is what gets written back, not the old spelling.
+    capture._flush_group(group)
+    on_disk = _group_state(outbox, group)
+    assert on_disk["digests_truncated"] is True
+    assert "variants_truncated" not in on_disk
+    assert "count" not in on_disk["digests"]["abc"]
+    assert "samples" not in on_disk["digests"]["abc"]
 
 
 def test_distinct_groups_do_not_share_a_budget(outbox):
@@ -265,6 +306,23 @@ def test_group_entry_carries_the_scale_counters(outbox):
     assert group_entry["total_misses"] == 5
     assert group_entry["first_seen"] and group_entry["last_seen"]
     assert group_entry["first_seen"] <= group_entry["last_seen"]
+
+
+def test_group_entry_keeps_the_legacy_truncation_key(outbox):
+    """The manifest is read outside this repo, so both spellings are written.
+
+    Batch 7 renamed `variants_truncated` to `digests_truncated`; the puller
+    cannot be updated with it, so the old key rides beside the new one for one
+    release under the same value.
+    """
+    for i in range(capture.MAX_DIGESTS_PER_GROUP * 2):
+        capture.record_failure("web_selector_miss", workshop_id=i,
+                               body=_html(classes=f"layout{i} rotating"))
+
+    group_entry = next(e for e in _failure_entries(outbox) if e["role"] == "group")
+    assert group_entry["digests_truncated"] is True
+    assert group_entry["variants_truncated"] is True
+    assert group_entry["digests_truncated"] == group_entry["variants_truncated"]
 
 
 def test_repeated_captures_do_not_duplicate_manifest_entries(outbox):
@@ -340,7 +398,7 @@ def test_an_image_failure_is_captured_with_status_and_headers(outbox):
     assert record["content_type"] == "text/html"
     assert record["content_length"] == "123"
     assert record["body_file"] is None
-    assert record["body_bytes"] == 0
+    assert record["full_body_bytes"] == 0
 
 
 def test_an_image_failure_does_not_store_the_failure_digest_as_a_class_digest(outbox):
