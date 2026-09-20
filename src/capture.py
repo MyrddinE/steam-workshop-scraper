@@ -165,7 +165,7 @@ _TITLE_RE = re.compile(rb"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 # 64 KB of a 303 KB page was <script> and <link> tags with no markup that
 # identified the document, so neither the artefact nor its shape digest
 # described the page. Removing these first spends the byte budget on markup.
-_NOISE_RE = re.compile(rb"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+_SCRIPT_STYLE_RE = re.compile(rb"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
 
 
 def _strip_script_and_style(raw: bytes) -> bytes:
@@ -177,7 +177,7 @@ def _strip_script_and_style(raw: bytes) -> bytes:
     """
     if not raw:
         return raw
-    return _NOISE_RE.sub(rb"<\1/>", raw)
+    return _SCRIPT_STYLE_RE.sub(rb"<\1/>", raw)
 
 
 # ── configuration ────────────────────────────────────────────────────────────
