@@ -49,7 +49,7 @@ _LAST_VERSION_RE = re.compile(r"^LastVersion\s*=\s*(\d+(?:\.\d+)*)", re.MULTILIN
 # costs no file copy.
 
 _cache_lock = threading.Lock()
-_cache = {"cookies": {}, "store": None, "announced": None}
+_cache = {"cookies": {}, "store": None, "announced_login_cookie": None}
 
 
 def default_profiles_root() -> Path | None:
@@ -210,9 +210,9 @@ def steam_community_cookies(refresh: bool = False, profiles_root: Path | None = 
             "run anonymously unless cookies are supplied another way.",
             profiles_root or default_profiles_root() or "the default location",
         )
-    elif found.get(LOGIN_COOKIE) != _cache.get("announced"):
+    elif found.get(LOGIN_COOKIE) != _cache.get("announced_login_cookie"):
         with _cache_lock:
-            _cache["announced"] = found.get(LOGIN_COOKIE)
+            _cache["announced_login_cookie"] = found.get(LOGIN_COOKIE)
         logging.info(
             "Read %d Steam cookies from the Firefox profile (%s), including %s.",
             len(found), store, LOGIN_COOKIE,
@@ -245,4 +245,4 @@ def clear_cache() -> None:
     with _cache_lock:
         _cache["cookies"] = {}
         _cache["store"] = None
-        _cache["announced"] = None
+        _cache["announced_login_cookie"] = None
