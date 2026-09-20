@@ -165,8 +165,8 @@ The translation system runs as a separate background thread, in parallel with th
   written as boundary blocks in the same shape as the reply it asks for — each opening with a phrase
   of four words drawn fresh for that request — so the model copies a structure rather than building
   one and never has to escape the translated text. (It previously asked for a JSON object "to make
-  parsing reliable"; the escaping that required turned out to be the least reliable part of it — see
-  [data-pipeline.md](data-pipeline.md#translation-phase).)
+  parsing reliable"; building and escaping that object proved to be both the least reliable and the
+  most expensive part of it — see [data-pipeline.md](data-pipeline.md#translation-phase).)
 * **Configuration**: Configured via the `openai` section in `config.yaml`, with the API key
   supplied through the `OPENAI_API_KEY` environment variable.
 
