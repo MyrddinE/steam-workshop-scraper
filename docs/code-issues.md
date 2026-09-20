@@ -89,11 +89,11 @@ way to say "unknown" so that neither front end claims a measurement it does not 
 the better reading of the data and the larger change. [architecture.md](architecture.md),
 [tui.md](tui.md), [web-ui.md](web-ui.md)
 
-### Issue 61
+### Issue 63
 
-**The 34→35 drop can outlast the busy timeout, so a second entry point starting during it fails** — *Open*, Medium
+**Relaunching the UI under a running daemon migrates the schema beneath it** — *Open*, High
 
-Migration 34→35 drops three columns, and SQLite implements `DROP COLUMN` by rewriting the table: **14.9 s** on the real 2.5 M-row copy on this machine's disk, and **283 s in production** when it was deployed on 2026-09-19 — the web runner owned it, and the two rename steps either side of it completed in 84 ms between them. Every connection is opened with a **15 s** busy timeout (`src/database.py:51`), so a second entry point — the TUI or the web runner — calling `initialize_database` during that rewrite waits out its timeout and raises "database is locked" instead. All three call it, and whichever starts first owns the migration. The window is therefore minutes, not the tenths of a second the copy suggested; the deploy escaped it only because the daemon was started 27 minutes later. Workarounds, in order of preference: bring the entry points up one at a time and let the first finish, since the migration is one-time; raise the busy timeout for the initialising connection; or run the drops as a standalone maintenance step before deploying. [schema-migrations.md](schema-migrations.md), [threading.md](threading.md)
+The daemon is a detached process, so closing the TUI leaves it running, and both UI entry points call `initialize_database` at startup with nothing stopping it first (`src/tui.py:2284`, `src/web_runner.py:33`). Relaunching the UI after an update therefore applies pending migrations while the daemon is writing: the 34→35 `DROP COLUMN` rewrote `workshop_items` in **283 s** in production, and the two renames either side of it took 84 ms between them. Afterwards the daemon keeps running old code against the new schema, which Batch 6a measured as a silent split rather than an error. The fix follows the owner's recommendation: stop a running daemon before a pending migration, refuse to migrate if it will not stop, and restart it once the migration succeeds. [threading.md](threading.md), [schema-migrations.md](schema-migrations.md)
 
 ## Recently closed
 
@@ -395,3 +395,7 @@ production has already paid, kept here as the evidence that the index is used. [
 ### A build older than the database ran against a newer schema
 
 **Was issue 62.** The driver only compared downward — `db_version < version` inside the `MIGRATIONS` loop — so a build whose `EXPECTED_VERSION` was below the file's recorded version ran normally: it applied no migrations and then read and wrote a schema it did not understand, which is the silent split Batch 6a measured rather than an error. `initialize_database` now reads `PRAGMA user_version` before even the journal-mode switch and raises `SchemaVersionError` when the database is newer, naming the path and both versions and telling the operator to replace the build rather than delete the file. The connection is closed before the raise, so a refused start writes nothing — *measured*: `user_version`, all 48 schema objects and the file's SHA-256 identical, with no `-wal`/`-shm` committed. The daemon runner and the web runner log the sentence and exit 2, and the TUI prints it and refuses to mount. [schema-migrations.md](schema-migrations.md), [architecture.md](architecture.md)
+
+### The 34→35 rewrite could outlast the busy timeout
+
+**Was issue 61, and the hazard was not reachable.** Every connection is opened with a 15 s busy timeout, and the 34→35 `DROP COLUMN` rewrote `workshop_items` — 14.9 s on the copy here and **283 s in production** — so a second entry point calling `initialize_database` during the rewrite would have waited out its timeout. The owner showed that no second entry point can: the UI blocks on `initialize_database` before it becomes available, and the daemon is started from that UI, so the two are sequential by construction. The measurement stands as the rewrite's cost, not as a reachable failure. The reverse order — a UI launched *under* a running daemon — is real and is recorded as issue 63. [schema-migrations.md](schema-migrations.md), [threading.md](threading.md)
