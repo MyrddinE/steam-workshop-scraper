@@ -377,9 +377,10 @@ def match_translations(content: str, batch: list[dict], phrase: str) -> dict[int
     pattern before any alignment is attempted.
 
     When the counts differ under both patterns, the boundaries become an alignment
-    guide, matched on ``(item_id, field label)``. A row that gets no block is simply
-    absent from the result: it is not deleted from `translation_queue` and a later
-    pass picks it up. Blocks matching no row are ignored.
+    guide, matched on ``(entity_id, field label)``. A row that gets no block is
+    simply absent from the result: it is not deleted from `translation_queue`, its
+    priority is lowered by one so it stops keeping its place at the head, and a
+    later pass picks it up. Blocks matching no row are ignored.
 
     Either way a partial reply is a partial success, never a reason to discard the
     blocks that did arrive.
@@ -637,9 +638,13 @@ class TranslatorThread(threading.Thread):
 
         Returns ``(translated, left_queued)``. A reply covering only part of the
         batch is a success: the rows it missed keep their `translation_queue` rows
-        and a later pass picks them up. A reply yielding no usable block at all
+        and a later pass picks them up, each at one priority step lower than it
+        had, so a field the model keeps omitting stops holding the head of the
+        queue without ever being dropped. A reply yielding no usable block at all
         raises, which is what puts the caller's backoff in charge of the retry
-        instead of re-sending the same request in a tight loop.
+        instead of re-sending the same request in a tight loop. A whole-batch
+        failure is not content-related, so it leaves every row's priority alone
+        and the batch is rebuilt and retried exactly as it stood.
         """
         if not batch:
             return (0, 0)
@@ -667,7 +672,16 @@ class TranslatorThread(threading.Thread):
             if not translations:
                 # Zero usable blocks is a failure rather than an empty success:
                 # every row is still queued, so the caller has to back off rather
-                # than immediately re-send the same request.
+                # than immediately re-send the same request. Unlike a partial
+                # reply it demotes nothing: a whole request coming back empty is
+                # unlikely to be content-related, so demoting would ratchet rows
+                # down on every transport or account failure, which says nothing
+                # about them. The rows are left exactly as they stand and the
+                # same batch is rebuilt and retried. The rows are deliberately
+                # not named here either: the exception plus the backoff log
+                # already say what happened, the rows are the same next time
+                # because nothing moved them, and naming them would add a line
+                # for a case the operator retries rather than diagnoses.
                 raise TranslationResponseError(
                     f"No usable translation blocks in a {len(batch)}-field "
                     f"response: {content[:200]!r}"
@@ -679,7 +693,25 @@ class TranslatorThread(threading.Thread):
                 trans_text = translations.get(index)
 
                 if not trans_text:
-                    logging.warning(f"No translation returned for {_row_key(row)}")
+                    # A miss lowers the row by one step and leaves it queued. At
+                    # temperature 0 the input is still not identical between
+                    # attempts -- the batch's other fields change, and the
+                    # activation levels with them -- so one miss is not evidence
+                    # of permanent failure and the row is retried, never dropped.
+                    # Lowering it is the point: at the same priority it kept its
+                    # place at the head and was re-sent ahead of work not yet
+                    # attempted. `queued_at` is deliberately not rewritten: it is
+                    # the honest queue time and the ordering's tiebreaker, and
+                    # moving a row with it would falsify it.
+                    new_priority = row["priority"] - 1
+                    conn.execute(
+                        "UPDATE translation_queue SET priority = ? WHERE id = ?",
+                        (new_priority, row["id"]),
+                    )
+                    logging.warning(
+                        f"No translation returned for {_row_key(row)}; "
+                        f"demoted to priority {new_priority}, still queued"
+                    )
                     continue
 
                 if row["entity_type"] == "user":

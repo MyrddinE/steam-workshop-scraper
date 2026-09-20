@@ -125,7 +125,7 @@ One row per text field awaiting translation.
 | `entity_id` | `workshop_id` or `steamid`, per `entity_type`. |
 | `field` | Target column, for example `title_en`. |
 | `original_text` | Source text. |
-| `priority` | Work priority; the translator drains highest first. |
+| `priority` | Work priority; the translator drains highest first. Lowered by one when a reply misses the row ([data-pipeline.md](data-pipeline.md#translation-phase)). |
 | `queued_at` | Our clock: when the entry was created. Written for new rows. Rows that predate migration 13→14 keep NULL because their queue time is genuinely unknown. |
 
 Ordering (`get_next_batch_for_translation`) is `priority DESC`, then NULL-`queued_at` rows ahead
@@ -170,6 +170,17 @@ download-failure path (`src/image_worker.py:201`) and the web worker's request-f
 (`src/web_worker.py:336`), both raising the item's *API* priority so that the refresh which
 re-evaluates it happens soon — above the backlog, below an item someone is looking at. See
 [live-data-profile.md](live-data-profile.md) for the measured distribution of each queue.
+
+**The translation queue demotes a missed row as a retry policy.** When the model's reply leaves a
+field out, `_translate_batch` lowers that row's `priority` by one and leaves it queued: the row
+stops keeping its place at the head and is retried behind the work it was jumping, and it leaves the
+queue when it finally comes back translated. `MAX` still governs the producers — a later re-queue at
+a higher priority raises the row again — so the demotion is the queue's only downward writer, and it
+is deliberately unbounded. `translation_queue.priority` is `INTEGER DEFAULT 0` with no `CHECK`, and
+the table's poll predicate is simply "the row exists", so a negative value is an ordinary priority
+that sorts below every other row rather than an invalid one. The image queue's failure path
+(`image_priority - 1` floored at 0) is not the same shape: there `0` means "not queued", which is why
+it cannot go lower and this one can.
 
 **The lower half belongs to the daemon, the top to the user.** `1`, `2` and `3` are what the daemon
 writes to organise its own work — a stale refresh, a retry, a discovery — while `5` and `10` are set

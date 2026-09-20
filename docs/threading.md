@@ -74,10 +74,12 @@ against a third-party API, and buries the real message in the log. A failed batc
 `translation_queue` rows in place, so a backoff costs nothing but time.
 
 A reply covering only part of its request is **partial success**, not a failure: the fields it
-resolved are written, the ones it missed keep their rows for a later pass, and the backoff is not
-grown — the model answered, so backing off would slow work it did return. A reply with **no usable
-block at all** is a failure and does back off, which is what stops an unparseable answer being
-re-sent in a tight loop.
+resolved are written, the ones it missed keep their rows for a later pass — each with its `priority`
+lowered by one, so it stops holding the head of the queue — and the backoff is not grown; the model
+answered, so backing off would slow work it did return. A reply with **no usable block at all** is a
+failure and does back off, which is what stops an unparseable answer being re-sent in a tight loop.
+A whole-batch failure demotes nothing: it is unlikely to be content-related, so every row keeps the
+priority it had and the batch is rebuilt and retried as it stands.
 
 The translator's delay doubles from a base and caps, in one of two shapes, chosen because the failures
 differ in kind. A **service** failure — a transport error, a rate limit, a 5xx — starts at 2 s and caps

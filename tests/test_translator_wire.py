@@ -39,6 +39,7 @@ from src.translator import (
     RETRY_BASE_SECONDS,
     TranslationResponseError,
     TranslatorThread,
+    _row_key,
     boundary_line,
     build_wire_request,
     choose_phrase,
@@ -68,9 +69,14 @@ def _row(item_id: int, field: str, text: str, priority: int = 3) -> dict:
 
 
 def _reply(phrase: str, batch: list[dict], english: dict[str, str]) -> str:
-    """A reply in the shape the request asks for: boundaries copied, text below."""
+    """A reply in the shape the request asks for: boundaries copied, text below.
+
+    Rows absent from ``english`` are left out of the reply, which is how a partial
+    reply is written.
+    """
     return "\n".join(
-        f"{boundary_line(row, phrase)}\n{english[row['field']]}" for row in batch
+        f"{boundary_line(row, phrase)}\n{english[row['field']]}"
+        for row in batch if row["field"] in english
     )
 
 
@@ -161,6 +167,20 @@ def _queued_count(db_path, item_id: int = 1) -> int:
         return conn.execute(
             "SELECT COUNT(*) AS n FROM translation_queue WHERE entity_id = ?", (item_id,)
         ).fetchone()["n"]
+    finally:
+        conn.close()
+
+
+def _queue_row(db_path, field: str, item_id: int = 1) -> dict | None:
+    """The queue row for one field, or None once it has been drained."""
+    conn = get_connection(db_path)
+    try:
+        found = conn.execute(
+            "SELECT priority, queued_at FROM translation_queue "
+            "WHERE entity_id = ? AND field = ?",
+            (item_id, field),
+        ).fetchone()
+        return dict(found) if found else None
     finally:
         conn.close()
 
@@ -581,6 +601,161 @@ def test_an_empty_batch_makes_no_request(db_path):
     client = _client("")
     assert _thread(db_path)._translate_batch([], client, "gpt-test") == (0, 0)
     assert not client.chat.completions.create.called
+
+
+# ── a miss lowers the row by one priority step and keeps it queued ───────────
+#
+# At temperature 0 the input is still not identical between attempts, because the
+# batch's other fields change and the activation levels with them, so one miss is
+# not evidence of permanent failure. The row is therefore demoted and retried,
+# never dropped: it stops keeping its place at the head of the queue, and it
+# leaves the queue when it finally comes back translated.
+
+def test_a_missed_field_is_demoted_one_step_and_stays_queued(db_path):
+    batch = _queued(db_path, ["title_en", "short_description_en"], priority=4)
+    before = _queue_row(db_path, "short_description_en")
+    reply = _reply(PHRASE, batch[:1], {"title_en": "Hello"})
+
+    with _phrase_fixed():
+        translated, left = _thread(db_path)._translate_batch(
+            batch, _client(reply), "gpt-test"
+        )
+
+    assert (translated, left) == (1, 1)
+    after = _queue_row(db_path, "short_description_en")
+    assert after is not None, "a miss is retried, never removed from the queue"
+    assert after["priority"] == before["priority"] - 1
+    assert after["queued_at"] == before["queued_at"], (
+        "queued_at is the honest queue time and the order's tiebreaker; moving the "
+        "row must not falsify it"
+    )
+
+
+def test_two_misses_lower_the_row_twice(db_path):
+    batch = _queued(db_path, ["title_en", "short_description_en"], priority=4)
+
+    with _phrase_fixed():
+        thread = _thread(db_path)
+        thread._translate_batch(
+            batch, _client(_reply(PHRASE, batch, {"title_en": "Hello"})), "gpt-test"
+        )
+        # What a later pass hands over. `title_en` is re-queued so the reply has a
+        # block that lands: only the repeatedly missed field is left out.
+        queue_field_for_translation(db_path, "item", 1, "title_en", SOURCE, 3)
+        reread = get_next_batch_for_translation(db_path, limit=2)
+        assert reread[0]["field"] == "short_description_en", "the demoted row is read"
+        thread._translate_batch(
+            reread, _client(_reply(PHRASE, reread, {"title_en": "Hello"})), "gpt-test"
+        )
+
+    row = _queue_row(db_path, "short_description_en")
+    assert row is not None
+    assert row["priority"] == 2, "one step per miss, and the misses accumulate"
+
+
+def test_a_demoted_row_sorts_behind_one_still_at_its_former_priority(db_path):
+    """The point of the demotion: it stops holding the head of the queue."""
+    # Item 1 carries both a field that will be translated and one that will be
+    # missed, so the demoted row is what the next poll hands over.
+    batch = _queued(db_path, ["title_en", "short_description_en"], item_id=1, priority=4)
+    # Queued at the same priority, at the tail of the queue as it stands.
+    _queued(db_path, ["title_en"], item_id=2, priority=4)
+
+    with _phrase_fixed():
+        _thread(db_path)._translate_batch(
+            batch, _client(_reply(PHRASE, batch, {"title_en": "Hello"})), "gpt-test"
+        )
+
+    order = [row["field"] + "@" + str(row["entity_id"])
+             for row in get_next_batch_for_translation(db_path, limit=5)]
+    assert "short_description_en@1" in order and "title_en@2" in order
+    assert order.index("title_en@2") < order.index("short_description_en@1"), (
+        "the demoted row is behind the row that kept its former priority"
+    )
+
+
+def test_a_demoted_retry_that_comes_back_translated_is_deleted(db_path):
+    """Demotion changes when the row is retried, not whether it can leave."""
+    batch = _queued(db_path, ["title_en", "short_description_en"], priority=4)
+    with _phrase_fixed():
+        thread = _thread(db_path)
+        thread._translate_batch(
+            batch, _client(_reply(PHRASE, batch, {"title_en": "Hello"})), "gpt-test"
+        )
+        reread = get_next_batch_for_translation(db_path, limit=2)
+        thread._translate_batch(
+            reread,
+            _client(_reply(PHRASE, reread, {"short_description_en": "World"})),
+            "gpt-test",
+        )
+
+    assert _queue_row(db_path, "short_description_en") is None
+    assert _queued_count(db_path) == 0
+    assert _stored(db_path, "short_description_en") == "World"
+
+
+def test_a_whole_batch_failure_leaves_every_row_priority_untouched(db_path):
+    """The other case: not content-related, so the rows are retried as they stand.
+
+    Demoting here would punish rows for a transport or account failure that says
+    nothing about them, and the whole batch would ratchet downwards on every
+    backoff.
+    """
+    batch = _queued(db_path, ["title_en", "short_description_en"], priority=5)
+    before = {field: _queue_row(db_path, field) for field in
+              ("title_en", "short_description_en")}
+
+    with _phrase_fixed(), pytest.raises(TranslationResponseError):
+        _thread(db_path)._translate_batch(
+            batch, _client("I am afraid I cannot do that."), "gpt-test"
+        )
+
+    for field, was in before.items():
+        now = _queue_row(db_path, field)
+        assert now is not None
+        assert now["priority"] == was["priority"]
+        assert now["queued_at"] == was["queued_at"]
+
+
+def test_the_miss_log_names_the_key_and_the_new_priority_in_one_line(db_path, caplog):
+    """One line, not two: the only trace that a field is being retried."""
+    batch = _queued(db_path, ["title_en", "short_description_en"], priority=4)
+    reply = _reply(PHRASE, batch[:1], {"title_en": "Hello"})
+
+    with caplog.at_level(logging.WARNING):
+        with _phrase_fixed():
+            _thread(db_path)._translate_batch(batch, _client(reply), "gpt-test")
+
+    miss_lines = [r.message for r in caplog.records if "No translation returned" in r.message]
+    assert len(miss_lines) == 1, "one line per miss, and no second line for the demotion"
+    assert _row_key(batch[1]) in miss_lines[0]
+    assert "priority 3" in miss_lines[0], "the new priority is what makes the retry visible"
+
+
+@pytest.mark.parametrize("priority, still_urgent", [(5, True), (4, False)])
+def test_a_demoted_row_stops_making_a_partial_batch_urgent(db_path, priority, still_urgent):
+    """The one consequence of demotion outside the queue's own ordering.
+
+    `urgent` is `priority >= 5` and it decides only whether a batch the queue
+    could not fill waits `BATCH_FILL_WAIT_SECONDS` to grow. A row demoted from 5
+    to 4 therefore stops counting as urgent, so a partial batch holding only such
+    rows waits for company instead of going at once. That is harmless -- the wait
+    is bounded and the batch is sent either way -- but it is a real difference, so
+    it is pinned rather than left to chance.
+    """
+    batch = _queued(db_path, ["title_en"], priority=priority)
+    assert batch[0]["priority"] == priority
+    urgent = any(row.get("priority", 0) >= 5 for row in batch)
+    assert urgent is still_urgent
+
+    # And the demotion is what moves it: one step down from 5 is below the gate.
+    if still_urgent:
+        conn = get_connection(db_path)
+        conn.execute("UPDATE translation_queue SET priority = priority - 1")
+        conn.commit()
+        conn.close()
+        demoted = get_next_batch_for_translation(db_path, limit=1)
+        assert not any(row.get("priority", 0) >= 5 for row in demoted)
 
 
 # ── the loop: partial success does not back off, zero blocks does ────────────
