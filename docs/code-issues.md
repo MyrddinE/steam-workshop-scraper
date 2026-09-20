@@ -89,17 +89,17 @@ way to say "unknown" so that neither front end claims a measurement it does not 
 the better reading of the data and the larger change. [architecture.md](architecture.md),
 [tui.md](tui.md), [web-ui.md](web-ui.md)
 
-### Issue 63
-
-**Relaunching the UI under a running daemon migrates the schema beneath it** — *Open*, High
-
-The daemon is a detached process, so closing the TUI leaves it running, and both UI entry points call `initialize_database` at startup with nothing stopping it first (`src/tui.py:2284`, `src/web_runner.py:33`). Relaunching the UI after an update therefore applies pending migrations while the daemon is writing: the 34→35 `DROP COLUMN` rewrote `workshop_items` in **283 s** in production, and the two renames either side of it took 84 ms between them. Afterwards the daemon keeps running old code against the new schema, which Batch 6a measured as a silent split rather than an error. The fix follows the owner's recommendation: stop a running daemon before a pending migration, refuse to migrate if it will not stop, and restart it once the migration succeeds. [threading.md](threading.md), [schema-migrations.md](schema-migrations.md)
-
 ### Issue 64
 
 **A field the model does not translate is neither retried by policy nor given up on** — *Open*, Low
 
 `_translate_batch` counts a reply that misses some rows as a success — the missed rows keep their `translation_queue` entries “and a later pass picks them up” — and logs one `No translation returned for <entity>_<field>` warning. Nothing counts the misses, so a field the model consistently omits has no end: it stays queued, and whether it blocks or starves depends only on its priority against what the producers add meanwhile. *Measured live*: **one miss in the last 60,000 log lines**, for a single field, with the queue since drained past it — so it is not being retried and it is not reported as abandoned; it will simply never be translated. A whole-batch failure is the same gap from the other side: the failure path leaves the rows untouched, so the same batch is rebuilt from the same head and retried — which is where the logged 25-attempt streak came from — and the failure log names the exception but not the rows it sent, although `_row_key` exists and is already used for the miss warning. What a policy needs to do: name the rows on a whole-batch failure, and after N misses either give up on the field and record it, dropping its queue row so it stops consuming a slot, or report the abandoned fields as a metric. [data-pipeline.md](data-pipeline.md), [threading.md](threading.md)
+
+### Issue 65
+
+**A hand-started second daemon migrates under the first** — *Open*, Low
+
+`daemon_runner.main()` writes `.daemon.pid` unconditionally and then calls `initialize_database`, with no check for a daemon already running, so starting `python -m src.daemon_runner` by hand while another runs overwrites the live PID file and applies pending migrations under it — the hazard issue 63 just closed for the UI path. The first daemon watches for the file's *absence* rather than its contents, so it keeps running; the two then share one PID file, and whichever exits first removes it and stops the other. `DaemonController.start()` already checks `is_running()` before spawning, so the UI path is guarded and this is the operator-error path only. Closing it needs a read-before-overwrite probe of the existing PID file plus a liveness check, which conflicts with the deliberate “write the PID file before migrating” order and revives the stale/recycled-PID hazard the controller was fixed to avoid — so it is recorded rather than patched. [threading.md](threading.md), [cross-platform.md](cross-platform.md)
 
 ## Recently closed
 
@@ -405,3 +405,7 @@ production has already paid, kept here as the evidence that the index is used. [
 ### The 34→35 rewrite could outlast the busy timeout
 
 **Was issue 61, and the hazard was not reachable.** Every connection is opened with a 15 s busy timeout, and the 34→35 `DROP COLUMN` rewrote `workshop_items` — 14.9 s on the copy here and **283 s in production** — so a second entry point calling `initialize_database` during the rewrite would have waited out its timeout. The owner showed that no second entry point can: the UI blocks on `initialize_database` before it becomes available, and the daemon is started from that UI, so the two are sequential by construction. The measurement stands as the rewrite's cost, not as a reachable failure. The reverse order — a UI launched *under* a running daemon — is real and is recorded as issue 63. [schema-migrations.md](schema-migrations.md), [threading.md](threading.md)
+
+### Relaunching the UI under a running daemon migrated the schema beneath it
+
+**Was issue 63.** Both UI entry points called `initialize_database` at startup with nothing stopping the detached daemon, so a relaunch after an update applied pending migrations under a live writer — the 34→35 rewrite took 283 s in production — and the daemon then ran old code against the new schema, which Batch 6a measured as a silent split rather than an error. `initialize_database_with_daemon_stopped` now gates it in this order: read the version and refuse a *newer* database before touching the daemon, so a refused start does not take the service down; do nothing at all when nothing is pending, which is the common relaunch and stays free; stop the daemon when a migration is pending, logging the migration as the reason; refuse to migrate if the stop did not succeed; migrate; and restart the daemon if it had been running. A migration that raises leaves the daemon stopped and says so. Both entry points go through the one helper, so the stop, the gate, the restart and the refusals are identical on the TUI and the web. [threading.md](threading.md), [schema-migrations.md](schema-migrations.md)
