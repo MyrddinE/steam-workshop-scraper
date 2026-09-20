@@ -233,7 +233,7 @@ are constants in `src/capture.py`:
 * A group tracks at most **`MAX_DIGESTS_PER_GROUP`** (5) distinct digests. Past
   that, a new shape is counted but not written — otherwise a page whose content
   rotates would produce a new digest per fetch and the per-shape cap would mean
-  nothing. The group records `variants_truncated: true` when this happens.
+  nothing. The group records `digests_truncated: true` when this happens.
 
 Every miss increments `total_misses` whether or not it produced a file. Those
 counters, not the samples, are what convey the size of a break. They live on the

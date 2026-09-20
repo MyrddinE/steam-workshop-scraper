@@ -176,7 +176,7 @@ def test_rotating_content_cannot_defeat_the_file_bound(outbox):
     assert len(files) <= capture.MAX_DIGESTS_PER_GROUP * capture.SAMPLES_PER_DIGEST
 
     state = _group_state(outbox, group)
-    assert state["variants_truncated"] is True
+    assert state["digests_truncated"] is True
     assert len(state["digests"]) == capture.MAX_DIGESTS_PER_GROUP
     assert state["total_misses"] == capture.MAX_DIGESTS_PER_GROUP * 4
 
@@ -193,7 +193,7 @@ def test_a_flapping_shape_stays_bounded(outbox):
     state = _group_state(outbox, group)
     assert state["total_misses"] == 30
     assert len(state["digests"]) == 2
-    assert state["variants_truncated"] is False
+    assert state["digests_truncated"] is False
 
 
 def test_caps_survive_a_restart(outbox):
@@ -223,6 +223,47 @@ def test_group_state_is_rebuilt_when_it_is_missing(outbox):
 
     state = _group_state(outbox, group)
     assert state["sample_count"] == 2, "samples on disk are the authority"
+
+
+def test_group_state_written_by_the_old_build_still_loads(outbox):
+    """Batch 7 renamed the _group.json keys; an old state file must still count.
+
+    The old file stores ``variants_truncated`` and, per digest, ``count`` and
+    ``samples``. The reader maps them onto ``digests_truncated``, ``misses``
+    and ``samples_written`` so a restart on an existing outbox keeps the caps
+    the old writer had already enforced.
+    """
+    group = capture.group_id("web_selector_miss", None, None)
+    group_dir = os.path.join(outbox, "failures", group)
+    os.makedirs(group_dir, exist_ok=True)
+    legacy = {
+        "group": group,
+        "sample_count": 2,
+        "total_misses": 9,
+        "first_seen": None,
+        "last_seen": None,
+        "variants_truncated": True,
+        "digests": {"abc": {"count": 7, "samples": 2,
+                            "first_seen": None, "last_seen": None}},
+    }
+    with open(os.path.join(group_dir, capture.GROUP_STATE_NAME), "w",
+              encoding="utf-8") as handle:
+        json.dump(legacy, handle)
+
+    capture.configure(outbox)  # drop in-memory state, as a restart does
+    loaded = capture._load_group(group)
+
+    assert loaded["digests_truncated"] is True
+    assert loaded["digests"]["abc"]["misses"] == 7
+    assert loaded["digests"]["abc"]["samples_written"] == 2
+
+    # The migrated state is what gets written back, not the old spelling.
+    capture._flush_group(group)
+    on_disk = _group_state(outbox, group)
+    assert on_disk["digests_truncated"] is True
+    assert "variants_truncated" not in on_disk
+    assert "count" not in on_disk["digests"]["abc"]
+    assert "samples" not in on_disk["digests"]["abc"]
 
 
 def test_distinct_groups_do_not_share_a_budget(outbox):

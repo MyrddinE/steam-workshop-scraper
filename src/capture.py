@@ -858,13 +858,40 @@ def _new_group(gid) -> dict:
         "total_misses": 0,
         "first_seen": None,
         "last_seen": None,
-        "variants_truncated": False,
+        "digests_truncated": False,
         "digests": {},
     }
 
 
 def _group_state_path(gid) -> str:
     return os.path.join(failures_dir(_outbox_dir), gid, GROUP_STATE_NAME)
+
+
+def _apply_legacy_group_keys(loaded: dict) -> None:
+    """Normalise a ``_group.json`` written before the Batch 7 key rename.
+
+    The old file stores ``variants_truncated`` at the top level and
+    ``count``/``samples`` inside each digest entry; this build stores
+    ``digests_truncated`` and ``misses``/``samples_written``. Each old key is
+    mapped only when its replacement is absent, then removed, so a state file
+    is migrated in place the first time it is read and a file this build wrote
+    is left untouched.
+    """
+    if "digests_truncated" not in loaded and "variants_truncated" in loaded:
+        loaded["digests_truncated"] = loaded["variants_truncated"]
+    loaded.pop("variants_truncated", None)
+    digests = loaded.get("digests")
+    if not isinstance(digests, dict):
+        return
+    for entry in digests.values():
+        if not isinstance(entry, dict):
+            continue
+        if "misses" not in entry and "count" in entry:
+            entry["misses"] = entry["count"]
+        entry.pop("count", None)
+        if "samples_written" not in entry and "samples" in entry:
+            entry["samples_written"] = entry["samples"]
+        entry.pop("samples", None)
 
 
 def _load_group(gid) -> dict:
@@ -879,6 +906,7 @@ def _load_group(gid) -> dict:
         with open(path, "r", encoding="utf-8") as handle:
             loaded = json.load(handle)
         if isinstance(loaded, dict):
+            _apply_legacy_group_keys(loaded)
             group.update(loaded)
     # No state file yet is the normal first-run case; the group is rebuilt from
     # the samples on disk below.
@@ -924,8 +952,8 @@ def _reconstruct_from_samples(gid, group) -> None:
         if not digest:
             continue
         entry = group["digests"].setdefault(
-            digest, {"count": 0, "samples": 0, "first_seen": None, "last_seen": None})
-        entry["samples"] += 1
+            digest, {"misses": 0, "samples_written": 0, "first_seen": None, "last_seen": None})
+        entry["samples_written"] += 1
         group["sample_count"] += 1
 
 
@@ -951,20 +979,20 @@ def _select_sample_slot(gid, digest, now):
     if variant is None:
         if len(group["digests"]) >= MAX_DIGESTS_PER_GROUP:
             # Stop capturing new shapes for this group; keep counting.
-            group["variants_truncated"] = True
+            group["digests_truncated"] = True
             return None
-        variant = {"count": 0, "samples": 0, "first_seen": now, "last_seen": now}
+        variant = {"misses": 0, "samples_written": 0, "first_seen": now, "last_seen": now}
         group["digests"][digest] = variant
-    elif variant["samples"] >= SAMPLES_PER_DIGEST:
-        variant["count"] += 1
+    elif variant["samples_written"] >= SAMPLES_PER_DIGEST:
+        variant["misses"] += 1
         variant["last_seen"] = now
         return None
 
-    variant["count"] += 1
+    variant["misses"] += 1
     variant["last_seen"] = now
-    variant["samples"] += 1
+    variant["samples_written"] += 1
     group["sample_count"] += 1
-    return variant["samples"]
+    return variant["samples_written"]
 
 
 def _flush_group(gid) -> None:
@@ -992,7 +1020,7 @@ def _flush_group(gid) -> None:
         total_misses=group["total_misses"],
         first_seen=group["first_seen"],
         last_seen=group["last_seen"],
-        variants_truncated=group["variants_truncated"],
+        digests_truncated=group["digests_truncated"],
     ))
 
 
