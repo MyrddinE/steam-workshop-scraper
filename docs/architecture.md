@@ -145,7 +145,12 @@ The database is designed for high-concurrency and complex querying. See
   `SchemaVersionError` and a message naming the file and both versions rather than reading and
   writing a schema it does not understand. The remedy is a build at least as new as the file: the
   database is not corrupt, and rolling back to an older build is not a way out once the schema
-  renames have run. See [schema-migrations.md](schema-migrations.md).
+  renames have run. See [schema-migrations.md](schema-migrations.md). Before a *pending* migration is
+  applied, a UI entry point stops a running daemon — the daemon is detached and may still be writing
+  to the tables the migration rewrites — and restarts it once the migration has applied; a database
+  already at the current version leaves the daemon alone. The gate is
+  `initialize_database_with_daemon_stopped` in `src/daemon_control.py`; see
+  [threading.md](threading.md#a-pending-migration-and-a-running-daemon).
 
 ### The Translator
 

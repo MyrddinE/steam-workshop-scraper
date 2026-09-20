@@ -9,7 +9,10 @@ The TUI is built with Textual (async terminal UI framework). It provides search,
 ### `ScraperApp.__init__`
 
 1. Loads config (or defaults to `{"database": {"path": "workshop.db"}}` if config file not found)
-2. Initializes database (runs migrations)
+2. Builds the process's single `DaemonController`, then initializes the database through
+   `initialize_database_with_daemon_stopped`: a pending migration stops a running daemon first (and
+   restarts it afterwards), while a relaunch on the current schema leaves the daemon alone. A newer
+   database or a daemon that would not stop prints its sentence and exits 2 before the screen mounts
 3. Starts embedded web server in a daemon thread (`_start_webserver`)
 4. Loads TUI state from `.tui_state.yaml` (filters, sort, scroll position, selected workshop ID)
 5. Sets up initial state flags: `_initial_load_done = False`, `_wilson_cutoffs = {}`

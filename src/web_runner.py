@@ -3,7 +3,12 @@ import sys
 import socket
 import logging
 from src.config import ConfigError, load_config
-from src.database import initialize_database, SchemaVersionError
+from src.daemon_control import (
+    DaemonController,
+    DaemonStillRunningError,
+    initialize_database_with_daemon_stopped,
+)
+from src.database import SchemaVersionError
 from src.webserver import app, init_webserver
 from src import crash
 
@@ -29,15 +34,21 @@ def main():
     # to reach the outbox instead of a console nobody reads.
     crash.install("web", config, config_path=config_path)
     db_path = config.get("database", {}).get("path", "workshop.db")
+    # One controller for this process: the startup gate uses it to stop a running
+    # daemon if a pending migration needs it, and the web server's daemon panel
+    # drives the same object once the server is up.
+    controller = DaemonController(config_path, config=config)
     try:
-        initialize_database(db_path)
-    except SchemaVersionError as exc:
+        initialize_database_with_daemon_stopped(db_path, controller)
+    except (SchemaVersionError, DaemonStillRunningError) as exc:
         # Refused before the web server is initialised: the operator gets the
         # sentence and exit 2, and no degraded server is left bound to a port
-        # against a schema this build does not understand.
+        # against a schema this build does not understand, or one a daemon is
+        # still writing to.
         logging.error("%s", exc)
         sys.exit(2)
-    init_webserver(db_path, config, config_path=config_path)
+    init_webserver(db_path, config, config_path=config_path,
+                   daemon_controller=controller)
 
     web_config = config.get("web", {})
     port = web_config.get("port", 8080)
