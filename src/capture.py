@@ -1021,6 +1021,9 @@ def _flush_group(gid) -> None:
         first_seen=group["first_seen"],
         last_seen=group["last_seen"],
         digests_truncated=group["digests_truncated"],
+        # Legacy alias, honoured for one release: the puller reads this manifest
+        # outside this repo, so the old key stays beside the new one.
+        variants_truncated=group["digests_truncated"],
     ))
 
 

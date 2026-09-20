@@ -308,6 +308,23 @@ def test_group_entry_carries_the_scale_counters(outbox):
     assert group_entry["first_seen"] <= group_entry["last_seen"]
 
 
+def test_group_entry_keeps_the_legacy_truncation_key(outbox):
+    """The manifest is read outside this repo, so both spellings are written.
+
+    Batch 7 renamed `variants_truncated` to `digests_truncated`; the puller
+    cannot be updated with it, so the old key rides beside the new one for one
+    release under the same value.
+    """
+    for i in range(capture.MAX_DIGESTS_PER_GROUP * 2):
+        capture.record_failure("web_selector_miss", workshop_id=i,
+                               body=_html(classes=f"layout{i} rotating"))
+
+    group_entry = next(e for e in _failure_entries(outbox) if e["role"] == "group")
+    assert group_entry["digests_truncated"] is True
+    assert group_entry["variants_truncated"] is True
+    assert group_entry["digests_truncated"] == group_entry["variants_truncated"]
+
+
 def test_repeated_captures_do_not_duplicate_manifest_entries(outbox):
     for i in range(4):
         capture.record_failure("api_unhandled_status", workshop_id=i, http_status=403,

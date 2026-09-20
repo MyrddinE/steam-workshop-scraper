@@ -226,6 +226,24 @@ tags, `class_count` was 2, and the artefact contained nothing that identified th
 nor did a digest of it describe the document. A body already under the cap strips to the
 same digest as before, so existing variants are not re-keyed.
 
+## An outbox written by an older build
+
+The field names above were renamed in Batch 7, and the outbox is not reset with a
+build: `capture_promote.load_capture` maps the old spellings onto the current names
+as it reads a record, so an old outbox stays promotable and parseable. `body_bytes`,
+`body_sha256` and `body_noise_stripped` are back-filled as `full_body_bytes`,
+`full_body_sha256` and `body_scripts_stripped`. `body_complete` is not a spelling
+change but its opposite — it recorded completeness while `body_truncated` records
+truncation — so an old `body_complete: true` becomes `body_truncated: false`, mapped
+by meaning rather than copied.
+
+The same holds for a group state file: `capture._load_group` migrates an old
+`_group.json` (top-level `variants_truncated`, and per-digest `count` and `samples`)
+onto `digests_truncated`, `misses` and `samples_written` the first time it is read,
+then drops the old keys, so the caps an earlier build already enforced survive a
+restart. The manifest's group entry keeps both spellings for one release, because
+the puller that reads it lives outside this repository.
+
 ## Bounds
 
 A persistent break must cost a bounded number of files. Two caps do that, and both
