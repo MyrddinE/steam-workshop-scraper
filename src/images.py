@@ -1,7 +1,7 @@
 """What ``workshop_items.image_answer`` holds, and what may be built from it.
 
 The column started as a file extension and nothing else: a non-empty value
-meant an image had been written to ``images/<bucket>/<id>.<ext>``, and the only
+meant an image had been written to ``images/<h1>/<h2>/<h3>/<id>.<ext>``, and the only
 question anyone asked of it was "which extension", so that a URL could be
 built. An image that could not be downloaded left it NULL — the same value as
 an image that had never been attempted, which is why a preview that 404s was
