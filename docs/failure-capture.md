@@ -151,7 +151,12 @@ One run can report more than one error: Textual calls `_handle_exception` once
 per unhandled error and prints only the first in normal mode, so the second
 traceback used to be discarded at print time. Every error therefore gets its own
 file, numbered in the order the process reported it; `error_occurrence` and
-`errors_this_run` in the header say which one it is. Each dump is written
+`errors_this_run` in the header say which one it is. `captured_at:` records when
+it was written, and the manifest entry's `error_occurrence` names the same count.
+For one release after the rename the old header line `timestamp:` and the old
+manifest key `error` are written beside the new ones, because the puller and any
+dump parser live outside this repository; a parser reading a dump written by an
+older build must likewise accept `timestamp:`. Each dump is written
 synchronously, because Textual closes its message loop as it exits.
 
 The file is a context header, the full traceback **with each frame's locals**,

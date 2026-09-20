@@ -99,11 +99,14 @@ def test_the_dump_file_holds_the_traceback_and_the_context(tmp_path):
     assert "Traceback (most recent call last)" in text
     assert "RuntimeError: context probe" in text
     for key in ("process: tui", "error_occurrence: 1",
-                "errors_this_run: 1", "timestamp:", "app_version:", "python:",
+                "errors_this_run: 1", "captured_at:", "app_version:", "python:",
                 "platform:", "cwd:", "argv:", "config_path: config.yaml",
                 "database_path: workshop.db", "thread:", "locals: included",
                 "caps:", "secrets_elided:"):
         assert key in text, f"the context header is missing {key!r}"
+    # Legacy alias, kept for one release so a parser that only knows the old
+    # spelling still reads a dump from this build.
+    assert "timestamp:" in text
 
 
 def test_a_cookie_value_in_a_local_and_in_the_message_is_elided(tmp_path):
@@ -291,6 +294,8 @@ def test_the_manifest_gains_a_crash_entry(tmp_path):
     assert entry["path"].startswith("crashes/")
     assert entry["path"].endswith("-tui-error1.txt")
     assert entry["process"] == "tui"
+    assert entry["error_occurrence"] == 1
+    # Legacy alias, kept for one release for the out-of-repo puller.
     assert entry["error"] == 1
     payload = (outbox / entry["path"]).read_bytes()
     assert entry["bytes"] == len(payload)
