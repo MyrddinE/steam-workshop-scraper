@@ -5,6 +5,7 @@ import re
 import json
 import time
 import logging
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 WORKSHOP_ITEM_COLUMNS = frozenset({
@@ -225,7 +226,7 @@ USER_PRIORITY_FLOOR = 5
 # number that will be wrong after the next migration.
 #
 # `initialize_database` refuses a database whose recorded version is *above*
-# this number (see `_newer_schema_error` and the guard that calls it): a build
+# this number (see `newer_schema_error` and the guard that calls it): a build
 # that is older than its database cannot know what the newer schema means, and
 # reading it as though it did is how an older build ends up writing beside the
 # real tables instead of stopping. Raise this value only by adding a migration.
@@ -237,7 +238,7 @@ class SchemaVersionError(Exception):
 
     Raised by :func:`initialize_database` before it sets the journal mode or
     touches the schema, so the refused file is left byte-for-byte as it was. The
-    operator-facing message (see :func:`_newer_schema_error`) says which file,
+    operator-facing message (see :func:`newer_schema_error`) says which file,
     which versions, and that the remedy is a newer build -- not deleting or
     repairing the database, and not rolling back to an even older build.
     """
@@ -2986,13 +2987,46 @@ MIGRATIONS = [
     (35, _migration_34_to_35),
 ]
 
-def _newer_schema_error(db_path: str, recorded_version: int) -> SchemaVersionError:
+def read_schema_version(db_path: str) -> int:
+    """The database's recorded ``PRAGMA user_version``, read without writing.
+
+    Opened read-only, so this is safe beside a running daemon: a WAL reader
+    takes no write lock, never switches the journal mode and never creates the
+    database file. That matters because the caller's next step -- stopping the
+    daemon before a migration -- must be decided *before* anything touches it.
+
+    A path that does not exist yet reads as ``0``: that is the version a fresh
+    file would carry, and a fresh file also needs ``initialize_database`` to
+    build a schema for it, so ``0`` is correctly "a migration is pending".
+
+    The read goes through SQLite rather than the file header on purpose. The
+    header is only updated on a checkpoint, so in WAL mode a version applied
+    moments ago can still be sitting in the ``-wal`` file; a connection reads
+    the effective version, a byte peek would not.
+    """
+    if not os.path.exists(db_path):
+        return 0
+    # `mode=ro` is the read-only VFS open; `as_uri` percent-encodes a path with
+    # spaces or '?' in it, which the raw `file:` prefix would not.
+    uri = f"{Path(db_path).resolve().as_uri()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        return conn.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def newer_schema_error(db_path: str, recorded_version: int) -> SchemaVersionError:
     """The refusal an older build owes a newer database.
 
     Built in one place so every entry point and every test sees the same
     sentence: the file, both versions, and the remedy. It is deliberately
     explicit that the database is *not* the problem and that an older build is
     not a way out.
+
+    Public rather than private because the UI startup gate in
+    ``src.daemon_control`` has to make this refusal *before* it stops a running
+    daemon, and it must not build a second, drifting sentence of its own.
     """
     return SchemaVersionError(
         f"{db_path} was written by a newer build: its schema version is "
@@ -3025,7 +3059,7 @@ def initialize_database(db_path: str, *, legacy_chain: bool = False):
       :class:`SchemaVersionError` before any schema work -- including the
       journal-mode statement -- so a refused start leaves the file untouched.
       An older build must not read a schema it does not understand; see
-      :func:`_newer_schema_error`;
+      :func:`newer_schema_error`;
     - a **fresh** database (``user_version = 0``) is built directly at
       :data:`EXPECTED_VERSION` by :func:`_create_current_schema`, with no
       migrations replayed;
@@ -3059,7 +3093,7 @@ def initialize_database(db_path: str, *, legacy_chain: bool = False):
         # Closed before the raise: on Windows an open handle would keep the
         # refused file locked for as long as the process lingers.
         conn.close()
-        raise _newer_schema_error(db_path, db_version)
+        raise newer_schema_error(db_path, db_version)
 
     cursor.execute("PRAGMA journal_mode=WAL;")
 

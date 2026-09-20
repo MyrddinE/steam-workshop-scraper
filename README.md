@@ -67,6 +67,8 @@ You can also configure the OpenAI endpoint and model in `config.yaml` if you wis
 
 Ensure your virtual environment is activated so the commands in `.venv/bin/` are in your path. The project provides two tools:
 
+Both UI front ends initialise the database on startup. If that finds a **pending schema migration** while the daemon is running, the UI stops the daemon first, applies the migration, and restarts it — a migration rewrites tables and must not run while the detached daemon is writing to them. If the daemon will not stop, the UI refuses to start rather than migrate under it. A relaunch on the current schema never touches a running daemon.
+
 ### 1. The Daemon
 
 Start the background worker. This process will read from the database to find items that need to be scraped, fetch their data from Steam, and save the results.

@@ -182,6 +182,18 @@ The detail poll runs at a fixed 3-second interval for the currently selected ite
 5. Initializes database (runs migrations)
 6. Creates `Daemon` instance, calls `daemon.run()`
 
+### A pending migration and a running daemon
+
+The daemon is detached, so closing the TUI leaves it running while a new UI starts. A migration is DDL that rewrites tables — 34→35's `DROP COLUMN` rewrote `workshop_items`, 283 s *measured live* in production — so migrating under that live writer is the defect, and afterwards the daemon would keep running old code against the new schema. The TUI and the standalone web runner therefore do not call `initialize_database` directly; they call `initialize_database_with_daemon_stopped` (`src/daemon_control.py`), which:
+
+1. reads the recorded `PRAGMA user_version` read-only (`database.read_schema_version`) — a WAL reader may do that while the daemon runs — and refuses a database newer than the build with `newer_schema_error` **before** touching the daemon, so a refused start does not take the service down on its way out;
+2. leaves the daemon alone when the version already equals `EXPECTED_VERSION`, which is the ordinary relaunch and stays free;
+3. when a migration is pending and the daemon is running, logs the migration as the reason and stops it through the same `DaemonController.stop()` the Stop button uses (PID-file removal, an owned-process signal, and the `STOP_TIMEOUT_SECONDS` grace described below);
+4. refuses to migrate when that stop did not succeed, raising `DaemonStillRunningError` with a sentence saying the daemon is still running and the migration was not attempted — a gate, not best-effort;
+5. migrates, then restarts the daemon and logs it; if the migration raised it does not restart, and `SchemaMigrationFailedError` says the daemon was stopped and has not been restarted.
+
+The daemon's own startup (step 5 above) is unchanged: it performs its pending migrations directly, before it constructs the `Daemon`, and `DaemonController.start()` already refuses a second start for anything the controller launches.
+
 ### Graceful Shutdown
 
 The daemon has two stop signals and both end in the same sequence. On **Unix**

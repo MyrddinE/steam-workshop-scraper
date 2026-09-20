@@ -4,6 +4,11 @@ Both the TUI's daemon manager and the embedded web UI drive the daemon through
 this class. The handshake is the PID file: ``src.daemon_runner`` writes it
 relative to its own working directory, and the daemon treats its disappearance
 as the shutdown signal, so the path stays relative here too.
+
+This module also owns the UI's startup gate, ``initialize_database_with_daemon_
+stopped``: a pending schema migration rewrites tables, and the daemon is a
+detached process that may still be writing to them, so the gate stops it first
+and refuses to migrate if it will not stop.
 """
 
 import logging
@@ -12,6 +17,15 @@ import platform
 import subprocess
 import sys
 import time
+
+from src.database import (
+    EXPECTED_VERSION,
+    SchemaVersionError,
+    initialize_database,
+    newer_schema_error,
+    read_schema_version,
+)
+
 
 # How long a graceful stop waits before escalating to a forced kill. It is
 # derived from the daemon's documented worst case, not guessed:
@@ -342,3 +356,123 @@ class DaemonController:
         if len(lines) > max_lines:
             lines = lines[-max_lines:]
         return {"lines": lines, "offset": start + last_newline + 1, "reset": reset}
+
+
+class DaemonStillRunningError(RuntimeError):
+    """A pending migration needed the daemon stopped, and the stop did not succeed.
+
+    Not a ``SchemaVersionError``: the database is fine, the obstacle is the live
+    writer. The entry points report the sentence and refuse to start rather than
+    migrating under it, because that is the defect the gate exists to prevent.
+    """
+
+
+class SchemaMigrationFailedError(RuntimeError):
+    """A migration raised after the daemon had been stopped for it.
+
+    The daemon is deliberately left down: restarting it onto a failed or
+    half-applied migration would be worse than an honest outage, and the
+    underlying error does not mention the process that was taken down for it.
+    """
+
+
+def initialize_database_with_daemon_stopped(db_path: str,
+                                            controller: DaemonController) -> None:
+    """Bring ``db_path`` to ``EXPECTED_VERSION`` with the daemon stopped first.
+
+    The daemon is detached -- closing the TUI leaves it running -- and it writes
+    to this database. A migration is DDL, and migration 34->35's ``DROP COLUMN``
+    rewrites ``workshop_items``: 283 s in production measured from the live log.
+    During that rewrite a live daemon would be writing to a table SQLite is
+    rebuilding, and afterwards it would keep running old code against the new
+    schema. So a *pending* migration is applied only with the daemon stopped,
+    and only when the stop actually succeeded.
+
+    The name is the operation and its precondition -- initialise the database
+    with the daemon stopped -- rather than the controller it drives, so a caller
+    reads what it gets rather than which object does the work.
+
+    The order is:
+
+    1. read the recorded ``user_version`` read-only (see
+       :func:`src.database.read_schema_version`) and refuse a database *newer*
+       than this build with :func:`src.database.newer_schema_error` -- before the
+       daemon is touched, so a refused start does not take the service down on
+       its way out;
+    2. when the recorded version already equals ``EXPECTED_VERSION`` nothing is
+       pending: call :func:`initialize_database` and return without touching the
+       daemon, which is the common UI relaunch and must stay free;
+    3. when a migration is pending and the daemon is running, log the migration
+       as the reason and stop it through ``controller.stop()``;
+    4. when that stop did not succeed, raise :class:`DaemonStillRunningError`
+       *without* migrating -- this is a gate, not best-effort;
+    5. migrate, then restart the daemon if it had been running and log that;
+    6. when the migration raised, do not restart, and raise
+       :class:`SchemaMigrationFailedError` saying the daemon was stopped and has
+       not been restarted.
+
+    ``controller`` is an argument rather than something this function builds, so
+    a test can hand in a fake; the entry points pass the single controller the
+    process shares with its UI (the TUI's daemon screen and the web runner's
+    daemon panel both drive it).
+    """
+    recorded = read_schema_version(db_path)
+    if recorded > EXPECTED_VERSION:
+        raise newer_schema_error(db_path, recorded)
+
+    if recorded == EXPECTED_VERSION:
+        # Still called: this is where the journal mode is established and the
+        # indexes ensured. It will not apply a migration, so a running daemon is
+        # irrelevant to it and is left alone.
+        initialize_database(db_path)
+        return
+
+    was_running = controller.is_running()
+    if was_running:
+        logging.info(
+            "Schema migration pending for %s (version %s -> %s): stopping the "
+            "running daemon so the migration does not run under a live writer.",
+            db_path, recorded, EXPECTED_VERSION)
+        stopped, message = controller.stop()
+        if not stopped:
+            # A failed stop can also mean the daemon exited between the check and
+            # the request, but refuse either way: acting on a stop the
+            # controller reported as failed is the defect, not the exception.
+            raise DaemonStillRunningError(
+                f"The daemon is still running, so the schema migration pending "
+                f"for {db_path} (version {recorded} -> {EXPECTED_VERSION}) was "
+                f"not attempted: {message}. Stop the daemon and start again.")
+
+    try:
+        initialize_database(db_path)
+    except SchemaVersionError:
+        # Only reachable if another process advanced the database past this
+        # build between the read above and the migration. The refusal keeps its
+        # own type so the entry points still report it as the schema error it is.
+        if was_running:
+            logging.error(
+                "The daemon was stopped to migrate %s, but the database is newer "
+                "than this build; the daemon has not been restarted.", db_path)
+        raise
+    except Exception as exc:
+        if was_running:
+            logging.error(
+                "Applying pending migrations to %s failed: %s. The daemon was "
+                "stopped for the migration and has not been restarted.",
+                db_path, exc)
+            raise SchemaMigrationFailedError(
+                f"Applying pending migrations to {db_path} failed: {exc}. The "
+                f"daemon was stopped for the migration and has not been "
+                f"restarted; it is not running now.") from exc
+        raise
+
+    if was_running:
+        started, message = controller.start()
+        if started:
+            logging.info(
+                "Schema migration applied to %s; the daemon was restarted: %s",
+                db_path, message)
+        else:
+            logging.warning(
+                "Schema migration applied to %s, but the daemon could not be "
+                "restarted: %s", db_path, message)
