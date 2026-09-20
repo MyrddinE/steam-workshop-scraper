@@ -302,9 +302,11 @@ def wire_block(row: dict, phrase: str) -> str:
     The request is written in the shape of the reply we want back, so translating
     is copying a structure rather than building one. That is the point: the JSON
     envelope this replaced required the model to escape every backslash and quote in
-    the translated text, and the escapes it got wrong (`Invalid \\escape`,
-    `Invalid \\uXXXX escape`) discarded the whole request -- 83 of 339 attempts,
-    measured in the live log, each one billed and thrown away.
+    the translated text and to emit the whole array in one piece, so the escapes it
+    got wrong (`Invalid \\escape`, `Invalid \\uXXXX escape`) and the replies it
+    truncated mid-string (`Unterminated string starting at: ...`) discarded the whole
+    request -- 83 of 339 attempts, measured in the live log, each one billed and
+    thrown away.
     """
     return f"{boundary_line(row, phrase)}\n{row.get('original_text') or ''}"
 
