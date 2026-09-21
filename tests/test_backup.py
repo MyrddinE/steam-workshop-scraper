@@ -449,6 +449,25 @@ def test_an_unreadable_volume_does_not_block_the_snapshot(monkeypatch, db_path, 
     assert os.path.isfile(dest)
 
 
+def test_an_unusable_free_space_reading_does_not_block_the_snapshot(monkeypatch, db_path, tmp_path):
+    """A reading that cannot be turned into a number is no evidence either.
+
+    The pre-change comparison raised ``TypeError`` here, which is not an
+    ``OSError`` and so escaped the guard; the snapshot must not be refused, or
+    aborted, on a reading that says nothing.
+    """
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 10})
+    dest = _dest(tmp_path)
+    monkeypatch.setattr(
+        backup.shutil, "disk_usage",
+        lambda _dir: types.SimpleNamespace(total=None, used=None, free=None))
+
+    meta = snapshot_database(db_path, dest)
+
+    assert meta["rows"] == 1
+    assert os.path.isfile(dest)
+
+
 def test_exactly_enough_free_space_proceeds(monkeypatch, db_path, tmp_path):
     """The boundary is inclusive: exactly source size + headroom is enough."""
     insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 10})
