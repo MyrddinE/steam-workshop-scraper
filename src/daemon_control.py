@@ -25,6 +25,7 @@ from src.database import (
     newer_schema_error,
     read_schema_version,
 )
+from src import log_rotation
 
 
 # How long a graceful stop waits before escalating to a forced kill. It is
@@ -161,6 +162,23 @@ class DaemonController:
     def log_file(self) -> str | None:
         logging_config = self.config.get("logging") or {}
         return logging_config.get("file") or None
+
+    def log_status(self) -> dict:
+        """The daemon page's log readout, button state and last rotation outcome.
+
+        One call serves both front ends, so the size and the wording cannot
+        differ between them; ``log_readout`` is the exact line each draws.
+        """
+        return log_rotation.log_status(self.log_file())
+
+    def rotate_log(self) -> dict:
+        """Start a manual rotation of the configured log.
+
+        Returns the immediate outcome; the compression continues on a background
+        thread and its result is read back through :meth:`log_status`. Manual
+        only -- nothing calls this on a timer or at startup.
+        """
+        return log_rotation.rotate_log(self.log_file())
 
     def read_pid(self) -> int | None:
         try:

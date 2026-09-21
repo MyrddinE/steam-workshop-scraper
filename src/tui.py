@@ -24,6 +24,7 @@ from src import pending
 from src import subscription
 from src import subscribe_engine
 from src import crash
+from src import log_rotation
 from src import workshop_folders
 from src.web_worker import configured_web_delay
 from src.config import ConfigError, load_config, save_config
@@ -883,6 +884,10 @@ class DaemonManagerScreen(Screen):
         # stop, so only one may be in flight and the controls are disabled while
         # it runs.
         self._transitioning = False
+        # A rotation hands its compression to a background thread; the button is
+        # disabled from the controller's own status on every tick, so a second
+        # press cannot start a second rotation.
+        self._rotating = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -896,18 +901,23 @@ class DaemonManagerScreen(Screen):
                 yield Button("Close", id="dm-close")
             with Vertical(id="dm-log", classes="dm-panel"):
                 yield Label("[b]Log Output[/b]")
+                # The size readout and the manual rotation control sit together,
+                # above the log itself. Small and quiet: a status line, the
+                # button, and the last rotation's outcome.
+                yield Static(id="dm-log-size")
+                yield Button(log_rotation.ROTATE_BUTTON_LABEL, id="dm-rotate")
+                yield Static(id="dm-log-message", markup=False)
                 yield RichLog(id="dm-log-view", auto_scroll=True, wrap=True, max_lines=200)
         yield Footer()
 
     def on_mount(self) -> None:
         self.query_one("#dm-controls").styles.width = 20
-        self._update_status()
         # Fill the pane on first paint, then keep polling. The old `tail -f`
         # subprocess is gone: it read the log a line at a time, which is too slow
         # for a production log. `tail_log` reads at most TAIL_BYTES per call, the
         # same bounded call the web panel makes.
-        self._poll_tail()
-        self._log_timer = self.set_interval(2.0, self._poll_tail)
+        self._tick()
+        self._log_timer = self.set_interval(2.0, self._tick)
 
     def on_unmount(self) -> None:
         # The screen is gone; stop asking the controller for log lines.
@@ -915,12 +925,72 @@ class DaemonManagerScreen(Screen):
             self._log_timer.stop()
             self._log_timer = None
 
+    def _tick(self) -> None:
+        """One two-second refresh: status, log readout, and the tail."""
+        self._update_status()
+        self._refresh_log_info()
+        self._poll_tail()
+
     def _update_status(self) -> None:
         status = self.controller.status()
         if status["running"]:
             self.query_one("#dm-status", Static).update(f"[green]Running (PID: {status['pid']})[/green]")
         else:
             self.query_one("#dm-status", Static).update("[red]Not running[/red]")
+
+    def _refresh_log_info(self) -> None:
+        """Draw the shared readout and the last rotation's outcome.
+
+        The strings come from ``src/log_rotation.py`` -- the same ones the web
+        panel's poll renders -- so the two front ends show the same number and the
+        same words, and the button's enabled state follows a rotation started in
+        either process.
+        """
+        try:
+            info = self.controller.log_status()
+        # A poll failure must not take the screen down; the next tick tries again.
+        except Exception as exc:
+            logging.debug("Daemon log status failed: %s", exc)
+            return
+        try:
+            self.query_one("#dm-log-size", Static).update(info.get("log_readout", ""))
+            self.query_one("#dm-log-message", Static).update(
+                info.get("rotation_message") or "")
+            self.query_one("#dm-rotate", Button).disabled = (
+                bool(info.get("rotating")) or not info.get("can_rotate"))
+        except Exception:
+            # The screen can be torn down mid-tick.
+            return
+
+    def _begin_rotation(self) -> None:
+        """Rotate on a worker: the rename is fast but the filesystem can block."""
+        if self._rotating:
+            return
+        self._rotating = True
+        self.query_one("#dm-rotate", Button).disabled = True
+        self.query_one("#dm-log-size", Static).update(log_rotation.ROTATING_LABEL)
+
+        def work():
+            try:
+                result = self.controller.rotate_log()
+            except Exception as exc:
+                result = {"ok": False, "started": False,
+                          "message": f"Rotation failed: {exc}"}
+            try:
+                self.app.call_from_thread(self._rotation_started, result)
+            except RuntimeError:
+                logging.debug("Rotation finished with no app to report to")
+
+        self.run_worker(work, name="daemon-rotate", group="daemon",
+                        thread=True, exclusive=True, exit_on_error=False)
+
+    def _rotation_started(self, result: dict) -> None:
+        """Report an outcome that will not appear in the polled status line."""
+        self._rotating = False
+        if result.get("message") and not result.get("started"):
+            self.app.notify(result["message"],
+                            severity="information" if result.get("ok") else "warning")
+        self._refresh_log_info()
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         for button_id in ("dm-start", "dm-stop", "dm-restart"):
@@ -1011,6 +1081,10 @@ class DaemonManagerScreen(Screen):
             # One call rather than stop-then-start, so a restart cannot interleave
             # with another press between the two halves.
             self._begin_transition("Restarting", self.controller.restart)
+        elif event.button.id == "dm-rotate":
+            # Manual only: no timer and no size trigger calls this. It renames the
+            # live log at once and compresses the archive off the event loop.
+            self._begin_rotation()
         elif event.button.id == "dm-close":
             self.app.pop_screen()
 
@@ -3410,8 +3484,11 @@ def main():
         # cp1252, which corrupts every non-ASCII character the moment the file is
         # read back as UTF-8 and silently drops any record it cannot represent
         # (CJK titles, which this project is full of). See `_log_file_handler` in
-        # `src/daemon_runner.py`.
-        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+        # `src/daemon_runner.py`. The same handler also reopens the file when the
+        # operator rotates it -- the TUI is one of the two processes holding the
+        # daemon log open, so a rename alone would leave this writer on the
+        # renamed inode. See `src/log_rotation.py`.
+        handlers.append(log_rotation.log_file_handler(log_file))
         
     if handlers:
         logging.basicConfig(

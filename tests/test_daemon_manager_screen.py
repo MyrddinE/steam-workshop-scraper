@@ -17,8 +17,9 @@ from pathlib import Path
 
 import pytest
 from textual.app import App
-from textual.widgets import Button
+from textual.widgets import Button, Static
 
+from src import log_rotation
 from src.tui import DaemonManagerScreen
 from tests.conftest import ASYNC_PAUSE
 
@@ -31,6 +32,10 @@ class _SlowController:
         self.started = False
         self.finished = False
         self.calls: list[str] = []
+        # The log readout and rotation state the controller would report.
+        self.log_readout = "Log size: 2.0 KB"
+        self.rotating = False
+        self.rotation_message = ""
 
     def status(self):
         return {"running": not self.finished, "pid": None if self.finished else 4242}
@@ -43,6 +48,23 @@ class _SlowController:
 
     def tail_log(self, since_offset=0, max_bytes=0, max_lines=0):
         return {"lines": [], "offset": 0, "reset": False}
+
+    def log_status(self):
+        return {
+            "log_file": "daemon.log",
+            "log_size": 2048,
+            "log_readout": self.log_readout,
+            "can_rotate": True,
+            "rotating": self.rotating,
+            "rotation_ok": True,
+            "rotation_message": self.rotation_message,
+        }
+
+    def rotate_log(self):
+        self.calls.append("rotate")
+        self.rotating = True
+        return {"ok": True, "started": True,
+                "message": "Rotating… (2.0 KB)"}
 
     def _transition(self, name: str):
         self.calls.append(name)
@@ -163,3 +185,66 @@ def test_the_handler_hands_the_work_to_a_worker():
     assert "self.controller.restart()" not in handler
     assert handler.count("_begin_transition") == 3, \
         "every transition must go through the worker"
+
+
+# ── the manual log rotation control ──────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_the_daemon_page_shows_the_shared_log_readout_and_button():
+    """UI parity: the same readout line and the same button wording as the web.
+
+    Both come from `src/log_rotation.py` -- the readout through the controller's
+    `log_status`, the label through `ROTATE_BUTTON_LABEL` -- so a change on one
+    side cannot silently leave the other behind.
+    """
+    controller = _SlowController()
+    app = App()
+    async with app.run_test() as pilot:
+        screen = DaemonManagerScreen(controller)
+        app.push_screen(screen)
+        await pilot.pause(ASYNC_PAUSE)
+
+        assert str(screen.query_one("#dm-log-size", Static).render()) == controller.log_readout
+        assert screen.query_one("#dm-rotate", Button).label.plain == log_rotation.ROTATE_BUTTON_LABEL
+        assert not screen.query_one("#dm-rotate", Button).disabled
+
+
+@pytest.mark.asyncio
+async def test_the_rotate_button_asks_the_controller_and_is_disabled_while_running():
+    controller = _SlowController()
+    app = App()
+    async with app.run_test() as pilot:
+        screen = DaemonManagerScreen(controller)
+        app.push_screen(screen)
+        await pilot.pause(ASYNC_PAUSE)
+
+        await pilot.click("#dm-rotate")
+        await pilot.pause(ASYNC_PAUSE)
+
+        assert controller.calls == ["rotate"]
+        # The worker returned, but the compression is still running, so the
+        # controller's own status keeps the button disabled.
+        assert screen.query_one("#dm-rotate", Button).disabled
+
+        # The background thread finishes: the outcome line appears and the button
+        # comes back.
+        controller.rotating = False
+        controller.rotation_message = "Rotated: logs/daemon-x.log.gz (1.0 KB)"
+        screen._refresh_log_info()
+        assert str(screen.query_one("#dm-log-message", Static).render()) == controller.rotation_message
+        assert not screen.query_one("#dm-rotate", Button).disabled
+        assert not screen._rotating
+
+
+@pytest.mark.asyncio
+async def test_a_second_rotate_press_while_one_is_in_flight_is_ignored():
+    controller = _SlowController()
+    app = App()
+    async with app.run_test() as pilot:
+        screen = DaemonManagerScreen(controller)
+        app.push_screen(screen)
+        await pilot.pause(ASYNC_PAUSE)
+
+        screen._rotating = True
+        screen._begin_rotation()
+        assert controller.calls == [], "the press must not start a second rotation"

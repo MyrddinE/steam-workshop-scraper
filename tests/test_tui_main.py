@@ -38,7 +38,7 @@ def test_tui_main_logging_configured(tmp_path):
     with patch('sys.argv', ['tui.py', str(config_file)]), \
          patch('src.tui.ScraperApp') as mock_app, \
          patch('logging.basicConfig') as mock_basic_config, \
-         patch('logging.FileHandler') as mock_file_handler:
+         patch('src.tui.log_rotation.log_file_handler') as mock_file_handler:
 
         mock_fh_instance = MagicMock()
         mock_file_handler.return_value = mock_fh_instance
@@ -46,10 +46,12 @@ def test_tui_main_logging_configured(tmp_path):
         import src.tui
         src.tui.main()
 
-        # UTF-8 explicitly: the platform default on Windows is cp1252, which
-        # corrupts non-ASCII on the way back in and silently drops records it
-        # cannot encode. See `_log_file_handler` in src/daemon_runner.py.
-        mock_file_handler.assert_called_once_with(str(log_file), encoding="utf-8")
+        # The shared factory pins UTF-8 (the platform default on Windows is
+        # cp1252, which corrupts non-ASCII on the way back in and silently drops
+        # records it cannot encode) and makes the handler rotation-aware, so the
+        # TUI reopens the fresh log when the operator rotates it. See
+        # `src/log_rotation.py`.
+        mock_file_handler.assert_called_once_with(str(log_file))
         kwargs = mock_basic_config.call_args.kwargs
         assert kwargs["level"] == logging.WARNING
         assert mock_fh_instance in kwargs["handlers"]
