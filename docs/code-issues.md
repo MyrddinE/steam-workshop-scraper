@@ -63,6 +63,12 @@ The line reports `count_never_fetched_items` as "items that have never been fetc
 
 `daemon_runner.main()` writes `.daemon.pid` unconditionally and then calls `initialize_database`, with no check for a daemon already running, so starting `python -m src.daemon_runner` by hand while another runs overwrites the live PID file and applies pending migrations under it — the hazard issue 63 just closed for the UI path. The first daemon watches for the file's *absence* rather than its contents, so it keeps running; the two then share one PID file, and whichever exits first removes it and stops the other. `DaemonController.start()` already checks `is_running()` before spawning, so the UI path is guarded and this is the operator-error path only. Closing it needs a read-before-overwrite probe of the existing PID file plus a liveness check, which conflicts with the deliberate “write the PID file before migrating” order and revives the stale/recycled-PID hazard the controller was fixed to avoid — so it is recorded rather than patched. [threading.md](threading.md), [cross-platform.md](cross-platform.md)
 
+### Issue 66
+
+**A dead item can still sit in the translation queue** — *Open*, Medium
+
+`_settle_api_failure` (`src/daemon.py:1012`) marks an item dead — `fetch_status = -1` — and clears the four item-level queue flags, but it never deletes the item's rows from `translation_queue`; the only `DELETE` from that table is in `src/translator.py:752`, after a successful translation. The translator's poll selects **every** row of the table (`translation_queue_predicate()` is `1`, `src/database.py:3477`) with no dead-item guard, so a dead item's fields are still handed out and paid for. Nothing reports it either: `queued_anywhere_predicate()` (`src/database.py:3501`) is built from the item-level mirror `translation_priority_predicate()` rather than from the consumer's queue, so `dead_queued` counts only the flag half of the handoff — while the handoff table itself names the translation consumer's predicate as “any `translation_queue` row”. *Measured* on the schema-v35 snapshot (1,725,544 rows, 68,323 dead): `dead_queued` reads **0** while **910 dead items hold 1,016 `translation_queue` rows**, every one of them with the mirror cleared; the v22 backup shows 914 items and 1,022 rows. This is the population the stage-handoff plan itself measured as “1 dead item is still queued for translation”. [data-pipeline.md](data-pipeline.md)
+
 ## Recently closed
 
 Removed from the list above rather than marked resolved. Each is now documented as current
