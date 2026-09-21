@@ -98,7 +98,7 @@ import re
 from dataclasses import dataclass
 
 from src import activity, capture, pacing, session_health, web_scraper
-from src.config import config_value_with_legacy, save_config
+from src.config import save_config, warn_retired_key
 from src.database import get_connection, mark_own_subscribed
 from src.web_worker import (
     WEB_DELAY_FLOOR,
@@ -381,11 +381,12 @@ def resolve_subscribe_credentials(config: dict, token_fallback: str = ""):
     the caller decides whether that is a refusal.
     """
     cookies = web_scraper._build_workshop_cookies(config)
+    session = config.get("session", {})
+    if "id" in session:
+        warn_retired_key("session", "id", "csrf_token")
     token = (
         token_fallback
-        or config_value_with_legacy(
-            config.get("session", {}), "csrf_token", "id", "", section_name="session"
-        )
+        or session.get("csrf_token")
         or ""
     )
     login = cookies.get("steamLoginSecure", "")

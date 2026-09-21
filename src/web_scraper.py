@@ -5,7 +5,7 @@ import sys
 import threading
 import requests.utils
 import logging
-from src.config import config_value_with_legacy, load_config, login_secure_value
+from src.config import load_config, login_secure_value, warn_retired_key
 from src.firefox_cookies import steam_community_cookies, firefox_version
 
 # The selectors scrape_extended_details depends on. Named so a selector miss can
@@ -286,9 +286,10 @@ def _csrf_token(config: dict) -> str:
         value = steam_community_cookies().get("sessionid")
         if value:
             return value
-    return config_value_with_legacy(
-        config.get("session", {}), "csrf_token", "id", "", section_name="session"
-    ) or ""
+    session = config.get("session", {})
+    if "id" in session:
+        warn_retired_key("session", "id", "csrf_token")
+    return session.get("csrf_token") or ""
 
 
 def _resolve_login_secure(config: dict) -> str:
