@@ -37,7 +37,9 @@ _TEMP_SUFFIX = ".tmp"
 # outbox would still need a real file lock, which is not implemented.
 _MANIFEST_LOCK = threading.Lock()
 
-# How much headroom beyond the source size we want before starting, best-effort.
+# Headroom beyond the source size required before a snapshot starts. A snapshot
+# is written as a full second copy in the destination directory, so free space
+# below source size + this margin is positive evidence the write cannot finish.
 _FREE_SPACE_HEADROOM = 16 * 1024 * 1024
 
 # Whether the stale-artifact warning has already been emitted in this process.
@@ -240,23 +242,38 @@ def _warn_about_stale_artefacts(dest_dir: str, dest_path: str) -> None:
     )
 
 
-def _check_free_space(source_db_path: str, dest_dir: str) -> None:
-    """Best-effort warning when the destination volume is too tight.
+def _require_free_space(source_db_path: str, dest_dir: str) -> None:
+    """Refuse to start the snapshot when the volume demonstrably cannot hold it.
 
-    Never raises: a wrong or unavailable reading must not block an otherwise
-    valid backup.
+    The snapshot is written as a complete second copy in the destination
+    directory before ``os.replace`` publishes it, so one run needs room for
+    roughly two copies of the database. When that room is missing the write
+    fails partway through, after the run has been spent; this raises
+    :class:`BackupError` first instead, naming the free bytes, the source size
+    and the total needed. It runs before the stale-temp cleanup and before the
+    copy, so a refusal leaves the previous snapshot and the rest of the
+    destination directory exactly as they were.
+
+    Only *positive* evidence refuses. If ``os.path.getsize`` or
+    ``shutil.disk_usage`` raises ``OSError``, or the reading cannot be turned
+    into a number, the check is skipped with a debug log and the snapshot
+    proceeds: a wrong or unavailable reading must not block an otherwise valid
+    backup.
     """
     try:
         source_size = os.path.getsize(source_db_path)
         usage = shutil.disk_usage(dest_dir)
-    except OSError as exc:
+        free = int(usage.free)
+    except (OSError, TypeError, ValueError, AttributeError) as exc:
         logging.debug("Could not check free space for backup: %s", exc)
         return
-    if usage.free < source_size + _FREE_SPACE_HEADROOM:
-        logging.warning(
-            "Low disk space for database backup: %s bytes free, source is %s bytes "
-            "(need roughly %s)",
-            usage.free, source_size, source_size + _FREE_SPACE_HEADROOM,
+
+    needed = source_size + _FREE_SPACE_HEADROOM
+    if free < needed:
+        raise BackupError(
+            f"refusing to snapshot {source_db_path}: {free} bytes free in "
+            f"{dest_dir}, source is {source_size} bytes, need {needed} bytes "
+            f"(a second full copy plus {_FREE_SPACE_HEADROOM} bytes headroom)"
         )
 
 
@@ -271,19 +288,30 @@ def snapshot_database(db_path: str, dest_path: str) -> dict:
     the temp file lives next to the destination rather than in the system temp
     directory.
 
-    On any failure the previous ``dest_path`` is left completely untouched, the
-    temp file is removed, and :class:`BackupError` is raised. On success the
-    metadata dict is returned: ``bytes``, ``sha256``, ``taken_at`` (ISO UTC),
-    ``rows`` and ``max_api_fetched_at``.
+    Only *reads* cross from the source database's volume: the ``VACUUM INTO``
+    write, the verification of the copy and the ``os.replace`` publish all
+    happen on the destination (outbox) volume. The source can therefore live on
+    a different drive, and no cross-volume move is relied on.
+
+    The write needs room for a complete second copy, so a destination volume
+    with demonstrably too little free space is refused before anything is
+    written (:func:`_require_free_space`). On any failure the previous
+    ``dest_path`` is left completely untouched, the temp file is removed, and
+    :class:`BackupError` is raised. On success the metadata dict is returned:
+    ``bytes``, ``sha256``, ``taken_at`` (ISO UTC), ``rows`` and
+    ``max_api_fetched_at``.
     """
     dest_dir = os.path.dirname(os.path.abspath(dest_path))
     os.makedirs(dest_dir, exist_ok=True)
     temp_path = dest_path + _TEMP_SUFFIX
 
+    # Guard first: a refusal must not even tidy a stale temp, let alone start a
+    # copy the volume cannot hold.
+    _require_free_space(db_path, dest_dir)
+
     # VACUUM INTO refuses to overwrite, so clear any stale temp file from a
     # previous crashed/failed run before starting.
     _remove_quietly(temp_path)
-    _check_free_space(db_path, dest_dir)
 
     taken_at = _utc_now_iso()
 

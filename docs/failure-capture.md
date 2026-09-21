@@ -288,7 +288,19 @@ The outbox holds two kinds of thing, and they are cleaned differently.
   removes the file once the transfer is verified. A failure that has not been
   reviewed is never removed, however old it gets.
 * `<outbox_dir>/db/` is the database backup, replaced in place by the backup
-  thread. It is not a capture and this sweep does not touch it.
+  thread. It is not a capture and this sweep does not touch it. A snapshot is
+  written as a complete second copy beside the destination before `os.replace`
+  publishes it, so one run needs room for roughly two copies of the database.
+  When the destination volume demonstrably has less than the source size plus a
+  fixed headroom free, the backup **refuses up front** (`_require_free_space`)
+  and leaves the previous snapshot byte-identical, rather than starting a write
+  it cannot finish. A reading that is unavailable — `os.path.getsize` or
+  `shutil.disk_usage` raising `OSError` — is not evidence of no room, so it is
+  skipped and the snapshot proceeds. Only *reads* cross from the source
+  database's volume: the write, the verification of the copy and the
+  `os.replace` publish all happen in `<outbox_dir>/db/` itself, so the source
+  database and the outbox may live on different drives and no cross-volume move
+  is relied on.
 
 Removing a capture also drops its `manifest.json` entry in the same operation
 (`backup.remove_manifest_entries`), and the pull tool does the same when it moves

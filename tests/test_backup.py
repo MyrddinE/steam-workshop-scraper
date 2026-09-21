@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sqlite3
+import types
 from datetime import datetime
 from unittest.mock import patch
 
@@ -419,3 +420,140 @@ def test_the_stale_artifact_report_is_said_once(monkeypatch, db_path, tmp_path, 
         snapshot_database(db_path, dest)
 
     assert caplog.text.count("does not manage") == 1
+
+
+# ── free space: refuse before starting a copy that cannot fit ─────────────────
+
+def _usage_with_free(free: int):
+    """A stand-in for ``shutil.disk_usage``'s named tuple with ``free`` set."""
+    return types.SimpleNamespace(total=free, used=0, free=free)
+
+
+def _needed(db_path) -> int:
+    return os.path.getsize(db_path) + backup._FREE_SPACE_HEADROOM
+
+
+def test_an_unreadable_volume_does_not_block_the_snapshot(monkeypatch, db_path, tmp_path):
+    """No evidence proceeds: an unavailable reading must not refuse a backup."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 10})
+    dest = _dest(tmp_path)
+
+    def _unavailable(_dir):
+        raise OSError("statvfs unavailable")
+
+    monkeypatch.setattr(backup.shutil, "disk_usage", _unavailable)
+
+    meta = snapshot_database(db_path, dest)
+
+    assert meta["rows"] == 1
+    assert os.path.isfile(dest)
+
+
+def test_an_unusable_free_space_reading_does_not_block_the_snapshot(monkeypatch, db_path, tmp_path):
+    """A reading that cannot be turned into a number is no evidence either.
+
+    The pre-change comparison raised ``TypeError`` here, which is not an
+    ``OSError`` and so escaped the guard; the snapshot must not be refused, or
+    aborted, on a reading that says nothing.
+    """
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 10})
+    dest = _dest(tmp_path)
+    monkeypatch.setattr(
+        backup.shutil, "disk_usage",
+        lambda _dir: types.SimpleNamespace(total=None, used=None, free=None))
+
+    meta = snapshot_database(db_path, dest)
+
+    assert meta["rows"] == 1
+    assert os.path.isfile(dest)
+
+
+def test_exactly_enough_free_space_proceeds(monkeypatch, db_path, tmp_path):
+    """The boundary is inclusive: exactly source size + headroom is enough."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 10})
+    dest = _dest(tmp_path)
+    free = _needed(db_path)
+    monkeypatch.setattr(backup.shutil, "disk_usage",
+                        lambda _dir: _usage_with_free(free))
+
+    meta = snapshot_database(db_path, dest)
+
+    assert meta["rows"] == 1
+    assert os.path.isfile(dest)
+
+
+def test_a_snapshot_the_volume_cannot_hold_is_refused(monkeypatch, db_path, tmp_path):
+    """Positive evidence of no room refuses; the previous snapshot survives.
+
+    A snapshot is written as a complete second copy in the destination directory
+    before ``os.replace`` publishes it, so one run needs room for roughly two
+    copies. Starting the write anyway spends the run and then fails partway; the
+    owner's answer is to refuse up front and leave the last good copy in place.
+    """
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 10})
+    dest = _dest(tmp_path)
+    snapshot_database(db_path, dest)  # the previous, known-good snapshot
+
+    before = open(dest, "rb").read()
+    before_mtime = os.path.getmtime(dest)
+    source_size = os.path.getsize(db_path)
+    free = source_size + backup._FREE_SPACE_HEADROOM - 1  # one byte short
+    monkeypatch.setattr(backup.shutil, "disk_usage",
+                        lambda _dir: _usage_with_free(free))
+
+    with pytest.raises(BackupError) as excinfo:
+        snapshot_database(db_path, dest)
+
+    message = str(excinfo.value)
+    assert str(free) in message           # the free bytes
+    assert str(source_size) in message    # the source size
+    assert str(source_size + backup._FREE_SPACE_HEADROOM) in message  # the total
+    # The previous snapshot is byte-identical, its mtime untouched, and nothing
+    # in the destination directory was added, removed or replaced.
+    assert open(dest, "rb").read() == before
+    assert os.path.getmtime(dest) == before_mtime
+    assert os.listdir(os.path.dirname(dest)) == [os.path.basename(dest)]
+
+
+def test_one_byte_short_of_the_boundary_refuses(monkeypatch, db_path, tmp_path):
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 10})
+    dest = _dest(tmp_path)
+    monkeypatch.setattr(backup.shutil, "disk_usage",
+                        lambda _dir: _usage_with_free(_needed(db_path) - 1))
+
+    with pytest.raises(BackupError, match="refusing to snapshot"):
+        snapshot_database(db_path, dest)
+
+
+def test_a_refusal_leaves_a_stale_temp_file_untouched(monkeypatch, db_path, tmp_path):
+    """The guard runs before the stale-temp cleanup, so a refusal changes nothing."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 10})
+    dest = _dest(tmp_path)
+    snapshot_database(db_path, dest)
+    stale = dest + ".tmp"
+    with open(stale, "wb") as handle:
+        handle.write(b"stale garbage from a previous crash")
+
+    monkeypatch.setattr(backup.shutil, "disk_usage",
+                        lambda _dir: _usage_with_free(_needed(db_path) - 1))
+    with pytest.raises(BackupError):
+        snapshot_database(db_path, dest)
+
+    assert os.path.isfile(stale), "a refusal must not tidy the destination"
+    assert open(stale, "rb").read() == b"stale garbage from a previous crash"
+
+
+def test_snapshot_now_refusal_returns_none_and_logs_once(monkeypatch, db_path, tmp_path, caplog):
+    """One line, from ``snapshot_now``; the guard itself must not also warn."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 10})
+    outbox = str(tmp_path / "outbox")
+    worker = BackupThread(db_path, outbox, 60)
+    monkeypatch.setattr(backup.shutil, "disk_usage",
+                        lambda _dir: _usage_with_free(_needed(db_path) - 1))
+
+    with caplog.at_level(logging.ERROR):
+        assert worker.snapshot_now() is None
+
+    assert caplog.text.count("Database backup failed (scrape loop unaffected)") == 1
+    assert not os.path.exists(worker.dest_path)
+
