@@ -1,6 +1,7 @@
 import time
 import math
 import signal
+import sqlite3
 import json
 import logging
 import os
@@ -1319,7 +1320,22 @@ class Daemon:
         if self._backup_worker is not None:
             self._backup_worker.start()
         while self.running:
-            self.process_batch()
+            try:
+                self.process_batch()
+            except sqlite3.OperationalError as exc:
+                # A write lock that outlived the connection's 15 s busy timeout
+                # is a lost iteration, not the end of the daemon: the rows this
+                # pass did not reach are still queued, so nothing is recovered
+                # per item -- the next pass simply retries them.
+                logging.warning(
+                    "Database locked during a fetch pass; leaving the queue "
+                    "alone and retrying in %gs: %s",
+                    pacing.DB_LOCK_RETRY_SECONDS, exc)
+                # Responsive, so a stop is not held for the whole pause.
+                pacing.wait(pacing.DB_LOCK_RETRY_SECONDS, lambda: self.running)
+            # Deliberately outside the except: the PID-file stop must be checked
+            # every iteration, including one that lost the lock. Skipping it
+            # here would postpone a graceful stop for as long as the lock lasts.
             self._pid_file_removed()
         logging.info("Daemon gracefully exited.")
         self._shutdown_workers()

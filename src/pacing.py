@@ -56,6 +56,13 @@ PERSIST_STEP_SECONDS = 0.05
 # need the precision the arithmetic does.
 PERSIST_DECIMALS = 2
 
+# How long a loop waits after losing a SQLite lock race before it tries again.
+# The connection's busy timeout is 15 s, so reaching this pause means a writer
+# held the lock longer than the timeout allowed; retrying at once would usually
+# meet the same lock and spin. Every loop that meets a lock -- the daemon's main
+# loop, the web scraper and the image downloader -- shares this one value.
+DB_LOCK_RETRY_SECONDS = 5.0
+
 
 def decay(delay: float, elapsed: float, floor: float,
           half_life: float = HALF_LIFE_SECONDS) -> float:
