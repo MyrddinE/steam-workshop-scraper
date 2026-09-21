@@ -227,7 +227,7 @@ def _high_water(conn, params):
     return conn.execute("SELECT MAX(api_fetched_at) AS v FROM workshop_items").fetchone()["v"]
 
 
-@metric("item_counts", 2, "Item counts, split by whether the item is still alive.")
+@metric("item_counts", 2, "Item counts: live, dead and ignored, with the overall total.")
 def _item_counts(conn, params) -> dict:
     """The table split into live, dead and ignored rows, plus the total.
 
