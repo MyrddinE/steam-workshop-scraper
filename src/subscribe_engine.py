@@ -1,4 +1,4 @@
-"""The browser-free subscribe engine: one page read, one "click", one re-read.
+"""The browser-free subscribe engine: one page read, one "click", one answer.
 
 The owner's subscription is a fact only Steam knows, and the project learned --
 by measuring it against production -- exactly how little of it can be learned
@@ -36,41 +36,47 @@ The request *shape* lives here too, and ``/api/subscribe`` builds its POST from
 :func:`resolve_subscribe_credentials`, :func:`subscribe_headers` and
 :func:`subscribe_form` rather than keeping a second copy.
 
-Why the re-read is authoritative
---------------------------------
+What decides an attempt
+-----------------------
 
-The engine never trusts ``{"success": 1}`` on its own. After the POST it reads
-the item page again and decides from the button:
+The engine never trusts ``{"success": 1}`` as proof that the *state* changed.
+On the default path the pre-read decides what is asked, and the POST's own answer
+is the record of what was accepted:
 
-* ``toggled`` present -> the item is subscribed. ``mark_own_subscribed`` is
-  recorded (which also clears the queue flag) and the session is marked
-  accepted. If Steam's JSON said something other than ``1``, the outcome's
-  message names the disagreement; the page still wins.
-* ``toggled`` absent -> the item is not subscribed. If Steam said ``1``, the
-  two sources disagree and :data:`DISAGREEMENT` is reported and **nothing is
-  recorded** -- the item stays queued. Guessing here is what would silently mark
-  an unsubscribed item as subscribed.
-* No button on the re-read -> :data:`THROTTLED` when the page is Steam's
-  "too many requests" shell (the item is left queued, never failed), otherwise
-  :data:`REFUSED` -- cannot tell.
+* ``toggled`` on the pre-read -> the item is already subscribed.
+  :func:`mark_own_subscribed` is recorded (which also clears the queue flag) and
+  **no request is sent at all**.
+* Otherwise the POST is sent, and with :data:`VERIFY_AFTER_SUBSCRIBE` ``False``
+  Steam's ``{"success": 1}`` is the record:
+  :func:`record_confirmed_subscription` is called and the outcome is
+  :data:`SUBSCRIBED`; any other answer is a :data:`FAILED` worded by
+  :func:`_steam_failure_message`. That is the read-click shape -- one page read,
+  one click, and the POST's own answer as the record. The JSON cannot
+  distinguish "newly subscribed" from "already subscribed"; it says only that
+  the request was accepted, which is why the pre-read stays in front of it
+  rather than the engine posting blind.
 
-**The confirmation read is evidence-gathering, not the design.** Read-click-read
-costs three requests per item, and the production run measured why the third can
-eventually go: the endpoint is safe on an already-subscribed item -- the POST
-returned ``{"success": 1}`` and the page stayed ``toggled``, byte-identical --
-and the response body cannot distinguish "newly subscribed" from "already
-subscribed". That is why the page read is the only confirmation *available*,
-not why it must be permanent. The step therefore lives alone in
-:func:`confirm_subscription`, gated by the module-level
-:data:`VERIFY_AFTER_SUBSCRIBE`, so retiring it later is one call site and one
-switch and cannot perturb the click, the recording or the capture. The two reads
-that remain are kept deliberately: the pre-read both guards against the endpoint
-ever turning out to be a toggle and skips the POST for an item that is already
-subscribed, which is what makes re-running a queue cheap. That skip records the
-observation like the confirmed path does -- the pre-read's ``toggled`` is the
-same page authority -- so an item already subscribed drains from the queue
-through :func:`mark_own_subscribed` instead of being read again on every pass.
-The retirement order is in ``docs/future-plans.md``.
+**The confirmation read is retired by default.** Read-click-read costs three
+requests per item -- twice the gated page reads of read-click -- and the
+production run measured why the third can go: the endpoint is safe on an
+already-subscribed item (the POST returned ``{"success": 1}`` and the page stayed
+``toggled``, byte-identical), the response body cannot distinguish the two
+cases, and the owner has since run the browser-free flow in production and found
+the results consistent. Setting :data:`VERIFY_AFTER_SUBSCRIBE` to ``True``
+restores it unchanged: :func:`confirm_subscription` reads the page again and the
+button, not the JSON, decides -- ``toggled`` records the subscription;
+``toggled`` absent beside ``success: 1`` is :data:`DISAGREEMENT` and records
+nothing; a button-less re-read is :data:`THROTTLED` when it is Steam's "too many
+requests" shell, otherwise :data:`REFUSED`. The step lives alone in
+:func:`confirm_subscription`, so the switch cannot perturb the pre-read, the
+click, the recording or the capture. The pre-read is kept deliberately: it both
+guards against the endpoint ever turning out to be a toggle and skips the POST
+for an item that is already subscribed, which is what makes re-running a queue
+cheap. That skip records the observation the confirmed path records -- the
+pre-read's ``toggled`` is the same page authority -- so an item already
+subscribed drains from the queue through :func:`mark_own_subscribed` instead of
+being read again on every pass. The retirement order is in
+``docs/future-plans.md``.
 
 Every page read and every POST is captured through
 :func:`src.capture.record_web_download` under ``item_page`` and ``subscribe``,
@@ -78,12 +84,14 @@ using the same ``web_downloads`` switch as the rest of the scraper. The switch's
 credential elision is the mechanism that keeps the login cookie out of the
 outbox; nothing here bypasses it.
 
-**Pacing.** Both page reads are page loads, so they honour the web scraper's
+**Pacing.** Every page read is a page load, so it honours the web scraper's
 adaptive interval through :class:`WebInterval` -- the same persisted
 ``daemon.web_delay_seconds`` the daemon's worker moves, re-read from the config
 rather than snapshotted, decayed on a clean read and doubled on a throttle page.
-The subscribe POST is the button click, a browser-initiated XHR rather than a
-page load, so it is deliberately exempt and never waits.
+On the default path an item pays that once; with :data:`VERIFY_AFTER_SUBSCRIBE`
+on, the confirmation read pays it too. The subscribe POST is the button click, a
+browser-initiated XHR rather than a page load, so it is deliberately exempt and
+never waits.
 
 No browser tab is involved at any point, and the engine never sends an
 unsubscribe: an already-subscribed item returns before any request is made.
@@ -180,18 +188,19 @@ _DISAGREEMENT_MESSAGE = (
 )
 
 
-# The confirmation read, on a switch. The production run proved the subscribe
-# endpoint is safe on an already-subscribed item -- it returned ``{"success": 1}``
-# and the page stayed ``toggled``, byte-identical -- so the read-click-read shape
-# is evidence-gathering for the testing phase, not the design. Flipping this to
-# ``False`` removes exactly the confirmation step: :func:`subscribe_item` then
-# records from Steam's own answer (which cannot distinguish "newly subscribed"
-# from "already subscribed", and is corroboration only) and never reads the page
-# a second time. The pre-read and the "already toggled -> no request at all"
-# short-circuit are deliberately *not* behind this switch; only the confirmation
-# is. The order in which the reads are retired is recorded in
-# ``docs/future-plans.md``.
-VERIFY_AFTER_SUBSCRIBE = True
+# The confirmation read, on a switch, **off by default**. The production run
+# proved the subscribe endpoint is safe on an already-subscribed item -- it
+# returned ``{"success": 1}`` and the page stayed ``toggled``, byte-identical --
+# and the owner has run the browser-free read-click flow in production since and
+# found the results consistent, so the third read is no longer wanted. With this
+# ``False``, :func:`subscribe_item` records from Steam's own answer (which cannot
+# distinguish "newly subscribed" from "already subscribed", and is corroboration
+# only) and never reads the page a second time; setting it ``True`` restores
+# :func:`confirm_subscription` unchanged. The pre-read and the "already toggled
+# -> no request at all" short-circuit are deliberately *not* behind this switch;
+# only the confirmation is. The order in which the reads are retired is recorded
+# in ``docs/future-plans.md``.
+VERIFY_AFTER_SUBSCRIBE = False
 
 
 def _steam_failure_message(steam_success) -> str:
@@ -664,7 +673,7 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
                    token_fallback: str = "", interval: WebInterval | None = None,
                    config_path: str | None = None,
                    keep_running=None) -> SubscribeOutcome:
-    """Subscribe one item without a browser, verifying from the page.
+    """Subscribe one item without a browser, from the pre-read and the POST.
 
     The exact flow is in the module docstring. ``config`` supplies the cookie
     source (``web_scraper._build_workshop_cookies``) and the configured session
@@ -672,8 +681,9 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
     recorded. ``token_fallback`` is the pushed token the embedded web
     server keeps in memory; the TUI passes nothing and relies on the config.
 
-    ``interval`` is the shared web interval both page reads honour. A pass
-    builds one and passes it down so the delay spans every item; a single
+    ``interval`` is the shared web interval the page read honours -- and the
+    confirmation read too, when :data:`VERIFY_AFTER_SUBSCRIBE` re-enables it. A
+    pass builds one and passes it down so the delay spans every item; a single
     standalone call builds its own from ``config`` (and writes it back to
     ``config_path`` when given). The submit POST is not gated on it.
     """
@@ -897,7 +907,7 @@ def run_subscription_pass(items, *, config: dict, db_path: str,
     progress display; it must not raise (the pass does not catch it).
 
     One :class:`WebInterval` is built for the whole pass and threaded through
-    every item, so each item's two page reads are spaced by the shared interval
+    every item, so each item's page reads are spaced by the shared interval
     and the delay the pass learns is persisted once for the daemon to pick up.
     It is built *after* the pause is taken, so recording the pause interval (a
     small state-file write) is not measured as the first read's elapsed time and

@@ -1021,27 +1021,30 @@ class SubscriptionQueueScreen(ModalScreen):
     subscribe to a human with a browser. It now runs each item through
     ``src.subscribe_engine``, which reads the item page's own subscribe button,
     sends the POST only when the button says the item is not subscribed, and
-    verifies from a second page read. There are no browser tabs and no URLs to
-    click; per-item progress and failures are shown in place, and a verified
-    subscribe clears ``is_queued_for_subscription`` (through
-    ``mark_own_subscribed``, which the engine calls).
+    records the subscription from the POST's own answer -- the confirmation read
+    is retired by default, and setting ``VERIFY_AFTER_SUBSCRIBE = True`` in the
+    engine restores it. There are no browser tabs and no URLs to click; per-item
+    progress and failures are shown in place, and a subscribe the engine records
+    clears ``is_queued_for_subscription`` (through ``mark_own_subscribed``, which
+    the engine calls).
 
     The ``.pauselock`` is created on mount and removed on unmount, so the daemon
     stays quiet while the queue is open; the pass itself takes and releases the
     same lock (``subscribe_engine.run_subscription_pass``), which is what covers
     a caller that runs the engine outside this screen.
 
-    The estimate *starts* from the configured web delay: each item costs the
-    engine **two gated page reads** -- the pre-read that guards the POST and the
-    confirmation read -- so the initial per-item guess is twice the shared
-    configured delay (the POST is an XHR and pays no interval). From then on it
-    is nudged by what the pass has actually done: the wall-clock cost of each
-    finished item is timed between the per-item results the pass already
-    delivers, and the rows still waiting are priced from the running mean of
-    those durations, seeded with the configured guess so the first item moves it
-    most. It is an estimate, not a promise, because the pass can also be refused,
-    throttled or cancelled after it is drawn. See ``docs/tui.md`` and, for why
-    this differs from the web overlay's countdown, ``docs/web-ui.md``.
+    The estimate *starts* from the configured web delay: on the default path an
+    item costs the engine **one gated page read** -- the pre-read that guards the
+    POST; the retired confirmation read would make it a second when the switch is
+    on -- so the initial per-item guess is that many times the shared configured
+    delay (the POST is an XHR and pays no interval). From then on it is nudged by
+    what the pass has actually done: the wall-clock cost of each finished item is
+    timed between the per-item results the pass already delivers, and the rows
+    still waiting are priced from the running mean of those durations, seeded
+    with the configured guess so the first item moves it most. It is an estimate,
+    not a promise, because the pass can also be refused, throttled or cancelled
+    after it is drawn. See ``docs/tui.md`` and, for why this differs from the web
+    overlay's countdown, ``docs/web-ui.md``.
     """
 
     # Four ticks a second, the web overlay's cadence.
@@ -1114,17 +1117,21 @@ class SubscriptionQueueScreen(ModalScreen):
         return line
 
     def _seed_item_seconds(self) -> float:
-        """The initial per-item guess: two gated page reads.
+        """The initial per-item guess: one gated page read by default.
 
-        The engine reads the item page before the POST and again to confirm, and
-        both reads wait the shared adaptive web interval, so the starting guess
-        is twice the configured delay; :meth:`_estimated_item_seconds` seeds its
-        running mean with it. The delay is read fresh from the same owner every
-        time (``src.web_worker.configured_web_delay``) rather than snapshotted,
+        On the default path the engine reads the item page once, before the
+        POST; the confirmation read is behind
+        :data:`subscribe_engine.VERIFY_AFTER_SUBSCRIBE`, so when it is on each
+        item pays a second gated read. The guess follows that count, and every
+        gated read waits the shared adaptive web interval, so the starting
+        figure is the configured delay times one or two; the delay is read fresh
+        from the same owner every time
+        (``src.web_worker.configured_web_delay``) rather than snapshotted,
         because the engine's ``WebInterval`` writes a throttle's doubling back
         through this screen's own config dict while the pass runs.
         """
-        return 2.0 * configured_web_delay(self.config)
+        reads = 2 if subscribe_engine.VERIFY_AFTER_SUBSCRIBE else 1
+        return reads * configured_web_delay(self.config)
 
     def _estimated_item_seconds(self) -> float:
         """The mean cost of a finished item, seeded with the configured guess.

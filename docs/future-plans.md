@@ -423,13 +423,14 @@ The Web UI could not subscribe on its own, and that was the only reason the Tamp
 
 Once that observation is done, the bridge becomes removable along with everything that exists to serve it: the userscript, the `autosubscribe=true` tab flow, the `/api/sessionid` token push, the verification poll against `/api/queued` and `/api/subscribe_failures`, and the throttle-reporting endpoints. The subscribe action in the Web UI is already one request to the route the TUI uses, and the grid's marker updates from the read-back that follows it.
 
-One thing this must not quietly drop: the tab flow spread many subscribes across a browser session and reported throttle pages separately, and the replacement needs equivalent pacing rather than a burst of server-side POSTs. The project already has the machinery — the shared AIMD delay and the per-account budget — so this is a matter of routing subscribe through it, not of inventing something. The engine does exactly that: both of its page reads wait the shared `daemon.web_delay_seconds` and feed their outcome back into it, while the subscribe POST is the click and is deliberately exempt (it is an XHR, not a page load). The Web UI's drain adds no client-side delay and never has two calls in flight, so the interval is paid once per item inside the route.
+One thing this must not quietly drop: the tab flow spread many subscribes across a browser session and reported throttle pages separately, and the replacement needs equivalent pacing rather than a burst of server-side POSTs. The project already has the machinery — the shared AIMD delay and the per-account budget — so this is a matter of routing subscribe through it, not of inventing something. The engine does exactly that: its page read (and the confirmation read, when the switch is on) waits the shared `daemon.web_delay_seconds` and feeds its outcome back into it, while the subscribe POST is the click and is deliberately exempt (it is an XHR, not a page load). The Web UI's drain adds no client-side delay and never has two calls in flight, so the interval is paid once per item inside the route.
 
 ---
 
 ## Retiring the subscribe confirmation read
 
-**Status: Planned** — parked until the browser-free flow has bedded in.
+**Status: step 1 landed** (`VERIFY_AFTER_SUBSCRIBE = False`) — the confirmation read is retired by
+default; the pre-read is **not** next by default.
 
 The engine reads the item page, sends the POST only when the page says the item is not subscribed,
 and then reads the page again to confirm. That third read is deliberate while the flow is being
@@ -447,8 +448,8 @@ retiring it is one call site and one flag and cannot perturb the click, the reco
 
 What must not go with it is the **pre-read**, and the order matters:
 
-1. **First, drop the confirmation read** (`VERIFY_AFTER_SUBSCRIBE = False`), which removes one read per
-   item and leaves the POST's own answer as the record.
+1. **First, drop the confirmation read** — *landed* (`VERIFY_AFTER_SUBSCRIBE = False`), which removes
+   one read per item and leaves the POST's own answer as the record.
 2. **Only then, and only once idempotency is trusted beyond a single observation, consider dropping
    the pre-read.** It has two jobs that no other code does: it is the guard against the endpoint ever
    turning out to be a *toggle* (an item that is already subscribed would be unsubscribed by a blind

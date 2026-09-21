@@ -465,11 +465,11 @@ The autosubscribe overlay keeps one timer (`_subScheduleIv`) whose only job is t
 figure on the row currently being asked about; the row's outcome is written from the route's own
 answer. There is deliberately **no schedule of opens**: the drain awaits each
 `/api/subscribe/<id>` and the route's page read pays the shared interval, so the POST it sends is
-exempt and a row's cost is one gated read — the same shape the TUI's queue has for its POST, though
-the TUI additionally spends a confirmation read per item (`src/subscribe_engine.py`). Nothing in the
-page spaces the requests: the route reads the configured delay itself, fresh per call, so a throttle's
-doubling mid-pass moves the pacing without the page knowing, and a second client-side delay would pay
-the interval twice per item.
+exempt and a row's cost is one gated read — the same shape the TUI's queue has, now that the engine's
+confirmation read is retired by default (`src/subscribe_engine.py`; `VERIFY_AFTER_SUBSCRIBE = True`
+restores the second read). Nothing in the page spaces the requests: the route reads the configured
+delay itself, fresh per call, so a throttle's doubling mid-pass moves the pacing without the page
+knowing, and a second client-side delay would pay the interval twice per item.
 
 `daemon.web_delay_seconds` is still injected as `WEB_DELAY`, but the page no longer uses it to space
 anything. It is left in place rather than removed: it is served from `src/webserver.py` and is the

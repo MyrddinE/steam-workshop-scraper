@@ -479,17 +479,18 @@ there are no clickable Steam URLs any more and no browser tabs. Each row is a `S
 [Steam text is escaped before it is rendered](#steam-text-is-escaped-before-it-is-rendered)).
 
 For each item the engine reads the page's server-rendered `#SubscribeItemBtn`, sends the subscribe POST
-only when the button says the item is not subscribed, and confirms from a second page read. `Subscribe`
-runs the pass on a worker thread and draws each item's outcome in place as it lands; a verified
-subscribe records `mark_own_subscribed`, which clears `is_queued_for_subscription`. Failures and
-disagreements stay queued. Both page reads wait the shared adaptive web interval, and the pass takes
+only when the button says the item is not subscribed, and records the subscription from the POST's own
+`success: 1` — the confirmation read is retired by default. `Subscribe`
+runs the pass on a worker thread and draws each item's outcome in place as it lands; a recorded
+subscribe writes `mark_own_subscribed`, which clears `is_queued_for_subscription`. Failures stay queued.
+Every page read waits the shared adaptive web interval, and the pass takes
 `.pauselock` for its duration and releases it in a `finally` — so the daemon's web and image workers
 pause for the pass and resume even if the engine raises. The screen also creates the lock on mount and
 removes it on unmount, so the queue stays quiet while it is open. No live Steam call happens in tests;
 the engine's fetch and POST seams are patched. See
 [data-pipeline.md](data-pipeline.md#subscribe-engine-browser-free) for the engine's semantics and
-[future-plans.md](future-plans.md#retiring-the-subscribe-confirmation-read) for the planned retirement
-of the confirmation read.
+[future-plans.md](future-plans.md#retiring-the-subscribe-confirmation-read) for the retirement of the
+confirmation read (step 1, landed).
 
 **Each row's marker is the item's real state**, read back from the database after the engine reports an
 outcome and rendered through `src/subscription.py`, the same table the list row and the detail pane
@@ -508,8 +509,9 @@ deliberately an estimate, not a promise: the pass can be refused, throttled or c
 drawn, and the screen's own status line says so.
 
 It **starts** from the configured web delay — the same `daemon.web_delay_seconds` the engine reads
-through `src.web_worker.configured_web_delay` — times **two**, because each item costs two gated page
-reads (the pre-read and the confirmation read) while the subscribe POST is an XHR and pays no interval.
+through `src.web_worker.configured_web_delay` — times **one** on the default path, because each item
+costs one gated page read (the pre-read) while the subscribe POST is an XHR and pays no interval; with
+`VERIFY_AFTER_SUBSCRIBE` on it is times **two** (the retired confirmation read is restored).
 *Measured live* (issue 41) that starting figure is about a third low: a gated read costs the interval
 **plus** the request, and the POST spends time on the clock even though it pays no interval. So from
 the first result on the screen nudges it: `run_subscription_pass` calls its per-item callback

@@ -311,6 +311,9 @@ def test_the_already_subscribed_no_op_reads_a_local_capture(engine_env, monkeypa
 
 def test_a_not_subscribed_item_is_subscribed_and_verified(engine_env, monkeypatch):
     db_path, config = engine_env
+    # The confirmation read is off by default now; this test is about the
+    # verified path, so it turns the switch back on explicitly.
+    monkeypatch.setattr(engine, "VERIFY_AFTER_SUBSCRIBE", True)
     not_toggled = _capture_with_state(engine.BUTTON_NOT_TOGGLED)
     monkeypatch.setattr(web_scraper, "scrape_extended_details",
                         _Fetcher([not_toggled, TOGGLED]))
@@ -345,6 +348,9 @@ def test_a_failed_post_is_reported_and_leaves_the_item_queued(engine_env, monkey
 def test_a_sources_disagreeing_is_reported_and_nothing_is_recorded(engine_env, monkeypatch):
     """Steam says success but the page still says not subscribed: no guess."""
     db_path, config = engine_env
+    # A disagreement is only visible when the confirmation read runs, so the
+    # switch is set explicitly.
+    monkeypatch.setattr(engine, "VERIFY_AFTER_SUBSCRIBE", True)
     monkeypatch.setattr(web_scraper, "scrape_extended_details",
                         _Fetcher([NOT_TOGGLED, NOT_TOGGLED]))
     session = _Session(payload={"success": 1})
@@ -377,6 +383,33 @@ def test_the_confirmation_step_can_be_retired_without_touching_the_click(engine_
     assert _queued(db_path, 7) is False
 
 
+def test_the_default_path_reads_the_item_page_once(engine_env, monkeypatch):
+    """The retired confirmation: one pre-read, one POST, no second read.
+
+    Pinned against the module as imported, so it fails if the switch is ever
+    flipped back or a read creeps onto the click path. The second body is
+    available to the fetcher on purpose: a confirmation read would consume it,
+    and the call count is what says it did not.
+    """
+    db_path, config = engine_env
+    fetcher = _Fetcher([NOT_TOGGLED, TOGGLED])
+    monkeypatch.setattr(web_scraper, "scrape_extended_details", fetcher)
+    session = _Session(payload={"success": 1})
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: session)
+
+    outcome = engine.subscribe_item(7, config=config, db_path=db_path)
+
+    assert len(fetcher.calls) == 1, "the item page is read once, not twice"
+    assert engine.VERIFY_AFTER_SUBSCRIBE is False, \
+        "the confirmation read is retired on the default path"
+    assert outcome.status == engine.SUBSCRIBED
+    assert outcome.subscribed is True
+    assert len(session.calls) == 1, "the pre-read still gates exactly one POST"
+    row = _row(db_path, 7)
+    assert row["own_subscribed"] == 1
+    assert row["is_queued_for_subscription"] == 0, "the POST's answer clears the queue"
+
+
 # --- the POST's CSRF token (issue 38) ---------------------------------------
 
 def test_the_post_uses_the_pages_token_when_the_configured_one_differs(engine_env,
@@ -389,6 +422,7 @@ def test_the_post_uses_the_pages_token_when_the_configured_one_differs(engine_en
     and the form field and the cookie must both carry that value.
     """
     db_path, config = engine_env
+    monkeypatch.setattr(engine, "VERIFY_AFTER_SUBSCRIBE", True)
     page = _synthetic_page("PAGE_SESSION_TOKEN", authenticated=True)
     after = _synthetic_page("PAGE_SESSION_TOKEN", authenticated=True, toggled=True)
     monkeypatch.setattr(web_scraper, "scrape_extended_details", _Fetcher([page, after]))
@@ -409,6 +443,7 @@ def test_the_configured_token_is_the_fallback_when_the_page_has_none(engine_env,
                                                                     monkeypatch):
     """A page with no `g_sessionID` still posts the cookie set's token."""
     db_path, config = engine_env
+    monkeypatch.setattr(engine, "VERIFY_AFTER_SUBSCRIBE", True)
     page = _synthetic_page(None, authenticated=True)
     after = _synthetic_page(None, authenticated=True, toggled=True)
     monkeypatch.setattr(web_scraper, "scrape_extended_details", _Fetcher([page, after]))
@@ -498,6 +533,7 @@ def test_the_post_log_carries_a_fingerprint_and_never_the_token(engine_env,
                                                                 monkeypatch, caplog):
     """One line tells the next occurrence apart without ever printing a token."""
     db_path, config = engine_env
+    monkeypatch.setattr(engine, "VERIFY_AFTER_SUBSCRIBE", True)
     token = "PAGE_SESSION_TOKEN"
     page = _synthetic_page(token, authenticated=True)
     after = _synthetic_page(token, authenticated=True, toggled=True)
@@ -607,6 +643,8 @@ def test_an_unusable_credential_refuses_before_the_request(engine_env, monkeypat
 def test_the_engine_captures_the_item_page_and_the_subscribe(engine_env,
                                                              monkeypatch, tmp_path):
     db_path, config = engine_env
+    # Both page reads are captured, so the confirmation switch is pinned on.
+    monkeypatch.setattr(engine, "VERIFY_AFTER_SUBSCRIBE", True)
     outbox = tmp_path / "outbox"
     capture.configure(str(outbox), capture_web_downloads=True)
     try:
@@ -690,6 +728,9 @@ def test_the_interval_is_read_fresh_from_the_config_and_floored():
 def test_every_page_read_waits_the_interval_and_the_post_does_not(engine_env, monkeypatch):
     """Reads are page loads, so they wait; the click is a XHR, so it does not."""
     db_path, config = engine_env
+    # This test pins the wait for both gated reads, so the confirmation read is
+    # switched back on explicitly.
+    monkeypatch.setattr(engine, "VERIFY_AFTER_SUBSCRIBE", True)
     config["daemon"] = {"web_delay_seconds": 12.0}
     events = []
     monkeypatch.setattr(

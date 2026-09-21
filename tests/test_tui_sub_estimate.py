@@ -3,12 +3,14 @@
 The web subscription overlay gives every queued row a live countdown to when it
 will be reached (`templates/index.html`, `openAt = i * ceil(stepDelay / 1000)`),
 and the TUI screen needs the same function. The engine's cost is not the web
-overlay's, though: each queued item pays **two** gated page reads -- the pre-read
-that guards the POST and the confirmation read -- while the POST itself is an XHR
-and pays no interval. So the estimate *starts* at twice the shared configured
-web delay, read fresh on every tick so a throttle that doubles it mid-pass is
-reflected, and the delay comes from the one owner
-(`src.web_worker.configured_web_delay`) rather than a second copy.
+overlay's, though: on the default path each queued item pays **one** gated page
+read -- the pre-read that guards the POST; the confirmation read is retired
+behind `subscribe_engine.VERIFY_AFTER_SUBSCRIBE`, and when it is on each item
+pays a second -- while the POST itself is an XHR and pays no interval. So the
+estimate *starts* at that many times the shared configured web delay, read fresh
+on every tick so a throttle that doubles it mid-pass is reflected, and the delay
+comes from the one owner (`src.web_worker.configured_web_delay`) rather than a
+second copy.
 
 *Measured live* (issue 41) that starting figure is about a third low: a gated
 read costs the interval **plus** the request, and the POST spends time on the
@@ -53,55 +55,66 @@ def _finished(screen: SubscriptionQueueScreen, *seconds: float) -> None:
     screen._observed_seconds = observed_so_far
 
 
-def test_the_step_is_two_gated_page_reads_of_the_shared_delay(tmp_path):
-    """The engine reads the page twice per item; the POST is exempt."""
+def test_the_step_is_one_gated_page_read_of_the_shared_delay(tmp_path):
+    """The default path reads the page once per item; the POST is exempt."""
     config = {"daemon": {"web_delay_seconds": 12.0}}
     screen = _screen(tmp_path, config)
 
-    assert screen._seed_item_seconds() == 2 * configured_web_delay(config)
-    assert screen._seed_item_seconds() == 24.0
+    assert screen._seed_item_seconds() == configured_web_delay(config)
+    assert screen._seed_item_seconds() == 12.0
     # The third item is reached after two completed items, not after one.
     assert screen._estimate_remaining(0, 0.0) == 0
-    assert screen._estimate_remaining(1, 0.0) == 24
-    assert screen._estimate_remaining(2, 0.0) == 48
+    assert screen._estimate_remaining(1, 0.0) == 12
+    assert screen._estimate_remaining(2, 0.0) == 24
 
 
-def test_the_initial_estimate_is_the_configured_delay_twice(tmp_path):
+def test_the_step_is_two_gated_page_reads_when_the_confirmation_is_on(
+        tmp_path, monkeypatch):
+    """The retired read still prices an item while `VERIFY_AFTER_SUBSCRIBE` is on."""
+    config = {"daemon": {"web_delay_seconds": 12.0}}
+    screen = _screen(tmp_path, config)
+    monkeypatch.setattr(subscribe_engine, "VERIFY_AFTER_SUBSCRIBE", True)
+
+    assert screen._seed_item_seconds() == 2 * configured_web_delay(config)
+    assert screen._seed_item_seconds() == 24.0
+
+
+def test_the_initial_estimate_is_the_configured_delay_once(tmp_path):
     """Before any item finishes the running mean is exactly the seed."""
     config = {"daemon": {"web_delay_seconds": 6.0}}
     screen = _screen(tmp_path, config)
 
-    assert screen._estimate_remaining(3, 0.0) == 36
-    assert screen._estimated_item_seconds() == 12.0
+    assert screen._estimate_remaining(3, 0.0) == 18
+    assert screen._estimated_item_seconds() == 6.0
 
 
 def test_a_slow_item_lengthens_the_waiting_rows_countdowns(tmp_path):
     """An item that overran the guess prices the rest of the queue higher."""
     config = {"daemon": {"web_delay_seconds": 6.0}}
     screen = _screen(tmp_path, config)
-    # The first item took 18 s, not the 12 s the configured delay predicted.
+    # The first item took 18 s, not the 6 s the configured delay predicted.
     _finished(screen, 18.0)
 
     # Row 2 is one item away, and that item now costs the seeded mean
-    # (12 + 18) / 2 = 15 s; the uncorrected step said 2 * 12 - 18 = 6 s at this
-    # instant.
-    assert screen._estimate_remaining(2, 18.0) == 15
-    assert screen._estimate_remaining(2, 18.0) > math.ceil(2 * 12.0 - 18.0)
-    assert screen._estimated_item_seconds() == 15.0
+    # (6 + 18) / 2 = 12 s; the uncorrected step said 2 * 6 - 18 = -6 s at this
+    # instant, which the clamp would have drawn as 0.
+    assert screen._estimate_remaining(2, 18.0) == 12
+    assert screen._estimate_remaining(2, 18.0) > math.ceil(2 * 6.0 - 18.0)
+    assert screen._estimated_item_seconds() == 12.0
 
 
 def test_a_fast_item_shortens_the_waiting_rows_countdowns(tmp_path):
     """An item that came in under the guess prices the rest lower."""
     config = {"daemon": {"web_delay_seconds": 6.0}}
     screen = _screen(tmp_path, config)
-    # This item took 6 s, half the guess.
-    _finished(screen, 6.0)
+    # This item took 2 s, well under the guess.
+    _finished(screen, 2.0)
 
-    # Row 2 is one item away at the mean (12 + 6) / 2 = 9 s; the uncorrected
-    # step said 18 s here.
-    assert screen._estimate_remaining(2, 6.0) == 9
-    assert screen._estimate_remaining(2, 6.0) < math.ceil(2 * 12.0 - 6.0)
-    assert screen._estimated_item_seconds() == 9.0
+    # Row 2 is one item away at the mean (6 + 2) / 2 = 4 s; the uncorrected
+    # step said 2 * 6 - 2 = 10 s here.
+    assert screen._estimate_remaining(2, 2.0) == 4
+    assert screen._estimate_remaining(2, 2.0) < math.ceil(2 * 6.0 - 2.0)
+    assert screen._estimated_item_seconds() == 4.0
 
 
 def test_the_correction_uses_the_observed_duration_not_the_item_count(tmp_path):
@@ -114,11 +127,11 @@ def test_the_correction_uses_the_observed_duration_not_the_item_count(tmp_path):
 
     # Same finished count, same queue position, different durations: the two
     # screens must not draw the same number.
-    assert slow._estimate_remaining(2, 30.0) == 21
-    assert fast._estimate_remaining(2, 4.0) == 8
+    assert slow._estimate_remaining(2, 30.0) == 18
+    assert fast._estimate_remaining(2, 4.0) == 5
     assert len(slow._observed_seconds) == len(fast._observed_seconds) == 1
-    assert slow._estimated_item_seconds() == 21.0   # (12 + 30) / 2
-    assert fast._estimated_item_seconds() == 8.0    # (12 + 4) / 2
+    assert slow._estimated_item_seconds() == 18.0   # (6 + 30) / 2
+    assert fast._estimated_item_seconds() == 5.0    # (6 + 4) / 2
 
 
 def test_the_seeded_mean_moves_less_with_each_later_item(tmp_path):
@@ -126,16 +139,16 @@ def test_the_seeded_mean_moves_less_with_each_later_item(tmp_path):
     config = {"daemon": {"web_delay_seconds": 6.0}}
     screen = _screen(tmp_path, config)
 
-    assert screen._estimate_remaining(2, 0.0) == 24  # still the bare seed
+    assert screen._estimate_remaining(2, 0.0) == 12  # still the bare seed
     _finished(screen, 18.0)
-    assert screen._estimate_remaining(2, 18.0) == 15
+    assert screen._estimate_remaining(2, 18.0) == 12
     _finished(screen, 18.0)
-    assert screen._estimate_remaining(3, 36.0) == 16
+    assert screen._estimate_remaining(3, 36.0) == 14
 
-    # 12 -> 15 -> 16: the first item moved the mean 3 s, the second only 1 s.
+    # 6 -> 12 -> 14: the first item moved the mean 6 s, the second only 2 s.
     mean_after_two = screen._estimated_item_seconds()
-    assert mean_after_two == 16.0
-    assert mean_after_two - 15.0 < 15.0 - screen._seed_item_seconds()
+    assert mean_after_two == 14.0
+    assert mean_after_two - 12.0 < 12.0 - screen._seed_item_seconds()
 
 
 def test_each_items_duration_is_timed_between_the_passes_results(tmp_path):
@@ -161,8 +174,8 @@ def test_a_changed_configured_delay_changes_the_estimate(tmp_path):
     # screen handed the engine, after a throttle page doubles the delay.
     config["daemon"]["web_delay_seconds"] = 24.0
 
-    assert before == 24
-    assert screen._estimate_remaining(1, 0.0) == 48
+    assert before == 12
+    assert screen._estimate_remaining(1, 0.0) == 24
 
     # The delay still pulls on the running mean once an item has finished: the
     # seed is re-read every tick, so it moves the mean with it.
@@ -200,9 +213,9 @@ def test_the_current_item_is_distinct_and_has_no_countdown(tmp_path):
     assert countdown is None
     assert status == "subscribing..."
 
-    # The second and third are still waiting, spaced by two reads each.
-    assert screen._row_display(1, 0.0)[0] == "~24s"
-    assert screen._row_display(2, 0.0)[0] == "~48s"
+    # The second and third are still waiting, spaced by one read each.
+    assert screen._row_display(1, 0.0)[0] == "~12s"
+    assert screen._row_display(2, 0.0)[0] == "~24s"
 
     # Once an item's outcome lands its countdown is cleared and the next item
     # becomes the current one.
