@@ -34,7 +34,13 @@ from src.database import (
 )
 from src.tui import DetailsPane, ScraperApp
 from tests.conftest import ASYNC_PAUSE
-from tests.test_subscription_web import web_client  # noqa: F401  (a fixture)
+from tests.test_subscription_web import (  # noqa: F401  (web_client is a fixture)
+    NODE,
+    _extract_function,
+    _run_node,
+    _served_inline_script,
+    web_client,
+)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -255,3 +261,93 @@ async def test_a_pane_that_stopped_displaying_an_item_receives_nothing(tmp_path)
             await pilot.pause(ASYNC_PAUSE)
             assert app.item_updates.subscribers(5) == ()
             assert app.dispatch_item_update({"workshop_id": 5, "own_subscribed": 1}) == 0
+
+
+# ── the web registry, under node ─────────────────────────────────────────────
+
+WEB_UPDATE_DRIVER = """
+const _itemSubscribers = new Map();
+let _itemUpdatePollTimer = null;
+const _ITEM_UPDATE_POLL_MS = 3000;
+const _subscribeItem = (__SUBSCRIBE__);
+const _unsubscribeItem = (__UNSUBSCRIBE__);
+const _subscribedItemIds = (__IDS__);
+const dispatchItemUpdate = (__DISPATCH__);
+const dispatchItemUpdates = (__DISPATCH_MANY__);
+const _itemUpdateTick = (__TICK__);
+
+let scheduled = 0;
+global.setTimeout = () => { scheduled += 1; return scheduled; };
+
+const requests = [];
+const seen = {cell: [], pane: [], gone: 0};
+let nextItems = [];
+global.fetch = async (url, opts) => {
+  requests.push(JSON.parse(opts.body).ids);
+  return {ok: true, status: 200, json: async () => nextItems};
+};
+
+const cellSub = {applyItemUpdate: (it) => seen.cell.push(it.subscription_state)};
+const paneSub = {applyItemUpdate: (it) => seen.pane.push(it.subscription_state)};
+const goneSub = {isConnected: false, applyItemUpdate: () => { seen.gone += 1; }};
+
+(async () => {
+  _subscribeItem(5, cellSub);
+  _subscribeItem(5, paneSub);
+  nextItems = [{workshop_id: 5, subscription_state: 'downloaded'}];
+  await _itemUpdateTick();
+  // Nothing is pending here ('downloaded' is settled), so an armed timer is the
+  // proof that the general poll does not stop merely because nothing is pending.
+  const armedAfterSettled = _itemUpdatePollTimer !== null;
+
+  // The pane stops displaying the item; the cell keeps it.
+  _unsubscribeItem(5, paneSub);
+  nextItems = [{workshop_id: 5, subscription_state: 'subscribed'}];
+  await _itemUpdateTick();
+
+  // A detached display is dropped rather than handed an update.
+  _subscribeItem(7, goneSub);
+  dispatchItemUpdate({workshop_id: 7, subscription_state: 'never'});
+  const goneStillSubscribed = _subscribedItemIds().indexOf(7) !== -1;
+
+  console.log(JSON.stringify({
+    requests: requests, seen: seen, armedAfterSettled: armedAfterSettled,
+    goneStillSubscribed: goneStillSubscribed,
+    ids: _subscribedItemIds(),
+  }));
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_the_web_general_poll_dispatches_to_every_display_of_the_item(web_client, tmp_path):
+    """The web mirror of the TUI test: one poll, one dispatch, both displays.
+
+    The poll reads exactly the registry's ids and hands every returned block to
+    the one dispatch point, so the cell and the pane cannot be current in one
+    and stale in the other. A display that unsubscribed is left alone, and the
+    poll stays armed even when the item is settled.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = (WEB_UPDATE_DRIVER
+              .replace("__SUBSCRIBE__", _extract_function(script, "_subscribeItem"))
+              .replace("__UNSUBSCRIBE__", _extract_function(script, "_unsubscribeItem"))
+              .replace("__IDS__", _extract_function(script, "_subscribedItemIds"))
+              .replace("__DISPATCH__", _extract_function(script, "dispatchItemUpdate"))
+              .replace("__DISPATCH_MANY__", _extract_function(script, "dispatchItemUpdates"))
+              .replace("__TICK__", _extract_function(script, "_itemUpdateTick")))
+    result = _run_node(driver, tmp_path)
+
+    assert result["requests"] == [[5], [5]], \
+        "the poll must read the registered ids, once per tick"
+    assert result["seen"]["cell"] == ["downloaded", "subscribed"], \
+        "the cell follows the database on both ticks"
+    assert result["seen"]["pane"] == ["downloaded"], \
+        "a pane that stopped displaying the item receives nothing"
+    assert result["armedAfterSettled"] is True, \
+        "the poll must not stop merely because nothing is pending"
+    assert result["seen"]["gone"] == 0
+    assert result["goneStillSubscribed"] is False, \
+        "a detached display is dropped from the registry"
+    assert result["ids"] == [5], "only the cell is left subscribed"

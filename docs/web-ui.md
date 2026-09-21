@@ -101,6 +101,36 @@ When `doSearch(reset=true)` clears the grid (`innerHTML = ''`), the old sentinel
 
 ---
 
+## One item-update path
+
+Every display of an item subscribes to its `workshop_id` while it is showing it: a grid cell joins the
+registry when `doSearch` creates it, the detail pane when `showDetail` opens it, and each leaves when
+it stops (a reset search unsubscribes the cells it clears, a new pane unsubscribes the pane's previous
+item, and `dispatchItemUpdate` drops a subscriber whose element is detached). So `_itemSubscribers`
+describes what is on screen, not what exists in the database, and the registry is the only coupling:
+no caller has to remember which component to refresh, and a display added later is correct as soon as
+it subscribes. The TUI's `src/item_updates.py` is the same mechanism on the other side.
+
+`dispatchItemUpdate(item)` is the page's one dispatch point. A poll's block, a click's read-back, a
+subscribe landing and an action all go through it, and it hands the whole block to each subscriber for
+that id. A subscriber applies the fields it draws and ignores the rest: a grid cell's applier
+(`_applyGridCellUpdate`) draws the title, image, size, stage marker, subscription marker and Wilson
+scores, and the detail pane's subscriber (`_detailSubscriber`) merges the block into the item it holds
+and calls `renderDetail`, so a summary block from a poll cannot blank a description the full payload
+brought. A field added later therefore reaches every panel that renders it without a new call site.
+
+**`_startItemUpdatePoll` — the trigger that is not conditional on anything pending.** On a 3-second
+cadence (`_ITEM_UPDATE_POLL_MS`, mirroring `ITEM_UPDATE_POLL_SECONDS` in `src/item_updates.py`) it
+POSTs `/api/items` with exactly the registry's ids and dispatches the answer. The bound is the on-screen
+count: one batched read per tick, never a table scan and never one read per component; an empty
+registry stops the timer, and a later search or pane open re-arms it. It deliberately does not stop
+when nothing is `pending` — that condition is exactly what let a change written behind the page's back
+(the daemon's folder scan stamping `steam_download_seen_at`) sit unfetched and leave the cell and the
+pane disagreeing. One failed read is a skipped tick and the next tick retries, like every other browser
+poll.
+
+---
+
 ## Image Polling
 
 ### `_startListPoll`
@@ -110,11 +140,11 @@ An adaptive-timeout poll that keeps a rendered cell's markers in step with the d
   with a stage spinner (`.has-spinner`), or one whose subscription marker is still `queued`. The
   subscription queue is deliberately not a stage, so a row queued only to subscribe has no spinner;
   selecting on `has-spinner` alone missed it, and a subscribe landing behind the cell's back left the
-  green `queued` marker on it.
+  green `queued` marker on it. This is the low-latency path; correctness no longer depends on it,
+  because `_startItemUpdatePoll` above runs whether or not anything is pending.
 - POSTs to `/api/items` (read-only bulk ID lookup)
-- For each returned item: updates the title, replaces the image placeholder with `_imageCellHtml(item)`
-  when the server has an answer, re-applies the stage marker (`_applyPending`) and the subscription
-  marker (`_applySub`), and rewrites the Wilson scores
+- Hands every returned item's block to `dispatchItemUpdates`, so the cell, the pane and anything else
+  subscribed to that id all draw from the same payload
 - Delay: `max(1, log2(pending_count))` seconds → speeds up as work lands
 - Stops when no rendered row needs re-reading
 - Re-arms after *any* failed read, too: the `setTimeout` sits outside the `try`, and a non-`ok`
@@ -138,11 +168,11 @@ text, so an answer is never overwritten with "no image".
 
 ### `_startDetailPoll`
 
-A fixed 3-second poll on the currently-selected detail item. Checks `translation_priority > 0` to detect when translation completes, then re-renders the detail pane. Stops when `translation_priority` is 0, or when the item itself is gone (a 404). A *failure* to answer — a 500 from a locked database, or a dropped request — leaves the interval running so the next tick retries; treating every non-200 as a stop used to freeze the pane for the rest of the session after one transient error.
+A fixed 3-second poll on the currently-selected detail item. Checks `translation_priority > 0` to detect when translation completes, then hands the completed item to `dispatchItemUpdate` — the pane redraws because it subscribed, not because this poll reached into it — and stops. Stops when `translation_priority` is 0, or when the item itself is gone (a 404). A *failure* to answer — a 500 from a locked database, or a dropped request — leaves the interval running so the next tick retries; treating every non-200 as a stop used to freeze the pane for the rest of the session after one transient error.
 
 ### Unattended Tolerance
 
-The browser's polls and the TUI's polls read the same database, and the same transient lock reaches both — but not in the same shape. The Flask route isolates one request: a lock that outlives the connection's busy timeout becomes a 500 for that response and the server keeps serving. It cannot kill a thread, let alone the daemon. What it *can* do is end a client poll that treats a failed response as final, so both browser polls above re-arm on any failure instead: one 500 is a skipped tick, and the write is picked up on a later one. On the TUI side the equivalent reads are wrapped in `src.db_poll.guard_db_poll`, because there an exception in a timer callback does end the session ([tui.md](tui.md#unattended-reads)). Neither side re-tries a failure inside the same tick; the retry is the next scheduled read.
+The browser's polls and the TUI's polls read the same database, and the same transient lock reaches both — but not in the same shape. The Flask route isolates one request: a lock that outlives the connection's busy timeout becomes a 500 for that response and the server keeps serving. It cannot kill a thread, let alone the daemon. What it *can* do is end a client poll that treats a failed response as final, so every browser poll above — `_startItemUpdatePoll`, `_startListPoll` and `_startDetailPoll` — re-arms on any failure instead: one 500 is a skipped tick, and the write is picked up on a later one. On the TUI side the equivalent reads are wrapped in `src.db_poll.guard_db_poll`, because there an exception in a timer callback does end the session ([tui.md](tui.md#unattended-reads)). Neither side re-tries a failure inside the same tick; the retry is the next scheduled read.
 
 ---
 
@@ -151,6 +181,8 @@ The browser's polls and the TUI's polls read the same database, and the same tra
 ### `renderDetail`
 
 Builds the detail view HTML inline. Shows: title (linked to Steam), creator (a jump-to-author button), workshop ID, Wilson scores (color-coded), the `Subscribed at` line when `own_first_subscribed_at` is set, created date, file size (color-coded), updated date (if different from created), views (via `fmtCount`), subscriptions/favorites (current/lifetime via `fmtCount`), tags (comma-separated from junction table or legacy JSON), Queue/Unqueue and Subscribe buttons, and description text (BBCode-to-HTML converted server-side).
+
+It is the detail pane subscriber's applier: `_detailSubscriber` merges each dispatched block into the item it holds and then calls this, so the pane redraws because it subscribed to the `workshop_id` rather than because a caller remembered it. The merge is what lets the summary block from `/api/items` refresh the marker without dropping the description the full payload brought.
 
 **Subscribed at** is rendered as a `.stat-row` directly beneath the marker/title
 line, formatted with the same `toISOString().slice(0,10)` convention the pane's
@@ -253,15 +285,17 @@ the pane alone.
 
 The click is not the only writer. A subscribe can land behind a rendered cell through
 `POST /api/subscribed/<id>` (the userscript bridge, or this page's cancel/clear calls) or through the
-direct `POST /api/subscribe/<id>` route, and none of those touches the DOM. The list poll is what
-re-reads such a cell: it keeps re-reading any row whose subscription marker is still `queued`, so
-the marker moves to `subscribed` on its own next tick ([Image Polling](#image-polling)).
+direct `POST /api/subscribe/<id>` route, and none of those touches the DOM. The item-update registry
+is what re-reads such a cell: `_startListPoll` keeps re-reading any row whose subscription marker is
+still `queued` at its fastest, and `_startItemUpdatePoll` re-reads every displayed row on its 3-second
+cadence whether or not anything is pending, so the marker moves on its own without a new search
+([One item-update path](#one-item-update-path)).
 
-One transition is deliberately not a poll trigger: a cell already at `subscribed` is not re-read
-when the folder scan later stamps `steam_download_seen_at`, so its star turns green when the row is next
-rendered (a new search or a rebuilt grid) rather than on a timer. Polling every subscribed row for
-ever, just to catch a download, would cost a request per second on a settled view; the marker is
-correct whenever it is drawn, which is the same promise the TUI's marker poll makes.
+A cell already at `subscribed` is re-read too, for the same reason: the folder scan later stamps
+`steam_download_seen_at` behind the page's back, and the cell must move to `downloaded` without the user
+acting. The cost is bounded by the registry, not by the table — one batched `/api/items` read of the
+rows on screen per tick — which is what makes polling a settled view acceptable now that the whole
+invariant rests on it.
 
 The marker sits inside the cell that opens the detail pane, so its click handler stops propagation:
 without that, toggling the queue would also drag the pane to the item.
@@ -501,7 +535,7 @@ The same detail payload, but applies detail-level priority (web, image, translat
 
 ### `/api/items` — POST
 
-Bulk ID lookup. Accepts `{ids: [1, 2, 3]}`. Returns the same summary fields as `/api/search` for efficiency. Used by image polling.
+Bulk ID lookup. Accepts `{ids: [1, 2, 3]}`. Returns the same summary fields as `/api/search` plus the derived subscription marker. Read by `_startListPoll` and by the general `_startItemUpdatePoll` for exactly the ids on screen, so one request answers every display of them.
 
 Both list routes attach the image classification the grid branches on before serialising: `image_state`
 (from `images.image_state`) and `image_resolved`, which is `images.is_resolved(stored)` itself rather

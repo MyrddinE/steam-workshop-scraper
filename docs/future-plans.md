@@ -508,8 +508,18 @@ items, and seeding it with the configured guess is enough.
 
 ## One item-update path: a change to an item reaches every display of it
 
-**Status: Deferred.** Agreed direction, deliberately parked: the refresh paths should be replaced
-by a single per-item notification, not patched one call site at a time.
+**Status: Landed.** The owner's six-point design is implemented in both front ends: a per-item
+subscription registry (`src/item_updates.py` for the TUI, `_itemSubscribers` in
+`templates/index.html`), one dispatch point per side (`ScraperApp.dispatch_item_update` /
+`dispatchItemUpdate`), updates that carry a block of columns rather than a field, the registry as the
+only coupling, and a general registry-scoped poll that is not conditional on anything pending
+(`ScraperApp._poll_item_updates`; `_startItemUpdatePoll` in the page). The four invariant tests are in
+`tests/test_item_update_path.py`. What is deliberately not done: the daemon-side push for background
+changes was not added — the general poll is the agreed acceptable trigger — and the TUI's modal
+subscription-queue screen still refreshes its own rows from the subscribe pass's callback rather than
+subscribing to the registry, because it is a transient overlay over a list that is already covered.
+The old subscription-marker fast paths were left in place as latency, not as correctness; see
+[tui.md](tui.md#one-item-update-path) and [web-ui.md](web-ui.md#one-item-update-path).
 
 **Reported symptom.** Three items were subscribed and the stars turned yellow correctly, but when
 they downloaded, the detail pane showed the green star and the list did not. The two displays of
