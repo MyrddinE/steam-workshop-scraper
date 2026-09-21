@@ -1246,6 +1246,17 @@ class _FakeDaemonController:
         self.calls.append(("log", since_offset))
         return dict(self._tail)
 
+    def log_status(self):
+        # The real controller delegates to the shared module; the fake does too,
+        # so the route's shape is exercised rather than a hand-built copy.
+        from src import log_rotation
+        return log_rotation.log_status(self._log_file)
+
+    def rotate_log(self):
+        self.calls.append("rotate")
+        return {"ok": True, "started": True, "archive": "/tmp/logs/daemon-x.log.gz",
+                "message": "Rotating… (1.0 KB)"}
+
 
 @pytest.fixture
 def daemon_client(tmp_path):
@@ -1269,7 +1280,86 @@ def test_daemon_status_route(daemon_client):
     client, fake = daemon_client
     resp = client.get('/api/daemon')
     assert resp.status_code == 200
-    assert resp.get_json() == {"running": True, "pid": 123, "log_file": "/tmp/daemon.log"}
+    body = resp.get_json()
+    assert body["running"] is True and body["pid"] == 123
+    assert body["log_file"] == "/tmp/daemon.log"
+    # The log readout travels on the same poll as the status, and its line is the
+    # one the TUI draws (the file does not exist, so both say so).
+    assert body["log_readout"] == "Log size: no log file"
+    assert body["rotating"] is False
+    assert body["can_rotate"] is True
+    assert body["rotation_message"] == ""
+
+
+def test_daemon_rotate_route_is_wired(daemon_client):
+    client, fake = daemon_client
+    resp = client.post('/api/daemon/rotate')
+    assert resp.status_code == 200
+    assert resp.get_json()["started"] is True
+    assert "rotate" in fake.calls
+
+
+def test_the_rotate_route_rotates_the_configured_log(tmp_path):
+    """The route renames immediately and reports the finished archive."""
+    from src import log_rotation
+
+    db_path = str(tmp_path / "rotate_web.db")
+    initialize_database(db_path)
+    log_path = tmp_path / "daemon.log"
+    log_path.write_text("old content\n" * 100, encoding="utf-8")
+    init_webserver(db_path, {"database": {"path": db_path},
+                             "logging": {"file": str(log_path)}})
+    client = app.test_client()
+
+    started = client.post('/api/daemon/rotate')
+    assert started.status_code == 200
+    assert started.get_json()["started"] is True
+    # The rename is already done when the route answers: the live log is fresh.
+    assert log_path.read_text(encoding="utf-8") == ""
+    assert log_rotation.wait_for_rotation(str(log_path), timeout=10)
+
+    body = client.get('/api/daemon').get_json()
+    assert body["log_readout"] == "Log size: 0 B"
+    assert body["rotation_ok"] is True
+    assert body["rotation_message"].startswith("Rotated: ")
+    assert ".log.gz" in body["rotation_message"]
+    client.post('/api/daemon/rotate').get_json()  # twice in a row is safe
+
+
+def test_the_rotate_route_reports_a_failure_honestly(tmp_path):
+    """An unconfigured log is a 400 with the sentence, never a traceback."""
+    db_path = str(tmp_path / "rotate_web_fail.db")
+    initialize_database(db_path)
+    init_webserver(db_path, {"database": {"path": db_path}})
+    client = app.test_client()
+
+    resp = client.post('/api/daemon/rotate')
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["ok"] is False
+    assert body["message"] == "No log file is configured."
+    # Bounded: the body carries the sentence, not the log or a traceback.
+    assert set(body) == {"ok", "started", "message"}
+
+
+def test_the_daemon_page_carries_the_rotation_readout_and_shared_button(web_client):
+    """UI parity: the readout, the button and its wording are on the page.
+
+    The label is rendered from the TUI's own constant (`log_rotation.
+    ROTATE_BUTTON_LABEL`), so a rename on one side cannot drift from the other.
+    """
+    from src import log_rotation
+
+    client, _ = web_client
+    html = client.get('/').data.decode()
+    doc = lxml.html.fromstring(html)
+    assert doc.xpath('//*[@id="daemon-log-size"]'), "log size readout is missing"
+    rotate = doc.xpath('//*[@id="daemon-rotate"]')
+    assert rotate, "Rotate Log button is missing"
+    assert rotate[0].text_content().strip() == log_rotation.ROTATE_BUTTON_LABEL
+    assert log_rotation.ROTATE_BUTTON_LABEL in html, \
+        "the page must be rendered with the shared wording"
+    assert doc.xpath('//*[@id="daemon-log-message"]'), "rotation outcome line is missing"
 
 
 def test_daemon_start_stop_restart_routes(daemon_client):

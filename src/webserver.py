@@ -12,6 +12,7 @@ from src import capture
 from src import crash
 from src import activity
 from src import images
+from src import log_rotation
 from src import metrics
 from src import pending
 from src import session_health
@@ -179,6 +180,10 @@ def index():
     return render_template('index.html', web_delay=web_delay,
                            translation_notice=pending.TRANSLATION_REQUESTED_NOTICE,
                            filter_schema_json=json.dumps(SEARCH_FILTER_SCHEMA),
+                           # The rotation button's wording is the TUI's constant,
+                           # retyped nowhere, so the two daemon pages cannot say
+                           # different things.
+                           rotate_label=log_rotation.ROTATE_BUTTON_LABEL,
                            open_folder_enabled=bool(
                                _workshop_folders and _workshop_folders.is_supported()))
 
@@ -877,8 +882,27 @@ def api_resume():
 def api_daemon():
     controller = _get_daemon_controller()
     status = controller.status()
-    status["log_file"] = controller.log_file()
+    # One call for the whole panel: the process status, plus the log readout,
+    # the rotation button state and the last rotation's outcome -- the same
+    # strings the TUI's daemon page draws, so the two cannot disagree.
+    status.update(controller.log_status())
     return jsonify(status)
+
+
+@app.route('/api/daemon/rotate', methods=['POST'])
+def api_daemon_rotate():
+    """Rotate the daemon log on demand -- manual only, never on a timer.
+
+    The rename happens before this returns, so the live log is fresh
+    immediately; the gzip runs on a background thread in the server process and
+    the outcome is read back from `/api/daemon` on the panel's next poll. A
+    refusal (no log configured, nothing to rotate, one already running, or a
+    filesystem fault) is answered with `ok: false` and the sentence to show,
+    bounded to that JSON body -- never a traceback.
+    """
+    result = _get_daemon_controller().rotate_log()
+    code = 200 if result.get("ok") else 400
+    return jsonify(result), code
 
 
 @app.route('/api/daemon/start', methods=['POST'])
