@@ -187,11 +187,19 @@ The detail poll runs at a fixed 3-second interval for the currently selected ite
 ### Startup (`daemon_runner.main`)
 
 1. `_fix_windows_encoding()` — sets console to UTF-8 on Windows
-2. Loads config, optionally invokes `_daemonize()` (double-fork on Unix, no-op on Windows)
-3. Writes PID to `.daemon.pid`, registers `atexit` handler to remove it
-4. Configures logging (file handler, stdout handler with `_SafeStreamHandler` on Windows). The file handler is rotation-aware: it reopens the log when the generation marker beside it changes, which is how it follows the operator's **manual** rotation instead of writing into the compressed archive (`src/log_rotation.py`)
-5. Initializes database (runs migrations)
-6. Creates `Daemon` instance, calls `daemon.run()`
+2. Loads config
+3. **Takes the PID file**: creates `.daemon.pid` with an exclusive create (`O_CREAT|O_EXCL`) — see [cross-platform.md](cross-platform.md#pid-file-protocol). If the file already exists, or the create fails for any other reason, the start is refused *here*: the reason is logged and the process exits non-zero (3), before the logging reconfiguration, before `initialize_database` and before any migration, so a refused start has touched neither the PID file nor the database
+4. Optionally invokes `_daemonize()` (double-fork on Unix, no-op on Windows). It runs *after* the file is taken, so a refusal is decided by the process the UI spawned rather than by its detached grandchild, and its non-zero exit code is what the controller can read
+5. Writes the daemon's own PID into the already-taken file and registers the `atexit` handler to remove it, still before the migrations (the stop-then-migrate order is unchanged)
+6. Configures logging (file handler, stdout handler with `_SafeStreamHandler` on Windows). The file handler is rotation-aware: it reopens the log when the generation marker beside it changes, which is how it follows the operator's **manual** rotation instead of writing into the compressed archive (`src/log_rotation.py`)
+7. Initializes database (runs migrations)
+8. Creates `Daemon` instance, calls `daemon.run()`
+
+### The PID file refuses a second start
+
+The PID file is the guard as well as the record. A hand-started second daemon used to overwrite the live file unconditionally and then migrate, applying migrations under the running daemon; the first daemon watches the file's *absence*, so it kept running, and the two shared one file — whichever exited first stopped the other. The exclusive create closes that: two simultaneous starts cannot both win, and the loser aborts before it has touched the database or written a PID file of its own.
+
+**Existence blocks the start, not liveness.** A stale file left by a crash therefore refuses the start too, until the operator removes it. That is the owner's chosen rule and the safe direction: a liveness probe would free the start over a *recycled* PID — the number now belongs to an unrelated process — and let the second daemon take the file anyway, which is the hazard this guard exists to prevent. So the refusal message names the file and, when it can be read, the PID inside it, and tells the operator what to do: if that PID is a running daemon, stop it first; if the daemon crashed and left the file behind, remove the file and start again. A create that fails for another reason — a missing directory, a read-only filesystem, permissions — is refused with the same shape and the filesystem's own reason. The refusal is written to stderr because the configured handlers are deliberately not installed yet, and it is the process the UI spawned that exits non-zero, so `DaemonController.start()` reports the refusal instead of a success it did not have.
 
 ### A pending migration and a running daemon
 
@@ -203,7 +211,7 @@ The daemon is detached, so closing the TUI leaves it running while a new UI star
 4. refuses to migrate when that stop did not succeed, raising `DaemonStillRunningError` with a sentence saying the daemon is still running and the migration was not attempted — a gate, not best-effort;
 5. migrates, then restarts the daemon and logs it; if the migration raised it does not restart, and `SchemaMigrationFailedError` says the daemon was stopped and has not been restarted.
 
-The daemon's own startup (step 5 above) is unchanged: it performs its pending migrations directly, before it constructs the `Daemon`, and `DaemonController.start()` already refuses a second start for anything the controller launches.
+The daemon's own startup (step 7 above) is unchanged: it performs its pending migrations directly, before it constructs the `Daemon`, and `DaemonController.start()` already refuses a second start for anything the controller launches. A start spawned this way that is refused by the PID-file guard reports the refusal to the UI rather than success; see [The PID file refuses a second start](#the-pid-file-refuses-a-second-start).
 
 ### Graceful Shutdown
 
