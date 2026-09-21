@@ -415,23 +415,35 @@ def _dead_items_by_queue(conn, params) -> dict:
     """Work queued against items that are already known to be gone.
 
     An item marked dead should be in no queue, so this is expected to read zero.
-    It is kept because the queues used to strand these rows: the daemon now
-    clears the flags when it marks an item dead, and migration 16->17 cleared the
-    rows already stranded. A non-zero reading means that cause has come back,
+    It is kept because the queues used to strand these rows, in two shapes. The
+    first is a queue flag: the daemon used to clear only `api_priority` when it
+    marked an item dead, and migration 16->17 cleared the `web_scrape_priority`,
+    `image_priority` and `translation_priority` flags already stranded. The
+    second is a `translation_queue` row with its mirror cleared: the daemon did
+    not delete those rows until issue 66, and migration 35->36 removed the ones
+    already there. A non-zero reading means one of those causes has come back,
     which is more useful than a button that would hide the symptom.
 
-    This is the flag-specific form of the question `dead_queued` answers: that
-    metric is the scalar that must read zero, and this one breaks the same
-    population down by *flag* so the reading says which queue still holds dead
-    rows. They are one question at two resolutions, not two findings. A dead
-    item's outstanding `translation_queue` row without a flag is counted by
-    `dead_queued` but not here, because no flag column describes it.
+    This is the other resolution of the question `dead_queued` answers: that metric
+    is the scalar that must read zero, and this one breaks the same population
+    down so the reading says which queue still holds the dead rows. The
+    translation column therefore counts the mirror *or* a `translation_queue` row,
+    exactly as the scalar's union does -- a dead item held only by a row has no
+    flag column to name it, and a breakdown that read flags alone would put the
+    item in the scalar and leave this diagnostic reading zero, which is the
+    disagreement the breakdown exists to prevent. They are one question at two
+    resolutions, not two findings.
     """
     row = conn.execute(
         """
         SELECT COALESCE(SUM(CASE WHEN web_scrape_priority > 0 THEN 1 ELSE 0 END), 0) AS web,
                COALESCE(SUM(CASE WHEN image_priority > 0 THEN 1 ELSE 0 END), 0) AS image,
-               COALESCE(SUM(CASE WHEN translation_priority > 0 THEN 1 ELSE 0 END), 0) AS translation,
+               COALESCE(SUM(CASE
+                              WHEN translation_priority > 0
+                                OR EXISTS (SELECT 1 FROM translation_queue q
+                                           WHERE q.entity_type = 'item'
+                                             AND q.entity_id = workshop_items.workshop_id)
+                              THEN 1 ELSE 0 END), 0) AS translation,
                COALESCE(SUM(CASE WHEN api_priority > 0 THEN 1 ELSE 0 END), 0) AS api
         FROM workshop_items
         WHERE fetch_status = -1
@@ -458,11 +470,12 @@ def _dead_queued(conn, params) -> int:
 
     Zero is the healthy reading. A non-zero value is the number of dead items
     still encumbered by a queue, each item counted once however many flags it
-    holds. `dead_items_by_queue` answers the flag half at the other resolution: this
-    is the scalar that must read zero, and that metric is the per-queue breakdown
-    that says where a flag was left set. Both are wanted -- the scalar is the
-    invariant, the breakdown is the diagnosis -- so one is not a replacement for
-    the other.
+    holds. `dead_items_by_queue` answers the same question at the other
+    resolution: this is the scalar that must read zero, and that metric is the
+    per-queue breakdown that says where the item is held -- a flag, or for
+    translation a queue row. Both are wanted -- the scalar is the invariant, the
+    breakdown is the diagnosis -- so one is not a replacement for the other, and
+    the two must agree.
     """
     # The union comes from the named queue predicates, so a change to one of them
     # moves this with it. ``api_priority`` is then added on its own, because the

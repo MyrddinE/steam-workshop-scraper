@@ -758,7 +758,7 @@ class StatsScreen(Screen):
         if not total:
             return "[green]No dead items are still sitting in a queue.[/green]"
         lines = [
-            f"[bold red]{total:,} dead item(s) are still flagged in a work queue[/bold red]",
+            f"[bold red]{total:,} dead item(s) are still sitting in a work queue[/bold red]",
             "",
         ]
         for key, label in labels:

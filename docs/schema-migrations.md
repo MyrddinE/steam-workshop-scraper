@@ -1227,10 +1227,13 @@ dead deletes the item's rows *in the same transaction as the status write*
 translator drain; and `queued_anywhere_predicate` now asks the consumer's real question —
 a flag **or** a `translation_queue` row — which is what makes `dead_queued` see a
 row-without-a-flag and keeps `queued_nowhere` from calling an item with outstanding
-translation work stranded. There is deliberately no poll-side dead guard: the producer's
-clear is the mechanism the stage-handoff plan names, so the translator's select is
-unchanged. Pinned by `tests/test_daemon.py::test_process_item_404_deletes_the_items_translation_queue_rows`,
-two tests in `tests/test_handoff_contract.py`, and two in `tests/test_metrics.py`.
+translation work stranded. `dead_items_by_queue` makes the same translation test (mirror
+**or** row) in its `translation` column, so the scalar and the per-queue diagnostic that
+exists to say *which* queue holds the item cannot disagree. There is deliberately no
+poll-side dead guard: the producer's clear is the mechanism the stage-handoff plan names,
+so the translator's select is unchanged. Pinned by
+`tests/test_daemon.py::test_process_item_404_deletes_the_items_translation_queue_rows`,
+two tests in `tests/test_handoff_contract.py`, and three in `tests/test_metrics.py`.
 
 ---
 

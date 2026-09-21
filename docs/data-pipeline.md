@@ -598,9 +598,10 @@ Two statistics watch the invariant, each meant to read zero:
 
 `dead_queued` and `dead_items_by_queue` are one question at two resolutions, and both are wanted:
 `dead_queued` is the scalar that must read zero, and `dead_items_by_queue` is the per-queue breakdown that says
-which flag was left set, so a non-zero reading points at the queue to look in. Neither replaces the
-other — the scalar is the invariant, the breakdown is the diagnosis. The breakdown counts flags, so the
-row-without-a-flag shape the scalar also catches appears only in `dead_queued`.
+where the item is held, so a non-zero reading points at the queue to look in. Neither replaces the
+other — the scalar is the invariant, the breakdown is the diagnosis — and the two must agree: the
+breakdown's `translation` column counts the mirror **or** a `translation_queue` row, the same test the
+scalar's union makes, so an item held only by a row is named in both.
 
 Both count; neither repairs. The consumer's predicates are named functions shared
 with the handoff contract tests, so a divergence between a predicate and the

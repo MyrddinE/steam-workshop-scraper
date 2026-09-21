@@ -406,6 +406,34 @@ def test_dead_items_by_queue_surfaces_dead_items_still_queued(db_path):
     assert stuck == {"web": 1, "image": 1, "translation": 1, "api": 0}
 
 
+def test_dead_items_by_queue_counts_an_item_held_only_by_a_queue_row(db_path):
+    """The breakdown must name the queue the scalar found.
+
+    A dead item whose only outstanding work is a `translation_queue` row has no
+    flag column for the breakdown to read, so a flag-only `translation` column
+    would put the item in `dead_queued` and leave the per-queue diagnostic that
+    exists to say *which* queue holds it reading zero. The two resolutions of
+    the question have to agree (issue 66).
+    """
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "title": "gone", "fetch_status": -1, "api_priority": 0,
+        "translation_priority": 0,
+    })
+    _queue_translation_row(db_path, 1)
+
+    values = metrics.values(metrics.compute(
+        db_path, ["dead_queued", "dead_items_by_queue"]))
+
+    assert values["dead_queued"] == 1
+    assert values["dead_items_by_queue"]["translation"] == 1, (
+        "the row the scalar counted is held by the translation queue, so the "
+        "breakdown's translation column must count it too"
+    )
+    assert values["dead_items_by_queue"] == {
+        "web": 0, "image": 0, "translation": 1, "api": 0,
+    }
+
+
 def _queue_translation_row(db_path, workshop_id: int, field: str = "title_en") -> None:
     """Put one row in the translation poll's queue without raising the mirror.
 
