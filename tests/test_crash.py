@@ -36,12 +36,19 @@ REGISTERED_SECRET = "REGISTERED-SECRET-VALUE-0123456789"
 
 
 @pytest.fixture(autouse=True)
-def _isolate_crash_state():
+def _isolate_crash_state(tmp_path, monkeypatch):
     """No test may leave crash hooks or a ring buffer on the process.
 
     The entry-point tests call ``main()``, which installs process-wide hooks;
-    without this they leak into every later test.
+    without this they leak into every later test. ``APP_DIR`` is pointed at this
+    test's tmp_path too: adoption scans the application folder for stranded
+    dumps, and a real dump left in the checkout must never inflate another test's
+    count or be moved out from under the operator.
     """
+    # `raising=False` keeps the fixture harmless while APP_DIR does not exist yet,
+    # so a new test fails against the old code for its own reason rather than on
+    # the fixture.
+    monkeypatch.setattr(crash, "APP_DIR", str(tmp_path / "app"), raising=False)
     crash.uninstall()
     saved_sys = sys.excepthook
     saved_threading = threading.excepthook
