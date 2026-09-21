@@ -17,6 +17,8 @@ from src.database import (
     get_creator, 
     get_app_tracking,
     update_app_tracking_cursor,
+    cursor_walk_finished,
+    mark_cursor_walk_finished,
     save_enrichment_filters,
     get_connection,
     get_item_details,
@@ -128,6 +130,18 @@ STALE_SWEEP_INTERVAL_SECONDS = 3600
 # past it on occasion, so 300 is the headroom above the crossing. At the request
 # page size of 100 it is three pages of fresh items per pass.
 DISCOVERY_FILL_TARGET = 300
+
+# How many consecutive cursor pages may add nothing before the walk concludes it
+# has run out of new items and stops (issue 68). A page that adds even one item
+# resets the count, so this is "five in a row", not "five in total". The walk
+# used to have only two stops -- `fill_target` new items, or an empty
+# `next_cursor` -- and once the pages it walked were all already known neither
+# was reachable, so it paged a whole exhausted catalogue at ~2.3 pages a second
+# until the API refused, pass after pass. The page-based (updated-order) mode
+# already stops on its first no-progress page; the cursor walk now has the same
+# rule with a wider margin, because a deep catalogue can legitimately have a few
+# pages where everything is already known.
+CURSOR_STALL_PAGES = 5
 
 # How long the discovery thread waits between passes. It is a check interval, not
 # a rate: `seed_database` returns at once while the fetchable queue is already at
@@ -1442,6 +1456,13 @@ class Daemon:
         """
         Discovers workshop items via IPublishedFileService/QueryFiles API
         using cursor-based pagination (unlimited depth).
+
+        The walk stops when `fill_target` new items are found, an API error ends
+        the pass, the cursor comes back empty, or `CURSOR_STALL_PAGES` pages in a
+        row add nothing new. Only the last two conclusions are permanent: the
+        stall records `app_discovery.cursor_walk_finished` so the walk is not
+        resumed (issue 68), while `fill_target` and an API error say nothing
+        about whether more items remain, so neither may mark it finished.
         """
         if not self.api_key:
             logging.error("No Steam API key configured. Discovery cannot run. "
@@ -1450,6 +1471,19 @@ class Daemon:
 
         discovered_total = 0
         for appid in self.target_appids:
+            # A finished walk is a permanent conclusion, not a per-pass one: the
+            # five-empty-page rule below recorded that this AppID's cursor scan
+            # has no new items left to reach, so re-running it would page an
+            # exhausted catalogue again. Page-based (updated-order) discovery is
+            # the source of new and changed items from here on.
+            if cursor_walk_finished(self.db_path, appid):
+                logging.info(
+                    "Cursor walk for AppID %s is recorded as finished "
+                    "(app_discovery.cursor_walk_finished); skipping the cursor scan.",
+                    appid,
+                )
+                continue
+
             # The guard must measure work the fetch queue can actually hand out.
             # It used to test count_never_fetched_items -- items never successfully
             # fetched -- which is a disjoint population: on production this read
@@ -1468,6 +1502,10 @@ class Daemon:
             cursor = (app_tracking or {}).get("last_cursor") or "*"
             new_discovered_count = 0
             pages = 0
+            # Consecutive pages that added nothing, reset by any page that adds
+            # something. It lives here, per AppID and per pass, so one AppID's
+            # dust does not carry into another's and a fresh pass starts clean.
+            stall_pages = 0
 
             logging.info(f"Discovering items for AppID {appid}, resuming from cursor...")
             while cursor and self.running:
@@ -1511,13 +1549,40 @@ class Daemon:
                 pages += 1
                 logging.info(f"Cursor page {pages} provided {page_new_count} new items. (Total new: {new_discovered_count})")
 
+                if page_new_count:
+                    stall_pages = 0
+                else:
+                    stall_pages += 1
+
                 cursor = result.get("next_cursor") or ""
                 if cursor:
                     update_app_tracking_cursor(self.db_path, appid, cursor)
                 pacing.wait(self.api_delay, lambda: self.running)
 
                 if new_discovered_count >= fill_target:
+                    # The healthy exit. It says the queue is refilled, not that
+                    # the catalogue is exhausted, so it must not mark the walk
+                    # finished -- there is more to find, we just have enough.
                     logging.info(f"Discovered {new_discovered_count} new items for AppID {appid}, enough for now.")
+                    break
+
+                if stall_pages >= CURSOR_STALL_PAGES:
+                    # Issue 68: this is the stop the loop never had. Every page
+                    # of an exhausted cursor walk adds nothing, so without this
+                    # the pass pages until the API refuses and the next pass
+                    # resumes into the same wall. Record it so a restart cannot
+                    # re-enable the march, and name the AppID in the log.
+                    logging.warning(
+                        "Cursor walk for AppID %s stalled: %d consecutive pages "
+                        "added no new items. Recording the walk as finished; "
+                        "page-based discovery takes over.",
+                        appid, stall_pages,
+                    )
+                    mark_cursor_walk_finished(self.db_path, appid)
+                    # Set the in-memory signal too, so the discovery thread's
+                    # cheap `_page_discovery_worth_checking` fires this pass
+                    # rather than waiting out its 20-pass eligibility interval.
+                    self._cursor_exhausted = True
                     break
 
             if pages:
@@ -1536,10 +1601,30 @@ class Daemon:
         if self._cursor_exhausted:
             return True
         conn = get_connection(self.db_path)
-        scraped = conn.execute(
-            "SELECT COUNT(*) FROM workshop_items WHERE api_fetched_at IS NOT NULL"
-        ).fetchone()[0]
-        conn.close()
+        try:
+            # Issue 68: the persisted half of the signal. `_cursor_exhausted` is
+            # in-memory and a restart clears it, which would re-enable the deep
+            # cursor march the previous run concluded was pointless. The
+            # `app_discovery` latch survives the restart, so eligibility is
+            # derived from it rather than from the flag alone. Restricted to the
+            # configured AppIDs: a finished walk on some other app says nothing
+            # about whether page discovery is worth running for these.
+            targets = self.target_appids or []
+            if targets:
+                placeholders = ",".join("?" * len(targets))
+                finished = conn.execute(
+                    "SELECT 1 FROM app_discovery "
+                    "WHERE cursor_walk_finished = 1 "
+                    f"AND appid IN ({placeholders}) LIMIT 1",
+                    tuple(targets),
+                ).fetchone()
+                if finished:
+                    return True
+            scraped = conn.execute(
+                "SELECT COUNT(*) FROM workshop_items WHERE api_fetched_at IS NOT NULL"
+            ).fetchone()[0]
+        finally:
+            conn.close()
         return scraped >= 500
 
     def _run_page_discovery(self):

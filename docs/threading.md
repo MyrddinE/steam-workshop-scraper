@@ -29,7 +29,10 @@ the drain rather than racing it.
 
 It holds no state of its own. The cursor, the page-discovery cooldown and
 `_cursor_exhausted` live on the daemon, and only this thread writes them — which
-is what keeps them safe without a lock. The fetch loop reads none of them.
+is what keeps them safe without a lock. The fetch loop reads none of them. The
+finished-walk latch `app_discovery.cursor_walk_finished` is likewise written and
+read only here (`seed_database` sets it, and skips a finished AppID's cursor scan
+on later passes).
 
 Its requests feed the adaptive backoff exactly as the details calls do. While
 discovery was serialised behind the fetch loop it was tolerable that a refused

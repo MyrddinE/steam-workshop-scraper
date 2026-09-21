@@ -96,11 +96,16 @@ scrapes and previews throughout and no API fetch until the walk finished.
 
 Cursor-based discovery using `IPublishedFileService/QueryFiles` with `query_type=1` (rank by publication date, newest first). For each target AppID:
 
-- Resumes from the last stored cursor (`app_discovery.last_cursor`), or `*` for the first page.
+- Resumes from the last stored cursor (`app_discovery.last_cursor`), or `*` for the first page — unless `app_discovery.cursor_walk_finished` is `1`, in which case the AppID's cursor scan is skipped outright with a log line and the walk is left to page-based discovery.
 - Fetches `numperpage=100` items per request. Each item's `publishedfileid` is inserted into `workshop_items` as a bare row at `api_priority = 3`, the documented new-item priority (fetch_status NULL, no metadata). The priority is passed explicitly rather than left to the column default, because that default is not stable across database histories: `CREATE TABLE` declares `DEFAULT 3` while the `ALTER TABLE` in migration 11→12 gives an existing database `DEFAULT 0`, so leaning on it queues discovered items on a fresh database and strands them on a migrated one (the fetch queue selects `api_priority > 0`). `_run_page_discovery` uses `5` because it handles new *and changed* items that should refresh as if visible; cursor discovery finds genuinely new items, so it uses the documented `3`.
-- Stops when `fill_target` unscraped items are accumulated, or when the cursor returns empty (no more pages).
-- Persists the cursor after each page via `update_app_tracking_cursor`.
-- When the cursor is empty after a successful scan, sets `_cursor_exhausted = True`, enabling the page-based discovery mode.
+- Stops on the first of four conditions: `fill_target` new items accumulated; an API error, which ends the pass without concluding anything; an empty `next_cursor`; or **five consecutive pages that add nothing new** (`CURSOR_STALL_PAGES`). A page that adds anything resets the consecutive count, so a stall is five in a row, not five in total. Only the empty cursor and the stall are conclusions about the catalogue — reaching `fill_target` means there is more to find and an API error means nothing was learned, so neither may mark the walk finished.
+- Persists the cursor after each page via `update_app_tracking_cursor`. The cursor is **kept** when a walk finishes: it records how far the walk reached, while `cursor_walk_finished` decides whether the walk may resume.
+- A stall logs at warning level, naming the AppID, and calls `mark_cursor_walk_finished`, setting `app_discovery.cursor_walk_finished = 1`. `seed_database` then skips that AppID's cursor scan on every later pass, and the state survives a restart, so the deep march cannot be re-enabled by one. There is no automatic clear: a finished walk is the conclusion the run drew.
+- When the cursor is empty after a successful scan, sets the in-memory `_cursor_exhausted = True`, enabling the page-based discovery mode.
+
+*Measured before the stop rule existed* (2026-09-21, AppID 431960, ~1.7–3.2M items): recent passes scanned 13,487 / 1,724 / 5,624 / 6,964 pages, each discovering 0 new items, at ~2.3 pages a second, and every one ended only because the API refused. `Cursor exhausted` never appeared in 400,000 log lines, so the page-mode fall-back it enables never fired.
+
+**Once an AppID's walk is finished, newly published items are found by page-based discovery, not by the cursor walk.** Page mode ranks by last-updated time and runs at most once per 24 hours per process (see below), so a newly published item can wait up to that long to be discovered — normally less, because it is at the head of updated-order and the first page carries it, and because a restart resets the in-memory cooldown. That is the trade the stop rule accepts: paging an exhausted catalogue without bound is exchanged for at most a day's discovery latency on new items.
 
 This is called when `get_next_items_to_fetch` returns empty — meaning the processing queue is drained and new items need to be discovered.
 
@@ -117,11 +122,11 @@ outstanding work once suppressed discovery permanently while the fetch queue hel
 
 ### `_run_page_discovery` (daemon)
 
-A periodic alternative to cursor-based discovery. Enabled when a `.fetch_new` trigger file exists, when `_cursor_exhausted` is True, or when at least 500 items have been scraped (`api_fetched_at IS NOT NULL`). Runs at most once per 24 hours (tracked via `_last_page_discovery`), unless the trigger file bypasses the cooldown.
+A periodic alternative to cursor-based discovery. Enabled when a `.fetch_new` trigger file exists, when `_cursor_exhausted` is True, when any target AppID's `app_discovery.cursor_walk_finished` is `1`, or when at least 500 items have been scraped (`api_fetched_at IS NOT NULL`). Runs at most once per 24 hours (tracked via `_last_page_discovery`), unless the trigger file bypasses the cooldown.
 
 Uses `query_workshop_updated_page`, which calls QueryFiles with `query_type=21` (rank by last updated, most recent first) and cursor-based pagination. It walks up to 500 pages per AppID, comparing each item's returned `time_updated` against the stored `steam_updated_at` and upserting new or changed items as bare rows at `api_priority = 5`. Stops when a page yields no new or changed items.
 
-After page mode completes, the daemon resumes normal cursor-based discovery.
+After page mode completes, the daemon resumes normal cursor-based discovery — except for an AppID whose walk is finished, whose cursor scan stays skipped and whose new items page mode continues to carry.
 
 ### `query_workshop_newest_page` (steam_api)
 
