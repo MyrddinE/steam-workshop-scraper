@@ -512,16 +512,65 @@ def test_web_parent_and_subsidiary_rows_are_flush(db_path):
 
 
 def test_web_subsidiary_bar_is_drawn_thinner_than_the_standard_bar():
-    """A smaller CSS height on the child's progress element, not a shorter bar."""
+    """A smaller CSS height on the child's track, not a shorter bar."""
     html = TEMPLATE.read_text(encoding="utf-8")
-    standard = re.search(r"\.coverage-table progress\s*\{[^}]*height:([^;]+);", html)
+    standard = re.search(r"\.coverage-track\s*\{[^}]*height:([^;]+);", html)
     child = re.search(
-        r"\.coverage-table tr\.coverage-child progress\s*\{[^}]*height:([^;]+);", html)
+        r"\.coverage-table tr\.coverage-child \.coverage-track\s*\{[^}]*height:([^;]+);",
+        html)
     assert standard and child, "both coverage bar heights must be declared"
     assert float(child.group(1).rstrip("rem")) < float(standard.group(1).rstrip("rem"))
     # Flush rows: no vertical padding and no border spacing to open a gap.
     assert re.search(r"\.coverage-table\s*\{[^}]*border-collapse:collapse;", html)
     assert re.search(r"\.coverage-table td\s*\{[^}]*padding-top:0;[^}]*padding-bottom:0;", html)
+
+
+def test_web_draws_the_no_work_share_as_a_second_fill(db_path):
+    """A track with two fills, because `<progress>` cannot show two segments.
+
+    The widths are the metric's own ``pct`` and ``gray_pct``, so the browser's
+    split cannot differ from the terminal's. A bar with no no-work share keeps
+    the one-fill track.
+    """
+    _full_library(db_path)
+    cov = _coverage(db_path, [294100])
+    bar = _bars(cov)["translations"]
+    html = _render_web_rows(cov)
+    row = html.split(">Translations<", 1)[1].split("</tr>", 1)[0]
+
+    assert 'class="coverage-track"' in row
+    assert 'class="coverage-fill" style="width:' + f"{bar['pct']:.1f}%" + '"' in row
+    assert 'class="coverage-nowork" style="width:' + f"{bar['gray_pct']:.1f}%" + '"' in row
+    assert "<progress" not in row, "a progress element cannot show two segments"
+    api_row = html.split(">API Data<", 1)[1].split("</tr>", 1)[0]
+    assert "coverage-nowork" not in api_row, "the Creator/API bars have no no-work share"
+    creator_row = html.split(">Creator<", 1)[1].split("</tr>", 1)[0]
+    assert "coverage-nowork" not in creator_row
+
+
+def test_tui_draws_the_no_work_share_as_a_gray_segment(db_path):
+    """Green fill, gray no-work, empty work: the three parts of a slot track.
+
+    The glyph counts are the metric's percentages of the twenty-cell track, so a
+    reader can see both the work done and the work that can never be there.
+    """
+    _full_library(db_path)
+    cov = _coverage(db_path, [294100])
+    lines = StatsScreen._coverage_block(cov)
+    bar = _bars(cov)["translations"]
+    line = _find_bar_line(lines, "Translations")
+
+    width = StatsScreen.COVERAGE_BAR_WIDTH
+    on, gray_glyph, off = StatsScreen.COVERAGE_GLYPHS[bool(bar["subsidiary"])]
+    filled = int(round(bar["pct"] / 100 * width))
+    gray = int(round(bar["gray_pct"] / 100 * width))
+    assert line.count(on) == filled, line
+    assert line.count(gray_glyph) == gray, line
+    assert line.count(off) == width - filled - gray, line
+    assert "[gray]" in line
+    parent_gray = StatsScreen.COVERAGE_GLYPHS[False][1]
+    assert parent_gray not in _find_bar_line(lines, "Creator"), \
+        "the Creator bar has no no-work share"
 
 
 def test_both_front_ends_print_the_same_short_note(db_path):
@@ -559,5 +608,8 @@ def test_web_reads_a_zero_population_as_nothing_to_translate(db_path):
 
     rendered = _render_web_rows(_coverage(db_path, []))
     assert metrics.NOTHING_TO_TRANSLATE in rendered
-    assert 'value="0" max="100"' in rendered
-    assert "0.0%" not in rendered.split(">Translations<", 1)[1].split("</tr>", 1)[0]
+    row = rendered.split(">Translations<", 1)[1].split("</tr>", 1)[0]
+    assert 'class="coverage-track"' in row
+    assert 'class="coverage-fill" style="width:0.0%"' in row
+    assert "coverage-nowork" not in row, "nothing to translate is not a 100% gray bar"
+    assert "<td>0.0%</td>" not in row, "no 0.0% that could never move"

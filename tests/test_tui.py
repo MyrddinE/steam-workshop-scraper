@@ -483,32 +483,47 @@ async def test_tui_detail_priority_applied_once_per_pane_load(mock_config, mock_
 # stats screen: one independent chunk per metric
 # --------------------------------------------------------------------------
 
-def _coverage_bar(key, label, subsidiary, done, maximum, total, detail=None, empty=None):
-    """One coverage bar shaped exactly as `src.metrics` returns it."""
-    return {"key": key, "label": label, "subsidiary": subsidiary, "done": done,
-            "maximum": maximum, "total": total,
-            "pct": None if maximum <= 0 or total <= 0 else round(done / total * 100, 1),
-            "detail": detail, "empty": empty}
+def _coverage_bar(key, label, subsidiary, done, maximum, total, detail=None,
+                  empty=None, slot_units=False):
+    """One coverage bar shaped exactly as `src.metrics` returns it.
+
+    ``slot_units`` mirrors the metric's translation bars: the track is the
+    stage's slots and the part that needs no translation is the gray share.
+    """
+    bar = {"key": key, "label": label, "subsidiary": subsidiary, "done": done,
+           "maximum": maximum, "total": total,
+           "pct": None if maximum <= 0 or total <= 0 else round(done / total * 100, 1),
+           "detail": detail, "empty": empty, "no_work": None, "gray_pct": None}
+    if slot_units and total > 0 and maximum > 0:
+        bar["no_work"] = total - maximum
+        bar["gray_pct"] = round((total - maximum) / total * 100, 1)
+    return bar
 
 
 def _fake_coverage(total=2, filtered_total=1):
+    def note(need, slots):
+        return None if need <= 0 or slots <= 0 else f"{need / slots * 100:.0f}% need translation"
+
     def bars(scope_total, api_done, described, imaged, attributed):
+        translation_slots = 2 * scope_total
+        translation_need = 1 if scope_total else 0
+        described_need = 1 if described else 0
+        author_need = 1 if attributed else 0
         return [
             _coverage_bar("api_fetched", "API Data", False, api_done, scope_total, scope_total),
-            _coverage_bar("translations", "Translations", True, 0, 1, scope_total,
-                          "reachable 1 of 2 (50.0%): non-ASCII title/short-description "
-                          "fields of filter-selected items; 1 filter-selected items need none",
-                          metrics.NOTHING_TO_TRANSLATE),
+            _coverage_bar("translations", "Translations", True, 0, translation_need,
+                          translation_slots, note(translation_need, translation_slots),
+                          metrics.NOTHING_TO_TRANSLATE, slot_units=True),
             _coverage_bar("described", "Extended Web", False, described, scope_total, scope_total,
                           "reachable 2 of 2 (100.0%): 0 scraped pages answered with no description"),
-            _coverage_bar("web_translated", "Extended Web Translation", True, 0, 1, scope_total,
-                          "reachable 1 of 2 (50.0%): non-ASCII descriptions of scraped items",
-                          metrics.NOTHING_TO_TRANSLATE),
+            _coverage_bar("web_translated", "Extended Web Translation", True, 0, described_need,
+                          described, note(described_need, described),
+                          metrics.NOTHING_TO_TRANSLATE, slot_units=True),
             _coverage_bar("imaged", "Images", False, imaged, scope_total, scope_total),
             _coverage_bar("attributed", "Creator", False, attributed, scope_total, scope_total),
-            _coverage_bar("creator_translated", "Creator Translation", True, 0, 1, scope_total,
-                          "reachable 1 of 2 (50.0%): items whose creator's name is non-ASCII",
-                          metrics.NOTHING_TO_TRANSLATE),
+            _coverage_bar("creator_translated", "Creator Translation", True, 0, author_need,
+                          scope_total, note(author_need, scope_total),
+                          metrics.NOTHING_TO_TRANSLATE, slot_units=True),
         ]
     return {
         "total": total,

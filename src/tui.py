@@ -540,24 +540,33 @@ class StatsScreen(Screen):
     #: still means less coverage. There is no way to shrink a line of text's
     #: height, and shrinking the bar's *length* would be read as coverage, so
     #: the glyph carries the subordination instead.
+    #:
+    #: The middle glyph is the translation bars' **no-work** segment -- the
+    #: fields on the track that need no translation at all. It sits between the
+    #: full cell and the light shade so the three parts of the track stay
+    #: distinguishable without colour: done, needs nothing, still to do.
     COVERAGE_BAR_WIDTH = 20
     COVERAGE_GLYPHS = {
-        False: ("█", "░"),
-        True: ("▄", "▁"),
+        False: ("█", "▒", "░"),
+        True: ("▄", "▂", "▁"),
     }
 
     @staticmethod
     def _coverage_bar_line(bar: dict, label_width: int) -> str:
-        """One bar: a label, the percentage of live items, the bar, the counts.
+        """One bar: a label, the percentage of its track, the bar, the counts.
 
-        ``pct`` comes from the metric rather than being recomputed here, so the
-        terminal and the browser print the same number. A bar whose reachable
-        population is zero shows its empty track and the metric's own words
-        instead of a percentage that would sit at 0.0% forever.
+        ``pct``, the gray share and the counts all come from the metric rather
+        than being recomputed here, so the terminal and the browser print the
+        same numbers and draw the same segments. A translation bar's track has
+        three parts: the green fill for the share done, the gray no-work segment
+        for the slots that need no translation, and the empty track for what is
+        left to do. A bar whose reachable population is zero shows its empty
+        track and the metric's own words instead of a percentage that would sit
+        at 0.0% forever.
         """
         label = f"{bar.get('label') or bar.get('key', ''):<{label_width}}"
         width = StatsScreen.COVERAGE_BAR_WIDTH
-        on, off = StatsScreen.COVERAGE_GLYPHS[bool(bar.get("subsidiary"))]
+        on, gray_glyph, off = StatsScreen.COVERAGE_GLYPHS[bool(bar.get("subsidiary"))]
         maximum = bar.get("maximum", 0) or 0
         if maximum <= 0:
             # The bar keeps its column even with no percentage, so every bar
@@ -566,8 +575,16 @@ class StatsScreen(Screen):
             return f"{label} {' ' * 6}  {track}  {bar.get('empty') or 'Nothing to reach'}"
         pct = bar.get("pct") or 0.0
         filled = max(0, min(width, int(round(pct / 100 * width))))
-        return (f"{label} {pct:5.1f}%  [green]{on * filled}[/green]"
-                f"[dim]{off * (width - filled)}[/dim]  "
+        gray_pct = bar.get("gray_pct")
+        if gray_pct is None:
+            track = (f"[green]{on * filled}[/green]"
+                     f"[dim]{off * (width - filled)}[/dim]")
+        else:
+            no_work = max(0, min(width - filled, int(round(gray_pct / 100 * width))))
+            track = (f"[green]{on * filled}[/green]"
+                     f"[gray]{gray_glyph * no_work}[/gray]"
+                     f"[dim]{off * (width - filled - no_work)}[/dim]")
+        return (f"{label} {pct:5.1f}%  {track}  "
                 f"{bar.get('done', 0):,} / {bar.get('total', 0):,}")
 
     @staticmethod
