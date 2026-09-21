@@ -4,6 +4,7 @@ from textual.containers import VerticalScroll
 from tests.conftest import ASYNC_PAUSE
 from src.tui import ScraperApp, StatsScreen
 from src import metrics
+from src.database import insert_or_update_item
 from unittest.mock import patch, MagicMock
 import threading
 import time
@@ -547,7 +548,7 @@ _FAKE_METRIC_VALUES = {
     "dead_items_by_queue": {"web": 1, "image": 0, "translation": 0, "api": 0},
     "dead_queued": 1,
     "queued_nowhere": 2,
-    "fetch_recency": {"fresh": 1, "stale": 0, "unknown": 1},
+    "fetch_recency": {"fresh": 1, "stale": 0, "unknown": 1, "window_days": 45},
     "coverage": _fake_coverage(),
     "translation_status": {"Translated": 1, "Queued": 1},
     "tag_counts": {"Alpha": 2, "Beta": 1},
@@ -724,6 +725,54 @@ async def test_stats_screen_puts_every_metric_in_its_own_chunk(mock_config):
             assert len(screen.query("#tier-costs")) == 0
             label = str(screen.query_one("#stats-label-item_counts", Label).render())
             assert "1.0 ms" in label
+
+
+@pytest.mark.asyncio
+async def test_stats_screen_uses_the_configured_staleness_window(db_path):
+    """Issue 73: the recency window is the configured `item_staleness_days`.
+
+    The row was last attempted 45 days ago. With the configured 60-day window it
+    is fresh; the old screen passed no window, so the boundary was the 30-day
+    constant and it read stale. The real metric runs here (wrapped only to record
+    the params it was called with), so the test proves the screen's plumbing and
+    the label together -- and that the label names the configured window rather
+    than the constant.
+    """
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "title": "x", "fetch_status": 200,
+        "last_fetch_attempted_at": int(time.time()) - 45 * 86400,
+    })
+    seen = []
+    real_iter_metrics = metrics.iter_metrics
+    config = {"database": {"path": db_path},
+              "daemon": {"item_staleness_days": 60}}
+
+    def spy(db_path, names=None, params=None):
+        seen.append(dict(params or {}))
+        yield from real_iter_metrics(db_path, names, params)
+
+    with patch('src.tui.load_config', return_value=config), \
+         patch('src.tui.metrics.iter_metrics', side_effect=spy):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+            app.action_show_stats()
+            await pilot.pause(ASYNC_PAUSE)
+            screen = app.screen
+            for _ in range(200):
+                await pilot.pause(0.02)
+                if len(screen._measured_ms) >= len(metrics.all_names()):
+                    break
+            recency = str(screen.query_one("#recency-content", Static).render())
+
+    assert seen and seen[0].get("staleness_days") == 60, \
+        "the screen must pass the configured item_staleness_days into the metric"
+    assert "Fresh (last 60d): 1" in recency, \
+        "a 45-day attempt is fresh inside the configured 60-day window"
+    assert "Stale (over 60d): 0" in recency
+    assert "30d" not in recency, "the label must not fall back to the constant"
+    assert metrics.FETCH_RECENCY_MEANING in recency, \
+        "the chunk must say what the figure is, not only its counts"
 
 
 @pytest.mark.asyncio

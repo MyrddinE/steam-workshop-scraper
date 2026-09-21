@@ -773,6 +773,42 @@ index (`idx_api_queue`, `idx_web_scrape_queue`, `idx_image_queue`,
 `idx_translation_priority`), and the completion counts through the partial
 completion indexes migration 26→27 added. No new index was required.
 
+### The fetch-recency figure is not a backlog
+
+The `fetch_recency` metric (`src/metrics.py`, `_fetch_recency`) buckets every row
+by **the age of our last fetch attempt** (`last_fetch_attempted_at`) into
+`fresh`, `stale` and `unknown`, against one window: `daemon.item_staleness_days`
+(default 30), the same window `_promote_stale_items` promotes at. Both front ends
+read that key through `metrics.item_staleness_days`, the one accessor that also
+serves the daemon's sweep, and the metric returns the window it used in its value
+as `window_days`; the TUI and the web panel both render that number and the same
+caveat sentence (`metrics.FETCH_RECENCY_MEANING`, injected into the page rather
+than retyped), so a label cannot name a window other than the one the query
+bucketed by. Before this, the front ends passed no window and the metric fell
+back to a hardcoded 30 days while the sweep used a configured 60 — the panel
+called 840,685 rows stale when the sweep's criterion matched none of them.
+
+The counts are recency, not work outstanding, and the figure was misread three
+ways:
+
+* **It is not the fetch queue.** Whether a row is queued is `api_priority > 0`,
+  reported by `queue_eta` and `priority_breakdowns`. A `stale` row is only older
+  than the window; the sweep's criterion is narrower — live
+  (`fetch_status = 200`), unqueued (`api_priority = 0`) and `api_fetched_at`
+  older than the same window — and it runs at most hourly, so a stale row may
+  simply not be due yet.
+* **It counts settled rows.** Dead items (`fetch_status = -1`) and the legacy
+  `404` rows are inside whichever bucket their attempt age lands, and neither
+  will ever be fetched again.
+* **It is our clock, not Steam's.** A failed attempt stamps
+  `last_fetch_attempted_at` too, so the boundary is the last thing *we* tried,
+  not when Steam last changed the item.
+
+*Measured on the 2026-09-21 outbox snapshot*: 840,685 rows read stale at the
+hardcoded 30 days — 778,934 successful fetches 30–60 days old and not yet due,
+61,521 dead rows and 230 legacy `404`s — while the 60-day sweep's criterion
+matched **zero** rows and the whole API queue held 4 owner-requested items.
+
 ---
 
 ## Item Lifecycle State Machine

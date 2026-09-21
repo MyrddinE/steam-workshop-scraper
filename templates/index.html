@@ -331,6 +331,10 @@ const SEARCH_FILTER_SCHEMA = {{ filter_schema_json | safe }};
 // defined in src/pending.py. Injected rather than retyped so the two detail
 // panes cannot drift.
 const TRANSLATION_NOTICE = {{ translation_notice | tojson }};
+// What the fetch-recency counts mean, defined once in src/metrics.py and shared
+// with the TUI. Injected rather than retyped so the two panels cannot describe
+// the same figure differently (issue 73).
+const FETCH_RECENCY_MEANING = {{ fetch_recency_meaning | tojson }};
 
 // Derived from schema
 const ALL_FIELDS = SEARCH_FILTER_SCHEMA.map(f => f.field);
@@ -2493,9 +2497,13 @@ function _renderStatusCounts(rows) {
 }
 
 function _renderRecency(r) {
-  return '<ul><li>Fresh: ' + fmtCount(r.fresh || 0) + '</li>'
-    + '<li>Stale: ' + fmtCount(r.stale || 0) + '</li>'
-    + '<li>Never attempted: ' + fmtCount(r.unknown || 0) + '</li></ul>';
+  // The window is the metric's own answer (`window_days`), never a constant
+  // here, so this label cannot name a window other than the one the query used.
+  const windowDays = (r && r.window_days) || 0;
+  return '<ul><li>Fresh (last ' + windowDays + 'd): ' + fmtCount(r.fresh || 0) + '</li>'
+    + '<li>Stale (over ' + windowDays + 'd): ' + fmtCount(r.stale || 0) + '</li>'
+    + '<li>Never attempted: ' + fmtCount(r.unknown || 0) + '</li></ul>'
+    + '<p class="stat-label">' + FETCH_RECENCY_MEANING + '</p>';
 }
 
 function _renderTranslation(t) {

@@ -353,6 +353,35 @@ def test_metric_endpoint_returns_value_and_measured_cost(web_client):
     assert data["seed_ms"] == metrics.REGISTRY["coverage"].seed_ms
 
 
+def test_metric_endpoint_passes_the_configured_staleness_window(tmp_path):
+    """Issue 73: the recency window is `daemon.item_staleness_days`, not 30.
+
+    A config that omits the key keeps the daemon's own default, so a 45-day-old
+    attempt stays stale; one that sets 60 days makes the same attempt fresh and
+    reports the window it used. The front ends pass only this key, through the
+    one shared reader, so the route cannot derive a window of its own.
+    """
+    db_path = str(tmp_path / "test_web.db")
+    initialize_database(db_path)
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "title": "x", "fetch_status": 200,
+        "last_fetch_attempted_at": int(time.time()) - 45 * 86400,
+    })
+
+    configured = {"database": {"path": db_path},
+                  "daemon": {"target_appids": [294100], "item_staleness_days": 60}}
+    init_webserver(db_path, configured)
+    sixty = app.test_client().get('/api/metrics/fetch_recency').get_json()["value"]
+    assert sixty["window_days"] == 60
+    assert sixty["fresh"] == 1 and sixty["stale"] == 0
+
+    default = {"database": {"path": db_path}, "daemon": {"target_appids": [294100]}}
+    init_webserver(db_path, default)
+    thirty = app.test_client().get('/api/metrics/fetch_recency').get_json()["value"]
+    assert thirty["window_days"] == 30, "an omitted key keeps the daemon's default"
+    assert thirty["stale"] == 1 and thirty["fresh"] == 0
+
+
 def test_metric_endpoint_runs_only_the_requested_metric(web_client, monkeypatch):
     """One request is one metric: asking for item_counts must not pay for tags."""
     client, _ = web_client
@@ -1596,6 +1625,46 @@ def test_header_port_display_is_filled_from_the_pages_own_location(web_client, t
     # The function only helps if the page actually calls it on load.
     assert re.search(r'^showServerPort\(\);$', script, re.M), \
         "the page never calls showServerPort()"
+
+
+RECENCY_DRIVER = """
+const FETCH_RECENCY_MEANING = __MEANING__;
+const fmtCount = (__FMT__);
+const fn = (__FN__);
+console.log(JSON.stringify({
+  rendered: fn({fresh: 5, stale: 7, unknown: 2, window_days: 60}),
+}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_web_recency_render_names_the_configured_window(web_client, tmp_path):
+    """Issue 73: the panel names the window the metric used, not the constant.
+
+    The value carries `window_days: 60` while the module's constant is 30, so a
+    renderer that hardcoded 30 -- or showed no window at all, as the old one did
+    -- fails. The caveat sentence is the metric module's own, injected into the
+    page and shared with the TUI, so both panels say the same thing about what
+    the figure is.
+    """
+    client, _ = web_client
+    html = client.get('/').data.decode()
+    script = _served_inline_script(client)
+    # The sentence is injected from the Python constant, not retyped, so the
+    # renderer's global is the same one the TUI prints.
+    driver = (RECENCY_DRIVER
+              .replace("__FN__", _extract_function(script, "_renderRecency"))
+              .replace("__FMT__", _extract_function(script, "fmtCount"))
+              .replace("__MEANING__", json.dumps(metrics.FETCH_RECENCY_MEANING)))
+    rendered = _run_node(driver, tmp_path)["rendered"]
+
+    assert "Fresh (last 60d)" in rendered
+    assert "Stale (over 60d)" in rendered
+    assert "30d" not in rendered, "the label must not fall back to the constant"
+    assert metrics.FETCH_RECENCY_MEANING in rendered, \
+        "the panel must say what the figure is, not only its counts"
+    assert json.dumps(metrics.FETCH_RECENCY_MEANING) in html, \
+        "the page must be rendered with the shared sentence, not retype it"
 
 
 # ── delete never fetched items ───────────────────────────────────────────────
