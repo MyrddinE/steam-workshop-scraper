@@ -624,7 +624,10 @@ Two statistics watch the invariant, each meant to read zero:
   priority). A live item with a `translation_queue` row is queued, so it is not in this population
   even when its `translation_priority` mirror reads zero.
 * `dead_queued` — dead items a work queue would still select: a queue flag left set (issue 17) or a
-  `translation_queue` row the poll still holds (issue 66).
+  `translation_queue` row the poll still holds (issue 66). The API column of this population is a
+  flag no poll would actually hand out — the fetch queue's predicate excludes dead rows — but it is
+  still a broken invariant, and the writers and migration 37→38 that keep it at zero are described
+  below.
 
 `dead_queued` and `dead_items_by_queue` are one question at two resolutions, and both are wanted:
 `dead_queued` is the scalar that must read zero, and `dead_items_by_queue` is the per-queue breakdown that says
@@ -642,6 +645,20 @@ where no test is running. The producers that mark an item dead clear its
 migration 35→36 removed the rows already stranded at the time of the fix (910
 dead items held 1,016 rows on the v35 snapshot, each with its mirror already
 cleared), so no dead item's fields are translated or paid for.
+
+**A dead item is final, so no writer may re-queue one.** The four writers that raise a priority on
+an item that already exists — the image worker's and the web worker's "the item changed" bump, and
+the two discovery call sites — carry the `fetch_status IS NULL OR fetch_status != -1` rule (the
+discovery call sites through `insert_or_update_item`'s `preserve_dead_api_priority`), because the
+fetch poll excludes dead rows: a priority written onto a dead row could never be handed out, and
+`_settle_api_failure` would never run for it again to clear it. Migration 37→38 cleared the rows
+the unguarded writers had already stranded, so both counters read zero (issue 74).
+
+The rendered explanation of these counters is careful for the same reason. The API fetch poll
+excludes dead rows, so the API queue still drains even when a dead row holds its flag; it is the
+web, image and translation polls — which select on their flag alone — that would keep spending
+requests on a page that no longer exists. Both front ends print that sentence from
+`metrics.DEAD_QUEUED_MEANING`, defined once rather than retyped.
 
 ---
 

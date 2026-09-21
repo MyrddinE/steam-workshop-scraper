@@ -1630,7 +1630,14 @@ class Daemon:
                     # documented new-item priority (data-model.md, and migration 11->12
                     # sets never-scraped rows to 3), so this also leaves the fresh
                     # database's queue order unchanged.
-                    if wid and insert_or_update_item(self.db_path, {"workshop_id": wid, "api_priority": 3}):
+                    #
+                    # `preserve_dead_api_priority` because discovery re-encounters
+                    # items the API has already answered -1 for. A dead item is final
+                    # and in no queue, so re-seeing it must not write a fresh
+                    # discovery priority onto it (issue 74).
+                    if wid and insert_or_update_item(
+                            self.db_path, {"workshop_id": wid, "api_priority": 3},
+                            preserve_dead_api_priority=True):
                         page_new_count += 1
 
                 new_discovered_count += page_new_count
@@ -1778,7 +1785,14 @@ class Daemon:
                         # Existing item with a fresher update time on Steam
                         page_new += 1
 
-                    insert_or_update_item(self.db_path, {"workshop_id": wid, "api_priority": 5})
+                    # `preserve_dead_api_priority`: the updated-order page hands
+                    # back items Steam still lists, including ones the API has
+                    # already answered -1 for. A dead item is final and in no
+                    # queue, so the see-again must not write a fresh discovery
+                    # priority onto it (issue 74).
+                    insert_or_update_item(
+                        self.db_path, {"workshop_id": wid, "api_priority": 5},
+                        preserve_dead_api_priority=True)
 
                 conn.close()
                 page += 1

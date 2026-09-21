@@ -120,7 +120,7 @@ def _regress_to_v31(db_path) -> None:
 
 
 def test_a_fresh_database_names_the_column_creator_steamid(db_path):
-    assert EXPECTED_VERSION == 37
+    assert EXPECTED_VERSION == 38
     assert _version(db_path) == EXPECTED_VERSION
     assert "creator_steamid" in _columns(db_path)
     assert "creator" not in _columns(db_path)

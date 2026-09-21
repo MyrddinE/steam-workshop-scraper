@@ -221,8 +221,23 @@ class ImageDownloadThread(threading.Thread):
                         # break a run of successes either.
                     else:
                         new_pri = max(0, (item.get("image_priority") or 1) - 1)
+                        # Only the `api_priority` term is guarded, deliberately.
+                        # The dead-item rule is that a dead row is in no queue,
+                        # and the flag this statement must never set on one is
+                        # `api_priority`: the API poll excludes dead rows, so the
+                        # bump would be invisible to the fetch queue and only
+                        # strand the row in the `dead_queued` reading. The
+                        # `image_priority` decrement is left in place for a dead
+                        # row because it moves the row *out* of the image queue
+                        # rather than reviving anything -- the image poll has no
+                        # dead guard and may have handed the row over, and
+                        # blocking the decrement would leave its flag set, the
+                        # state the dead-item rule wants gone (issue 74).
                         conn.execute(
-                            "UPDATE workshop_items SET image_priority=?, api_priority = CASE WHEN api_priority < 2 THEN 2 ELSE api_priority END WHERE workshop_id=?",
+                            "UPDATE workshop_items SET image_priority=?, "
+                            "api_priority = CASE WHEN (fetch_status IS NULL OR fetch_status != -1) "
+                            "AND api_priority < 2 THEN 2 ELSE api_priority END "
+                            "WHERE workshop_id=?",
                             (new_pri, wid)
                         )
                         conn.commit()

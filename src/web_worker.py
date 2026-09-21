@@ -413,8 +413,18 @@ class WebScraperThread(threading.Thread):
                 "[W:%s] Web scrape failed with no response (transport failure); "
                 "backing off.", workshop_id)
             conn = get_connection(self.db_path)
+            # The whole statement skips a dead row, deliberately: unlike the
+            # image worker's two-term UPDATE there is no other column here, so a
+            # `fetch_status = -1` predicate in the WHERE *is* the `api_priority`
+            # guard and it leaves the row unwritten. A dead item is final and in
+            # no queue; the API poll excludes dead rows, so this bump could never
+            # be handed out and would only strand the row in `dead_queued`
+            # (issue 74).
             conn.execute(
-                "UPDATE workshop_items SET api_priority = CASE WHEN api_priority < 2 THEN 2 ELSE api_priority END WHERE workshop_id = ?",
+                "UPDATE workshop_items SET api_priority = "
+                "CASE WHEN api_priority < 2 THEN 2 ELSE api_priority END "
+                "WHERE workshop_id = ? "
+                "AND (fetch_status IS NULL OR fetch_status != -1)",
                 (workshop_id,)
             )
             conn.commit()

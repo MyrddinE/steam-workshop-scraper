@@ -56,6 +56,22 @@ FETCH_RECENCY_MEANING = (
     "configured threshold."
 )
 
+#: Why a dead item still holding a queue flag matters, in one sentence both
+#: front ends print. It deliberately does *not* say "the queues will not drain":
+#: the API fetch poll excludes dead rows (``api_fetch_queue_predicate``), so
+#: that queue still drains. Only the web, image and translation polls select on
+#: their flag alone with no dead-item guard, so only they would keep spending
+#: requests on a page that no longer exists. Defined here rather than written
+#: once in the TUI and retyped in the template, so the two panels cannot
+#: describe the same figure differently -- the same reason
+#: ``FETCH_RECENCY_MEANING`` exists.
+DEAD_QUEUED_MEANING = (
+    "These rows can never complete. The API fetch poll excludes dead rows, so "
+    "its queue still drains; the web, image and translation polls select on "
+    "their flag alone and would keep spending requests on a page that no "
+    "longer exists."
+)
+
 
 def item_staleness_days(daemon_config: dict | None) -> int:
     """The item re-fetch window, read from the one key that configures it.

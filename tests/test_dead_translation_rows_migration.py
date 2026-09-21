@@ -70,7 +70,7 @@ def test_the_expected_version_is_37(db_path):
         version = conn.execute("PRAGMA user_version").fetchone()[0]
     finally:
         conn.close()
-    assert version == EXPECTED_VERSION == 37
+    assert version == EXPECTED_VERSION == 38
 
 
 def test_migration_36_deletes_a_dead_items_queue_rows(db_path):

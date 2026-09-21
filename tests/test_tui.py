@@ -841,6 +841,24 @@ def test_handoff_counters_show_an_all_clear_at_zero():
     assert "red" in bad and "3" in bad and "item(s) stranded" in bad
 
 
+def test_the_dead_queue_callout_prints_the_shared_meaning():
+    """Issue 74: the sentence is the metric module's, and it must be accurate.
+
+    It cannot claim every queue stops draining: the API fetch poll excludes dead
+    rows, so that queue still drains. Only the flag-only polls would keep
+    spending requests, and the shared constant is what says so.
+    """
+    rendered = StatsScreen._format_dead_items_by_queue(
+        {"web": 1, "image": 0, "translation": 0, "api": 0})
+
+    assert metrics.DEAD_QUEUED_MEANING in rendered
+    assert "queues will not drain" not in rendered, (
+        "that sentence is false for the API fetch queue"
+    )
+    assert "API fetch poll excludes dead rows" in rendered
+
+
+
 def test_stats_request_order_learns_from_the_measured_costs():
     """Seed order until something is measured, then the durations actually seen."""
     screen = StatsScreen("unused.db")

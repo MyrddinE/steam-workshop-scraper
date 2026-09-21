@@ -9,11 +9,11 @@ The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_
 
 A **pending** migration is DDL that rewrites tables — 34→35's `DROP COLUMN` rewrote `workshop_items` and took *measured live* **283 s** in production — and the daemon is a detached process that may still be writing to them. So the two UI entry points do not call `initialize_database` directly. They call `initialize_database_with_daemon_stopped` (`src/daemon_control.py`), which reads the recorded `user_version` read-only first, stops a running daemon through `DaemonController.stop()` when — and only when — a migration is pending, refuses to migrate when that stop did not succeed, migrates, and restarts the daemon afterwards. A database already at `EXPECTED_VERSION` leaves a running daemon untouched: that is the ordinary relaunch. The daemon's own startup still calls `initialize_database` directly, because a daemon performs its own pending migrations before it begins writing; see [threading.md](threading.md#a-pending-migration-and-a-running-daemon).
 
-The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v38) for what that means when you add one.
+The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v39) for what that means when you add one.
 
 ---
 
-## Current Schema (v37)
+## Current Schema (v38)
 
 The application-level reference for every table and column is
 [data-model.md](data-model.md); the timestamp conventions are in
@@ -51,7 +51,7 @@ Primary key: `workshop_id INTEGER PRIMARY KEY` (aliased from rowid). Columns:
 | own_first_subscribed_at | INTEGER | When we first *saw* the owner subscribed; sticky, and the only source of the `previously` state |
 | steam_download_seen_at | INTEGER | One-way local latch: when this app first saw Steam's downloaded copy of a subscribed item on disk (v26). Set only by `src/workshop_folders`, cleared only beside `own_subscribed` when the item leaves the subscription list. NULL means not confirmed on disk. Renamed from `downloaded_at` in v33: it is a sighting latch, not a completion clock |
 
-The columns above are what the database holds at v37, and they are reached two ways.
+The columns above are what the database holds at v38, and they are reached two ways.
 `_create_current_schema` creates them directly, so a fresh database starts at `EXPECTED_VERSION`
 with these names. `_create_legacy_schema`'s `CREATE TABLE` instead declares the historical names
 (`dt_found`, `dt_updated`, `dt_attempted`, `dt_translated`, `time_created`, `time_updated`) and a
@@ -207,15 +207,15 @@ independently, allowing crash recovery on a per-migration basis.
 from 1 to `EXPECTED_VERSION`, that each entry names the function for its own
 version, and that a fresh database reaches `EXPECTED_VERSION`.
 
-### Adding the next migration (target v38)
+### Adding the next migration (target v39)
 
-1. bump `EXPECTED_VERSION` in `src/database.py` to `38`;
-2. append `def _migration_37_to_38(cursor, conn, db_path): ...` immediately
-   after `_migration_36_to_37`, keeping the body self-contained and preserving
-   what the step meant at v37 (no tidying an older step, no changing a
+1. bump `EXPECTED_VERSION` in `src/database.py` to `39`;
+2. append `def _migration_38_to_39(cursor, conn, db_path): ...` immediately
+   after `_migration_37_to_38`, keeping the body self-contained and preserving
+   what the step meant at v38 (no tidying an older step, no changing a
    `PRAGMA user_version = N` target);
-3. append `(38, _migration_37_to_38)` as the last entry of `MIGRATIONS`;
-4. add a `### v37 → v38: ...` entry below, in the same shape as the others;
+3. append `(39, _migration_38_to_39)` as the last entry of `MIGRATIONS`;
+4. add a `### v38 → v39: ...` entry below, in the same shape as the others;
 5. **mirror the step in `_create_current_schema`.** It is the shape a fresh
    database is created at now, so a schema change that lands only in the chain
    moves the legacy endpoint and not the fresh one. Update the table, index or
@@ -1278,6 +1278,58 @@ page-mode eligibility surviving the restart, the kept cursor, the migration and 
 default, and the fresh path; `tests/test_fresh_schema_path.py::test_schema_equivalence` pins
 that both paths leave the same shape.
 
+### v37 → v38: dead items give up their stranded queue flags
+
+The defect is issue 74. A dead item is deliberately final — `fetch_status = -1` is the API's
+permanent answer, `_promote_stale_items` promotes only `fetch_status = 200`, and the handoff
+invariant is that a dead item is in **no** queue — but four writers that raise a queue priority
+on an item that already exists did not honour it. The image worker's and the web worker's
+"the item changed" bump, and the two discovery call sites, could write `api_priority` onto a
+row the API had already answered `-1` for. Because the fetch poll excludes dead rows
+(`api_priority > 0 AND (fetch_status IS NULL OR fetch_status != -1)`), `_settle_api_failure` —
+which clears all four flags and deletes the translation queue rows — never runs for that row
+again, so nothing cleared what they wrote. *Measured live* 2026-09-21: `dead_queued` and
+`dead_items_by_queue` both read **4**, and all four dead rows held only `api_priority`
+(2, 3, 5 and 5). The priorities name the writers exactly: 3 from cursor discovery, 5 from page
+discovery, 2 from an image or web "changed" bump.
+
+The first half of the fix guards the writers: both `CASE` bumps carry the
+`fetch_status IS NULL OR fetch_status != -1` predicate (the image worker on its `api_priority`
+term, so its `image_priority` decrement still runs on a row the flag-only image poll handed
+over; the web worker on the whole statement, which is that one term), and the two discovery
+call sites pass `preserve_dead_api_priority=True` to `insert_or_update_item`. This step is the
+second half:
+
+```sql
+UPDATE workshop_items SET api_priority = 0, web_scrape_priority = 0,
+       image_priority = 0, translation_priority = 0
+WHERE fetch_status = -1
+  AND (api_priority > 0 OR web_scrape_priority > 0
+       OR image_priority > 0 OR translation_priority > 0);
+DELETE FROM translation_queue
+WHERE entity_type = 'item'
+  AND entity_id IN (SELECT workshop_id FROM workshop_items WHERE fetch_status = -1);
+```
+
+It is the data-only shape of 16→17 (the three non-API flags) and 19→20 (`api_priority`), done
+together because a dead item is in no queue, plus 35→36's delete of the item's translation
+queue rows because the translation poll selects them without a dead guard. Matching only rows
+that hold a flag makes the reported count the rows changed and a re-run a no-op, and a live row
+is outside the `fetch_status = -1` population by construction. The columns are resolved with
+`_current_column_name`, not named unconditionally: a marker rewound to 37 replays only the
+steps above it, so 30→31's `status`, 32→33's `needs_web_scrape`/`needs_image` and 33→34's
+`item_type`/`item_id` renames do not run again and the historical spellings are what the step
+sees. The two table names (`workshop_items`, `translation_queue`) are stable across the chain.
+
+No DDL, so `_create_current_schema` needs no mirror; `EXPECTED_VERSION` moves to 38, because
+`test_schema_equivalence` compares the version marker both paths leave. The rendered
+explanation of `dead_items_by_queue` moves with it: the old sentence claimed every queue would
+stop draining, which is false for the API fetch queue the poll excludes, so both front ends now
+print `metrics.DEAD_QUEUED_MEANING`. `tests/test_dead_requeue_writers.py` pins each guarded
+writer dead-and-live, `tests/test_dead_requeue_migration.py` pins the step, its historical
+names and the two metrics reading zero, and the two front-end text tests pin the shared
+sentence.
+
 ---
 
 ## Database Utility Functions
@@ -1306,7 +1358,7 @@ The exception exists rather than a bare `ValueError` because the three entry poi
 
 ### `_create_current_schema`, `_create_legacy_schema`, `_ensure_indexes`, `MIGRATIONS` (database)
 
-`_create_current_schema(cursor, conn)` creates a brand-new database directly at `EXPECTED_VERSION`. Every table, index and trigger definition it holds was dumped from `sqlite_master` of a database the migration chain itself produced at v35 — not written from reading the migrations — so the index SQL it creates is the exact text SQLite stores. v36 was data-only, so the dump stayed the terminal shape for that step; v37 adds `app_discovery.cursor_walk_finished`, which is now declared in the `app_discovery` `CREATE TABLE` here as the migration leaves it. It deliberately does **not** repeat the query indexes `_ensure_indexes` owns, because that runs after it on both paths; those are the ones with historical names such as `idx_time_created`, whose definitions a `RENAME COLUMN` rewrote. It does create the indexes a *migration* owns, because no migration runs on this path. It does not carry the three columns 34→35 dropped.
+`_create_current_schema(cursor, conn)` creates a brand-new database directly at `EXPECTED_VERSION`. Every table, index and trigger definition it holds was dumped from `sqlite_master` of a database the migration chain itself produced at v35 — not written from reading the migrations — so the index SQL it creates is the exact text SQLite stores. v36 was data-only, so the dump stayed the terminal shape for that step; v37 adds `app_discovery.cursor_walk_finished`, which is now declared in the `app_discovery` `CREATE TABLE` here as the migration leaves it. It deliberately does **not** repeat the query indexes `_ensure_indexes` owns, because that runs after it on both paths; those are the ones with historical names such as `idx_time_created`, whose definitions a `RENAME COLUMN` rewrote. It does create the indexes a *migration* owns, because no migration runs on this path. It does not carry the three columns 34→35 dropped. v38 is data-only, so the dump stayed the terminal shape for that step too.
 
 `_create_legacy_schema(cursor, conn)` creates the tables (`IF NOT EXISTS`) and the baseline columns in their historical form, and runs the legacy data conversions every database history shares. It is the unversioned part of the schema, run before the versioned steps. Because it runs on every startup for an existing database, it also runs on both sides of migration 29→30: it resolves the creator and discovery table names once with `_current_table_name` (new name if it exists, else the historical one, else the historical one for a brand-new file) and routes its `CREATE TABLE`, `_safe_add_columns`, populate step and legacy-filter conversion through the resolved name.
 
@@ -1320,7 +1372,7 @@ Adds columns to an existing table, catching `OperationalError` for duplicates. I
 
 ### `insert_or_update_item` (database)
 
-Upserts an item row using `INSERT ... ON CONFLICT(workshop_id) DO UPDATE SET`. Filters keys against `WORKSHOP_ITEM_COLUMNS` frozenset before building the SQL. Handles tags via junction table (parses JSON, calls `_ensure_tag_ids`, updates `workshop_tags`). Tags are excluded from the INSERT column list since they're no longer a workshop_items column. The keyword-only `clear_translation_queue` (default `False`) also deletes the item's `translation_queue` rows on the same connection before the single commit; the producer that marks an item dead passes it so the status write and the queue clear are one transaction (v36).
+Upserts an item row using `INSERT ... ON CONFLICT(workshop_id) DO UPDATE SET`. Filters keys against `WORKSHOP_ITEM_COLUMNS` frozenset before building the SQL. Handles tags via junction table (parses JSON, calls `_ensure_tag_ids`, updates `workshop_tags`). Tags are excluded from the INSERT column list since they're no longer a workshop_items column. The keyword-only `clear_translation_queue` (default `False`) also deletes the item's `translation_queue` rows on the same connection before the single commit; the producer that marks an item dead passes it so the status write and the queue clear are one transaction (v36). The keyword-only `preserve_dead_api_priority` (default `False`) makes the conflict update leave `api_priority` untouched when the existing row is dead (`CASE WHEN workshop_items.fetch_status = -1 THEN workshop_items.api_priority ELSE excluded.api_priority END`); the two discovery call sites pass it, so re-seeing an item the API already answered `-1` for cannot revive it. It is opt-in because this is a generic upsert and `_settle_api_failure` also writes `api_priority` through it — including the `0` that marks the item dead (v38, issue 74).
 
 ### `insert_or_update_creator` (database)
 
