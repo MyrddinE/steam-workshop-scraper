@@ -758,6 +758,13 @@ def test_every_page_read_waits_the_interval_and_the_post_does_not(engine_env, mo
     monkeypatch.setattr(
         pacing, "wait",
         lambda seconds, keep_running=None: events.append(("wait", seconds)) or True)
+    # The clean read decays the shared delay by the healthy elapsed time, which
+    # is microseconds of machine speed here, so the exact assertion below would
+    # otherwise measure the host rather than which calls waited. Freeze that one
+    # term: the decay itself is covered by its own tests in test_pacing.py, and
+    # this test pins that every page read waits the interval while the POST does
+    # not -- the second wait is that shared interval, not a default.
+    monkeypatch.setattr(pacing, "decay", lambda delay, elapsed, floor: delay)
 
     bodies = [NOT_TOGGLED, TOGGLED]
     seen = {"n": 0}
@@ -785,8 +792,7 @@ def test_every_page_read_waits_the_interval_and_the_post_does_not(engine_env, mo
 
     assert outcome.status == engine.SUBSCRIBED
     assert [event[0] for event in events] == ["wait", "get", "post", "wait", "get"]
-    # The clean read decays the delay by a hair (elapsed is microseconds), so
-    # the second wait is the first one to within floating point.
+    # With the decay frozen above, both gated reads wait the one seeded interval.
     assert events[0][1] == 12.0
     assert events[3][1] == pytest.approx(12.0)
 
@@ -814,6 +820,13 @@ def test_the_pass_spaces_every_item(tmp_path, monkeypatch):
     monkeypatch.setattr(
         pacing, "wait",
         lambda seconds, keep_running=None: waits.append(seconds) or True)
+    # The clean read decays the shared delay by the healthy elapsed time, which
+    # is microseconds of machine speed here, so the exact assertion below would
+    # otherwise measure the host rather than the spacing. Freeze that one term:
+    # the decay itself is covered by its own tests in test_pacing.py, and this
+    # test pins that *one interval spans the pass* -- the second wait is that
+    # shared interval, not a default rebuilt per item.
+    monkeypatch.setattr(pacing, "decay", lambda delay, elapsed, floor: delay)
     monkeypatch.setattr(web_scraper, "scrape_extended_details", _Fetcher([TOGGLED]))
     # The already-subscribed branch now records what the page showed, so the
     # pass needs the schema; the items themselves are not required for spacing.
