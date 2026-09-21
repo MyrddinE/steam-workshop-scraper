@@ -118,6 +118,39 @@ def warn_retired_key(section_name: str, legacy_key: str, current_key: str) -> No
     )
 
 
+def warn_still_honoured_key(section_name: str, legacy_key: str, current_key: str) -> None:
+    """Name a config key that still works under an old spelling.
+
+    The opposite of :func:`warn_retired_key`: the value is still read, so an
+    operator must not be told to remove it, only to rename it. Used for the
+    aliases the log has not yet shown unused.
+    """
+    if not _is_first_warning(section_name, legacy_key):
+        return
+    logging.warning(
+        "Config key '%s' is deprecated and still honoured; rename it to '%s'.",
+        _key_where(section_name, legacy_key), _key_where(section_name, current_key),
+    )
+
+
+def configured_outbox_dir(daemon_config: dict) -> str | None:
+    """``daemon.outbox_dir``, with the still-honoured ``daemon.backup_dir`` fallback.
+
+    Three processes read the same location -- the daemon, the web server and the
+    crash writer -- and each used to read the legacy name inline and silently.
+    The lookup lives here so they agree, and so the one warning for the old
+    spelling fires once per process rather than once per reader.
+
+    ``backup_dir`` was renamed to ``outbox_dir`` when the outbox came to hold
+    more than database backups. It is retained: the value still works, and the
+    warning asks for the rename. The current key wins when both are present.
+    """
+    daemon_config = daemon_config or {}
+    if "backup_dir" in daemon_config:
+        warn_still_honoured_key("daemon", "backup_dir", "outbox_dir")
+    return daemon_config.get("outbox_dir") or daemon_config.get("backup_dir") or None
+
+
 def save_config(path: str, config: dict):
     """
     Saves the configuration to a YAML file. To avoid writing secrets to disk, 

@@ -1,15 +1,14 @@
 """Legacy config keys: the ones still read, and the ones retired.
 
-`daemon.request_delay_seconds` and `daemon.capture_web_scrapes` are still
-honoured -- the renames that produced `daemon.api_delay_seconds` and
-`daemon.capture_web_downloads` keep the old spelling working, with a warning.
+Most renamed keys are **retired**: the rename project is over and the live log
+shows the deprecated warning has not fired in a long time, so the old value must
+no longer influence anything. A config that carries the old key alone leaves the
+current setting at its default, and is not ignored silently -- the key is named
+in one warning so the operator learns the spelling they wrote does nothing.
 
-`daemon.batch_size` and `daemon.user_staleness_days` are **retired**. The rename
-project is over and the operator's config has used only the current spellings
-long enough that the old value must no longer influence anything: a config that
-carries the old key alone leaves the current setting at its default. It is not
-ignored silently, though -- the key is named in one warning so the operator
-learns the spelling they wrote does nothing.
+`daemon.backup_dir` is the one the owner's rule settles the other way: it was
+honoured with no warning at all, so it gets a warning and is **retained** -- an
+outbox path that still works must not be dropped out from under an operator.
 """
 
 import logging
@@ -28,6 +27,16 @@ def _retired_warnings(caplog, legacy_key):
         for record in caplog.records
         if record.levelno >= logging.WARNING
         and "no longer used" in record.getMessage()
+        and legacy_key in record.getMessage()
+    ]
+
+
+def _still_honoured_warnings(caplog, legacy_key):
+    """The warning lines that name `legacy_key` as deprecated but still read."""
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if "deprecated and still honoured" in record.getMessage()
         and legacy_key in record.getMessage()
     ]
 
@@ -115,6 +124,32 @@ def test_the_current_capture_key_wins_and_the_retired_key_still_warns(db_path, t
         capture.configure(None)
 
 
+# --- the still-honoured backup directory ------------------------------------
+#
+# `daemon.backup_dir` was renamed `daemon.outbox_dir` when the outbox came to
+# hold more than database backups. Three processes read the same location and
+# none of them ever warned, so the alias keeps working and now says so; it is
+# retained until the log shows it unused.
+
+def test_the_backup_dir_alias_is_still_honoured_and_warns(db_path, tmp_path, caplog):
+    outbox = str(tmp_path / "outbox")
+    with caplog.at_level(logging.WARNING):
+        daemon = Daemon(_config(db_path, backup_dir=outbox))
+    assert daemon.outbox_dir == outbox, "the alias still supplies the outbox"
+    warnings = _still_honoured_warnings(caplog, "daemon.backup_dir")
+    assert len(warnings) == 1
+    assert "daemon.outbox_dir" in warnings[0]
+
+
+def test_the_current_outbox_key_wins_and_the_backup_alias_still_warns(db_path, tmp_path, caplog):
+    current = str(tmp_path / "current")
+    with caplog.at_level(logging.WARNING):
+        daemon = Daemon(_config(db_path, outbox_dir=current,
+                                backup_dir=str(tmp_path / "old")))
+    assert daemon.outbox_dir == current, "the current key is the one read"
+    assert len(_still_honoured_warnings(caplog, "daemon.backup_dir")) == 1
+
+
 # --- the retired batch knob -------------------------------------------------
 #
 # `daemon.batch_size` said "batch" while meaning items per API fetch, beside the
@@ -186,3 +221,15 @@ def test_a_retired_key_warning_fires_once_per_process(db_path, caplog):
         Daemon(_config(db_path, batch_size=7))
         Daemon(_config(db_path, batch_size=7))
     assert len(_retired_warnings(caplog, "daemon.batch_size")) == 1
+
+
+def test_the_backup_dir_warning_fires_once_across_the_readers(db_path, tmp_path, caplog):
+    from src.config import configured_outbox_dir
+
+    outbox = str(tmp_path / "outbox")
+    with caplog.at_level(logging.WARNING):
+        Daemon(_config(db_path, backup_dir=outbox))
+        configured_outbox_dir({"backup_dir": outbox})  # the web/crash readers
+        configured_outbox_dir({"backup_dir": outbox})
+    assert len(_still_honoured_warnings(caplog, "daemon.backup_dir")) == 1
+

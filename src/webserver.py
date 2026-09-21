@@ -18,7 +18,7 @@ from src import subscribe_engine
 from src import subscription
 from src import web_scraper
 from src import workshop_folders
-from src.config import login_secure_value, save_config
+from src.config import configured_outbox_dir, login_secure_value, save_config
 from src.daemon_control import DaemonController
 from src.firefox_cookies import steam_login_secure
 from src.web_worker import WEB_DELAY_DEFAULT
@@ -95,10 +95,11 @@ def init_webserver(db_path: str, config: dict, config_path: str = "config.yaml",
     # The server-side subscribe is a Steam community pull, and this process is
     # not the daemon's, so the debug switch has to be read here too or a
     # subscribe could never be captured. `web_download_switch` is the same
-    # lookup the daemon uses, so the deprecated key is honoured in both.
+    # lookup the daemon uses. `configured_outbox_dir` likewise resolves the
+    # still-honoured `backup_dir` spelling through the one shared accessor.
     daemon_config = config.get("daemon", {}) or {}
     capture.configure(
-        daemon_config.get("outbox_dir") or daemon_config.get("backup_dir"),
+        configured_outbox_dir(daemon_config),
         capture.web_download_switch(daemon_config),
     )
 

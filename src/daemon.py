@@ -36,7 +36,7 @@ from src.steam_api import (
     STEAM_API_MAX_IDS_PER_REQUEST,
 )
 from src.translator import TranslatorThread, is_ascii
-from src.config import login_secure_value, save_config, warn_retired_key
+from src.config import configured_outbox_dir, login_secure_value, save_config, warn_retired_key
 from src.database import raise_web_scrape_priority, queue_field_for_translation, raise_image_priority, translation_is_current
 from src.firefox_cookies import steam_login_secure
 from src.web_worker import WebScraperThread
@@ -390,10 +390,12 @@ class Daemon:
         )
 
         # Optional database backup into a pull-outbox. The feature defaults to
-        # OFF: it is only enabled when both `outbox_dir` (or `backup_dir`) and a
-        # positive `backup_interval_seconds` are configured, so turning it on for
-        # the live instance is a deliberate switch.
-        self.outbox_dir = daemon_config.get("outbox_dir") or daemon_config.get("backup_dir")
+        # OFF: it is only enabled when both `outbox_dir` and a positive
+        # `backup_interval_seconds` are configured, so turning it on for the live
+        # instance is a deliberate switch. `configured_outbox_dir` also resolves
+        # the still-honoured `backup_dir` spelling, shared with the web and crash
+        # readers.
+        self.outbox_dir = configured_outbox_dir(daemon_config)
         # Debugging switches, not permanent ones: on means keep everything. The
         # image switch is separate because the web switch keeps whole bodies
         # unbounded, and an owner reviewing image metadata should not have to
