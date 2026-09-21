@@ -15,7 +15,11 @@ the production database on 2026-09-12.
 
 ## Open
 
-Nothing open. The last entry to leave the list was issue 70, on 2026-09-21.
+### Issue 72
+
+**A finished cursor walk is announced every 30 seconds** — *Open*, Low
+
+`seed_database` logs at INFO, on every pass, that an AppID's cursor walk is recorded as finished and skipped (`src/daemon.py:1545`), and the discovery thread runs every `DISCOVERY_IDLE_SECONDS` (30 s, `src/daemon.py:156`), so a permanent state is reported as news forever. *Measured live* on 2026-09-21: the line appeared **25 times in the 13 minutes** from 15:38:00 to 15:51:20 for AppID 431960 — once per pass — in a log that already grows about 115 MB a day. The skip itself is correct and deliberate (issue 68's latch), and nothing else in the discovery path repeats this way: the page-mode and fetchable-guard lines fire only when those decisions change or those passes actually run. A one-time fact wants to be said once per process per AppID, at INFO, and afterwards at DEBUG — the shape the config-key and stale-artefact warnings already use. [threading.md](threading.md)
 
 ## Recently closed
 
