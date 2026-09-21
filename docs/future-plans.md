@@ -717,3 +717,35 @@ The `i` keystroke, the toggle and the in-place strikethrough/underline are a sep
 of work (stage 2 of the ignored-item feature); this entry is about making the settled rows reachable
 again.
 
+---
+
+## Improve how ignored and dead items are rendered
+
+**Status: Planned** — owner request, 2026-09-21, from the same conversation as the ignored-item
+feature.
+
+The current rendering is the minimum the toggle needed: an ignored item's title is struck through on
+the web and underlined in the TUI, **keyed off the settled status** rather than off the action that
+set it, and a dead item gets no mark at all. That is enough to show that a press worked, and not
+enough to read a settled row at a glance:
+
+* dead (`-1`) and ignored (`-2`) are visually indistinguishable from each other and, for dead, from a
+  live row; the owner asked for the two settled statuses to be told apart;
+* a strikethrough or underline on the title alone does not say *why* the row is settled, or who
+  settled it (the API's permanent answer versus the owner's marker) — the shared mechanics already
+  distinguish the two statuses, so the display can too;
+* nothing marks the row as unusable beyond the title: the actions that would fail on it (subscribe,
+  open page) are still offered.
+
+Candidate directions, none decided: a distinct badge or colour per settled status, a tooltip naming
+the status, and greying the whole cell rather than only the title. Any of them should keep the
+single source the toggle uses — `fetch_status` on the item payload — so a row settled behind the
+page's back still draws correctly.
+
+This is deliberately separate from [Surfacing dead and ignored items](#surfacing-dead-and-ignored-items):
+that entry is about making settled rows *reachable* again, this one about what they look like once
+they are on screen. The rendering here (strikethrough/underline) is stage 2 of the ignored-item
+feature; the rest is open.
+
+[web-ui.md](web-ui.md), [tui.md](tui.md), [data-model.md](data-model.md)
+

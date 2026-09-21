@@ -55,6 +55,10 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .grid-img-failed { color: #d33; container-type: size; }
 .grid-img-failed-mark { font-size: 2.5rem; font-size: 50cqh; line-height: 1; font-weight: 700; letter-spacing: -.02em; }
 .grid-title { font-size: .82rem; font-weight: bold; line-height: 1.2; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+/* An ignored item's title is struck through, the way the TUI underlines it.
+   Keyed off the cell's `ignored` class, which the one item-update path sets
+   from fetch_status -- not off the keystroke that settled the row. */
+.grid-cell.ignored .grid-title { text-decoration: line-through; }
 .grid-meta { font-size: .7rem; color: var(--pico-muted-color); display: flex; flex-wrap: wrap; gap: .2em .5em; }
 .grid-scores { font-size: .7rem; font-weight: bold; display: flex; gap: .5em; }
 #right-pane { flex: 0 0 360px; display: flex; flex-direction: column; overflow: hidden; border-left: 1px solid var(--pico-muted-border-color); padding-left: .5rem; }
@@ -340,6 +344,11 @@ const FETCH_RECENCY_MEANING = {{ fetch_recency_meaning | tojson }};
 // sentence so the TUI and this page cannot say different things about the same
 // figure (issue 74).
 const DEAD_QUEUED_MEANING = {{ dead_queued_meaning | tojson }};
+
+// The ignored status value, injected from src.database's IGNORED_FETCH_STATUS so
+// the rendering keys off the status rather than a retyped -2. The same path
+// draws a row the item-update poll reports as ignored.
+const IGNORED_FETCH_STATUS = {{ ignored_fetch_status }};
 
 // Derived from schema
 const ALL_FIELDS = SEARCH_FILTER_SCHEMA.map(f => f.field);
@@ -1029,6 +1038,13 @@ function _applyGridCellUpdate(cell, item) {
   const title = item.title_en || item.title || 'Untitled';
   const titleEl = cell.querySelector('.grid-title');
   if (titleEl) titleEl.textContent = title;
+  // An ignored row keeps its place in the grid until the next query, so the
+  // status the item-update poll reports is drawn in place rather than by
+  // removing the cell. Absent from the block means "no claim", so a partial
+  // update leaves the class as it was instead of clearing it.
+  if (item.fetch_status !== undefined) {
+    cell.classList.toggle('ignored', item.fetch_status === IGNORED_FETCH_STATUS);
+  }
   if (!cell.querySelector('.grid-img') && !cell.querySelector('.grid-img-failed')) {
     const ph = cell.querySelector('.grid-img-placeholder');
     if (ph && _imageState(item) !== 'absent') ph.outerHTML = _imageCellHtml(item);
@@ -1443,6 +1459,34 @@ async function toggleDetailQueue(wid) {
   } catch (e) { console.debug('Queue state refresh failed', e); }
 }
 
+// /api/ignore/<id> is a toggle and answers only {ok: true}, exactly like the
+// queue route, so the direction is not guessed here either: the item is read
+// back and handed to the one dispatch point. The cell is a subscriber while it
+// displays the item, so the read-back redraws it in place -- the ignored
+// strikethrough appears on the row that stays exactly where it was until the
+// next search re-queries the list.
+async function toggleIgnoredItem(wid) {
+  let resp;
+  try {
+    resp = await fetch('/api/ignore/' + wid, {method: 'POST'});
+  } catch (e) {
+    alert('Ignore update failed: ' + e.message);
+    return;
+  }
+  if (!resp.ok) {
+    alert('Ignore update failed: ' + resp.status + ' ' + resp.statusText);
+    return;
+  }
+  try {
+    // Read-only route: reading the state back must not re-arm the fetch queue.
+    const detail = await fetch('/api/item/' + wid);
+    if (!detail.ok) return;
+    const item = await detail.json();
+    if (item.error) return;
+    dispatchItemUpdate(item);
+  } catch (e) { console.debug('Ignore state refresh failed', e); }
+}
+
 let _detailPollWid = null, _detailPollTimer = null;
 
 function _detailNeedsPoll(item) {
@@ -1834,7 +1878,18 @@ document.addEventListener('blur', e => {
   } catch (err) { console.debug('Blur handler error', err); /* must never break the page */ }
 }, true);
 
-document.addEventListener('keydown', e => {
+// Move focus to a cell and open its detail pane. The arrow keys and the `i`
+// shortcut both advance through this one helper, so a keystroke cannot invent a
+// second focus scheme.
+function _focusGridCell(cells, nextIdx) {
+  if (nextIdx < 0 || nextIdx >= cells.length) return;
+  const cell = cells[nextIdx];
+  cell.focus();
+  cell.scrollIntoView({block:'nearest'});
+  showDetail(parseInt(cell.getAttribute('data-wid'), 10));
+}
+
+function _onGridKeydown(e) {
   const grid = document.getElementById('results-grid');
   if (!grid.contains(document.activeElement)) return;
   if (!document.activeElement.classList.contains('grid-cell')) return;
@@ -1849,6 +1904,16 @@ document.addEventListener('keydown', e => {
     // the same read-back path as a click on it: the old local `queued` class
     // flip could disagree with the server, and it drew a second indicator.
     toggleDetailQueue(wid);
+    return;
+  }
+
+  if (e.key === 'i' || e.key === 'I') {
+    e.preventDefault();
+    // Ignoring leaves the row where it is: no re-query runs, so the focused
+    // cell is redrawn in place with the ignored style, then focus moves on like
+    // `s`. The last cell has no next, so it steps back to the previous one.
+    toggleIgnoredItem(wid);
+    _focusGridCell(cells, idx < cells.length - 1 ? idx + 1 : idx - 1);
     return;
   }
 
@@ -1881,13 +1946,10 @@ document.addEventListener('keydown', e => {
   else return;
 
   e.preventDefault();
-  if (nextIdx >= 0 && nextIdx < cells.length) {
-    const cell = cells[nextIdx];
-    cell.focus();
-    cell.scrollIntoView({block:'nearest'});
-    showDetail(parseInt(cell.getAttribute('data-wid'), 10));
-  }
-});
+  _focusGridCell(cells, nextIdx);
+}
+
+document.addEventListener('keydown', _onGridKeydown);
 
 let _subPollIv = null;
 let _subScheduleIv = null;

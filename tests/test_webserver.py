@@ -1714,6 +1714,209 @@ def test_web_totals_panel_draws_ignored_beside_dead(web_client, tmp_path):
     assert "Ignored:" in rendered and "1" in rendered
 
 
+# ── the owner's ignore toggle: route, `i` key and the in-place strikethrough ──
+
+
+def test_the_ignore_route_toggles_the_marker(web_client):
+    """POST /api/ignore/<id> flips the status and answers like the queue route.
+
+    The shape -- ``{ok: true}`` and nothing else -- is the contract the page
+    treats uniformly; the route must not invent a second response shape.
+    """
+    client, db_path = web_client
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "title": "Toggle Me", "fetch_status": 200,
+        "api_fetched_at": 123, "extended_description": "present",
+    })
+
+    first = client.post('/api/ignore/1')
+    assert first.status_code == 200
+    assert first.get_json() == {"ok": True}
+
+    conn = get_connection(db_path)
+    try:
+        assert conn.execute(
+            "SELECT fetch_status FROM workshop_items WHERE workshop_id = 1"
+        ).fetchone()["fetch_status"] == -2, "the first press ignores the item"
+    finally:
+        conn.close()
+
+    second = client.post('/api/ignore/1')
+    assert second.get_json() == {"ok": True}
+
+    conn = get_connection(db_path)
+    try:
+        assert conn.execute(
+            "SELECT fetch_status FROM workshop_items WHERE workshop_id = 1"
+        ).fetchone()["fetch_status"] == 200, "the same route restores it"
+    finally:
+        conn.close()
+
+
+GRID_KEY_DRIVER = """
+const fn = (__FN__);
+const calls = {toggle: [], focus: [], prevented: 0};
+global.toggleIgnoredItem = (wid) => calls.toggle.push(wid);
+global._focusGridCell = (cells, nextIdx) => calls.focus.push(nextIdx);
+global.toggleDetailQueue = () => {};
+global._startAutoSubscribe = () => {};
+global.openFolder = () => {};
+function cell(wid) {
+  return {
+    classList: {contains: (c) => c === 'grid-cell'},
+    getAttribute: (n) => (n === 'data-wid' ? String(wid) : null),
+  };
+}
+const cells = [cell(11), cell(22), cell(33)];
+let focused = 0;
+global.document = {
+  getElementById: () => ({contains: () => true, querySelectorAll: () => cells}),
+  get activeElement() { return cells[focused]; },
+};
+global.getComputedStyle = () => ({gridTemplateColumns: '1fr 1fr'});
+function press(key) {
+  fn({key: key, preventDefault: () => { calls.prevented += 1; }});
+}
+press('i');
+focused = 2;
+press('i');
+focused = 1;
+press('s');
+console.log(JSON.stringify(calls));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_the_grid_i_key_toggles_the_focused_cell_and_advances(web_client, tmp_path):
+    """`i` acts on the focused cell and then moves on; the last cell steps back."""
+    client, _ = web_client
+    script = _served_inline_script(client)
+    calls = _run_node(
+        GRID_KEY_DRIVER.replace("__FN__", _extract_function(script, "_onGridKeydown")),
+        tmp_path)
+
+    assert calls["toggle"] == [11, 33], "the focused cell's own data-wid"
+    assert calls["focus"] == [1, 1], \
+        "from the first cell forward, from the last cell back"
+    assert calls["prevented"] == 3, "`i`, `i` and `s` all preventDefault"
+
+
+FOCUS_DRIVER = """
+const fn = (__FN__);
+const events = [];
+function cell(name, wid) {
+  return {
+    focus: () => events.push('focus-' + name),
+    scrollIntoView: () => events.push('scroll-' + name),
+    getAttribute: () => String(wid),
+  };
+}
+const cells = [cell('a', 11), cell('b', 22)];
+global.showDetail = (wid) => events.push('detail-' + wid);
+fn(cells, 1);
+fn(cells, -1);
+fn(cells, 2);
+console.log(JSON.stringify(events));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_the_grid_focus_helper_moves_to_the_named_cell(web_client, tmp_path):
+    """The one advance helper focuses the cell, scrolls it in and opens it.
+
+    It is the arrow keys' own advance, reused by `i`, and an out-of-range index
+    is a no-op rather than a crash.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    events = _run_node(
+        FOCUS_DRIVER.replace("__FN__", _extract_function(script, "_focusGridCell")),
+        tmp_path)
+
+    assert events == ['focus-b', 'scroll-b', 'detail-22']
+
+
+IGNORE_TOGGLE_DRIVER = """
+const fn = (__FN__);
+const calls = {posts: [], dispatched: [], searches: 0, alerts: []};
+global.dispatchItemUpdate = (item) => calls.dispatched.push(item);
+global.doSearch = () => { calls.searches += 1; };
+global.alert = (m) => calls.alerts.push(m);
+global.fetch = async (url) => {
+  calls.posts.push(url);
+  if (url.indexOf('/api/item/') === 0) {
+    return {ok: true, json: async () => ({workshop_id: 7, fetch_status: -2, title: 'x'})};
+  }
+  return {ok: true, status: 200, statusText: 'OK', json: async () => ({ok: true})};
+};
+(async () => { await fn(7); console.log(JSON.stringify(calls)); })();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_toggle_ignored_item_redraws_in_place_without_requerying(web_client, tmp_path):
+    """The toggle posts, reads the item back and hands it to the one dispatch
+    point; it never re-runs the search, so the row keeps its place."""
+    client, _ = web_client
+    script = _served_inline_script(client)
+    calls = _run_node(
+        IGNORE_TOGGLE_DRIVER.replace("__FN__", _extract_function(script, "toggleIgnoredItem")),
+        tmp_path)
+
+    assert calls["posts"] == ['/api/ignore/7', '/api/item/7']
+    assert calls["dispatched"][0]["fetch_status"] == -2, \
+        "the read-back is what redraws the cell in place"
+    assert calls["searches"] == 0, "ignoring does not requery the list"
+    assert calls["alerts"] == []
+
+
+GRID_CELL_IGNORED_DRIVER = """
+const IGNORED_FETCH_STATUS = __STATUS__;
+const fn = (__FN__);
+const classes = {ignored: false};
+const title = {textContent: ''};
+const cell = {
+  classList: {toggle: (name, on) => { if (name === 'ignored') classes.ignored = on; }},
+  querySelector: (sel) => (sel === '.grid-title' ? title : null),
+};
+global._imageState = () => 'absent';
+global._pendingStage = () => null;
+global._applyPending = () => {};
+global._applySub = () => {};
+global.wClass = () => '';
+global.fmtSize = () => '';
+fn(cell, {workshop_id: 7, fetch_status: -2, title: 'Hidden'});
+const afterIgnore = classes.ignored;
+// A block that carries no status leaves the class alone rather than clearing it.
+fn(cell, {workshop_id: 7, title: 'Hidden'});
+const afterPartial = classes.ignored;
+fn(cell, {workshop_id: 7, fetch_status: 200, title: 'Hidden'});
+const afterRestore = classes.ignored;
+console.log(JSON.stringify({afterIgnore, afterPartial, afterRestore, title: title.textContent}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_an_ignored_cell_gets_the_class_and_the_page_strikes_the_title(web_client, tmp_path):
+    """The rendering keys off the status: the cell takes `ignored`, the CSS
+    strikes `.grid-title`, and a restore clears it."""
+    client, _ = web_client
+    html = client.get('/').data.decode()
+    script = _served_inline_script(client)
+    result = _run_node(
+        GRID_CELL_IGNORED_DRIVER
+        .replace("__FN__", _extract_function(script, "_applyGridCellUpdate"))
+        .replace("__STATUS__", "-2"),
+        tmp_path)
+
+    assert result["afterIgnore"] is True
+    assert result["afterPartial"] is True, "a partial block makes no status claim"
+    assert result["afterRestore"] is False, "the same path clears the class"
+    assert result["title"] == 'Hidden'
+    assert ".grid-cell.ignored .grid-title { text-decoration: line-through; }" in html, \
+        "the class has to actually strike the title"
+
+
 # ── delete never fetched items ───────────────────────────────────────────────
 #
 # The route is a thin wrapper over delete_never_fetched_items, so the predicate is the

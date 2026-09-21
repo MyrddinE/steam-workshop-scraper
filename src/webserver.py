@@ -5,7 +5,7 @@ import os
 import re
 import logging
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items, live_fetch_status_predicate
+from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, toggle_ignored_item, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items, live_fetch_status_predicate, IGNORED_FETCH_STATUS
 from src.analysis import view_window_analysis
 from src import capture
 from src import activity
@@ -181,6 +181,10 @@ def index():
                            # the same consequence of a dead row holding a flag
                            # (issue 74).
                            dead_queued_meaning=metrics.DEAD_QUEUED_MEANING,
+                           # The ignored status value is the one named in
+                           # src.database, injected so the page's rendering test
+                           # keys off the status rather than a retyped -2.
+                           ignored_fetch_status=IGNORED_FETCH_STATUS,
                            filter_schema_json=json.dumps(SEARCH_FILTER_SCHEMA),
                            # The rotation button's wording is the TUI's constant,
                            # retyped nowhere, so the two daemon pages cannot say
@@ -678,6 +682,26 @@ def api_subscribe(workshop_id):
 @app.route('/api/toggle_subscription_queue/<int:workshop_id>', methods=['POST'])
 def api_toggle_subscription_queue(workshop_id):
     toggle_subscription_queue(_db_path, workshop_id)
+    return jsonify({"ok": True})
+
+
+@app.route('/api/ignore/<int:workshop_id>', methods=['POST'])
+def api_ignore(workshop_id):
+    """Toggle the owner's ignored marker for one item and answer ``{ok: true}``.
+
+    The shape is deliberately the same as the queue and subscribe routes the page
+    already treats uniformly: the route reports only that the request was
+    accepted, and says nothing about which way the toggle moved. The page reads
+    the item back through the read-only ``/api/item/<id>`` route and draws the
+    marker from that payload, so the toggle's direction is never guessed from a
+    local flip -- the same read-back ``toggleDetailQueue`` does.
+
+    ``toggle_ignored_item`` owns the direction (ignored rows restore, everything
+    else is ignored) and the settling write, so this route holds no rule of its
+    own. A missing row still answers ``{ok: true}`` because nothing changed; there
+    is no id to validate against a page the route never reads.
+    """
+    toggle_ignored_item(_db_path, workshop_id)
     return jsonify({"ok": True})
 
 

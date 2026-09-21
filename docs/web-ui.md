@@ -302,6 +302,23 @@ invariant rests on it.
 The marker sits inside the cell that opens the detail pane, so its click handler stops propagation:
 without that, toggling the queue would also drag the pane to the item.
 
+### Ignoring an item (`i`)
+
+The `i` key, with a `.grid-cell` focused, toggles the owner's ignored marker on that cell's item
+through `POST /api/ignore/<id>`; it mirrors `s`, acting on the same focused cell's `data-wid` and
+calling `preventDefault()`. The same key restores an item that is already ignored. Where `s` leaves
+focus alone, `i` then advances the way the arrow keys do — through the shared `_focusGridCell`
+helper, to the next cell, or to the previous one when the focused cell is the last.
+
+**The row is not removed.** Ignoring does not re-query the list, so a search that already returned
+the row keeps it on screen until the next search hides it; the toggle has to show what it did to the
+live session. The `ignored` class is set on the cell from the status the read-back reports, and
+`.grid-cell.ignored .grid-title` renders the title with `text-decoration: line-through` — the web
+counterpart of the TUI's underline. The class is keyed off `fetch_status == -2`, not off the
+keystroke that set it, so the same path draws a row the 3-second item-update poll reports as
+ignored, whether the owner, another front end or a `POST /api/ignore/<id>` settled it. A block that
+carries no `fetch_status` makes no claim and leaves the class as it is.
+
 The Web UI's subscribe action runs entirely through the server. `doSubscribe` POSTs
 `/api/subscribe/<id>`, which reads the item page on the server, takes that page's own CSRF token,
 posts to Steam and records the answer — the route the TUI has always driven
@@ -323,8 +340,8 @@ tooltip says this rather than implying a complete record.
 ### Opening the downloaded item's folder (Windows only)
 
 When the pane's item is in the `downloaded` state, `Open Folder` in `#detail-buttons` opens the
-item's workshop folder — and the `o` key does the same for the focused grid cell, beside the `s` and
-`l` shortcuts. The button is **visible but disabled** for anything not downloaded, with the reason in
+item's workshop folder — and the `o` key does the same for the focused grid cell, beside the `s`, `l`
+and `i` shortcuts. The button is **visible but disabled** for anything not downloaded, with the reason in
 its label (`Open Folder (not downloaded)`) and title, so the affordance is discoverable rather than
 invisible; the key path shows the same refusal as an alert. The button and the shortcut are rendered
 **only on Windows** (`open_folder_enabled`, computed by the server from
@@ -544,6 +561,17 @@ It refuses before spending a request when the set has no `steamLoginSecure` (**4
 ### `/api/toggle_subscription_queue/<id>` — POST
 
 Flips `is_queued_for_subscription` for one item and answers `{ok: true}`. It is the route behind both the `s` shortcut on a grid cell and the detail pane's Queue/Unqueue button. It returns no new state, so the detail pane reads the item back through the read-only `/api/item/<id>` route to label its button.
+
+### `/api/ignore/<id>` — POST
+
+Toggles the owner's ignored marker (`fetch_status = -2`) for one item and answers `{ok: true}`, the
+same shape as `/api/toggle_subscription_queue/<id>` so the page treats the two uniformly. It is the
+route behind the `i` shortcut on a grid cell. The direction is not passed in: `toggle_ignored_item`
+owns the rule, sending an ignored row through `unignore_item` and every other row through
+`ignore_item` (which settles the item exactly as death does — all four queue priorities cleared and
+its `translation_queue` rows deleted). Like the queue route, it returns no new state, so the client
+reads the item back through the read-only `/api/item/<id>` route and draws the marker from that
+payload rather than from a local flip.
 
 ### `/api/open_folder/<id>` — POST
 
