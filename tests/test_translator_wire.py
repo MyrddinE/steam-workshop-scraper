@@ -564,6 +564,43 @@ def test_the_poll_asks_for_the_window_derived_from_the_cap(db_path):
     )
 
 
+# --- the retired openai batch key -------------------------------------------
+#
+# `openai.batch_items` was a ceiling on fields per request, and `openai.batch` its
+# legacy spelling. A request is bounded by `openai.batch_char_cap` alone now, so an
+# existing config that still carries either key is told the key does nothing rather
+# than having it silently honoured or removed.
+
+def test_a_stale_batch_items_key_warns_once_and_does_not_change_the_packing(caplog):
+    with caplog.at_level(logging.WARNING):
+        thread = TranslatorThread({"openai": {"batch_items": 30}})
+    stale = [record for record in caplog.records if "batch_items" in record.message]
+    assert len(stale) == 1, "one warning naming the key, not one per read"
+    assert "batch_char_cap" in stale[0].message
+    assert not hasattr(thread, "batch_size")
+    assert thread.candidate_window == (
+        DEFAULT_BATCH_CHAR_CAP // translator.PER_FIELD_OVERHEAD_CHARS + 1
+    )
+    # The stale key carries no ceiling into the packing either.
+    batch, _ = pack_batch(
+        [_row(i, "title_en", "x") for i in range(1, 31)], thread.batch_char_cap
+    )
+    assert len(batch) == 30
+
+
+def test_the_legacy_openai_batch_key_is_reported_as_unused(caplog):
+    with caplog.at_level(logging.WARNING):
+        thread = TranslatorThread({"openai": {"batch": 5}})
+    assert any("openai.batch" in record.message for record in caplog.records)
+    assert not hasattr(thread, "batch_size")
+
+
+def test_an_absent_batch_key_does_not_warn(caplog):
+    with caplog.at_level(logging.WARNING):
+        TranslatorThread({"openai": {"batch_char_cap": 4000}})
+    assert not any("batch" in record.message for record in caplog.records)
+
+
 # ── partial success through the real writer ──────────────────────────────────
 
 def test_a_full_reply_stores_every_field_and_clears_the_queue(db_path):

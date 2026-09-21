@@ -451,6 +451,18 @@ class TranslatorThread(threading.Thread):
         self.config = config
         self.db_path = config.get("database", {}).get("path", "workshop.db")
         openai_config = config.get("openai", {}) or {}
+        # `batch_items` (and its legacy spelling `batch`) used to be an item
+        # ceiling beside the character cap. The request is bounded by the cap alone
+        # now, but a config file already on disk is a contract: report the retired
+        # key rather than silently ignoring it.
+        if "batch_items" in openai_config or "batch" in openai_config:
+            logging.warning(
+                "Config key 'openai.%s' is no longer used; batching is bounded by "
+                "'openai.batch_char_cap', which charges each field its source text "
+                "plus %d characters of boundary scaffolding. Remove the key.",
+                "batch_items" if "batch_items" in openai_config else "batch",
+                PER_FIELD_OVERHEAD_CHARS,
+            )
         self.batch_char_cap = _positive_int(
             openai_config.get("batch_char_cap"), DEFAULT_BATCH_CHAR_CAP
         )

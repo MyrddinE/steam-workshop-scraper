@@ -44,9 +44,13 @@ Deep-merges the in-memory config into the disk file, preserving keys not present
 | `openai.api_key` | string | None | OpenAI-compatible API key for translation. Overridden by `OPENAI_API_KEY` env var. |
 | `openai.model` | string | `"gpt-4o-mini"` | Model name passed to the OpenAI client. |
 | `openai.endpoint` | string | `"https://api.openai.com/v1"` | API endpoint URL (supports alternative providers like x.ai). |
-| `openai.batch_items` | int | 20 | Ceiling on fields per translation request. Bounds how many rows one bad reply can cost. `openai.batch` is an accepted legacy alias, honoured with a deprecation warning. |
-| `openai.batch_char_cap` | int | 4000 | Ceiling on the summed source length of one request. The first field is taken before the cap is checked; every later field is checked before it is taken, so only a single-field request may exceed it. |
+| `openai.batch_char_cap` | int | 4000 | Ceiling on the estimated cost of one request: each field's source text plus a fixed 50-character allowance for the boundary scaffolding (the phrase, the entity id, the field label and the newline; `PER_FIELD_OVERHEAD_CHARS` in `src/translator.py`). The first field is taken before the cap is checked; every later field is checked before it is taken, so only a single-field request may exceed it. There is no item ceiling, so the number of fields follows from their lengths. |
 | `openai.temperature` | float | 0.0 | Sampling temperature. Translation is not a creative task, so sampling only adds variance; the value is clamped to 0–2. |
+
+`openai.batch_items` is **no longer read** — the request is bounded by
+`openai.batch_char_cap` alone — and neither is its legacy spelling `openai.batch`.
+A config that still carries either key gets one warning naming the key, and needs
+no other change.
 
 There is deliberately no `max_tokens` key: a translation is never cut to a token
 budget, because a truncated translation is a corrupt one. The size ceiling is
