@@ -230,7 +230,7 @@ at the same time. That ordering is the fix for the previous sequence, which
 signalled one worker, joined it with its own 5-second timeout, and only then
 told the next one to stop — five additive joins whose worst case was 25 seconds,
 long enough that the controller's grace expired while the workers were still
-logging. The joins now share one deadline, `SHUTDOWN_BUDGET_SECONDS` (5 s in
+logging. The joins now share one deadline, `SHUTDOWN_BUDGET_SECONDS` (20 s in
 `src/daemon.py`); each join gets only the budget the previous ones left, and once
 it is gone the remaining workers are not joined at all. Whatever is still alive
 at the deadline is named in a warning and left behind. Each worker that did stop
@@ -244,12 +244,12 @@ with a line naming the thread that outlived the budget. The daemon then exits,
 and `atexit` removes the PID file.
 
 The controller's side is derived so that it covers that worst case rather than
-fitting it by luck: `STOP_TIMEOUT_SECONDS` (25 s in `src/daemon_control.py`) is
+fitting it by luck: `STOP_TIMEOUT_SECONDS` (40 s in `src/daemon_control.py`) is
 the longest single blocking call the daemon's main thread can be inside when the
 stop arrives (15 s: the SQLite busy timeout in `src/database.py`, and the
 subscriptions page fetch in `src/subscription_sync._fetch_page`; the Steam calls
 on that path are 10 s and the 15 s workers run on their own threads), plus the
-daemon's 5 s join budget (`SHUTDOWN_BUDGET_SECONDS`) plus a 5 s margin for the
+daemon's 20 s join budget (`SHUTDOWN_BUDGET_SECONDS`) plus a 5 s margin for the
 up-to-a-second PID-file tick in `_wait_for_work`, the failure-capture flush, the
 controller's own half-second poll and process teardown. Only after that grace
 does the controller escalate to terminate/kill, and only against a process it

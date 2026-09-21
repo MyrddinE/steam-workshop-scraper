@@ -1,7 +1,7 @@
 """Stopping the daemon must not freeze the interface that asked for it.
 
 `DaemonController.stop()` polls the process every half second for up to
-`STOP_TIMEOUT_SECONDS` (25 s) and then waits up to another 3 s for a forced kill,
+`STOP_TIMEOUT_SECONDS` (40 s) and then waits up to another 3 s for a forced kill,
 and `restart()` is `stop()` followed by `start()`. Run from the button handler,
 that held the Textual event loop for the whole shutdown: no keypress, no screen
 change and no timer, including the manager screen's own two-second log poll,

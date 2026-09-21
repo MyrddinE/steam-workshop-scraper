@@ -917,7 +917,7 @@ class DaemonManagerScreen(Screen):
         """Run a daemon transition on a worker so the interface keeps running.
 
         Every controller transition blocks: ``stop`` polls the process every half
-        second for up to ``STOP_TIMEOUT_SECONDS`` (25 s, derived from the daemon's
+        second for up to ``STOP_TIMEOUT_SECONDS`` (40 s, derived from the daemon's
         worst case in ``src/daemon_control.py``) and then waits up to another 3 s
         for a forced kill, and ``restart`` is ``stop`` followed by ``start``.
         Called straight from the button handler, that froze the whole application

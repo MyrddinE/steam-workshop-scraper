@@ -143,14 +143,18 @@ DISCOVERY_IDLE_SECONDS = 30.0
 # and waited for together, and whatever is still alive when this expires is named
 # in the log and left behind.
 #
-# It is deliberately a single-digit number. The controller's
-# ``STOP_TIMEOUT_SECONDS`` (25 s in ``src/daemon_control.py``) is derived as
-# the longest single main-thread block (15 s) plus this budget plus a 5 s
-# margin, so this constant is one of the two terms that set the grace and must
-# not be raised without raising that one; ``tests/test_daemon_control.py``
+# Because the deadline is shared and every worker is signalled at once, a long
+# budget costs nothing unless a worker is genuinely stuck mid-IO: the phase
+# returns as soon as the last healthy worker does. 20 s leaves room for a worker
+# to finish a real operation instead of being abandoned part-way, and a worker
+# still stuck when it expires is named in the log and left behind all the same.
+# The controller's ``STOP_TIMEOUT_SECONDS`` (40 s in ``src/daemon_control.py``)
+# is derived as the longest single main-thread block (15 s) plus this budget
+# plus a 5 s margin, so this constant is one of the two terms that set the grace
+# and must not be raised without raising that one; ``tests/test_daemon_control.py``
 # pins the pairing. ``daemon_control`` mirrors this value instead of importing
 # it, so the coupling is stated in both comments and checked by that test.
-SHUTDOWN_BUDGET_SECONDS = 5.0
+SHUTDOWN_BUDGET_SECONDS = 20.0
 
 # The owner's subscriptions are reconciled once per appid at startup and then on
 # this cadence. Daily is the right order for it: the list only moves when a

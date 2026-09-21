@@ -65,7 +65,7 @@ def test_the_stop_grace_is_the_daemons_documented_worst_case():
     """The grace and the daemon's own budget are tied constants.
 
     The daemon's main thread can be inside one 15 s request or busy-timeout
-    wait, then it needs its 5 s join budget and the margin for the PID-file
+    wait, then it needs its 20 s join budget and the margin for the PID-file
     tick, the failure-capture flush and teardown. The budget half is mirrored
     here rather than imported (importing ``src.daemon`` would pull its whole
     dependency graph into the TUI and web processes), so this test is what
