@@ -643,6 +643,9 @@ async function doSearch(reset = true) {
       _unsubscribeItem(el.getAttribute('data-wid'), el);
     });
     document.getElementById('results-grid').innerHTML = '';
+    // The cells that just left the DOM are gone; drop the observation of the
+    // batch-first cell so a detached node cannot trigger a load.
+    _observeNextBatch(null);
     // Drop to the neutral colour and fetch the cutoffs in the background. They
     // decide colour only, and colouring this filter set with the previous set's
     // percentiles would be worse than not colouring it.
@@ -658,6 +661,10 @@ async function doSearch(reset = true) {
   const items = await resp.json();
 
   const grid = document.getElementById('results-grid');
+  // The batch's first cell is what the observer watches: it sits where the next
+  // page is wanted, so it can be observed directly instead of marking it and
+  // inserting a placeholder element that would take a grid cell of its own.
+  let firstCell = null;
   items.forEach((item, idx) => {
     const title = item.title_en || item.title || 'Untitled';
     const wfs = item.wilson_favorite_score != null ? (item.wilson_favorite_score*100).toFixed(1) : null;
@@ -670,7 +677,7 @@ async function doSearch(reset = true) {
     div.className = 'grid-cell';
     div.setAttribute('data-wid', item.workshop_id);
     div.setAttribute('tabindex', '0');
-    if (idx === 0) div.setAttribute('data-batch-first', '1');
+    if (idx === 0) firstCell = div;
     div.innerHTML = `${imgHtml}
       <div class="grid-title">${title}</div>
       <div class="grid-meta"><span class="${sizeClass(item.file_size)}">${size}</span></div>
@@ -707,34 +714,32 @@ async function doSearch(reset = true) {
   if (_listNeedsPoll(items)) {
     _startListPoll(filters, document.getElementById('sort-by').value, document.getElementById('sort-order').value);
   }
-  _placeSentinel();
+  _observeNextBatch(firstCell);
   // A reset re-establishes the committed filter/sort view; save it once the
   // result set it describes is on screen.
   if (reset) _saveViewState();
 }
 
-function _placeSentinel() {
-  if (loading || !hasMore) return;
-  let sentinel = document.getElementById('scroll-sentinel');
-  if (!sentinel) {
-    sentinel = document.createElement('div');
-    sentinel.id = 'scroll-sentinel';
-  } else {
-    sentinel.remove();
+// Arm infinite scroll on the batch just rendered by watching its first cell.
+// The cell a previous batch armed is always released first: it is still in the
+// DOM, so leaving it observed would fire a duplicate load when it scrolled into
+// view. `firstCell` is null on the reset path, where the grid was just emptied
+// and there is nothing in the batch yet to watch.
+function _observeNextBatch(firstCell) {
+  if (_observedCell) {
+    _scrollObserver.unobserve(_observedCell);
+    _observedCell = null;
   }
+  if (loading || !hasMore || !firstCell) return;
 
-  const first = document.querySelector('.grid-cell[data-batch-first]');
-  if (!first) return;
-  first.removeAttribute('data-batch-first');
-
-  const rect = first.getBoundingClientRect();
+  const rect = firstCell.getBoundingClientRect();
   if (rect.top < window.innerHeight) {
     setTimeout(() => doSearch(false), 0);
     return;
   }
 
-  first.parentNode.insertBefore(sentinel, first);
-  _scrollObserver.observe(sentinel);
+  _scrollObserver.observe(firstCell);
+  _observedCell = firstCell;
 }
 
 // What the server recorded for this item's image. image_state comes from
@@ -1687,8 +1692,8 @@ function _applyFilters(filters) {
 }
 
 // Ask doSearch for the next page until `done` holds, exactly as scrolling to
-// the bottom would. doSearch owns currentOffset and the sentinel, so this never
-// touches either; a page that moves no offset means there is nothing left.
+// the bottom would. doSearch owns currentOffset and the observed cell, so this
+// never touches either; a page that moves no offset means there is nothing left.
 async function _loadUntil(done, maxBatches) {
   let batches = 0;
   while (hasMore && !done() && batches < maxBatches) {
@@ -1799,6 +1804,10 @@ async function saveFilterAndReport() {
   alert('Filter saved for scraper.');
 }
 document.getElementById('btn-save-filter').onclick = saveFilterAndReport;
+
+// The batch-first cell the observer is currently watching, or null when nothing
+// is armed. Held so the next batch can unobserve it before arming its own.
+let _observedCell = null;
 
 const _scrollObserver = new IntersectionObserver((entries) => {
   if (loading || !hasMore || !currentOffset) return;
