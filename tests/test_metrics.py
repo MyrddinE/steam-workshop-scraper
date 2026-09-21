@@ -12,7 +12,13 @@ import time
 import pytest
 
 from src import metrics
-from src.database import get_connection, get_db_stats, initialize_database, insert_or_update_item
+from src.database import (
+    get_connection,
+    get_db_stats,
+    initialize_database,
+    insert_or_update_creator,
+    insert_or_update_item,
+)
 
 
 # --------------------------------------------------------------------------
@@ -335,6 +341,8 @@ def test_coverage_counts_each_stage(db_path):
         "image_answer": "jpg", "translate_version": 5, "creator_steamid": 42,
     })
     insert_or_update_item(db_path, {"workshop_id": 2, "title": "bare", "fetch_status": 200})
+    insert_or_update_creator(db_path, {"steamid": 42, "personaname": "Bob",
+                                       "api_fetched_at": 1000})
 
     cov = metrics.values(metrics.compute(db_path, ["coverage"]))["coverage"]
     bars = {bar["key"]: bar for bar in cov["bars"]}
@@ -342,7 +350,8 @@ def test_coverage_counts_each_stage(db_path):
     assert bars["api_fetched"]["done"] == 1
     assert bars["described"]["done"] == 1
     assert bars["imaged"]["done"] == 1
-    assert bars["attributed"]["done"] == 1
+    assert bars["attributed"]["done"] == 1, "the item's one author, whose persona we hold"
+    assert bars["attributed"]["total"] == 1, "author units, not the two items"
     assert "translated" not in bars, "the old item-level count is gone"
 
 

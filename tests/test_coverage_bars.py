@@ -18,9 +18,18 @@ Every bar's population is the same test that decides whether the field is
 flagged, so the tests check the flagging rules rather than a rendering: non-empty
 and non-ASCII, translated and current (``translation_is_current``). The three
 translation bars deliberately have three different scopes, and the tests name
-each one. The creator's name lives on ``creators`` and is shared by every item that
-creator made, so its bar counts *items*, which is what makes it comparable with
-the per-item bars around it.
+each one. The two **Creator** bars count **authors**, not items: the name lives
+on ``creators`` and is shared by every item that creator made, so the population
+under the "Creator" label is the scope's unique authors.
+
+The **translation bars are drawn in slots**, the unit the queue works in: two per
+entry for `title`/`short_description`, one per described item for the scraped
+description, one per author for the creator name. A bar's track therefore has
+three parts -- the coloured fill for the share done, a **gray segment** for the
+slots that need no translation at all, and the empty track for the work left --
+and its short note is the share that still needs a translation. The percentage,
+the gray share and the note are all computed in ``src/metrics.py``, so both front
+ends cannot print different numbers.
 
 The rendering properties are checked on both sides: the three translation bars
 are flush under their parents (no line, margin or row between them) and are
@@ -132,7 +141,8 @@ def test_one_non_ascii_field_of_two_counts_once_per_field(db_path):
     Item 1 has one non-ASCII field of its two; item 2 has both; item 3 has
     neither. The population is three fields, not three items and not the item
     count of the items that need anything (two). Only item 1's field is stored
-    and current, so the fill is one field.
+    and current, so the fill is one field; the track is two slots per entry and
+    the four fields that need nothing are its gray segment.
     """
     _mature(db_path)
     _item(db_path, 1, tags=["Mature"], title="テスト", title_en="Test",
@@ -145,8 +155,11 @@ def test_one_non_ascii_field_of_two_counts_once_per_field(db_path):
 
     assert bar["maximum"] == 3, "three fields need translation"
     assert bar["done"] == 1, "only the stored, current field is filled"
-    assert bar["pct"] == round(1 / 3 * 100, 1)
-    assert "1 filter-selected items need none" in bar["detail"]
+    assert bar["total"] == 6, "two translation slots per entry"
+    assert bar["pct"] == round(1 / 6 * 100, 1)
+    assert bar["no_work"] == 3, "the three ASCII-or-empty slots"
+    assert bar["gray_pct"] == 50.0
+    assert bar["detail"] == "50% need translation"
     assert "translated" not in _bars(_coverage(db_path, [294100])), \
         "the old item-level translated count is gone"
 
@@ -188,6 +201,7 @@ def test_ascii_only_library_has_nothing_to_translate(db_path):
     assert bar["maximum"] == 0
     assert bar["done"] == 0
     assert bar["pct"] is None, "a zero population is not a percentage at all"
+    assert bar["gray_pct"] is None, "nothing to translate is not a 100% gray bar"
     assert bar["empty"] == metrics.NOTHING_TO_TRANSLATE
 
 
@@ -199,6 +213,7 @@ def test_tui_reads_a_zero_population_as_nothing_to_translate(db_path):
 
     assert metrics.NOTHING_TO_TRANSLATE in line
     assert "%" not in line, "no 0.0% that could never move"
+    assert "need translation" not in text, "no note when there is nothing to translate"
     assert "▁" in line, "the zero-length bar is still drawn, in the thin track"
 
 
@@ -233,7 +248,9 @@ def test_extended_web_translation_never_exceeds_extended_web(db_path):
     assert child["maximum"] == 3 and child["done"] == 1
     assert child["maximum"] <= parent["maximum"]
     assert child["done"] <= parent["done"]
-    assert child["pct"] <= parent["pct"]
+    assert child["total"] == parent["done"], \
+        "one slot per described item, so the child's track is the parent's fill"
+    assert child["no_work"] == 1, "the ASCII description needs no translation"
     assert "answered with no description" in parent["detail"]
 
 
@@ -252,16 +269,46 @@ def test_a_fully_blank_web_library_has_a_zero_length_bar_at_both_levels(db_path)
 
 
 # --------------------------------------------------------------------------
-# the creator: per item, from the creators table
+# the creator: authors, not items, from the creators table
 # --------------------------------------------------------------------------
 
 
-def test_creator_translation_counts_items_by_their_creators_name(db_path):
-    """The name lives per user; the bar is counted in items, like the others.
+def test_creator_counts_authors_not_items(db_path):
+    """Under the Creator label the population is the scope's unique authors.
+
+    The translated creator made two items and the untranslated one made one, so
+    the population is three authors, not the four attributed items; the fill is
+    the two authors we hold a fetched persona for. The third has no ``creators``
+    row, so nothing was fetched for it.
+    """
+    insert_or_update_creator(db_path, {
+        "steamid": 42, "personaname": "作者", "personaname_en": "Author",
+        "api_fetched_at": 10, "translated_at": 20,
+    })
+    insert_or_update_creator(db_path, {
+        "steamid": 43, "personaname": "作家", "api_fetched_at": 10,
+    })
+    _item(db_path, 1, creator_steamid=42)
+    _item(db_path, 2, creator_steamid=42)
+    _item(db_path, 3, creator_steamid=43)
+    _item(db_path, 4, creator_steamid=99)   # no creators row
+
+    bar = _bars(_coverage(db_path, []))["attributed"]
+
+    assert bar["maximum"] == bar["total"] == 3, "three authors, not four items"
+    assert bar["done"] == 2, "two authors have a fetched persona"
+    assert bar["pct"] == round(2 / 3 * 100, 1)
+    assert bar["gray_pct"] is None, "the Creator bar has no no-work share"
+
+
+def test_creator_translation_counts_authors_by_their_creators_name(db_path):
+    """The name lives per user; the bar counts the scope's unique authors.
 
     The translated creator made two items, the untranslated one made one, the
-    ASCII name one and the unknown creator one. Two of the three items behind a
-    non-ASCII name are done -- an item count of two, not a user count of one.
+    ASCII name one and the unknown creator one. There are four authors, two of
+    them behind a non-ASCII name, and one of those two is done -- an author
+    count of one, not the item count of two. The ASCII and unknown names need no
+    translation, so they are the gray share.
     """
     insert_or_update_creator(db_path, {
         "steamid": 42, "personaname": "作者", "personaname_en": "Author",
@@ -281,10 +328,14 @@ def test_creator_translation_counts_items_by_their_creators_name(db_path):
 
     bar = _bars(_coverage(db_path, []))["creator_translated"]
 
-    assert bar["maximum"] == 3, "three items behind a non-ASCII name"
-    assert bar["done"] == 2, "the two items of the translated creator"
+    assert bar["total"] == 4, "four authors, not five items"
+    assert bar["maximum"] == 2, "two authors behind a non-ASCII name"
+    assert bar["done"] == 1, "the translated creator"
+    assert bar["pct"] == round(1 / 4 * 100, 1)
+    assert bar["no_work"] == 2, "the ASCII name and the unknown creator"
+    assert bar["gray_pct"] == 50.0
+    assert bar["detail"] == "50% need translation"
     assert bar["subsidiary"] is True
-    assert "name is non-ASCII" in bar["detail"]
 
 
 def test_a_creator_translation_is_stale_after_a_newer_persona_fetch(db_path):
@@ -299,6 +350,61 @@ def test_a_creator_translation_is_stale_after_a_newer_persona_fetch(db_path):
 
     assert bar["maximum"] == 1
     assert bar["done"] == 0, "the stored translation is older than the fetched name"
+
+
+# --------------------------------------------------------------------------
+# the translation bars' unit: slots, with the fields that need nothing gray
+# --------------------------------------------------------------------------
+
+
+def test_api_translations_are_drawn_in_translation_units(db_path):
+    """100% is two translations per entry, not one entry.
+
+    One item has a non-ASCII title and short description with the title
+    translated and current; two are ASCII-only. The track is 2 x 3 slots, two
+    of them need translation and one is done -- so the four fields that need
+    nothing are the gray segment, and the note is the share that does. Dividing
+    the two field-units of work by the three items used to report 66.7% where
+    the honest figure is 33.3%.
+    """
+    _mature(db_path)
+    _item(db_path, 1, tags=["Mature"], title="テスト", title_en="Test",
+          short_description="説明", steam_updated_at=100, translate_version=100)
+    _item(db_path, 2, tags=["Mature"], title="plain", short_description="plain")
+    _item(db_path, 3, tags=["Mature"], title="plain", short_description="plain")
+
+    bar = _bars(_coverage(db_path, [294100]))["translations"]
+
+    assert bar["total"] == 6, "two translation slots per entry"
+    assert bar["maximum"] == 2, "the title and the short description"
+    assert bar["done"] == 1
+    assert bar["pct"] == round(1 / 6 * 100, 1)
+    assert bar["no_work"] == 4
+    assert bar["gray_pct"] == round(4 / 6 * 100, 1)
+    assert bar["detail"] == "33% need translation"
+
+
+def test_extended_web_translation_has_one_slot_per_described_item(db_path):
+    """The second translation bar reads the same way: one slot per description.
+
+    One described item is translated and current, one needs it, one is ASCII
+    (the gray share) and one has no description at all (not a slot).
+    """
+    _item(db_path, 1, extended_description="説明", extended_description_en="Desc",
+          steam_updated_at=100, translate_version=100)
+    _item(db_path, 2, extended_description="説明2", steam_updated_at=100)
+    _item(db_path, 3, extended_description="plain ascii")
+    _item(db_path, 4)
+
+    bar = _bars(_coverage(db_path, []))["web_translated"]
+
+    assert bar["total"] == 3, "one slot per described item"
+    assert bar["maximum"] == 2
+    assert bar["done"] == 1
+    assert bar["pct"] == round(1 / 3 * 100, 1)
+    assert bar["no_work"] == 1
+    assert bar["gray_pct"] == round(1 / 3 * 100, 1)
+    assert bar["detail"] == "67% need translation"
 
 
 # --------------------------------------------------------------------------
@@ -341,7 +447,7 @@ def test_tui_parent_and_subsidiary_are_flush_and_the_child_is_thin(db_path):
     bar_lines = [line for line in lines
                  if any(line.startswith(label) for pair in COVERAGE_PAIRS for label in pair)]
     # Every bar's first glyph is in the same column: no subsidiary is indented.
-    columns = {min(line.index(glyph) for glyph in "█░▄▁" if glyph in line)
+    columns = {min(line.index(glyph) for glyph in "█░▒▄▁▂" if glyph in line)
                for line in bar_lines}
     assert len(columns) == 1, f"bars do not share a left edge: {sorted(columns)}"
 
@@ -406,16 +512,82 @@ def test_web_parent_and_subsidiary_rows_are_flush(db_path):
 
 
 def test_web_subsidiary_bar_is_drawn_thinner_than_the_standard_bar():
-    """A smaller CSS height on the child's progress element, not a shorter bar."""
+    """A smaller CSS height on the child's track, not a shorter bar."""
     html = TEMPLATE.read_text(encoding="utf-8")
-    standard = re.search(r"\.coverage-table progress\s*\{[^}]*height:([^;]+);", html)
+    standard = re.search(r"\.coverage-track\s*\{[^}]*height:([^;]+);", html)
     child = re.search(
-        r"\.coverage-table tr\.coverage-child progress\s*\{[^}]*height:([^;]+);", html)
+        r"\.coverage-table tr\.coverage-child \.coverage-track\s*\{[^}]*height:([^;]+);",
+        html)
     assert standard and child, "both coverage bar heights must be declared"
     assert float(child.group(1).rstrip("rem")) < float(standard.group(1).rstrip("rem"))
     # Flush rows: no vertical padding and no border spacing to open a gap.
     assert re.search(r"\.coverage-table\s*\{[^}]*border-collapse:collapse;", html)
     assert re.search(r"\.coverage-table td\s*\{[^}]*padding-top:0;[^}]*padding-bottom:0;", html)
+
+
+def test_web_draws_the_no_work_share_as_a_second_fill(db_path):
+    """A track with two fills, because `<progress>` cannot show two segments.
+
+    The widths are the metric's own ``pct`` and ``gray_pct``, so the browser's
+    split cannot differ from the terminal's. A bar with no no-work share keeps
+    the one-fill track.
+    """
+    _full_library(db_path)
+    cov = _coverage(db_path, [294100])
+    bar = _bars(cov)["translations"]
+    html = _render_web_rows(cov)
+    row = html.split(">Translations<", 1)[1].split("</tr>", 1)[0]
+
+    assert 'class="coverage-track"' in row
+    assert 'class="coverage-fill" style="width:' + f"{bar['pct']:.1f}%" + '"' in row
+    assert 'class="coverage-nowork" style="width:' + f"{bar['gray_pct']:.1f}%" + '"' in row
+    assert "<progress" not in row, "a progress element cannot show two segments"
+    api_row = html.split(">API Data<", 1)[1].split("</tr>", 1)[0]
+    assert "coverage-nowork" not in api_row, "the Creator/API bars have no no-work share"
+    creator_row = html.split(">Creator<", 1)[1].split("</tr>", 1)[0]
+    assert "coverage-nowork" not in creator_row
+
+
+def test_tui_draws_the_no_work_share_as_a_gray_segment(db_path):
+    """Green fill, gray no-work, empty work: the three parts of a slot track.
+
+    The glyph counts are the metric's percentages of the twenty-cell track, so a
+    reader can see both the work done and the work that can never be there.
+    """
+    _full_library(db_path)
+    cov = _coverage(db_path, [294100])
+    lines = StatsScreen._coverage_block(cov)
+    bar = _bars(cov)["translations"]
+    line = _find_bar_line(lines, "Translations")
+
+    width = StatsScreen.COVERAGE_BAR_WIDTH
+    on, gray_glyph, off = StatsScreen.COVERAGE_GLYPHS[bool(bar["subsidiary"])]
+    filled = int(round(bar["pct"] / 100 * width))
+    gray = int(round(bar["gray_pct"] / 100 * width))
+    assert line.count(on) == filled, line
+    assert line.count(gray_glyph) == gray, line
+    assert line.count(off) == width - filled - gray, line
+    assert "[gray]" in line
+    parent_gray = StatsScreen.COVERAGE_GLYPHS[False][1]
+    assert parent_gray not in _find_bar_line(lines, "Creator"), \
+        "the Creator bar has no no-work share"
+
+
+def test_both_front_ends_print_the_same_short_note(db_path):
+    """The note is the metric's, so neither side can invent its own sentence."""
+    _full_library(db_path)
+    cov = _coverage(db_path, [294100])
+    text = StatsScreen._format_coverage(cov)
+    html = _render_web_rows(cov)
+
+    for key in ("translations", "web_translated", "creator_translated"):
+        note = _bars(cov)[key]["detail"]
+        assert note and note.endswith("need translation"), note
+        assert note in text, f"the TUI does not print {note!r}"
+        assert note in html, f"the browser does not print {note!r}"
+    # The Extended Web parent is not a translation bar: its sentence about the
+    # scraped-but-blank pages stays rather than being replaced by a note.
+    assert "answered with no description" in _bars(cov)["described"]["detail"]
 
 
 def test_web_renders_the_extended_web_rename_from_the_metric(db_path):
@@ -436,5 +608,8 @@ def test_web_reads_a_zero_population_as_nothing_to_translate(db_path):
 
     rendered = _render_web_rows(_coverage(db_path, []))
     assert metrics.NOTHING_TO_TRANSLATE in rendered
-    assert 'value="0" max="100"' in rendered
-    assert "0.0%" not in rendered.split(">Translations<", 1)[1].split("</tr>", 1)[0]
+    row = rendered.split(">Translations<", 1)[1].split("</tr>", 1)[0]
+    assert 'class="coverage-track"' in row
+    assert 'class="coverage-fill" style="width:0.0%"' in row
+    assert "coverage-nowork" not in row, "nothing to translate is not a 100% gray bar"
+    assert "<td>0.0%</td>" not in row, "no 0.0% that could never move"

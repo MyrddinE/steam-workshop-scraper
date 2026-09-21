@@ -602,22 +602,36 @@ where no test is running.
 ## Coverage bars
 
 The `coverage` statistic (`src/metrics.py`, `_coverage`) answers one question per stage: how much of
-the live library the stage has reached, at two scopes. It is drawn as seven bars on one width —
-100% of the scope's live items — in pipeline order. Dead items are excluded, because they can never
-be covered and counting them would make coverage fall as the library is cleaned up. Each bar's
-**maximum** is its reachable population as a share of live items and its **fill** is the share whose
-output is stored and current; drawing the fill against the live library rather than against the
-population is what stops a bar promising work that cannot exist.
+the live library the stage has reached, at two scopes. It is drawn as seven bars in pipeline order.
+Dead items are excluded, because they can never be covered and counting them would make coverage fall
+as the library is cleaned up. Each bar's **maximum** is its reachable population and its **fill** is
+the share whose output is stored and current; the two are drawn on the bar's own track, and drawing
+the fill against the track rather than against the population is what stops a bar promising work that
+cannot exist.
+
+A bar's track is 100% of the unit its stage works in, which is not always the item. The item-scale
+bars (API Data, Extended Web, Images) count live items. The three **translation bars** are drawn in
+**translation slots**, the unit the queue works in, because their work is per field: two slots per
+entry for the API's `title`/`short_description`, one per described item for the scraped description,
+one per author for the creator name. A translation bar therefore has a third part — a **gray segment**
+for the slots that need no translation at all — and its short note is the share that does need one
+(for example "25% need translation", `need / slots`). The percentage, the gray share and the note are
+all computed in `src/metrics.py` and carried in the payload, so the terminal and the browser draw the
+same segments and print the same words. The two **Creator** bars are drawn in **author units**: a
+persona lives once per creator and is shared by every item that creator made, so counting items under
+the "Creator" label printed roughly the item count (about 3 M on production) where the population is
+the scope's unique authors (2,459,796 live items gave 849,695 authors, 34.5%, of which 26,555 had a
+fetched persona).
 
 | Bar | Counts | Population — the same test that flags the work |
 |---|---|---|
 | API Data | live items with `api_fetched_at` | every live item |
-| Translations (subsidiary) | **fields**, not items: `title` and `short_description` | the non-empty non-ASCII fields of the **filter-selected** items, because `_queue_translations` returns early unless the item was enriched. A field is filled when `translation_is_current` — stored and taken at the item's current `steam_updated_at` |
-| Extended Web | live items with a non-empty `extended_description` | every live item except the pages that answered with no description (a scrape that stored an empty description); that legitimate-blank count and the resulting ceiling are printed with the bar |
-| Extended Web Translation (subsidiary) | live items whose non-ASCII `extended_description` has a current `extended_description_en` | any **scraped** item with a non-ASCII description, not only the filter-selected ones: `WebScraperThread` flags the description regardless of enrichment. A non-ASCII description is a description, so this bar can never be longer than Extended Web above it |
+| Translations (subsidiary) | **translation slots** — two per entry, `title` and `short_description` | the non-empty non-ASCII fields of the **filter-selected** items, because `_queue_translations` returns early unless the item was enriched. A field is filled when `translation_is_current` — stored and taken at the item's current `steam_updated_at`. The track is 2 × the scope's live items, so 100% is two translations per entry |
+| Extended Web | live items with a non-empty `extended_description` | every live item except the pages that answered with no description (a scrape that stored an empty description); that legitimate-blank count and the resulting ceiling are printed with the bar, which is not a translation bar and keeps its sentence about them |
+| Extended Web Translation (subsidiary) | **one slot per described item**, filled when its non-ASCII `extended_description` has a current `extended_description_en` | any **scraped** item with a non-ASCII description, not only the filter-selected ones: `WebScraperThread` flags the description regardless of enrichment. A non-ASCII description is a description, so this bar can never be longer than Extended Web above it; the ASCII descriptions are its gray segment |
 | Images | live items with a recorded `image_answer` | every live item; a recorded answer settles the stage even when the preview does not exist |
-| Creator | live items with a creator | every live item |
-| Creator Translation (subsidiary) | **items** attributed to a creator whose `creators.personaname` is non-ASCII and whose `personaname_en` is current | the name lives per creator and is shared by every item that creator made, so the bar counts items to stay comparable with the per-item bars around it. Currency compares our clocks, `translated_at >= api_fetched_at`, because a creator has no `steam_updated_at` |
+| Creator | **authors** — distinct `creator_steamid` of the scope's live items, filled when we hold a `creators` row for the author | the scope's unique authors |
+| Creator Translation (subsidiary) | **authors** whose `creators.personaname` is non-ASCII and whose `personaname_en` is current | one slot per author in the scope; a name that is ASCII, or an author we have never fetched, needs no translation and is the gray segment. Currency compares our clocks, `translated_at >= api_fetched_at`, because a creator has no `steam_updated_at` |
 
 The three translation bars have **three different scopes** deliberately, because the code that feeds
 them does. Each population is the flagging rule written in SQL — non-empty and non-ASCII
@@ -625,13 +639,14 @@ them does. Each population is the flagging rule written in SQL — non-empty and
 (`translation_is_current`) — so a bar and the work it measures cannot disagree. Where a rule is
 Python today and the metric is its SQL translation, the metric's docstring says so, the same way the
 filtered figure already did for the enrichment filters. A population of zero is a legitimate answer
-and reads "Nothing to translate" on both front ends rather than as a percentage that never moves.
+and reads "Nothing to translate" on both front ends rather than as a percentage that never moves;
+because nothing needs translating there is no note and no gray segment, just the empty track.
 
 The **second scope** restricts every bar to the items the target AppIDs' `enrichment_filters`
 select, the population the daemon calls *enriched*. The Translations bar's population is already
-exactly that set, so only its denominator changes between the two blocks — it does not follow the
-scope, it *is* the scope. The whole-library view is the one whose Translations bar shows the
-stage's reachable share of the entire library.
+exactly that set, so only its track changes between the two blocks — it does not follow the scope, it
+*is* the scope. The whole-library view is the one whose Translations bar is the stage's reachable
+share of the entire library.
 
 **Cost.** Each scope is one pass over its live items (`_coverage_scan`), with a `LEFT JOIN creators` on
 the primary key for the creator bars and the non-ASCII tests evaluated in SQL. No index was added:

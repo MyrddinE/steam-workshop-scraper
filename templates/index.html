@@ -290,14 +290,20 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 .stats-section-body ul { margin:.2rem 0 0 1rem; }
 .stats-section-body progress { margin:0; }
 .stats-table td, .stats-table th { padding:.15rem .5rem .15rem 0; }
-/* Coverage bars share one width, so a shorter bar means less coverage. A
-   subsidiary bar (a stage hanging off the bar above it) is half the height of
-   the standard one -- the browser's equivalent of the TUI's half-height block
-   glyph -- and the two rows are flush: no padding, no spacing, no gap. */
+/* Coverage bars share one width, so a shorter bar means less coverage. A bar is
+   a track with two fills: the coloured one for the share done, and -- on the
+   translation bars -- a gray one for the slots that need no translation at all.
+   The track shows through for the work still to do. A subsidiary bar (a stage
+   hanging off the bar above it) is half the height of the standard one -- the
+   browser's equivalent of the TUI's half-height block glyph -- and the two rows
+   are flush: no padding, no spacing, no gap. */
 .coverage-table { border-collapse:collapse; }
 .coverage-table td { padding-top:0; padding-bottom:0; }
-.coverage-table progress { height:1rem; width:100%; }
-.coverage-table tr.coverage-child progress { height:.5rem; }
+.coverage-track { display:flex; width:100%; height:1rem; overflow:hidden;
+  border-radius:.25rem; background:var(--pico-muted-border-color); }
+.coverage-table tr.coverage-child .coverage-track { height:.5rem; }
+.coverage-track .coverage-fill { height:100%; background:var(--pico-primary); }
+.coverage-track .coverage-nowork { height:100%; background:var(--pico-muted-color); }
 .coverage-detail td { color:var(--pico-muted-color); font-size:.8em; padding-top:.1rem; }
 /* Tags are the one metric that is a long list rather than a handful of
    numbers, so it scrolls inside a bounded box instead of pushing every
@@ -2139,6 +2145,23 @@ function _fmtTimestamp(ts) {
 // The row rendering is extracted and run by tests/test_coverage_bars.py
 // between these two markers, so the browser's rows are pinned by behaviour
 // rather than by a substring. Do not rename or remove the markers.
+function _coverageTrack(bar) {
+  // A bar's track is 100% of its stage. The coloured fill is the share done;
+  // a translation bar adds a gray fill for the slots that need no translation
+  // at all, and the track shows through for the work still to do. Both widths
+  // come from the metric, so the browser cannot draw a different split from
+  // the terminal. `<progress>` cannot show two segments, which is why this is
+  // a track element rather than a progress element.
+  const fill = Math.max(0, Math.min(100, bar.pct || 0));
+  let html = '<div class="coverage-track"><div class="coverage-fill" style="width:'
+    + fill.toFixed(1) + '%"></div>';
+  if (bar.gray_pct !== null && bar.gray_pct !== undefined) {
+    const gray = Math.max(0, Math.min(100 - fill, bar.gray_pct));
+    html += '<div class="coverage-nowork" style="width:' + gray.toFixed(1) + '%"></div>';
+  }
+  return html + '</div>';
+}
+
 function _coverageRow(bar) {
   const cls = bar.subsidiary ? 'coverage-row coverage-child' : 'coverage-row coverage-parent';
   const label = _escapeHtml(bar.label || bar.key || '');
@@ -2147,13 +2170,13 @@ function _coverageRow(bar) {
     // empty track and print the metric's own words, so both front ends say
     // the same thing about a library with nothing to translate.
     return '<tr class="' + cls + '"><td>' + label + '</td><td></td>'
-      + '<td style="width:45%"><progress value="0" max="100"></progress></td>'
+      + '<td style="width:45%">' + _coverageTrack(bar) + '</td>'
       + '<td>' + _escapeHtml(bar.empty || 'Nothing to reach') + '</td></tr>';
   }
   const pct = bar.pct || 0;
   return '<tr class="' + cls + '"><td>' + label + '</td>'
     + '<td style="white-space:nowrap">' + fmtCount(bar.done) + ' / ' + fmtCount(bar.total) + '</td>'
-    + '<td style="width:45%"><progress value="' + pct.toFixed(1) + '" max="100"></progress></td>'
+    + '<td style="width:45%">' + _coverageTrack(bar) + '</td>'
     + '<td>' + pct.toFixed(1) + '%</td></tr>';
 }
 
@@ -2162,8 +2185,8 @@ function _coverageRows(scope) {
   // between them, so the subsidiary row is flush against the bar above it: no
   // margin, no padding, no paragraph. The counts that explain a pair follow
   // its rows, never open a gap inside it. The subsidiary row's class draws its
-  // progress element at half height, the browser's equivalent of the TUI's
-  // half-height block glyph.
+  // track at half height, the browser's equivalent of the TUI's half-height
+  // block glyph.
   const bars = scope.bars || [];
   let html = '';
   for (let i = 0; i < bars.length; i++) {
