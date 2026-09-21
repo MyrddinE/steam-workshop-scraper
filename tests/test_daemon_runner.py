@@ -1,7 +1,25 @@
+import logging
+import os
+
 import pytest
 from unittest.mock import patch, MagicMock
 import sys
 from src.daemon_runner import main
+
+
+@pytest.fixture(autouse=True)
+def _isolate_the_pid_file(tmp_path, monkeypatch):
+    """Point the runner's PID file into this test's tmp_path.
+
+    ``main`` now takes the file with an exclusive create and refuses to start
+    when one is already there, so tests sharing the repository's ``.daemon.pid``
+    would refuse each other. ``raising=False`` keeps the fixture harmless while
+    the guard does not exist yet, which is what lets the new tests fail against
+    the old code for the right reason.
+    """
+    monkeypatch.setattr("src.daemon_runner.PID_FILE",
+                        str(tmp_path / ".daemon.pid"), raising=False)
+
 
 def test_main_custom_config():
     with patch('sys.argv', ['daemon_runner.py', 'custom.yaml']), \
@@ -173,3 +191,151 @@ def test_a_cjk_record_survives_the_log_file(tmp_path):
     assert "鸣潮-爱弥丝" in text, "a CJK title must survive the log file"
     assert "—" in text, "the em dash must survive as an em dash"
     assert "\ufffd" not in text, "nothing may be replaced on the way through"
+
+
+# ── the PID file is the guard, not just the record ────────────────────────────
+#
+# ``main`` used to overwrite ``.daemon.pid`` and then migrate, so a hand-started
+# second daemon took the live daemon's PID file and applied migrations under it;
+# the two then shared one file, and whichever exited first stopped the other.
+# The file is now created with ``O_CREAT|O_EXCL`` before the logging
+# reconfiguration and before ``initialize_database``, so an existing file --
+# live or left by a crash -- refuses the start before the database is touched.
+# See docs/threading.md and docs/cross-platform.md.
+
+def test_a_start_refuses_an_existing_pid_file_and_touches_no_database(
+        tmp_path, caplog):
+    """The refusal precedes migrations: no database file is created at all.
+
+    ``initialize_database`` is deliberately *not* mocked here. It creates the
+    database on first use, so ``not db_path.exists()`` after the refused start is
+    a direct assertion that the database was not touched, rather than a mock's
+    word for it. The log line must name the file and the PID inside it, so an
+    operator can tell a live daemon from a stale file.
+    """
+    pid_file = tmp_path / ".daemon.pid"
+    pid_file.write_text("4321")
+    db_path = tmp_path / "workshop.db"
+
+    with patch('sys.argv', ['daemon_runner.py']), \
+         patch('src.daemon_runner.load_config') as mock_load, \
+         patch('src.daemon_runner.Daemon') as mock_daemon, \
+         caplog.at_level(logging.ERROR):
+        mock_load.return_value = {"database": {"path": str(db_path)}}
+        with pytest.raises(SystemExit) as excinfo:
+            main()
+
+    assert excinfo.value.code != 0, "a refused start must exit non-zero"
+    assert not db_path.exists(), "a refused start must not touch the database"
+    mock_daemon.assert_not_called()
+    assert str(pid_file) in caplog.text, "the log must name the PID file"
+    assert "4321" in caplog.text, "the log must name the PID inside it"
+    assert pid_file.read_text().strip() == "4321", (
+        "the refused start must leave the existing PID file alone")
+
+
+def test_a_start_refuses_an_unreadable_pid_file_and_says_so(tmp_path, caplog):
+    """A file with no readable PID refuses too, and the log does not invent one."""
+    pid_file = tmp_path / ".daemon.pid"
+    pid_file.write_text("not-a-pid")
+
+    with patch('sys.argv', ['daemon_runner.py']), \
+         patch('src.daemon_runner.load_config') as mock_load, \
+         patch('src.daemon_runner.Daemon'), \
+         caplog.at_level(logging.ERROR):
+        mock_load.return_value = {"database": {"path": str(tmp_path / "workshop.db")}}
+        with pytest.raises(SystemExit):
+            main()
+
+    assert str(pid_file) in caplog.text
+    assert "not-a-pid" not in caplog.text, "the file's contents are not a PID"
+    assert "no PID could be read" in caplog.text
+
+
+def test_a_second_start_over_an_existing_pid_file_is_refused(tmp_path):
+    """Two sequential starts: the first wins, the second aborts and changes nothing.
+
+    The first start leaves its PID file behind (its removal is the stop
+    protocol's job, not the start's); the second must not overwrite it. The
+    database is the real module here, so a broken guard would create it.
+    """
+    db_path = tmp_path / "workshop.db"
+    with patch('sys.argv', ['daemon_runner.py']), \
+         patch('src.daemon_runner.load_config') as mock_load, \
+         patch('src.daemon_runner.Daemon') as mock_daemon:
+        mock_load.return_value = {"database": {"path": str(db_path)}}
+        main()  # the winner
+        first_contents = (tmp_path / ".daemon.pid").read_text()
+        with pytest.raises(SystemExit):
+            main()  # the loser
+
+    assert mock_daemon.call_count == 1, "only the winner may construct the daemon"
+    assert (tmp_path / ".daemon.pid").read_text() == first_contents, (
+        "the loser must not overwrite the winner's PID file")
+
+
+def test_the_pid_file_create_is_exclusive_under_a_race(tmp_path):
+    """Concurrent creators: exactly one wins, the rest get FileExistsError.
+
+    This is the property ``O_CREAT|O_EXCL`` exists for, so it is pinned at the
+    helper rather than left to be inferred from sequential starts.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from src.daemon_runner import _acquire_pid_file
+
+    pid_file = tmp_path / ".daemon.pid"
+
+    def attempt(_):
+        try:
+            fd = _acquire_pid_file(str(pid_file))
+        except FileExistsError:
+            return False
+        os.close(fd)
+        return True
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        outcomes = list(pool.map(attempt, range(8)))
+
+    assert outcomes.count(True) == 1, f"exactly one creator may win: {outcomes}"
+
+
+def test_a_create_failure_other_than_already_exists_aborts_with_its_reason(
+        tmp_path, caplog):
+    """A missing parent directory is not "already running"; it still refuses.
+
+    The outcome for the operator is the same -- it did not start -- so the
+    message has the same shape, with the filesystem's own reason attached. The
+    database must not be touched on this path either.
+    """
+    missing_parent = tmp_path / "no-such-dir" / ".daemon.pid"
+    assert not missing_parent.parent.exists()
+    db_path = tmp_path / "workshop.db"
+
+    with patch('sys.argv', ['daemon_runner.py']), \
+         patch('src.daemon_runner.load_config') as mock_load, \
+         patch('src.daemon_runner.Daemon') as mock_daemon, \
+         caplog.at_level(logging.ERROR):
+        # Override the autouse fixture: force the create itself to fail without
+        # that failure being "already exists".
+        with patch('src.daemon_runner.PID_FILE', str(missing_parent)):
+            mock_load.return_value = {"database": {"path": str(db_path)}}
+            with pytest.raises(SystemExit) as excinfo:
+                main()
+
+    assert excinfo.value.code != 0
+    assert not db_path.exists(), "a refused start must not touch the database"
+    mock_daemon.assert_not_called()
+    assert "cannot create PID file" in caplog.text
+    assert str(missing_parent) in caplog.text
+
+
+def test_the_ordinary_start_writes_the_pid_file(tmp_path):
+    """The guard is also the record: a clean start leaves its own PID in the file."""
+    with patch('sys.argv', ['daemon_runner.py']), \
+         patch('src.daemon_runner.load_config') as mock_load, \
+         patch('src.daemon_runner.initialize_database'), \
+         patch('src.daemon_runner.Daemon'):
+        mock_load.return_value = {"database": {"path": "test.db"}}
+        main()
+
+    assert (tmp_path / ".daemon.pid").read_text().strip() == str(os.getpid())

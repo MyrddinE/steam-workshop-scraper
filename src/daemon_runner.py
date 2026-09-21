@@ -89,6 +89,79 @@ def _daemonize():
     os.dup2(devnull, sys.stderr.fileno())
 
 
+# The PID file is both the record of who is running and, since issue 65, the
+# guard that keeps a second daemon from starting over the first. The path is
+# relative to the daemon's working directory and is the same file
+# ``src/daemon.py`` watches for its absence (`Daemon._pid_file_removed`).
+PID_FILE = ".daemon.pid"
+
+# A refused start -- the PID file already exists, or could not be created -- gets
+# its own exit code, distinct from the config refusals (1 and 2), so a launcher
+# can tell "a daemon is already running" from "this build will not run".
+PID_FILE_REFUSED_EXIT_CODE = 3
+
+
+def _read_existing_pid(pid_file: str) -> int | None:
+    """The PID inside ``pid_file``, or None when it cannot be read.
+
+    Diagnostic only. The refusal below is decided by the file's *existence*,
+    never by whether the PID inside it is alive: a liveness probe would revive
+    the stale/recycled-PID hazard the controller was fixed to avoid, and the
+    owner's chosen rule is that existence blocks the start.
+    """
+    try:
+        with open(pid_file, encoding="utf-8") as f:
+            return int(f.read().strip())
+    # Missing between the failed create and this read, empty, or not a number:
+    # all mean there is no PID to name, not that the start may proceed.
+    except (OSError, ValueError):
+        return None
+
+
+def _refuse_start(message: str) -> None:
+    """Log why the daemon did not start and exit non-zero.
+
+    The PID file is taken before the logging reconfiguration on purpose, so at
+    this point only the minimal stderr configuration below exists -- the same
+    shape the config-load refusals use. The line names the file and, when it can
+    be read, the PID inside it, and says what the operator can do about it.
+    """
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.error(message)
+    sys.exit(PID_FILE_REFUSED_EXIT_CODE)
+
+
+def _acquire_pid_file(pid_file: str) -> int:
+    """Create ``pid_file`` exclusively and return its open descriptor.
+
+    ``O_CREAT|O_EXCL`` is the guard: two starts racing here cannot both win, and
+    the loser is refused before it has touched the database. The descriptor is
+    held open across ``_daemonize`` and written once the final daemon process
+    exists. Any other failure -- a missing directory, a read-only filesystem,
+    permissions -- is raised to the caller and refused with its own reason.
+    """
+    return os.open(pid_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+
+
+def _refuse_existing_pid_file(pid_file: str) -> None:
+    """Refuse the start, naming the file and the PID in it when readable."""
+    pid = _read_existing_pid(pid_file)
+    if pid is not None:
+        message = (
+            f"Refusing to start: PID file {pid_file} already exists "
+            f"(PID {pid} in it). If PID {pid} is a running daemon, stop it "
+            f"first; if the daemon crashed and left the file behind, remove "
+            f"{pid_file} and start again.")
+    else:
+        message = (
+            f"Refusing to start: PID file {pid_file} already exists but no PID "
+            f"could be read from it. If a daemon is running, stop it first; if "
+            f"the file is left over from a crash, remove {pid_file} and start "
+            f"again.")
+    _refuse_start(message)
+
+
 def main():
     _fix_windows_encoding()
     config_path = "config.yaml"
@@ -108,12 +181,32 @@ def main():
         logging.error("%s", exc)
         sys.exit(2)
 
+    # Take the PID file before anything else -- before the logging
+    # reconfiguration, before initialize_database and its migrations -- so a
+    # refused start has not touched the database. Existence is the rule: a
+    # second daemon must not overwrite a live PID file and migrate under the
+    # first, and a stale file left by a crash refuses the start until the
+    # operator removes it (the message says how to tell the two apart). The
+    # file is created here, before the fork, so the process the UI spawned is
+    # the one that exits non-zero on a refusal; the PID is written after the
+    # fork, once the final daemon process exists.
+    pid_file = PID_FILE
+    try:
+        pid_fd = _acquire_pid_file(pid_file)
+    except FileExistsError:
+        _refuse_existing_pid_file(pid_file)
+    except OSError as exc:
+        _refuse_start(
+            f"Refusing to start: cannot create PID file {pid_file}: {exc}")
+
     if should_daemonize:
         _daemonize()
 
-    # Write PID file for TUI daemon manager
-    pid_file = ".daemon.pid"
-    with open(pid_file, "w") as f:
+    # The descriptor was opened before the fork; write the daemon's own PID now
+    # that the final process exists. Still before initialize_database, so the
+    # stop-then-migrate order is unchanged and the write is the guard as well as
+    # the record.
+    with os.fdopen(pid_fd, "w") as f:
         f.write(str(os.getpid()))
     atexit.register(lambda: os.remove(pid_file) if os.path.exists(pid_file) else None)
         

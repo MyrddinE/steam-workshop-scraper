@@ -585,7 +585,7 @@ Daemon status: `{running, pid, log_file}`, where `log_file` is the configured `l
 
 ### `/api/daemon/start`, `/api/daemon/stop`, `/api/daemon/restart` — POST
 
-Drive the background daemon through the shared `DaemonController`. Each returns `{ok, changed, message}`; starting a running daemon or stopping a stopped one is an idempotent no-op that still reports success.
+Drive the background daemon through the shared `DaemonController`. Each returns `{ok, changed, message}`; starting a running daemon or stopping a stopped one is an idempotent no-op that still reports success. A start the daemon itself refuses — the runner creates the PID file exclusively, and an existing file blocks the start — comes back with `changed: false` and the refusal sentence naming the PID file and the PID inside it, so the panel reports the refusal rather than a start that did not happen. Same controller, same sentence as the TUI.
 
 ### `/api/daemon/rotate` — POST
 
