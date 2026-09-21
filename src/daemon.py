@@ -171,12 +171,15 @@ DISCOVERY_IDLE_SECONDS = 30.0
 # returns as soon as the last healthy worker does. 20 s leaves room for a worker
 # to finish a real operation instead of being abandoned part-way, and a worker
 # still stuck when it expires is named in the log and left behind all the same.
-# The controller's ``STOP_TIMEOUT_SECONDS`` (40 s in ``src/daemon_control.py``)
-# is derived as the longest single main-thread block (15 s) plus this budget
-# plus a 5 s margin, so this constant is one of the two terms that set the grace
-# and must not be raised without raising that one; ``tests/test_daemon_control.py``
-# pins the pairing. ``daemon_control`` mirrors this value instead of importing
-# it, so the coupling is stated in both comments and checked by that test.
+# The controller's ``STOP_TIMEOUT_SECONDS`` (220 s in ``src/daemon_control.py``)
+# is derived as the longest single main-thread block (15 s) plus this budget,
+# plus a separate 180 s allowance for the closing database snapshot -- taken in
+# ``_maybe_final_snapshot`` below, after the joins, which this budget does not
+# bound -- plus a 5 s margin, so this constant is one of the terms that set the
+# grace and must not be raised without raising that one;
+# ``tests/test_daemon_control.py`` pins the pairing. ``daemon_control`` mirrors
+# this value instead of importing it, so the coupling is stated in both comments
+# and checked by that test.
 SHUTDOWN_BUDGET_SECONDS = 20.0
 
 # The owner's subscriptions are reconciled once per appid at startup and then on
@@ -1513,6 +1516,14 @@ class Daemon:
         bounded, a worker can outlive them; when one does, that premise is false
         and the snapshot is skipped with a line saying why, rather than taken
         against a database something may still be writing.
+
+        The snapshot itself is *not* bounded by ``SHUTDOWN_BUDGET_SECONDS``: it
+        runs synchronously here for as long as the copy and its verification
+        take, and the controller's grace is what waits it out (the 180 s
+        closing-snapshot allowance in ``src/daemon_control.py``). It announces
+        itself before it starts, because the published/failed lines come after
+        and without the first line a slow copy is indistinguishable from a
+        hung shutdown.
         """
         if self._backup_worker is None:
             return
@@ -1523,6 +1534,11 @@ class Daemon:
                 ", ".join(survivors),
             )
             return
+        logging.info(
+            "Starting the closing database snapshot; this runs outside the %gs "
+            "shutdown budget and takes as long as a full copy of the database.",
+            SHUTDOWN_BUDGET_SECONDS,
+        )
         try:
             self._backup_worker.snapshot_now()
         except Exception as e:

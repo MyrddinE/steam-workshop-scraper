@@ -65,14 +65,15 @@ def test_the_stop_grace_is_the_daemons_documented_worst_case():
     """The grace and the daemon's own budget are tied constants.
 
     The daemon's main thread can be inside one 15 s request or busy-timeout
-    wait, then it needs its 20 s join budget and the margin for the PID-file
-    tick, the failure-capture flush and teardown. The budget half is mirrored
-    here rather than imported (importing ``src.daemon`` would pull its whole
-    dependency graph into the TUI and web processes), so this test is what
-    stops the two drifting apart. The 15 s request bound itself is pinned only
-    by the comment in ``daemon_control`` -- there is no cheap way to read a
-    ``requests`` timeout off the call graph, and asserting a literal here would
-    only duplicate it.
+    wait, then it needs its 20 s join budget, then the closing database snapshot
+    (a named 180 s allowance, measured on the pulled 2.83 GB production
+    snapshot) and the margin for the PID-file tick, the failure-capture flush
+    and teardown. The budget half is mirrored here rather than imported
+    (importing ``src.daemon`` would pull its whole dependency graph into the TUI
+    and web processes), so this test is what stops the two drifting apart. The
+    15 s request bound itself is pinned only by the comment in
+    ``daemon_control`` -- there is no cheap way to read a ``requests`` timeout
+    off the call graph, and asserting a literal here would only duplicate it.
     """
     from src.daemon import SHUTDOWN_BUDGET_SECONDS
 
@@ -81,8 +82,29 @@ def test_the_stop_grace_is_the_daemons_documented_worst_case():
     assert daemon_control.STOP_TIMEOUT_SECONDS == (
         daemon_control._LONGEST_MAIN_THREAD_BLOCK_SECONDS
         + SHUTDOWN_BUDGET_SECONDS
+        + daemon_control._CLOSING_SNAPSHOT_ALLOWANCE_SECONDS
         + daemon_control._SHUTDOWN_MARGIN_SECONDS
     ), "STOP_TIMEOUT_SECONDS must spell out the derivation, not a guessed number"
+
+
+def test_the_grace_covers_the_closing_snapshot_allowance():
+    """The snapshot allowance must fit *inside* the grace, not be trimmed by it.
+
+    The closing snapshot runs after the joins and outside
+    ``SHUTDOWN_BUDGET_SECONDS``; the grace is the only thing that can interrupt
+    it. Folded into the 5 s margin instead of named, it would leave the
+    controller force-killing the daemon inside ``VACUUM INTO`` whenever the
+    joins were slow -- the defect this term exists to remove.
+    """
+    assert daemon_control._CLOSING_SNAPSHOT_ALLOWANCE_SECONDS > 0
+    # The whole allowance has to sit on top of the main-thread block and the
+    # join budget: a grace that only equals the allowance, or hides it in the
+    # margin, still escalates while the snapshot is running.
+    assert daemon_control.STOP_TIMEOUT_SECONDS >= (
+        daemon_control._LONGEST_MAIN_THREAD_BLOCK_SECONDS
+        + daemon_control._DAEMON_JOIN_BUDGET_SECONDS
+        + daemon_control._CLOSING_SNAPSHOT_ALLOWANCE_SECONDS
+    ), "the closing snapshot's allowance must be waited out, not interrupted"
 
 
 def test_read_pid_handles_missing_empty_and_garbage(tmp_path):
