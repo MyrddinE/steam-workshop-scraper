@@ -2118,9 +2118,6 @@ class ScraperApp(App):
         background: $boost;
         color: $accent;
     }
-    #top-left-overlay Button, .top-right-btn {
-        color: $accent;
-    }
     Button.-primary, Button.-error, Button.-success, Button.-warning {
         color: auto 100%;
         background: $primary;

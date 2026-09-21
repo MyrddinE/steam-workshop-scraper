@@ -277,7 +277,6 @@ def test_mixed_outcome_batch_is_a_healthy_request_not_a_refusal(db_path, tmp_pat
 
     assert daemon.api_delay == initial, "mixed per-item results must not back the delay off"
     assert daemon.api_failures == 0
-    assert daemon.api_successes == 1
 
     conn = get_connection(db_path)
     rows = {r["workshop_id"]: dict(r)

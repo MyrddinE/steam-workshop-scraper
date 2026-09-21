@@ -8,7 +8,7 @@ from src.database import initialize_database, insert_or_update_item, get_connect
 def _no_discovery_side_effects():
     """Keep these tests hermetic.
 
-    If a failure path wrongly dequeues its item, the next _acquire_batch finds an
+    If a failure path wrongly dequeues its item, the next _read_batch finds an
     empty queue, falls through to seed_database (real network) and then sits in
     _wait_for_work for ten minutes. Both are stubbed so a regression fails fast
     instead of hanging the suite.

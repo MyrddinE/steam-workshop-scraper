@@ -168,12 +168,11 @@ def index():
     # The worker owns the default; share its constant so an unset delay does not
     # display a number the decay rule would immediately raise to the floor.
     web_delay = float((_config.get("daemon", {}) or {}).get("web_delay_seconds", WEB_DELAY_DEFAULT))
-    import json as _json
     # The open-folder control is Windows-only, so the page is told whether to
     # render it at all: off Windows the button and the `o` shortcut are absent,
     # not merely inert.
     return render_template('index.html', web_delay=web_delay,
-                           filter_schema_json=_json.dumps(SEARCH_FILTER_SCHEMA),
+                           filter_schema_json=json.dumps(SEARCH_FILTER_SCHEMA),
                            open_folder_enabled=bool(
                                _workshop_folders and _workshop_folders.is_supported()))
 
@@ -580,9 +579,6 @@ def _ensure_image_flagged(workshop_id, priority):
 
 # The sentences and the request shape live in `src/subscribe_engine.py`, which the
 # TUI's queue drives too, so the two front ends cannot drift apart.
-_SUBSCRIBE_NO_SESSION_MESSAGE = subscribe_engine.NO_SESSION_MESSAGE
-_SUBSCRIBE_NO_LOGIN_MESSAGE = subscribe_engine.NO_LOGIN_MESSAGE
-_SUBSCRIBE_SESSION_REJECTED_DETAIL = subscribe_engine.SUBSCRIBE_SESSION_REJECTED_DETAIL
 
 
 @app.route('/api/subscribe/<int:workshop_id>', methods=['POST'])
@@ -620,7 +616,7 @@ def api_subscribe(workshop_id):
     # holding a browser.
     if not login:
         logging.warning(f"[Subscribe] No steamLoginSecure available — refusing before the request")
-        return jsonify({"success": -1, "message": _SUBSCRIBE_NO_LOGIN_MESSAGE}), 400
+        return jsonify({"success": -1, "message": subscribe_engine.NO_LOGIN_MESSAGE}), 400
 
     problem = session_health.evaluate_login(login)
     if problem:
@@ -648,7 +644,7 @@ def api_subscribe(workshop_id):
         page_html, cookies, fallback_token)
     if not sid:
         logging.warning(f"[Subscribe] No sessionid available — refusing before the request")
-        return jsonify({"success": -1, "message": _SUBSCRIBE_NO_SESSION_MESSAGE}), 400
+        return jsonify({"success": -1, "message": subscribe_engine.NO_SESSION_MESSAGE}), 400
 
     logging.info(
         f"[Subscribe] POSTing to Steam: id={workshop_id}, appid={appid}, "
@@ -675,7 +671,7 @@ def api_subscribe(workshop_id):
                     f"was recorded.")
             else:
                 session_health.record_rejected(
-                    _db_path, _SUBSCRIBE_SESSION_REJECTED_DETAIL)
+                    _db_path, subscribe_engine.SUBSCRIBE_SESSION_REJECTED_DETAIL)
         elif success == 1:
             # The confirmation is the same fact `/api/subscribed/<id>` stamps for
             # the browser bridge: mark it subscribed and clear the queue flag.

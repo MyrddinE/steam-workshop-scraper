@@ -47,7 +47,7 @@ def test_an_empty_queue_returns_empty_instead_of_blocking(db):
     with patch("src.daemon.get_next_items_to_fetch", return_value=[]), \
          patch.object(Daemon, "seed_database") as seed, \
          patch.object(Daemon, "_run_page_discovery") as page:
-        assert daemon._acquire_batch() == []
+        assert daemon._read_batch() == []
     seed.assert_not_called()
     page.assert_not_called()
 

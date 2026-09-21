@@ -29,7 +29,6 @@ from src.database import (
 from src.steam_api import (
     get_workshop_details,
     get_workshop_details_batch,
-    query_workshop_items,
     get_player_summaries,
     query_workshop_newest_page,
     set_api_delay,
@@ -417,8 +416,8 @@ class Daemon:
                           self.capture_image_downloads)
         
         # State variables for the request-level congestion-control delay. The
-        # counters are diagnostics; the delay itself is the state that matters.
-        self.api_successes = 0
+        # failure counter is a diagnostic; the delay itself is the state that
+        # matters.
         self.api_failures = 0
         # The last delay written to config, so the per-request decay does not
         # rewrite the file on every request.
@@ -649,7 +648,7 @@ class Daemon:
         self._maybe_reconcile_subscriptions()
         self._maybe_scan_downloaded_items()
 
-        items_to_fetch = self._acquire_batch()
+        items_to_fetch = self._read_batch()
         if items_to_fetch is None:
             return  # database error, already logged
         if not items_to_fetch:
@@ -857,21 +856,6 @@ class Daemon:
         except Exception as exc:
             pass
             logging.warning("Stale-item promotion failed; housekeeping skipped this sweep: %s", exc)
-
-    def _acquire_batch(self):
-        """Return the next batch of items. Returns None on a database error.
-
-        Refilling is not this method's business: the discovery thread owns it, so
-        an empty result here means the queue is genuinely empty rather than
-        "discovery has not been run yet".
-        """
-        # Discovery is the discovery thread's job now. It used to happen here,
-        # which meant the fetch loop only refilled the queue after draining it
-        # completely: the daemon starved, blocked on paging until enough new
-        # items appeared, and then resumed. Batching the details calls made
-        # fetching fast enough that the stall became a visible share of the
-        # time, so the refill moved off this path entirely.
-        return self._read_batch()
 
     def _read_batch(self, failure_context: str = "Database error in process_batch"):
         """Read one batch from the database. Returns None on database error."""
@@ -1249,7 +1233,6 @@ class Daemon:
         ceiling; see the module comment.
         """
         self.api_failures += 1
-        self.api_successes = 0
         self._api_clock.since()
         old_delay = self.api_delay
         self.api_delay = pacing.backoff(self.api_delay)
@@ -1273,7 +1256,6 @@ class Daemon:
         for a higher sustainable rate and converge on the limit. The decay is
         persisted only once it has moved far enough to be worth a config write.
         """
-        self.api_successes += 1
         self.api_failures = 0
         old_delay = self.api_delay
         self.api_delay = pacing.decay(
