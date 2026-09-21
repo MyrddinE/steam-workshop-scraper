@@ -159,7 +159,7 @@ The image thread uses a direct UPDATE to set `image_priority = max(0, current - 
 
 ### The Outbox Manifest
 
-Two producers write the same `manifest.json` when an outbox is configured: the backup thread (database snapshots) and the failure-capture writer. `update_manifest` reads, modifies and rewrites that one file, so its read-modify-write is serialised by a module lock in `backup.py`. Two separate **processes** sharing one outbox would still need a real file lock, which is not implemented.
+Two producers write the same `manifest.json` when an outbox is configured: the backup thread (database snapshots) and the failure-capture writer. `update_manifest` reads, modifies and rewrites that one file, so its read-modify-write is serialised by a module lock in `backup.py`; `remove_manifest_entries` — which housekeeping uses to drop a pruned debug capture's entry, so the puller never chases a file that is gone — takes the same lock. Two separate **processes** sharing one outbox would still need a real file lock, which is not implemented; that also means a pull tool that edits the manifest while the daemon writes it can lose an entry, which is why the daemon-side prune and the puller both remove a file and its entry in one operation.
 
 ### `insert_or_update_item` Concurrency
 

@@ -2,11 +2,13 @@
 
 It exists to answer what a *working* exchange looks like -- for the item page,
 the subscriptions page and the server-side subscribe -- so the signed-in markup
-and the subscribe path can be judged from real captures. It is deliberately
-unbounded and keeps the body whole: it is a switch that is on for a session or
-two, and thinning a sample before anyone has looked at it just means collecting
-the evidence twice. The failure capture is the opposite case -- it runs for
-weeks, so its caps stay.
+and the subscribe path can be judged from real captures. It is deliberately not
+thinned while it is on and keeps the body whole: it is a switch that is on for a
+session or two, and thinning a sample before anyone has looked at it just means
+collecting the evidence twice. What bounds it is age, not volume -- housekeeping
+prunes a debug capture after ``DEBUG_CAPTURE_RETENTION_DAYS`` (see
+``tests/test_capture_prune.py``). The failure capture is the opposite case -- it
+runs for weeks, so its caps stay, and it is never pruned by age.
 
 It is also an instrument for a signed-in session, so nothing in it may carry a
 credential value; ``elide_secrets`` is the barrier, and the leak test at the

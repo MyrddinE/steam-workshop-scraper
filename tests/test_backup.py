@@ -208,6 +208,37 @@ def test_update_manifest_recovers_from_corrupt_manifest(tmp_path):
     assert [entry["path"] for entry in manifest["artifacts"]] == ["db/x.db"]
 
 
+def test_remove_manifest_entries_drops_only_the_named_paths(tmp_path):
+    outbox = str(tmp_path / "outbox")
+    update_manifest(outbox, {"path": "web_downloads/a.json", "kind": "web_download"})
+    update_manifest(outbox, {"path": "web_downloads/a.body", "kind": "web_download"})
+    update_manifest(outbox, {"path": "failures/g/a-1.json", "kind": "failure"})
+
+    removed = backup.remove_manifest_entries(
+        outbox, ["web_downloads/a.json", "web_downloads/a.body"])
+
+    assert sorted(removed) == ["web_downloads/a.body", "web_downloads/a.json"]
+    with open(os.path.join(outbox, "manifest.json"), encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    assert [entry["path"] for entry in manifest["artifacts"]] == ["failures/g/a-1.json"]
+    assert not os.path.exists(os.path.join(outbox, "manifest.json.tmp"))
+
+
+def test_remove_manifest_entries_is_silent_for_unknown_paths(tmp_path):
+    outbox = str(tmp_path / "outbox")
+    update_manifest(outbox, {"path": "db/x.db", "kind": "db"})
+
+    assert backup.remove_manifest_entries(outbox, ["web_downloads/never-existed.json"]) == []
+    assert backup.remove_manifest_entries(outbox, []) == []
+    with open(os.path.join(outbox, "manifest.json"), encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    assert [entry["path"] for entry in manifest["artifacts"]] == ["db/x.db"]
+
+
+def test_remove_manifest_entries_tolerates_a_missing_manifest(tmp_path):
+    assert backup.remove_manifest_entries(str(tmp_path / "outbox"), ["a"]) == []
+
+
 # ── BackupThread ─────────────────────────────────────────────────────────────
 
 def test_backup_thread_snapshot_now_swallows_failure(tmp_path):

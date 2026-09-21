@@ -187,10 +187,11 @@ def _warn_about_stale_artefacts(dest_dir: str, dest_path: str) -> None:
 
     The snapshot layout has changed before. ``<outbox>/db/workshop-backup.db.gz``
     is left over from a build that compressed the snapshot onto the same path;
-    no code path writes, reads or removes it, and nothing prunes the outbox, so
-    it sits there until someone deletes it by hand -- measured live at 672.9 MB
-    against a 1.9 GB current snapshot. Silence about it is how a file that size
-    goes unnoticed.
+    no code path writes, reads or removes it, and the debug-capture prune is
+    scoped to ``web_downloads/``, ``image_downloads/`` and ``scrapes/`` -- never
+    ``db/`` -- so it sits there until someone deletes it by hand -- measured live
+    at 672.9 MB against a 1.9 GB current snapshot. Silence about it is how a file
+    that size goes unnoticed.
 
     Only reports. Deleting a file in someone's outbox is their call, not this
     module's, and a backup artifact is exactly the kind of thing they may have
@@ -418,6 +419,72 @@ def _update_manifest_unlocked(outbox_dir: str, entry: dict) -> None:
         _remove_quietly(temp_path)
         logging.error("Could not write manifest %s: %s", manifest_path, exc)
         raise
+
+
+def remove_manifest_entries(outbox_dir: str, paths) -> list:
+    """Drop every manifest entry whose ``path`` is in ``paths``.
+
+    The mirror of :func:`update_manifest` for the outbox lifecycle: a file
+    removed from the outbox must lose its entry in the same operation, because
+    the puller transfers one file per entry and an entry left behind would make
+    the next pull fail on a path that no longer exists. That is the rule the
+    owner's pull tool now follows when it fetches by moving, and the rule this
+    module follows when housekeeping prunes a debug capture.
+
+    Returns the relative paths actually dropped, so a caller can report them. An
+    absent manifest, a corrupt one, an unknown path or an empty ``paths`` is not
+    an error: there is simply nothing to drop. Serialised across threads by
+    ``_MANIFEST_LOCK``, and written atomically like :func:`update_manifest`, so a
+    reader never sees a half-written manifest.
+    """
+    wanted = {path for path in paths if path}
+    if not wanted:
+        return []
+    with _MANIFEST_LOCK:
+        return _remove_manifest_entries_unlocked(outbox_dir, wanted)
+
+
+def _remove_manifest_entries_unlocked(outbox_dir: str, wanted: set) -> list:
+    manifest_path = os.path.join(outbox_dir, "manifest.json")
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        if not isinstance(manifest, dict):
+            raise ValueError("manifest root is not an object")
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as exc:
+        logging.warning("Could not read manifest %s to remove entries (%s)", manifest_path, exc)
+        return []
+
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        return []
+
+    removed = [
+        entry.get("path") for entry in artifacts
+        if isinstance(entry, dict) and entry.get("path") in wanted
+    ]
+    if not removed:
+        return []
+    manifest["artifacts"] = [
+        entry for entry in artifacts
+        if not (isinstance(entry, dict) and entry.get("path") in wanted)
+    ]
+    manifest["generated_at"] = _utc_now_iso()
+
+    temp_path = manifest_path + _TEMP_SUFFIX
+    try:
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, manifest_path)
+    except OSError as exc:
+        _remove_quietly(temp_path)
+        logging.error("Could not write manifest %s: %s", manifest_path, exc)
+        raise
+    return removed
 
 
 class BackupThread(threading.Thread):
