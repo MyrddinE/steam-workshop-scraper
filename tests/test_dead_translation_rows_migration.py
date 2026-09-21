@@ -63,14 +63,14 @@ def _queue_rows(db_path):
         conn.close()
 
 
-def test_the_expected_version_is_36(db_path):
+def test_the_expected_version_is_37(db_path):
     """The data-only step still moves the version marker, so it is pinned."""
     conn = get_connection(db_path)
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
     finally:
         conn.close()
-    assert version == EXPECTED_VERSION == 36
+    assert version == EXPECTED_VERSION == 37
 
 
 def test_migration_36_deletes_a_dead_items_queue_rows(db_path):

@@ -38,6 +38,7 @@ CREATOR_COLUMNS = {
 APP_DISCOVERY_COLUMNS = {
     "appid", "filter_text", "required_tags",
     "excluded_tags", "enrichment_filters", "last_cursor",
+    "cursor_walk_finished",
 }
 
 
@@ -70,7 +71,7 @@ def _seed_both_tables(db_path) -> None:
 
 
 def test_a_fresh_database_reaches_the_expected_version_under_the_new_names(db_path):
-    assert EXPECTED_VERSION == 36
+    assert EXPECTED_VERSION == 37
     assert _version(db_path) == EXPECTED_VERSION
 
     names = _table_names(db_path)

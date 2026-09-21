@@ -29,12 +29,17 @@ The daemon does not merely wait for new items; it actively expands the database:
 
 * **Cursor-based discovery (`seed_database`)**: Walks `IPublishedFileService/QueryFiles` sorted by
   publication date, resuming from the cursor stored in `app_discovery.last_cursor`. Each page
-  inserts newly seen `publishedfileid` values as bare rows; metadata is filled in later.
-* **Page-based discovery (`_run_page_discovery`)**: Once the cursor is exhausted — or at least 500
-  items have been scraped — the daemon periodically walks the same endpoint sorted by last-updated
-  time. It compares each item's Steam `steam_updated_at` against the stored value and queues
-  genuinely new or changed items for fetching at `api_priority = 5`. This catches content changes
-  that publication-order scanning would never revisit. It runs at most once per 24 hours.
+  inserts newly seen `publishedfileid` values as bare rows; metadata is filled in later. The walk
+  stops on `fill_target` new items, an API error, an empty cursor, or five consecutive pages that
+  add nothing; the last two record `app_discovery.cursor_walk_finished` so the walk is not resumed,
+  which is what keeps a restarted daemon from paging an exhausted catalogue.
+* **Page-based discovery (`_run_page_discovery`)**: Once the cursor walk is finished — the cursor
+  exhausted, or the finished latch set — or at least 500 items have been scraped, the daemon
+  periodically walks the same endpoint sorted by last-updated time. It compares each item's Steam
+  `steam_updated_at` against the stored value and queues genuinely new or changed items for
+  fetching at `api_priority = 5`. This catches content changes that publication-order scanning
+  would never revisit, and it is the only source of newly published items for an AppID whose
+  cursor walk is finished. It runs at most once per 24 hours.
 * **Proactive user expansion**: The daemon identifies creators whose profile information is missing
   or stale and refreshes their persona details via the Steam API (`GetPlayerSummaries/v2`).
 * **Dynamic scrape delay**: To avoid rate-limiting and adapt to network conditions, the daemon
@@ -136,7 +141,8 @@ The database is designed for high-concurrency and complex querying. See
   * **`tags` / `workshop_tags`**: A normalized tag store and an item-to-tag junction table.
     `workshop_items` has no tags column.
   * **`creators`**: Creator information, keyed by `steamid`, with translated name fields.
-  * **`app_discovery`**: Per-AppID discovery state (`last_cursor`) and the
+  * **`app_discovery`**: Per-AppID discovery state (`last_cursor`, and
+    `cursor_walk_finished`, the latch that says the cursor walk ran out of new items) and the
     enrichment filters that gate web scraping.
 * **Schema evolution**: A brand-new database is created directly at the current schema version; an
   existing one is carried forward by built-in migration logic that adds and renames columns without

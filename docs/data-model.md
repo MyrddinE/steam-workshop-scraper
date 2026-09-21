@@ -1,9 +1,9 @@
 # Data Model
 
-The database is a single SQLite file in WAL mode. Its current schema version is 30
-(`EXPECTED_VERSION` in `src/database.py`). All application state lives in three tables —
-`workshop_items`, `creators`, and `translation_queue` — plus two tables that hold tags,
-`tags` and `workshop_tags`.
+The database is a single SQLite file in WAL mode. Its current schema version is 37
+(`EXPECTED_VERSION` in `src/database.py`). All application state lives in four tables —
+`workshop_items`, `creators`, `translation_queue`, and `app_discovery` — plus two tables that
+hold tags, `tags` and `workshop_tags`.
 
 Column names follow two conventions, described in full in [timestamps.md](timestamps.md):
 
@@ -113,6 +113,22 @@ One row per Steam creator whose profile has been fetched, keyed by `steamid`.
 | `api_fetched_at` | STATE (ours) | Our clock: when the profile was last refreshed. |
 | `translated_at` | TRANSLATED/STATE | Our wall-clock time of the last translation. This is **not** a Steam version key: creators have no `steam_updated_at`. |
 | `translation_priority` | QUEUE | Translation queue mirror, exactly as on `workshop_items`: raised by `queue_field_for_translation` in the same transaction as the `translation_queue` row and zeroed by the translator when the creator's last queue row is deleted. A priority above `0` therefore means the creator has at least one queued field. Migration 27→28 queued the flags that had no row behind them and cleared the ones with nothing left to translate. |
+
+## `app_discovery`
+
+One row per AppID the daemon discovers for, keyed by `appid`. It holds the cursor-based
+discovery's position and its per-AppID filter configuration.
+
+| Column | Class | Meaning |
+|---|---|---|
+| `appid` | STATE | Steam AppID. Primary key. |
+| `last_cursor` | STATE | The cursor the cursor-based walk reached (`query_type=1`, newest first). `seed_database` writes it after every page, and it is **kept** when a walk finishes: it records where the walk got to, not whether it may resume. |
+| `cursor_walk_finished` | STATE | `1` once the cursor walk has stopped for lack of new items — `seed_database` saw `CURSOR_STALL_PAGES` (5) consecutive pages add nothing — and `0` otherwise. Written by `mark_cursor_walk_finished`; read by `seed_database` (which skips the walk for a finished AppID) and by `_page_discovery_eligible`. Persisted on purpose: the in-memory `_cursor_exhausted` is lost on restart, and the finished state must not be re-armed by one. Never reset automatically — a finished walk is the conclusion the run drew, so re-arming it is an operator action. Migration 36→37 adds it, defaulting every existing AppID's walk to unfinished. |
+| `filter_text`, `required_tags`, `excluded_tags`, `enrichment_filters` | STATE | The per-AppID enrichment filters that decide an item's queue priority. Not touched by the discovery stop rule. |
+
+Unlike `_cursor_exhausted`, which also becomes true when the cursor itself comes back empty, the
+persisted flag is set only by the stall. An empty cursor means the walk reached the end of the
+catalogue, and the next pass re-reaches it in one page; a stall means paging further is pointless.
 
 ## `translation_queue`
 
