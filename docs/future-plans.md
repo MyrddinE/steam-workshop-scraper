@@ -16,12 +16,13 @@ Absolute timings are hardware-dependent; the ratios are the point.
 
 ## UI enhancements: web parity, queue-state statistics, page performance
 
-**Status: Partly landed.** The statistics rework is implemented: the monolithic payload is
+**Status: Landed.** The statistics rework is implemented: the monolithic payload is
 split into named metrics in `src/metrics.py`, and both front ends render one independent
 chunk per metric, ordered and throttled by measured cost rather than a fixed classification
-([tui.md](tui.md), [web-ui.md](web-ui.md)). What remains is the schema-dependent half —
-per-queue completion timestamps for throughput/ETA (the queue indexes have since landed as
-migration 24→25) — plus the open parity gaps in the table below (authors, view-state persistence).
+([tui.md](tui.md), [web-ui.md](web-ui.md)). The schema-dependent half landed with the
+per-queue completion timestamps that throughput and ETA read, and the two parity gaps this
+paragraph used to list — the author list and view-state persistence — are both **Present** in
+the table below.
 
 
 Bring the web UI to parity with the TUI, rebuild the statistics surface in both so it reports the
