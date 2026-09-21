@@ -29,10 +29,13 @@ from src.database import (
     initialize_database,
     insert_or_update_item,
 )
+# The per-field overhead constant is read through the module rather than imported
+# by name so the packing tests below fail individually against a translator that
+# predates it, instead of erroring for the whole file at collection.
+import src.translator as translator
 from src.translator import (
     BATCH_FILL_WAIT_SECONDS,
     DEFAULT_BATCH_CHAR_CAP,
-    DEFAULT_BATCH_ITEMS,
     DEFAULT_TEMPERATURE,
     PHRASE_ATTEMPTS,
     PHRASE_WORDS,
@@ -306,14 +309,15 @@ def test_both_descriptions_align_independently():
 # ── packing: the owner's algorithm ───────────────────────────────────────────
 
 def test_the_first_candidate_is_taken_even_when_it_alone_exceeds_the_cap():
-    """The cap is consulted from the second candidate onwards, never the first.
+    """A field larger than the cap still goes alone.
 
-    A field larger than the cap has to go on its own; refusing it would mean the
-    longest descriptions could never be translated at all.
+    The cap is consulted from the second candidate onwards, never the first;
+    refusing it would mean the longest descriptions could never be translated at
+    all.
     """
     batch, _had_more = pack_batch(
         [_row(1, "extended_description_en", "x" * 5000), _row(2, "title_en", "y")],
-        char_cap=4000, item_ceiling=20,
+        char_cap=4000,
     )
     assert [row["entity_id"] for row in batch] == [1]
     assert len(batch[0]["original_text"]) > 4000
@@ -323,44 +327,70 @@ def test_the_cap_is_checked_before_the_second_candidate_is_taken():
     batch, had_more = pack_batch(
         [_row(1, "extended_description_en", "x" * 3000),
          _row(2, "extended_description_en", "y" * 2000)],
-        char_cap=4000, item_ceiling=20,
+        char_cap=4000,
     )
     assert [row["entity_id"] for row in batch] == [1], "3000 + 2000 exceeds 4000"
     assert had_more is True
 
 
 def test_a_candidate_that_exactly_reaches_the_cap_is_taken():
-    """The cap is a ceiling, not an exclusive bound: 4000 fits in 4000."""
+    """The cap is a ceiling, not an exclusive bound.
+
+    Each field also carries the boundary overhead, so the two texts that reach the
+    cap are two overheads short of it: 1950 + 50 twice is exactly 4000.
+    """
+    overhead = translator.PER_FIELD_OVERHEAD_CHARS
     batch, _ = pack_batch(
-        [_row(1, "extended_description_en", "x" * 2000),
-         _row(2, "extended_description_en", "y" * 2000)],
-        char_cap=4000, item_ceiling=20,
+        [_row(1, "extended_description_en", "x" * (2000 - overhead)),
+         _row(2, "extended_description_en", "y" * (2000 - overhead))],
+        char_cap=4000,
     )
     assert [row["entity_id"] for row in batch] == [1, 2]
 
 
+def test_a_batch_of_short_fields_is_no_longer_capped_at_twenty():
+    """The count follows from the cost; nothing bounds it separately.
+
+    Thirty one-character titles cost 30 x (1 + overhead) characters, far under the
+    4,000 cap, so all thirty go in one request. The old rule packed twenty and
+    reported a candidate left behind.
+    """
+    batch, had_more = pack_batch(
+        [_row(i, "title_en", "x") for i in range(1, 31)], char_cap=4000
+    )
+    assert len(batch) == 30
+    assert had_more is False
+
+
+def test_the_field_overhead_bounds_a_batch_without_a_count_ceiling():
+    """Every field is charged its text plus the boundary scaffolding.
+
+    Rows with no text at all still cost the overhead, and that alone is what bounds
+    the count: 4,000 // 50 = 80 fields fit, and the eighty-first is left behind
+    rather than the cap being ignored. This is the rule that lets the item ceiling
+    go: the charge per field means the count cannot run away.
+    """
+    overhead = translator.PER_FIELD_OVERHEAD_CHARS
+    batch, had_more = pack_batch(
+        [_row(i, "title_en", "") for i in range(1, 101)], char_cap=4000
+    )
+    assert len(batch) == 4000 // overhead
+    assert had_more is True
+
+
 def test_a_single_candidate_batch_may_exceed_the_cap():
     batch, had_more = pack_batch(
-        [_row(1, "extended_description_en", "x" * 7725)], char_cap=4000, item_ceiling=20
+        [_row(1, "extended_description_en", "x" * 7725)], char_cap=4000
     )
     assert len(batch) == 1
     assert had_more is False, "there was no further candidate to refuse"
-
-
-def test_the_item_ceiling_bounds_a_request():
-    """The cap bounds a request's size; the ceiling bounds the rows one can cost."""
-    batch, had_more = pack_batch(
-        [_row(i, "title_en", "x") for i in range(1, 30)], char_cap=4000, item_ceiling=20
-    )
-    assert len(batch) == 20
-    assert had_more is True, "the ceiling refused the twenty-first candidate"
 
 
 def test_a_starved_batch_is_reported_as_having_no_more_candidates():
     """The flag is how the loop tells 'full' from 'the queue gave all it had'."""
     batch, had_more = pack_batch(
         [_row(1, "title_en", "x"), _row(2, "title_en", "y")],
-        char_cap=4000, item_ceiling=20,
+        char_cap=4000,
     )
     assert len(batch) == 2
     assert had_more is False
@@ -509,40 +539,66 @@ def test_max_tokens_is_never_sent(db_path):
 def test_the_packing_keys_default_from_the_measurable_distribution(db_path):
     """The defaults are documented against the queue's own lengths."""
     thread = _thread(db_path)
-    assert thread.batch_size == DEFAULT_BATCH_ITEMS == 20
     assert thread.batch_char_cap == DEFAULT_BATCH_CHAR_CAP == 4000
-    assert _thread(db_path, batch_items=5).batch_size == 5
+    assert thread.candidate_window == 4000 // translator.PER_FIELD_OVERHEAD_CHARS + 1
     assert _thread(db_path, batch_char_cap=500).batch_char_cap == 500
-    # Unusable values fall back rather than disabling the bounds.
-    assert _thread(db_path, batch_items=0).batch_size == DEFAULT_BATCH_ITEMS
+    assert _thread(db_path, batch_char_cap=500).candidate_window == (
+        500 // translator.PER_FIELD_OVERHEAD_CHARS + 1
+    )
+    # Unusable values fall back rather than disabling the bound.
     assert _thread(db_path, batch_char_cap="wide").batch_char_cap == DEFAULT_BATCH_CHAR_CAP
 
 
-# --- the renamed openai batch key -------------------------------------------
-#
-# `openai.batch` said "batch" while meaning fields per request, beside the
-# daemon's own `daemon.batch_size`; it took the qualified name. A config written
-# before the rename must keep working, with a warning.
+def test_the_poll_asks_for_the_window_derived_from_the_cap(db_path):
+    """The fetch limit follows the cap, so the cap is actually reachable.
 
-def test_the_legacy_openai_batch_key_is_honoured_and_warns(caplog):
+    It used to be ``batch_size + 1``: a count-derived window that could not reach a
+    size-derived cap. It is now the cap divided by the per-field overhead, plus the
+    one extra candidate that signals "the next field would exceed the cap".
+    """
+    thread = _thread(db_path, batch_char_cap=2000)
+    with patch("src.translator.get_next_batch_for_translation", return_value=[]) as fetch:
+        thread._read_candidates()
+    assert fetch.call_args.kwargs["limit"] == (
+        2000 // translator.PER_FIELD_OVERHEAD_CHARS + 1
+    )
+
+
+# --- the retired openai batch key -------------------------------------------
+#
+# `openai.batch_items` was a ceiling on fields per request, and `openai.batch` its
+# legacy spelling. A request is bounded by `openai.batch_char_cap` alone now, so an
+# existing config that still carries either key is told the key does nothing rather
+# than having it silently honoured or removed.
+
+def test_a_stale_batch_items_key_warns_once_and_does_not_change_the_packing(caplog):
+    with caplog.at_level(logging.WARNING):
+        thread = TranslatorThread({"openai": {"batch_items": 30}})
+    stale = [record for record in caplog.records if "batch_items" in record.message]
+    assert len(stale) == 1, "one warning naming the key, not one per read"
+    assert "batch_char_cap" in stale[0].message
+    assert not hasattr(thread, "batch_size")
+    assert thread.candidate_window == (
+        DEFAULT_BATCH_CHAR_CAP // translator.PER_FIELD_OVERHEAD_CHARS + 1
+    )
+    # The stale key carries no ceiling into the packing either.
+    batch, _ = pack_batch(
+        [_row(i, "title_en", "x") for i in range(1, 31)], thread.batch_char_cap
+    )
+    assert len(batch) == 30
+
+
+def test_the_legacy_openai_batch_key_is_reported_as_unused(caplog):
     with caplog.at_level(logging.WARNING):
         thread = TranslatorThread({"openai": {"batch": 5}})
-    assert thread.batch_size == 5
-    assert any("deprecated" in record.message for record in caplog.records)
+    assert any("openai.batch" in record.message for record in caplog.records)
+    assert not hasattr(thread, "batch_size")
 
 
-def test_the_current_openai_batch_key_does_not_warn(caplog):
+def test_an_absent_batch_key_does_not_warn(caplog):
     with caplog.at_level(logging.WARNING):
-        thread = TranslatorThread({"openai": {"batch_items": 5}})
-    assert thread.batch_size == 5
-    assert not any("deprecated" in record.message for record in caplog.records)
-
-
-def test_the_current_openai_batch_key_wins_when_both_are_present(caplog):
-    with caplog.at_level(logging.WARNING):
-        thread = TranslatorThread({"openai": {"batch_items": 3, "batch": 9}})
-    assert thread.batch_size == 3
-    assert not any("deprecated" in record.message for record in caplog.records)
+        TranslatorThread({"openai": {"batch_char_cap": 4000}})
+    assert not any("batch" in record.message for record in caplog.records)
 
 
 # ── partial success through the real writer ──────────────────────────────────

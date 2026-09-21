@@ -19,11 +19,11 @@ openai:
   api_key: "YOUR_OPENAI_API_KEY_HERE" # Can be overridden by OPENAI_API_KEY env var
   endpoint: "https://api.openai.com/v1"
   model: "gpt-4o-mini"
-  # Ceiling on fields per translation request: bounds how many rows one bad reply
-  # can cost.
-  batch_items: 20
-  # Ceiling on the summed source length of one request. The first field is always
-  # taken, so only a single-field request may exceed it.
+  # Ceiling on the estimated cost of one request: each field's source text plus a
+  # fixed 50-character allowance for the boundary scaffolding the request wraps
+  # around it. There is no item ceiling; the field count follows from their
+  # lengths. The first field is always taken, so only a single-field request may
+  # exceed it.
   batch_char_cap: 4000
   # Translation is not a creative task; sampling only adds variance.
   temperature: 0.0
