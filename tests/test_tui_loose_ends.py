@@ -99,7 +99,14 @@ async def test_return_button_leaves_single_creator_mode_and_restores_filters(
 
 @pytest.mark.asyncio
 async def test_update_visible_does_not_requeue_dead_items(db_path):
-    """Issue 13: the TUI bulk update must carry the web route's fetch_status guard."""
+    """Issue 13: the TUI bulk update must carry the web route's settled guard.
+
+    ``search_items`` hides the dead row now, so it is surfaced through the same
+    patched search these tests already use: the point here is the bulk UPDATE's
+    guard, not the visibility.
+    """
+    from src.database import search_items as real_search
+
     insert_or_update_item(
         db_path, {"workshop_id": 1, "title": "Dead Item", "fetch_status": -1, "api_priority": 0}
     )
@@ -111,7 +118,9 @@ async def test_update_visible_does_not_requeue_dead_items(db_path):
     )
 
     config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
-    with patch("src.tui.load_config", return_value=config):
+    with patch("src.tui.load_config", return_value=config), \
+         patch("src.tui.search_items",
+               side_effect=lambda *a, **k: real_search(*a, include_settled=True, **k)):
         app = ScraperApp()
         async with app.run_test(size=(120, 200)) as pilot:
             await pilot.pause(ASYNC_PAUSE)

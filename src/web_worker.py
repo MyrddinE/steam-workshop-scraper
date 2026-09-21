@@ -7,7 +7,7 @@ import logging
 import sqlite3
 import threading
 from datetime import datetime, timezone
-from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, queue_field_for_translation, translation_is_current
+from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, queue_field_for_translation, translation_is_current, live_fetch_status_predicate
 from src import pacing
 from src import session_health
 from src.daemon_state import StateStore, state_path_for
@@ -413,18 +413,19 @@ class WebScraperThread(threading.Thread):
                 "[W:%s] Web scrape failed with no response (transport failure); "
                 "backing off.", workshop_id)
             conn = get_connection(self.db_path)
-            # The whole statement skips a dead row, deliberately: unlike the
-            # image worker's two-term UPDATE there is no other column here, so a
-            # `fetch_status = -1` predicate in the WHERE *is* the `api_priority`
-            # guard and it leaves the row unwritten. A dead item is final and in
-            # no queue; the API poll excludes dead rows, so this bump could never
+            # The whole statement skips a settled row, deliberately: unlike the
+            # image worker's two-term UPDATE there is no other column here, so the
+            # live predicate in the WHERE *is* the `api_priority`
+            # guard and it leaves the row unwritten. A settled item -- dead or
+            # ignored -- is final and in
+            # no queue; the API poll excludes settled rows, so this bump could never
             # be handed out and would only strand the row in `dead_queued`
             # (issue 74).
             conn.execute(
                 "UPDATE workshop_items SET api_priority = "
                 "CASE WHEN api_priority < 2 THEN 2 ELSE api_priority END "
                 "WHERE workshop_id = ? "
-                "AND (fetch_status IS NULL OR fetch_status != -1)",
+                f"AND {live_fetch_status_predicate()}",
                 (workshop_id,)
             )
             conn.commit()

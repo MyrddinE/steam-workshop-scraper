@@ -5,7 +5,7 @@ import os
 import re
 import logging
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items
+from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items, live_fetch_status_predicate
 from src.analysis import view_window_analysis
 from src import capture
 from src import activity
@@ -749,7 +749,7 @@ def api_update_visible():
     conn = get_connection(_db_path)
     placeholders = ','.join('?' * len(ids))
     conn.execute(
-        f"UPDATE workshop_items SET api_priority = 10 WHERE workshop_id IN ({placeholders}) AND (fetch_status IS NULL OR fetch_status != -1)",
+        f"UPDATE workshop_items SET api_priority = 10 WHERE workshop_id IN ({placeholders}) AND {live_fetch_status_predicate()}",
         ids,
     )
     updated = conn.total_changes

@@ -27,6 +27,8 @@ from src.database import (
     get_enrichment_filters,
     USER_PRIORITY_FLOOR,
     WORKSHOP_ITEM_COLUMNS,
+    DEAD_FETCH_STATUS,
+    live_fetch_status_predicate,
 )
 from src.steam_api import (
     get_workshop_details,
@@ -942,7 +944,7 @@ class Daemon:
             cursor = conn.execute(
                 "UPDATE workshop_items SET api_priority = 1 "
                 "WHERE api_priority = 0 AND fetch_status = 200 AND api_fetched_at < ? "
-                "AND (fetch_status IS NULL OR fetch_status != -1)",
+                f"AND {live_fetch_status_predicate()}",
                 (threshold,)
             )
             conn.commit()
@@ -1102,7 +1104,7 @@ class Daemon:
                 f"[A:{item_id}] Item not found ({api_status}) via API. "
                 "Recording the failure and marking it dead (fetch_status=-1)."
             )
-            merged_data["fetch_status"] = -1
+            merged_data["fetch_status"] = DEAD_FETCH_STATUS
             merged_data["api_priority"] = 0
             # A dead item can never complete, so clear the other three queue
             # flags as well. The web, image and translation polls select on

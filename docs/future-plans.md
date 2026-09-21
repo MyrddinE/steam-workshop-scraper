@@ -688,3 +688,32 @@ acts on that rather than on whatever item happens to be selected. The flag needs
 free number) and `CREATOR_COLUMNS` moving with it, and the API merge is where a new item from an
 ignored creator is stamped ignored before the web scrape, image and translation stages are queued.
 [data-model.md](data-model.md), [tui.md](tui.md), [web-ui.md](web-ui.md)
+
+---
+
+## Surfacing dead and ignored items
+
+**Status: Deferred** — owner decision, 2026-09-21. The hiding half has landed; the surfacing UI has
+not been started.
+
+The owner decided that **dead (`fetch_status = -1`) and ignored (`-2`) items are inaccessible for
+now**: every search hides them, so a settled row cannot be found and clicked while it is unusable.
+The escape hatch already exists in the backend — `search_items`, `compute_wilson_cutoffs` and
+`get_all_creator_ids` each take `include_settled`, defaulting to hiding — but **no UI passes it**.
+That is deliberate: the later feature becomes a UI change rather than a query rewrite, and nothing
+in the grid can accidentally show a settled row before the rendering that goes with it exists.
+
+Surfacing them needs, at minimum:
+
+* a keystroke or UI element (a filter control, a "show settled" toggle) in both front ends that
+  passes `include_settled=True` to the three queries, so the grid, the Wilson colours and the
+  creator picker all move together;
+* the rendering that makes a settled row legible once it is visible — dead and ignored already
+  share mechanics but not yet appearance;
+* a decision about what a visible settled row may do: it has no page to open and nothing to
+  subscribe to, so the actions that would fail on it have to be disabled or explained.
+
+The `i` keystroke, the toggle and the in-place strikethrough/underline are a separate, nearer piece
+of work (stage 2 of the ignored-item feature); this entry is about making the settled rows reachable
+again.
+
