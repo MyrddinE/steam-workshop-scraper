@@ -21,6 +21,20 @@ the production database on 2026-09-12.
 
 The test seeds an 8.0 s web delay and asserts the second item's wait is `pytest.approx(8.0)` (`tests/test_subscribe_engine.py:832`), but the engine decays the shared delay on every clean read by the healthy elapsed time — `WebInterval.after_read` calls `pacing.decay(self.delay, self._elapsed, WEB_DELAY_FLOOR)` (`src/subscribe_engine.py:615`) — so the second wait is `8.0 * 0.5**(elapsed/600)`: a hair under 8.0, falling with every microsecond the first item takes. `pytest.approx`'s default relative tolerance is 1e-6, i.e. 8e-6 absolute, which that decay exceeds once the first item takes more than about 0.9 ms. *Measured* on 2026-09-21, six consecutive runs of the test alone: four failed — 7.9999914, 7.9999917, 7.9999918 and 7.9999910 against the 8.0 ± 8e-6 window — and two passed. The behaviour is correct and the delay is shared exactly as designed, so the assertion is what is wrong: it measures the machine's speed rather than the property the test names. It fails a full-suite run at random, and did so on the 2026-09-21 run for the crash-fix merge (`1 failed, 1887 passed`). [threading.md](threading.md)
 
+### Issue 71
+
+**A Windows rotation is refused while the operator's own tail holds the log** — *Open*, Medium
+
+The rotation renames the live log (`os.replace(log_file, raw)`, `src/log_rotation.py:534`), and on Windows renaming an open file succeeds only if **every** process holding it opened it with `FILE_SHARE_DELETE`. The two writers this feature had to coordinate now do share delete — `RotationAwareFileHandler._open` goes through `_windows_fd` with `FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE` — but a *reader* does not, and the persistent tail this feature was designed around is a reader. *Measured on the production host* (Windows, CPython 3.12.10), renaming a file while it is held open:
+
+| Opened with | Rename |
+|---|---|
+| `FILE_SHARE_READ\|WRITE\|DELETE` (our handler) | succeeds, renamed and back |
+| `FILE_SHARE_READ\|WRITE` (no delete) | `PermissionError [WinError 32] The process cannot access the file because it is being used by another process` |
+| an ordinary Python `open()` | the same `WinError 32` — `open()` does not share delete either |
+
+So the workflow the feature exists for — persistent tail in another window, manual **Rotate Log** button — refuses the rotation whenever that tail is attached. It fails visibly rather than silently: `rotate_log` returns `{"ok": False, "message": "Rotation failed: [WinError 32] …"}` (`src/log_rotation.py:549`), the log is untouched and nothing is lost. The operator must close the tail, rotate, and reopen it. Whether to accept that, or to fall back to streaming the content into the archive and truncating the live file in place (which needs write access, not delete sharing, and leaves the tail following the same path), is the owner's call. [config-security.md](config-security.md#manual-rotation-and-why-it-is-manual)
+
 ## Recently closed
 
 Removed from the list above rather than marked resolved. Each is now documented as current
