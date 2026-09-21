@@ -51,12 +51,6 @@ The original entry here said the web-download capture claimed a budget it did no
 
 The line reports `count_never_fetched_items` as "items that have never been fetched but are not queued" (`src/daemon.py:1300`), but that function (`src/database.py:2759`) counts every row with `api_fetched_at IS NULL` and applies no queue predicate at all; the comment above the guard goes further and calls the two populations "disjoint". *Measured live* on 2026-09-18 14:35 UTC: 336 such items — 133 dead (`status = -1`), 87 queued at `api_priority = 3`, and 116 neither queued nor dead, every one of which carries `status = 404`, the API's answer that the item does not exist. So 220 of the 336 do not fit the description, and 87 sit in both populations the comment calls disjoint. The figure is therefore not a measure of stranded work: it has a floor of roughly 250 items that will never be fetched whatever the daemon does, and the part that moves is the queued remainder, which tracks discovery. Over the 24 hours to 2026-09-18 14:00 UTC, containing six restarts, it oscillated between 240 and 476 with no step at any restart — two seconds after the 09:14:20 start it read the same 463 the database already held, the climb having happened earlier while the daemon was running — and the genuinely unqueued population measured 116 at both 02:16 and 14:35 UTC. [data-pipeline.md](data-pipeline.md#discovery-phase)
 
-### Issue 37
-
-**The daemon log is never rotated** — *Open*, Low
-
-`src/daemon_runner.py` installs a plain `logging.FileHandler`, and nothing under `src/` mentions `RotatingFileHandler` or any size cap, so the configured `logging.file` grows for the life of the installation. *Measured live* on 2026-09-18 it held **594 MB across 5,631,543 lines** — about 105 bytes a line, with the last 60,000 lines covering 1.3 hours, so it is gaining roughly 46,000 lines (**115 MB**) a day, and the discovery guard's skip line alone is written about sixty times an hour. [config-security.md](config-security.md) documents the setting as the log's destination and says nothing about a bound.
-
 ### Issue 65
 
 **A hand-started second daemon migrates under the first** — *Open*, Low
@@ -73,6 +67,12 @@ The line reports `count_never_fetched_items` as "items that have never been fetc
 
 Removed from the list above rather than marked resolved. Each is now documented as current
 behaviour, or covered by a test:
+
+### The daemon log is never rotated (issue 37)
+
+The log now has a bound, but **not an automatic one**. The owner keeps a persistent `tail` open in another window, and a rotation the daemon chose on a timer or a size threshold would have disrupted that view without warning, so rotation is **wholly manual**: the daemon page of each front end carries a small size readout and a **Rotate Log** button, and nothing rotates on a timer, on a size threshold, or at startup. Pressing it renames the live log to `<log folder>/logs/<stem>-<UTC stamp>.log.gz`, immediately leaves a fresh empty file at the configured path, and compresses the archive on a background thread — the readout reads `Rotating… (<size>)` while a production-sized gzip runs, then `Rotated: logs/<name> (<size>)`. The readout line and the button's label come from one place (`src/log_rotation.py`), so the TUI and the web show the same number and the same words.
+
+The part that needed the care was that **two processes hold the log open** — `src/daemon_runner.py`'s handler and the TUI's — so a rename alone would leave one writing into the renamed inode, and those records would end up inside the compressed archive silently. Both handlers now come from `src/log_rotation.log_file_handler`; the rotator publishes the archive's name to `<log>.generation` and each handler caches that marker and reopens when it changes. That mechanism was chosen over `logging.handlers.WatchedFileHandler` because the latter does not reopen on Windows, which is where production runs. A test holds a handler across a rotation and fails against the old plain `FileHandler`, asserting the next record lands in the new file and not in the sealed archive. **No retention policy was invented** — archives accumulate, and when to delete the owner's log history is the owner's decision, the outbox question of issue 24 in another form. [config-security.md](config-security.md#manual-rotation-and-why-it-is-manual), [tui.md](tui.md#daemonmanagerscreen), [web-ui.md](web-ui.md#daemon-panel)
 
 ### Dead items kept their queue priority
 
