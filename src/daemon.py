@@ -153,14 +153,6 @@ DISCOVERY_IDLE_SECONDS = 30.0
 # it, so the coupling is stated in both comments and checked by that test.
 SHUTDOWN_BUDGET_SECONDS = 5.0
 
-# How long a loop waits after losing a lock race before it tries again. The
-# connection's busy timeout is 15 s, so reaching this pause means a writer held
-# the lock longer than the timeout allowed; retrying at once would usually meet
-# the same lock and spin. Five seconds is the same brief pause the fetch path
-# already serves on a database error, and it is short enough that a lock which
-# clears quickly costs one iteration.
-DB_LOCK_RETRY_SECONDS = 5.0
-
 # The owner's subscriptions are reconciled once per appid at startup and then on
 # this cadence. Daily is the right order for it: the list only moves when a
 # human subscribes or unsubscribes, the one moment that matters (a subscribe the
@@ -1337,10 +1329,13 @@ class Daemon:
                 # per item -- the next pass simply retries them.
                 logging.warning(
                     "Database locked during a fetch pass; leaving the queue "
-                    "alone and retrying in %gs: %s", DB_LOCK_RETRY_SECONDS, exc)
+                    "alone and retrying in %gs: %s",
+                    pacing.DB_LOCK_RETRY_SECONDS, exc)
                 # Responsive, so a stop is not held for the whole pause.
-                pacing.wait(DB_LOCK_RETRY_SECONDS, lambda: self.running)
-                continue
+                pacing.wait(pacing.DB_LOCK_RETRY_SECONDS, lambda: self.running)
+            # Deliberately outside the except: the PID-file stop must be checked
+            # every iteration, including one that lost the lock. Skipping it
+            # here would postpone a graceful stop for as long as the lock lasts.
             self._pid_file_removed()
         logging.info("Daemon gracefully exited.")
         self._shutdown_workers()

@@ -20,12 +20,6 @@ from src.images import MIME_MAP, MAGIC_EXT_MAP  # noqa: F401
 # it can probe far harder than the web scraper's shared Steam budget allows.
 IMAGE_DELAY_FLOOR = 0.5
 
-# How long the loop waits after losing a lock race before its next attempt. A
-# `sqlite3.OperationalError` here means a write lock outlived the connection's
-# 15 s busy timeout, so retrying at once would usually meet the same lock; a
-# brief pause keeps a persistent lock from becoming a hot loop.
-DB_LOCK_RETRY_SECONDS = 5.0
-
 
 def _response_metadata(resp) -> dict:
     """The response facts a capture records. Never includes the body.
@@ -245,14 +239,14 @@ class ImageDownloadThread(threading.Thread):
                     logging.warning(
                         "[I:%s] Database locked; leaving the item queued and "
                         "retrying in %gs: %s",
-                        item["workshop_id"], DB_LOCK_RETRY_SECONDS, exc)
+                        item["workshop_id"], pacing.DB_LOCK_RETRY_SECONDS, exc)
                 else:
                     logging.warning(
                         "Image downloader could not read the queue (database "
                         "locked); retrying in %gs: %s",
-                        DB_LOCK_RETRY_SECONDS, exc)
+                        pacing.DB_LOCK_RETRY_SECONDS, exc)
                 # Responsive, so a stop is not held for the whole pause.
-                pacing.wait(DB_LOCK_RETRY_SECONDS, lambda: self.running)
+                pacing.wait(pacing.DB_LOCK_RETRY_SECONDS, lambda: self.running)
 
         self._persist_delay(force=True)
         # No "Image download thread stopped." here: the daemon logs one line per

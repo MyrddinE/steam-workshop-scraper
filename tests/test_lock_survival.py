@@ -95,6 +95,56 @@ def test_the_daemon_loop_survives_a_lock_and_retries(tmp_path, caplog):
     )
 
 
+def test_a_stop_reaches_the_daemon_while_the_lock_keeps_failing(
+        tmp_path, monkeypatch):
+    """The PID-file stop is checked every iteration, a locked one included.
+
+    `_pid_file_removed()` is what turns a removed PID file into
+    ``self.running = False``. If the lock path skipped it -- the first version
+    of this guard paused and then ``continue``d -- a persistent lock would
+    postpone a graceful stop until a pass happened to succeed, leaving the
+    controller's SIGTERM escalation as the only way out.
+    """
+    monkeypatch.chdir(tmp_path)
+    db = str(tmp_path / "daemon-stop.db")
+    initialize_database(db)
+    daemon = Daemon(
+        {
+            "database": {"path": db},
+            "api": {"key": "TEST_KEY"},
+            "daemon": {"target_appids": [1], "api_batch_size": 1,
+                       "request_delay_seconds": 0},
+        },
+        config_path=str(tmp_path / "config.yaml"),
+        # The runner leaves the file behind before the daemon starts; here it is
+        # already gone, so the first check is a stop even though none was seen.
+        expect_pid_file=True,
+    )
+    daemon.translator = _StubWorker()
+
+    passes = []
+
+    def process_batch():
+        passes.append(1)
+        # A regression that never checks the stop flag must still terminate.
+        if len(passes) > 5:
+            daemon.running = False
+        raise sqlite3.OperationalError("database is locked")
+
+    with patch("src.daemon.DiscoveryThread", _StubWorker), \
+         patch("src.daemon.WebScraperThread", _StubWorker), \
+         patch("src.daemon.ImageDownloadThread", _StubWorker), \
+         patch.object(Daemon, "process_batch", side_effect=process_batch), \
+         patch("src.daemon.pacing.wait"):
+        daemon.run()
+
+    assert len(passes) == 1, (
+        "the stop check must run on the iteration that lost the lock; run() "
+        f"needed {len(passes)} passes to notice the missing PID file"
+    )
+    assert daemon.running is False
+
+
 def test_the_web_worker_survives_a_lock_and_keeps_working(db_path, caplog):
     """The web worker's loop had no guard at all: a lock ended the thread."""
     from src.web_worker import WebScraperThread

@@ -32,12 +32,6 @@ WEB_DELAY_FLOOR = 6.0
 # it to anyway.
 WEB_DELAY_DEFAULT = WEB_DELAY_FLOOR
 
-# How long the loop waits after losing a lock race before its next attempt. A
-# `sqlite3.OperationalError` here means a write lock outlived the connection's
-# 15 s busy timeout, so retrying at once would usually meet the same lock; a
-# brief pause keeps a persistent lock from becoming a hot loop.
-DB_LOCK_RETRY_SECONDS = 5.0
-
 
 def configured_web_delay(config: dict) -> float:
     """The shared web interval currently configured, floored at the floor.
@@ -523,14 +517,14 @@ class WebScraperThread(threading.Thread):
                     logging.warning(
                         "[W:%s] Database locked; leaving the item queued and "
                         "retrying in %gs: %s",
-                        item["workshop_id"], DB_LOCK_RETRY_SECONDS, exc)
+                        item["workshop_id"], pacing.DB_LOCK_RETRY_SECONDS, exc)
                 else:
                     logging.warning(
                         "Web scraper could not read the queue (database "
                         "locked); retrying in %gs: %s",
-                        DB_LOCK_RETRY_SECONDS, exc)
+                        pacing.DB_LOCK_RETRY_SECONDS, exc)
                 # Responsive, so a stop is not held for the whole pause.
-                pacing.wait(DB_LOCK_RETRY_SECONDS, lambda: self.running)
+                pacing.wait(pacing.DB_LOCK_RETRY_SECONDS, lambda: self.running)
 
         self._persist_delay(force=True)
         # No "Web scraper thread stopped." here: the daemon logs one line per
