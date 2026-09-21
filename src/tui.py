@@ -463,6 +463,7 @@ class StatsScreen(Screen):
                 name,
                 f"[b]Live items:[/b] {value.get('alive', 0):,}   "
                 f"[b]Dead:[/b] {value.get('dead', 0):,}   "
+                f"[b]Ignored:[/b] {value.get('ignored', 0):,}   "
                 f"[dim](total {value.get('total', 0):,})[/dim]",
             )
         elif name == "app_discovery":

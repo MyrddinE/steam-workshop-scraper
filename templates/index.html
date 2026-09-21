@@ -2477,8 +2477,13 @@ function _renderDeadItemsByQueue(stuck) {
 }
 
 function _renderItemCounts(t) {
+  // Alive is the live population only: the settled pair, dead (-1) and ignored
+  // (-2), is excluded from it and each reported beside the other, so the three
+  // counts account for every row. The value comes from the one metric that
+  // splits the table; this only draws it.
   return '<p><b>Alive:</b> ' + fmtCount(t.alive || 0)
     + ' &nbsp; <b>Dead:</b> ' + fmtCount(t.dead || 0)
+    + ' &nbsp; <b>Ignored:</b> ' + fmtCount(t.ignored || 0)
     + ' &nbsp; <span class="stat-label">Total: ' + fmtCount(t.total || 0) + '</span></p>';
 }
 

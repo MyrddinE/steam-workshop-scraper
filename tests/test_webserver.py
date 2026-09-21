@@ -1686,6 +1686,34 @@ def test_web_recency_render_names_the_configured_window(web_client, tmp_path):
         "the page must be rendered with the shared sentence, not retype it"
 
 
+ITEM_COUNTS_DRIVER = """
+const fmtCount = (__FMT__);
+const fn = (__FN__);
+console.log(JSON.stringify({
+  rendered: fn({total: 3, alive: 1, dead: 1, ignored: 1}),
+}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_web_totals_panel_draws_ignored_beside_dead(web_client, tmp_path):
+    """The web Totals panel draws the ignored count from the metric value.
+
+    Alive is the live population, so an ignored row is not in it; the panel must
+    report the settled pair separately rather than deriving one from the other.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    rendered = _run_node(
+        ITEM_COUNTS_DRIVER
+        .replace("__FN__", _extract_function(script, "_renderItemCounts"))
+        .replace("__FMT__", _extract_function(script, "fmtCount")),
+        tmp_path)["rendered"]
+
+    assert "Alive:" in rendered and "Dead:" in rendered
+    assert "Ignored:" in rendered and "1" in rendered
+
+
 # ── delete never fetched items ───────────────────────────────────────────────
 #
 # The route is a thin wrapper over delete_never_fetched_items, so the predicate is the

@@ -20,7 +20,7 @@ test passes either way and is kept as documentation rather than as proof.
 from unittest.mock import patch
 
 import pytest
-from textual.widgets import ListView
+from textual.widgets import ListView, Static
 
 from src import database
 from src import metrics
@@ -537,3 +537,49 @@ async def test_the_tui_bulk_update_does_not_requeue_an_ignored_item(db_path):
             await pilot.pause(ASYNC_PAUSE)
 
     assert _row(db_path, 1)["api_priority"] == 0, "an ignored item is in no queue"
+
+
+# ── stage 2: the Totals count stops calling an ignored row alive ─────────────
+
+
+def test_item_counts_reports_ignored_separately_from_alive(db_path):
+    """The Totals split must account for the settled pair, not only death.
+
+    ``alive`` is the live population the searchable library shows, so an ignored
+    row -- hidden by the same feature -- cannot be counted in it. The three
+    counts partition the table.
+    """
+    _live(db_path, 1)
+    _raw(db_path, 2, fetch_status=-1)
+    _raw(db_path, 3, fetch_status=-2)
+
+    assert _metric(db_path, "item_counts")["item_counts"] == {
+        "total": 3, "alive": 1, "dead": 1, "ignored": 1,
+    }, "an ignored row is settled, not alive"
+
+
+@pytest.mark.asyncio
+async def test_the_tui_totals_panel_draws_ignored_beside_dead(mock_config, monkeypatch):
+    """The TUI Totals chunk renders the ignored count from the one metric value."""
+    from src.tui import ScraperApp, StatsScreen
+    from tests.test_tui import _FAKE_METRIC_VALUES, _fake_iter_metrics
+
+    monkeypatch.setitem(
+        _FAKE_METRIC_VALUES, "item_counts",
+        {"total": 4, "alive": 2, "dead": 1, "ignored": 1})
+
+    with patch("src.tui.load_config", return_value=mock_config), \
+         patch("src.tui.metrics.iter_metrics", side_effect=_fake_iter_metrics()):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+            app.push_screen(StatsScreen(app.db_path))
+            await pilot.pause(ASYNC_PAUSE)
+            screen = app.screen
+            for _ in range(200):
+                await pilot.pause(0.02)
+                if len(screen._measured_ms) >= len(metrics.all_names()):
+                    break
+            rendered = str(screen.query_one("#item-counts-content", Static).render())
+
+    assert "Ignored:" in rendered and "1" in rendered
