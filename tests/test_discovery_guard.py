@@ -1,10 +1,12 @@
 """The discovery guard must measure work the fetch queue can actually hand out.
 
 Regression cover for a defect that stopped discovery permanently on production:
-the guard compared against items that had never been fetched successfully, a
-population disjoint from the fetch queue. Production read 890 "unscraped" while
-`get_next_items_to_fetch` could return exactly 1 item, so every discovery pass
-was skipped and the queue could never refill.
+the guard compared against items that had never been fetched successfully and
+read that count as if it were the fetch queue. Production read 890 "unscraped"
+while `get_next_items_to_fetch` could return exactly 1 item, so every discovery
+pass was skipped and the queue could never refill. The two counts are not a
+partition -- they overlap and items move between them -- so the guard's diagnostic
+counts the never-fetched rows no queue holds (`count_stranded_never_fetched_items`).
 """
 
 from unittest.mock import patch
@@ -15,6 +17,7 @@ from src.database import (
     initialize_database,
     count_fetchable_items,
     count_never_fetched_items,
+    count_stranded_never_fetched_items,
     EXPECTED_VERSION,
 )
 from tests.conftest import restore_pre_rename_table_names, seed_pacing_delay
@@ -56,11 +59,57 @@ def test_count_fetchable_items_matches_the_fetch_query(db_path):
     assert count_fetchable_items(db_path) == 2
 
 
-def test_count_fetchable_items_is_disjoint_from_unscraped(db_path):
-    """The two populations can be completely disjoint -- that was the whole bug."""
+def test_count_fetchable_items_and_unscraped_move_independently(db_path):
+    """The regression shape: a deep never-fetched backlog with an empty queue.
+
+    Fifty rows have never been fetched successfully and hold no queue flag, while
+    the fetch queue can hand out none of them, so the two counts diverge -- the
+    old guard read the first as if it were the second and skipped discovery. They
+    are not a partition, though: a queued row sits in both counts.
+    """
     _insert(db_path, [(i, 500, 0, None) for i in range(1, 51)])
     assert count_never_fetched_items(db_path) == 50
     assert count_fetchable_items(db_path) == 0
+
+
+def test_count_stranded_never_fetched_items_excludes_the_settled_classes(db_path):
+    """The measured live shape: only the rows outside every queue are stranded.
+
+    Measured live 2026-09-18 14:35 UTC: of 336 rows with ``api_fetched_at IS NULL``,
+    133 were dead, 87 were queued at ``api_priority = 3`` and the other 116 all
+    carried ``fetch_status = 404``, so the old parenthetical printed 336 -- the
+    never-fetched total -- for a population the query did not measure. Dead,
+    settled-``404`` and queued rows are each a class in the fixture below; the
+    never-fetched, live rows no queue holds are what the reader counts.
+    """
+    _insert(db_path, [
+        *[(i, -1, 5, None) for i in range(1, 5)],      # dead, still holding priority
+        *[(i, None, 3, None) for i in range(10, 14)],  # queued for API fetch
+        *[(i, 404, 0, None) for i in range(20, 26)],   # settled permanent answer
+        (30, None, 0, None),                            # discovered, never queued (issue 20)
+        (31, 500, 0, None),                             # transient failure, dequeued
+    ])
+    assert count_never_fetched_items(db_path) == 16, "the old count takes all three settled classes"
+    assert count_fetchable_items(db_path) == 4, "only the fetch-queued rows"
+    assert count_stranded_never_fetched_items(db_path) == 2, \
+        "the issue-20 row and the dequeued transient, no settled or queued row"
+
+
+def test_count_stranded_never_fetched_items_ignores_a_translation_queue_row(db_path):
+    """A never-fetched row with a translation row queued is work, not stranded.
+
+    The queue test is the union, not just the item's own flags: a bucket queued
+    for translation must not be reported as work no queue carries.
+    """
+    _insert(db_path, [(1, None, 0, None)])
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT INTO translation_queue (entity_type, entity_id, field, original_text, priority) "
+        "VALUES ('item', 1, 'title_en', 'Bonjour', 5)"
+    )
+    conn.commit()
+    conn.close()
+    assert count_stranded_never_fetched_items(db_path) == 0
 
 
 def test_count_never_fetched_items_keeps_its_meaning(db_path):
