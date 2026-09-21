@@ -2439,10 +2439,12 @@ const opened = [];
 global.window = {open: (url, name) => { opened.push({url: url, name: name}); return null; }};
 global.alert = (m) => calls.push({alert: m});
 // The pane and the grid cell are not the subject here; the read-back only has
-// to complete so its request is visible in the recorded calls.
+// to complete so its request is visible in the recorded calls. Its dispatch is
+// stubbed for the same reason -- there is no display subscribed in this driver.
 global.document = {getElementById: () => null, querySelector: () => null};
 global._currentDetail = null;
 global._startListPoll = () => {};
+global.dispatchItemUpdate = () => {};
 async function refreshItemState(wid) { return __REFRESH__(wid); }
 global.fetch = async (url, opts) => {
   calls.push({url: url, method: opts && opts.method});
@@ -3168,6 +3170,13 @@ def test_render_detail_wires_the_author_and_subscription_marker(web_client, tmp_
 TOGGLE_QUEUE_DRIVER = """
 const fn = (__FN__);
 const subFn = (__SUB_FN__);
+// The served registry, so the toggle reaches the pane and the cell the same way
+// it does on the page: through the one dispatch point and their subscriptions,
+// not by the toggle naming either of them.
+const _itemSubscribers = new Map();
+const _subscribeItem = (__SUBSCRIBE__);
+const _unsubscribeItem = (__UNSUBSCRIBE__);
+const dispatchItemUpdate = (__DISPATCH__);
 const rendered = [];
 const classes = new Set();
 let serverQueued = 0;
@@ -3197,6 +3206,10 @@ global.document = {
   }),
 };
 global._applySub = subFn;
+// The pane subscriber, as DetailsPane's is in the TUI and _detailSubscriber is
+// on the page, and a cell subscriber that applies the marker.
+_subscribeItem(77, {applyItemUpdate: (it) => global.renderDetail(it)});
+_subscribeItem(77, {applyItemUpdate: (it) => _applySub(marker, it)});
 // Queueing a row starts the list poll that re-reads its marker; this driver is
 // about the toggle itself, so the poll is stubbed rather than run.
 global._startListPoll = () => {};
@@ -3268,7 +3281,11 @@ def test_toggle_queue_reflects_the_databases_state_and_updates_the_marker(web_cl
     sub_fn = _extract_function(script, "_applySub")
     result = _run_node(TOGGLE_QUEUE_DRIVER
                        .replace("__FN__", fn)
-                       .replace("__SUB_FN__", sub_fn), tmp_path)
+                       .replace("__SUB_FN__", sub_fn)
+                       .replace("__SUBSCRIBE__", _extract_function(script, "_subscribeItem"))
+                       .replace("__UNSUBSCRIBE__", _extract_function(script, "_unsubscribeItem"))
+                       .replace("__DISPATCH__", _extract_function(script, "dispatchItemUpdate")),
+                       tmp_path)
 
     assert result["afterFirst"] == 1
     # The DB said queued while the cached payload still said 0; the read-back

@@ -431,6 +431,9 @@ def test_a_row_queued_only_for_subscription_is_polled(web_client, tmp_path):
 POLL_SCOPE_DRIVER = """
 let _listPollTimer = null;
 const _stopListPoll = () => {};
+// The tick hands every block to the one dispatch point; this driver is about
+// the ids it asks for, so the dispatch is stubbed rather than run.
+const dispatchItemUpdates = () => {};
 const startFn = (__START__);
 
 function marker(state) {
@@ -498,6 +501,9 @@ def test_the_poll_re_reads_a_row_queued_only_for_subscription(web_client, tmp_pa
 
 TOGGLE_STARTS_POLL_DRIVER = """
 const _applySub = () => {};
+// The toggle's read-back goes through the one dispatch point; this driver is
+// about the poll it starts, so the dispatch is stubbed.
+global.dispatchItemUpdate = () => {};
 let started = 0;
 var _startListPoll = () => { started += 1; };
 let queued = 0;

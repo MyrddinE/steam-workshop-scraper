@@ -628,6 +628,11 @@ async function doSearch(reset = true) {
     currentOffset = 0;
     hasMore = true;
     _selectedWid = null;
+    // The old result set is about to leave the screen, so it leaves the
+    // registry: a cell that is being removed must not keep receiving updates.
+    document.querySelectorAll('#results-grid .grid-cell[data-wid]').forEach(el => {
+      _unsubscribeItem(el.getAttribute('data-wid'), el);
+    });
     document.getElementById('results-grid').innerHTML = '';
     // Drop to the neutral colour and fetch the cutoffs in the background. They
     // decide colour only, and colouring this filter set with the previous set's
@@ -676,7 +681,15 @@ async function doSearch(reset = true) {
     // drag the pane to the item.
     div.onclick = () => showDetail(item.workshop_id);
     grid.appendChild(div);
+    // The cell is a registry subscriber while it displays the item; its
+    // applier is what the one dispatch point calls.
+    div.applyItemUpdate = (block) => _applyGridCellUpdate(div, block);
+    _subscribeItem(item.workshop_id, div);
   });
+
+  // The general poll runs whether or not anything is pending: the marker and
+  // every other field can move behind the page's back. See _itemUpdateTick.
+  _startItemUpdatePoll();
 
   currentOffset += items.length;
   hasMore = items.length >= 50;
@@ -859,6 +872,65 @@ function openFolderFromDetail() {
   if (_currentDetail) openFolder(_currentDetail.workshop_id);
 }
 
+// ── one item-update path: the per-item subscription registry ─────────────────
+//
+// Every display of an item -- a grid cell, the detail pane -- subscribes to the
+// workshop_id while it is showing it, and every update the page receives
+// (a poll, a click, a subscribe landing, or the block a search returned) goes
+// through dispatchItemUpdate below, which looks up that id's subscribers and
+// hands each of them the whole block. The registry is the only coupling: no
+// caller has to remember which component to refresh, so a display added later is
+// correct as soon as it subscribes. The TUI mirrors this in src/item_updates.py.
+//
+// A subscriber applies the fields it draws and ignores the rest, so a block may
+// carry one column or all of them and a column added later reaches every panel
+// without a new call site.
+const _itemSubscribers = new Map();   // workshop_id -> Set(subscriber)
+
+function _subscribeItem(wid, subscriber) {
+  const id = parseInt(wid, 10);
+  if (isNaN(id) || !subscriber || typeof subscriber.applyItemUpdate !== 'function') return null;
+  let subs = _itemSubscribers.get(id);
+  if (!subs) { subs = new Set(); _itemSubscribers.set(id, subs); }
+  subs.add(subscriber);
+  return id;
+}
+
+function _unsubscribeItem(wid, subscriber) {
+  const id = parseInt(wid, 10);
+  const subs = _itemSubscribers.get(id);
+  if (!subs) return;
+  subs.delete(subscriber);
+  if (!subs.size) _itemSubscribers.delete(id);
+}
+
+// The ids on screen, which is what the general poll reads: the bound is the
+// displayed count, never the size of the table.
+function _subscribedItemIds() {
+  return Array.from(_itemSubscribers.keys());
+}
+
+// The page's one dispatch point. Returns how many displays the block reached.
+function dispatchItemUpdate(item) {
+  if (!item || item.workshop_id == null) return 0;
+  const id = parseInt(item.workshop_id, 10);
+  const subs = _itemSubscribers.get(id);
+  if (!subs || !subs.size) return 0;
+  let delivered = 0;
+  Array.from(subs).forEach(sub => {
+    // A detached cell has stopped displaying the item; drop it rather than hand
+    // a display that is gone another update.
+    if (sub.isConnected === false) { _unsubscribeItem(id, sub); return; }
+    sub.applyItemUpdate(item);
+    delivered += 1;
+  });
+  return delivered;
+}
+
+function dispatchItemUpdates(items) {
+  (items || []).forEach(dispatchItemUpdate);
+}
+
 function _listNeedsPoll(items) {
   for (const item of items) {
     // A stage spinner moves on its own; a subscription marker moves when a
@@ -904,30 +976,9 @@ function _startListPoll(filters, sortBy, sortOrder) {
         // session.
       } else {
         const items = await resp.json();
-        if (Array.isArray(items)) {
-          items.forEach(item => {
-            const el = grid.querySelector(`.grid-cell[data-wid="${item.workshop_id}"]`);
-            if (!el) return;
-            const title = item.title_en || item.title || 'Untitled';
-            const titleEl = el.querySelector('.grid-title');
-            if (titleEl) titleEl.textContent = title;
-            if (!el.querySelector('.grid-img') && !el.querySelector('.grid-img-failed')) {
-              const ph = el.querySelector('.grid-img-placeholder');
-              if (ph && _imageState(item) !== 'absent') ph.outerHTML = _imageCellHtml(item);
-            }
-            _applyPending(el, item);
-            // The poll also carries the subscription columns, and /api/subscribed
-            // may have stamped them behind this cell's back, so the marker is
-            // refreshed from the same payload.
-            _applySub(el.querySelector('.grid-sub'), item);
-            const wfs = item.wilson_favorite_score != null ? (item.wilson_favorite_score*100).toFixed(1) : null;
-            const wss = item.wilson_subscription_score != null ? (item.wilson_subscription_score*100).toFixed(1) : null;
-            const scores = el.querySelector('.grid-scores');
-            if (scores) scores.innerHTML = `
-              <span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}" data-wilson="wilson_subscription" data-score="${item.wilson_subscription_score ?? ''}">S ${wss!=null?wss+'%':'—'}</span>
-              <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}" data-wilson="wilson_favorite" data-score="${item.wilson_favorite_score ?? ''}">F ${wfs!=null?wfs+'%':'—'}</span>`;
-          });
-        }
+        // Every re-read block, for every display of it, goes through the one
+        // dispatch point; the cell's applier is what draws the fields it holds.
+        if (Array.isArray(items)) dispatchItemUpdates(items);
       }
     } catch(e) { console.debug('List poll error', e); /* keep trying */ }
     // Re-arm whatever the tick met, so one failed read is a skipped tick rather
@@ -948,6 +999,113 @@ function _stopListPoll() {
       if (ph.textContent.startsWith('pending')) ph.textContent = 'no image';
     });
   }
+}
+
+// The grid cell's applier: what a block updates in one cell. It draws only the
+// fields a cell holds, so it can receive the summary block from a poll or the
+// full detail payload from an action without either caller knowing the
+// difference.
+function _applyGridCellUpdate(cell, item) {
+  if (!cell || !item) return;
+  const title = item.title_en || item.title || 'Untitled';
+  const titleEl = cell.querySelector('.grid-title');
+  if (titleEl) titleEl.textContent = title;
+  if (!cell.querySelector('.grid-img') && !cell.querySelector('.grid-img-failed')) {
+    const ph = cell.querySelector('.grid-img-placeholder');
+    if (ph && _imageState(item) !== 'absent') ph.outerHTML = _imageCellHtml(item);
+  }
+  const sizeEl = cell.querySelector('.grid-meta span');
+  if (sizeEl && item.file_size !== undefined) {
+    sizeEl.textContent = fmtSize(item.file_size);
+    sizeEl.className = sizeClass(item.file_size);
+  }
+  _applyPending(cell, item);
+  // The marker comes from the payload's shared subscription fields, so a
+  // subscribe that landed behind this cell's back is drawn from the same block
+  // as everything else the cell shows.
+  _applySub(cell.querySelector('.grid-sub'), item);
+  const wfs = item.wilson_favorite_score != null ? (item.wilson_favorite_score*100).toFixed(1) : null;
+  const wss = item.wilson_subscription_score != null ? (item.wilson_subscription_score*100).toFixed(1) : null;
+  const scores = cell.querySelector('.grid-scores');
+  if (scores) scores.innerHTML = `
+    <span class="${wClass(item.wilson_subscription_score,'wilson_subscription')}" data-wilson="wilson_subscription" data-score="${item.wilson_subscription_score ?? ''}">S ${wss!=null?wss+'%':'—'}</span>
+    <span class="${wClass(item.wilson_favorite_score,'wilson_favorite')}" data-wilson="wilson_favorite" data-score="${item.wilson_favorite_score ?? ''}">F ${wfs!=null?wfs+'%':'—'}</span>`;
+}
+
+// ── the general item-update poll ─────────────────────────────────────────────
+//
+// The trigger that is not conditional on anything being pending. It runs while
+// any item is displayed, reads exactly the ids the registry holds in one
+// batched /api/items request, and dispatches the blocks to their subscribers.
+// A change written behind the page's back -- the daemon's folder scan stamping
+// steam_download_seen_at, a scrape or a translation landing -- therefore arrives
+// without the user acting, and the grid does not stop updating merely because
+// nothing is `pending`. The fast `_startListPoll` stays as the low-latency path
+// for a stage spinner or a queued marker; correctness no longer depends on it.
+const _ITEM_UPDATE_POLL_MS = 3000;   // mirrors ITEM_UPDATE_POLL_SECONDS in src/item_updates.py
+let _itemUpdatePollTimer = null;
+
+function _startItemUpdatePoll() {
+  if (_itemUpdatePollTimer) return;   // already running; the tick re-arms itself
+  if (!_subscribedItemIds().length) return;
+  _itemUpdatePollTimer = setTimeout(_itemUpdateTick, _ITEM_UPDATE_POLL_MS);
+}
+
+async function _itemUpdateTick() {
+  _itemUpdatePollTimer = null;
+  const ids = _subscribedItemIds();
+  // Nothing on screen: no read, and nothing to keep armed. A later search or
+  // pane open arms it again through _startItemUpdatePoll.
+  if (!ids.length) return;
+  try {
+    const resp = await fetch('/api/items', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ids: ids})
+    });
+    if (resp.ok) {
+      const items = await resp.json();
+      if (Array.isArray(items)) dispatchItemUpdates(items);
+    }
+  } catch(e) { console.debug('Item update poll error', e); /* keep trying */ }
+  // Never stop while something is displayed: one failed read is a skipped tick,
+  // and the next tick is the retry. The cost of a tick is one batched read of
+  // the on-screen ids.
+  if (_subscribedItemIds().length) {
+    _itemUpdatePollTimer = setTimeout(_itemUpdateTick, _ITEM_UPDATE_POLL_MS);
+  }
+}
+
+// The detail pane is one subscriber. It can receive the summary block the
+// general poll reads or the full detail payload an action read; merging keeps a
+// field the block does not carry (the description, most of all) from being
+// blanked, which is what lets the same dispatch feed every panel.
+const _detailSubscriber = {
+  workshop_id: null,
+  applyItemUpdate: function(item) {
+    // Merge into what the pane holds only when it is the same item; a block for
+    // a newly-opened item must not inherit the previous item's description or
+    // translation, which the summary block does not carry.
+    const same = _currentDetail
+      && String(_currentDetail.workshop_id) === String(item.workshop_id);
+    _currentDetail = Object.assign({}, same ? _currentDetail : null, item);
+    renderDetail(_currentDetail);
+  },
+};
+
+function _subscribeDetail(wid) {
+  const id = _subscribeItem(wid, _detailSubscriber);
+  if (id == null) return;
+  // The pane has stopped displaying whatever it held before.
+  if (_detailSubscriber.workshop_id !== id) _unsubscribeDetail();
+  _detailSubscriber.workshop_id = id;
+  _startItemUpdatePoll();
+}
+
+function _unsubscribeDetail() {
+  if (_detailSubscriber.workshop_id != null) {
+    _unsubscribeItem(_detailSubscriber.workshop_id, _detailSubscriber);
+  }
+  _detailSubscriber.workshop_id = null;
 }
 
 let _showTranslated = true;   // mirrors DetailsPane.show_translated in the TUI
@@ -1254,15 +1412,13 @@ async function toggleDetailQueue(wid) {
     if (!detail.ok) return;
     const item = await detail.json();
     if (item.error) return;
-    if (_currentDetail && _currentDetail.workshop_id === wid) renderDetail(item);
-    // Keep the matching grid cell's marker in step, as pressing `s` on that
-    // cell would. _applySub is the one writer, so the cell shows whatever the
-    // server said rather than a locally flipped guess.
-    const cell = document.querySelector(`#results-grid .grid-cell[data-wid="${wid}"]`);
-    if (cell) _applySub(cell.querySelector('.grid-sub'), item);
+    // Hand the read-back to the one dispatch point. The pane (if it holds this
+    // item) and the matching grid cell both draw from it, and so would anything
+    // else that subscribed to this id -- no caller names a component to refresh.
+    dispatchItemUpdate(item);
     // A row queued here now carries a marker that can change without this
-    // pane's help: the subscribe lands in the database. The list poll is what
-    // re-reads such a cell, and a row queued after the search rendered was
+    // pane's help: the subscribe lands in the database. The list poll re-reads
+    // such a cell at its fastest, and a row queued after the search rendered was
     // never seen by _listNeedsPoll, so the transition starts it.
     if (item.subscription_state === 'queued') _startListPoll([], '', '');
   } catch (e) { console.debug('Queue state refresh failed', e); }
@@ -1293,7 +1449,10 @@ function _startDetailPoll(wid, item) {
       const updated = await resp.json();
       if (updated.error) { _stopDetailPoll(); return; }
       if (!_detailNeedsPoll(updated)) {
-        renderDetail(updated);
+        // The completion is an update like any other: it goes through the one
+        // dispatch point, so the pane redraws because it subscribed rather than
+        // because this poll reached into it.
+        dispatchItemUpdate(updated);
         _stopDetailPoll();
       }
     } catch(e) { console.debug('Detail poll error', e); /* keep trying */ }
@@ -1320,7 +1479,11 @@ async function showDetail(wid) {
     const item = await resp.json();
     if (item.error) { pane.innerHTML = '<p>Item not found.</p>'; return; }
 
-  renderDetail(item);
+  // The pane is a subscriber while it displays this id, and the payload it was
+  // opened with is the first update dispatched to it -- the same path every
+  // later poll and action takes.
+  _subscribeDetail(wid);
+  dispatchItemUpdate(item);
   document.querySelectorAll('#results-grid .grid-cell').forEach(el => el.classList.remove('selected'));
   const cell = document.querySelector(`#results-grid .grid-cell[data-wid="${wid}"]`);
   if (cell) { cell.classList.add('selected'); cell.focus(); }
@@ -1425,7 +1588,8 @@ async function doSubscribe(wid) {
   }
 }
 
-// Re-read one item and let the pane and its grid cell render from the payload.
+// Re-read one item and dispatch the block: the pane and its grid cell render
+// because they subscribed, not because this function knows about them.
 // `/api/item/<id>` is read-only, so this cannot re-arm the fetch queue.
 async function refreshItemState(wid) {
   try {
@@ -1433,9 +1597,7 @@ async function refreshItemState(wid) {
     if (!resp.ok) return;
     const item = await resp.json();
     if (item.error) return;
-    if (_currentDetail && _currentDetail.workshop_id === wid) renderDetail(item);
-    const cell = document.querySelector(`#results-grid .grid-cell[data-wid="${wid}"]`);
-    if (cell) _applySub(cell.querySelector('.grid-sub'), item);
+    dispatchItemUpdate(item);
     if (item.subscription_state === 'queued') _startListPoll([], '', '');
   } catch (e) { console.debug('Item state refresh failed', e); }
 }

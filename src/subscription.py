@@ -163,3 +163,26 @@ def is_clickable(state: str) -> bool:
     if state not in MARKER_SPECS:
         raise ValueError(f"unknown subscription state {state!r}")
     return state in CLICKABLE_STATES
+
+
+def attach_marker(item: dict) -> dict:
+    """Add the whole derived marker to ``item`` in place and return it.
+
+    This is the marker half of the front ends' shared item-update payload: the
+    web server enriches every payload it returns through here, and
+    :mod:`src.item_updates` enriches every block the TUI dispatches through
+    here, so a subscriber on either side receives the same field names for the
+    same stored row. The raw columns (``own_subscribed``,
+    ``steam_download_seen_at``, ...) stay on the payload as well, because the
+    state is derived from them and a display may legitimately read either.
+    """
+    state = subscription_state(item)
+    glyph, colour, css, label = marker_spec(state)
+    item["subscription_state"] = state
+    item["subscription_glyph"] = glyph
+    item["subscription_colour"] = colour
+    item["subscription_class"] = css
+    item["subscription_label"] = label
+    item["subscription_tooltip"] = tooltip(state)
+    item["subscription_clickable"] = is_clickable(state)
+    return item
