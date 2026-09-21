@@ -37,11 +37,11 @@ from src.database import (
 #        the Steam API calls on that path are 10 s (src/steam_api.py), and the
 #        15 s workers (image download, web scrape, page discovery) run on their
 #        own threads, so the largest single main-thread block is 15 s.
-#   + the daemon's own join budget                5 s  (SHUTDOWN_BUDGET_SECONDS in src/daemon.py)
+#   + the daemon's own join budget               20 s  (SHUTDOWN_BUDGET_SECONDS in src/daemon.py)
 #   + margin                                      5 s  (the up-to-1 s PID-file
 #        tick in Daemon._wait_for_work, the failure-capture flush, this
 #        controller's own half-second poll and process teardown)
-#   = 25 s
+#   = 40 s
 #
 # The request/DB block and the daemon's join budget are therefore tied to this
 # number: raising either without raising STOP_TIMEOUT_SECONDS means the
@@ -50,7 +50,7 @@ from src.database import (
 # whole import graph into the TUI and web processes; a test pins the two
 # together.
 _LONGEST_MAIN_THREAD_BLOCK_SECONDS = 15.0
-_DAEMON_JOIN_BUDGET_SECONDS = 5.0
+_DAEMON_JOIN_BUDGET_SECONDS = 20.0
 _SHUTDOWN_MARGIN_SECONDS = 5.0
 
 STOP_TIMEOUT_SECONDS = (

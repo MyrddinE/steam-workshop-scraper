@@ -121,13 +121,13 @@ STALE_SWEEP_INTERVAL_SECONDS = 3600
 # guard threshold -- a pass returns at once while the queue is already at it --
 # and the per-run fill target the cursor loop stops at.
 #
-# It is 200 because the fetch loop drains the queue between discovery passes.
 # The earlier target of 100 was small enough that every pass found the queue
 # already at or above it and skipped, so the refill raced the drain instead of
 # leading it: the buffer was a level the drain kept crossing, not headroom above
-# it. 200 sits clear of that crossing, and at the request page size of 100 it is
-# two pages of fresh items per pass.
-DISCOVERY_FILL_TARGET = 200
+# it. 200 fixed that most of the time, but the fetch loop still drained the queue
+# past it on occasion, so 300 is the headroom above the crossing. At the request
+# page size of 100 it is three pages of fresh items per pass.
+DISCOVERY_FILL_TARGET = 300
 
 # How long the discovery thread waits between passes. It is a check interval, not
 # a rate: `seed_database` returns at once while the fetchable queue is already at
@@ -143,14 +143,18 @@ DISCOVERY_IDLE_SECONDS = 30.0
 # and waited for together, and whatever is still alive when this expires is named
 # in the log and left behind.
 #
-# It is deliberately a single-digit number. The controller's
-# ``STOP_TIMEOUT_SECONDS`` (25 s in ``src/daemon_control.py``) is derived as
-# the longest single main-thread block (15 s) plus this budget plus a 5 s
-# margin, so this constant is one of the two terms that set the grace and must
-# not be raised without raising that one; ``tests/test_daemon_control.py``
+# Because the deadline is shared and every worker is signalled at once, a long
+# budget costs nothing unless a worker is genuinely stuck mid-IO: the phase
+# returns as soon as the last healthy worker does. 20 s leaves room for a worker
+# to finish a real operation instead of being abandoned part-way, and a worker
+# still stuck when it expires is named in the log and left behind all the same.
+# The controller's ``STOP_TIMEOUT_SECONDS`` (40 s in ``src/daemon_control.py``)
+# is derived as the longest single main-thread block (15 s) plus this budget
+# plus a 5 s margin, so this constant is one of the two terms that set the grace
+# and must not be raised without raising that one; ``tests/test_daemon_control.py``
 # pins the pairing. ``daemon_control`` mirrors this value instead of importing
 # it, so the coupling is stated in both comments and checked by that test.
-SHUTDOWN_BUDGET_SECONDS = 5.0
+SHUTDOWN_BUDGET_SECONDS = 20.0
 
 # The owner's subscriptions are reconciled once per appid at startup and then on
 # this cadence. Daily is the right order for it: the list only moves when a
