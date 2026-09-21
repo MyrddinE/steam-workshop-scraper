@@ -266,6 +266,9 @@ def test_start_when_stopped_spawns_detached_daemon(tmp_path, monkeypatch):
         return proc
 
     monkeypatch.setattr(daemon_control.subprocess, "Popen", fake_popen)
+    # The spawned process stays "alive" here, so nothing will publish a PID;
+    # zero the grace so the success path is reached without a real sleep.
+    monkeypatch.setattr(daemon_control, "START_REFUSAL_GRACE_SECONDS", 0)
     changed, message = controller.start()
 
     assert changed is True
@@ -306,6 +309,63 @@ def test_start_reports_spawn_failure(tmp_path, monkeypatch):
     changed, message = controller.start()
     assert changed is False
     assert "Failed to start daemon" in message
+
+
+def test_start_reports_the_refusal_when_the_spawned_daemon_aborts(
+        tmp_path, monkeypatch):
+    """A daemon that cannot take the PID file exits non-zero; start() must not
+    claim a success it did not have.
+
+    The runner takes the file with an exclusive create *before* it detaches, so
+    the refusal is decided by the very process ``Popen`` returned: it exits
+    non-zero, while an ordinary start exits 0 and detaches. The controller sees
+    that exit code and reports the refusal, naming the PID file the daemon
+    refused on.
+    """
+    pid_file = _pid_file(tmp_path)
+    with open(pid_file, "w") as f:
+        f.write("4321")
+    controller = DaemonController(pid_file=pid_file)
+    # The existing file names a dead PID, so the pre-spawn check says "not
+    # running" and start() spawns; the daemon itself is what refuses.
+    monkeypatch.setattr(daemon_control, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(daemon_control.subprocess, "Popen",
+                        lambda *a, **k: FakeProc(pid=9001, alive=False))
+
+    changed, message = controller.start()
+
+    assert changed is False, "the daemon did not start"
+    assert "refused" in message.lower()
+    assert pid_file in message, "the operator needs to know which file blocked it"
+    assert "4321" in message, "and which PID is inside it"
+    assert controller.proc is None, "a refused process is not a live handle"
+
+
+def test_start_reads_a_published_pid_as_the_success_signal(tmp_path, monkeypatch):
+    """On Windows there is no fork, so the spawned process keeps running.
+
+    The daemon publishing a live PID in the file is that platform's proof that
+    it started; ``start`` must wait for it, report success with that PID, and
+    not mistake the wait itself for a refusal.
+    """
+    pid_file = _pid_file(tmp_path)
+    controller = DaemonController(pid_file=pid_file)
+    proc = FakeProc(pid=5150)
+
+    def publish():
+        # What the still-running daemon does on its first tick.
+        with open(pid_file, "w") as f:
+            f.write("5150")
+        return None
+
+    monkeypatch.setattr(daemon_control, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(proc, "poll", publish)
+    monkeypatch.setattr(daemon_control.subprocess, "Popen", lambda *a, **k: proc)
+
+    changed, message = controller.start()
+
+    assert changed is True
+    assert "5150" in message, "the reported PID must be the published daemon's"
 
 
 def test_stop_removes_the_pid_file_without_signalling_a_pid_it_did_not_start(
@@ -452,6 +512,8 @@ def test_restart_stops_then_starts(tmp_path, monkeypatch):
         return proc
 
     monkeypatch.setattr(daemon_control.subprocess, "Popen", fake_popen)
+    # As above: the fake stays alive and publishes no PID, so skip the grace.
+    monkeypatch.setattr(daemon_control, "START_REFUSAL_GRACE_SECONDS", 0)
 
     changed, message = controller.restart()
     assert calls == ["stop", "start"]

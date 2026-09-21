@@ -66,6 +66,16 @@ STOP_TIMEOUT_SECONDS = (
 TAIL_BYTES = 64 * 1024
 TAIL_LINES = 500
 
+# How long ``start`` waits for a just-spawned daemon to prove it started rather
+# than refuse. The runner takes the PID file with an exclusive create *before* it
+# detaches, so the refusal is decided by the process ``Popen`` returned: it exits
+# non-zero on a refusal and 0 on a clean detach. On Windows there is no fork, so
+# that process keeps running and the signal is a live PID published in the file.
+# The wait ends at whichever comes first, so the full grace is only reached by a
+# process that is alive but has published nothing.
+START_REFUSAL_GRACE_SECONDS = 3.0
+_START_REFUSAL_POLL_SECONDS = 0.05
+
 # Constants for the Windows liveness probe.
 _SYNCHRONIZE = 0x00100000
 _WAIT_TIMEOUT = 0x00000102
@@ -225,10 +235,63 @@ class DaemonController:
                 [sys.executable, "-m", "src.daemon_runner", self.config_path, "--daemon"],
                 **kwargs,
             )
-            return True, f"Daemon started (PID: {self._proc.pid})"
+            refusal = self._await_spawn_outcome()
+            if refusal is not None:
+                # The daemon refused before it detached, so there is no process to
+                # keep and no success to report.
+                self._proc = None
+                return False, refusal
+            pid = self.read_pid() or (self._proc.pid if self._proc else None)
+            return True, f"Daemon started (PID: {pid})"
         except Exception as exc:
             logging.warning("Failed to start daemon: %s", exc)
             return False, f"Failed to start daemon: {exc}"
+
+    def _await_spawn_outcome(self) -> str | None:
+        """The refusal sentence when the spawned daemon refused, else None.
+
+        ``is_running`` said no before the spawn, so a PID file is either absent
+        or names a dead process. The daemon is started only once the process it
+        spawned either exits 0 (the ``--daemon`` fork parent detaches) or
+        publishes a live PID; a non-zero exit is the runner's refusal -- an
+        existing PID file, or a create failure such as a missing directory.
+        Exhausting the grace is treated as started: the process is alive and has
+        simply not published yet. Only the runner's own PID-file work happens
+        before either signal, so the honest answer usually arrives in
+        milliseconds rather than at the deadline.
+        """
+        deadline = time.monotonic() + START_REFUSAL_GRACE_SECONDS
+        while True:
+            if self._proc is None:
+                return None
+            code = self._proc.poll()
+            if code is not None and code != 0:
+                return self._spawn_refusal_message(code)
+            pid = self.read_pid()
+            if pid is not None and _pid_alive(pid) is not False:
+                return None
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(_START_REFUSAL_POLL_SECONDS)
+
+    def _spawn_refusal_message(self, code: int) -> str:
+        """What to tell the operator about a daemon that exited without starting.
+
+        The runner explains itself on its own stderr, which the controller sends
+        to ``DEVNULL``: the exit code is the honest channel, and the PID file is
+        re-read here so the sentence can name the file and the PID that blocked
+        the start.
+        """
+        pid = self.read_pid()
+        if pid is not None:
+            return (
+                f"Daemon refused to start (exit code {code}): {self.pid_file} "
+                f"already exists (PID: {pid}). Stop that daemon, or delete the "
+                f"file if it is left over from a crash, then start again.")
+        return (
+            f"Daemon refused to start (exit code {code}); {self.pid_file} "
+            f"blocked it or could not be created. See the daemon log for the "
+            f"reason.")
 
     def _owned_pid(self) -> int | None:
         """The PID of a process this controller started, or None.
