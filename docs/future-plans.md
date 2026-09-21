@@ -649,3 +649,27 @@ red star outline** in both front ends, from one shared source the way the other 
 What `s` does for each existing marker state (`never`, `queued`, `subscribed`, `downloaded`) — and
 what it does when the item is already queued — is to be settled from that state machine before the
 work starts, not guessed. [tui.md](tui.md), [web-ui.md](web-ui.md), [data-pipeline.md](data-pipeline.md)
+
+## Ignoring a creator
+
+**Status: needs a decision before it is briefed.** Owner request, 2026-09-21.
+
+Flagging a creator as ignored should make every one of their workshop items ignored, and any new item
+from that creator ignored immediately as it is scraped. The `creators` table has no status column
+today — `steamid`, `personaname`, `personaname_en`, `api_fetched_at`, `translated_at`,
+`translation_priority` — so this needs one plus a migration, and `CREATOR_COLUMNS`, which is the
+upsert whitelist, has to move with it.
+
+**New items can only be attributed at the API merge.** Discovery's page response carries the
+`publishedfileid` alone (`src/daemon.py:1633`), so the creator is learned from the detail fetch, where
+`_merge_and_clean_api_data` remaps the API's `creator` to `creator_steamid` (`src/daemon.py:642`). The
+queue would spend that request anyway on an unfetched item, so the cost is bounded — but the ignore
+necessarily lands after it, before the web scrape, image and translation stages are queued, which is
+the part that actually saves work.
+
+**Open, and the reason this is not briefed.** How inheritance is modelled — a materialised item status
+with provenance that makes un-ignoring exact, versus a creator-flag join in every query and queue
+predicate, versus a one-way cascade that cannot be undone. Where the operator triggers it, given that
+the detail pane is the only place either front end names a creator. Whether un-ignoring a creator
+restores their items, and to what state. And whether an ignored creator's profile stops being
+refreshed. [data-model.md](data-model.md), [tui.md](tui.md), [web-ui.md](web-ui.md)
