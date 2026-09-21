@@ -288,6 +288,11 @@ def snapshot_database(db_path: str, dest_path: str) -> dict:
     the temp file lives next to the destination rather than in the system temp
     directory.
 
+    Only *reads* cross from the source database's volume: the ``VACUUM INTO``
+    write, the verification of the copy and the ``os.replace`` publish all
+    happen on the destination (outbox) volume. The source can therefore live on
+    a different drive, and no cross-volume move is relied on.
+
     The write needs room for a complete second copy, so a destination volume
     with demonstrably too little free space is refused before anything is
     written (:func:`_require_free_space`). On any failure the previous

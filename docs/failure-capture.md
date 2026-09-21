@@ -296,7 +296,11 @@ The outbox holds two kinds of thing, and they are cleaned differently.
   and leaves the previous snapshot byte-identical, rather than starting a write
   it cannot finish. A reading that is unavailable — `os.path.getsize` or
   `shutil.disk_usage` raising `OSError` — is not evidence of no room, so it is
-  skipped and the snapshot proceeds.
+  skipped and the snapshot proceeds. Only *reads* cross from the source
+  database's volume: the write, the verification of the copy and the
+  `os.replace` publish all happen in `<outbox_dir>/db/` itself, so the source
+  database and the outbox may live on different drives and no cross-volume move
+  is relied on.
 
 Removing a capture also drops its `manifest.json` entry in the same operation
 (`backup.remove_manifest_entries`), and the pull tool does the same when it moves
