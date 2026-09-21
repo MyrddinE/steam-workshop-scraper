@@ -15,7 +15,7 @@ diagnostic exception escape would stop the work that produced the fact.
 
 **Steam is the only authority, but it is not the only witness.** The cookie
 states its own expiry, so a doomed request can be recognised before it is made
-and a freshly pushed cookie can be judged without a round trip; that is what
+and a freshly saved cookie can be judged without a round trip; that is what
 :func:`evaluate_login` is for. It is never the last word -- a session can be
 revoked while its token still looks valid -- so a sign-in page that arrives
 anyway is recorded too, and it is the *only* thing that clears the record.

@@ -414,7 +414,7 @@ Starts a Waitress server in a daemon thread serving the Flask app. Waitress bind
 
 The chosen port is stored as an `int` (Waitress reports it as a string). If startup fails after the socket was bound, the server is closed so the port is not left occupied.
 
-The server shares the TUI's database connection path (set via `init_webserver`). It also shares the `_pushed_sessionid` global for subscribe operations.
+The server shares the TUI's database connection path (set via `init_webserver`), so the TUI's subscribe action calls its route against the same database.
 
 ### Subscribe Action (Ctrl+B)
 

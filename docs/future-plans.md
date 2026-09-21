@@ -436,17 +436,44 @@ The old wording is also load-bearing in three places that would move with it:
 
 ## Removing the browser bridge from the subscribe path
 
-**Status: The Web UI half has landed; removing the bridge has not.** The captured evidence arrived:
-two real subscribes were run against production, captured end to end, and the browser-free engine
-that replaces the bridge's job exists in `src/subscribe_engine.py` and drives the TUI's subscription
-queue and, through `/api/subscribe/<id>`, the Web UI's Subscribe button and queue drain. What remains
-is the removal of the bridge itself, deliberately deferred until the new path has been proven in use.
+**Status: Landed.** The browser-free engine in `src/subscribe_engine.py` drives the TUI's subscription
+queue and, through `/api/subscribe/<id>`, the Web UI's Subscribe button and queue drain; the owner ran
+it for days and then uninstalled the userscript. The bridge is gone, with everything that existed only
+to serve it.
 
-The Web UI could not subscribe on its own, and that was the only reason the Tampermonkey bridge exists: the server could not build a working Steam session request, so a browser tab did the subscribing and reported the outcome back. Everything the bridge compensates for is now addressed on the server side — the credential comes from one read (`web_scraper._build_workshop_cookies`, which is also where the CSRF token now comes from), the request presents the same identity as every scrape, and `/api/subscribe/<id>` records the confirmation instead of discarding it. That is the same route the TUI has always called, and the Web UI now calls it too: `doSubscribe` POSTs it, and `_startAutoSubscribe` drains the queue through it one awaited call at a time, so the flow opens no tab. **The bridge is still installed and still works** — the userscript, `/api/sessionid`, `/api/subscribed`, the verification poll and the throttle endpoints are untouched — it has simply stopped being the path the Web UI takes, so the new one can be observed before anything is deleted.
+The Web UI could not subscribe on its own, and that was the only reason the Tampermonkey bridge
+existed: the server could not build a working Steam session request, so a browser tab did the
+subscribing and reported the outcome back. Everything the bridge compensated for is now addressed on
+the server side — the credential comes from one read (`web_scraper._build_workshop_cookies`), the
+request presents the same identity as every scrape, and `/api/subscribe/<id>` records the
+confirmation instead of discarding it. That is the same route the TUI has always called, and the Web
+UI now calls it too: `doSubscribe` POSTs it, and `_startAutoSubscribe` drains the queue through it one
+awaited call at a time, so the flow opens no tab.
 
-Once that observation is done, the bridge becomes removable along with everything that exists to serve it: the userscript, the `autosubscribe=true` tab flow, the `/api/sessionid` token push, the verification poll against `/api/queued` and `/api/subscribe_failures`, and the throttle-reporting endpoints. The subscribe action in the Web UI is already one request to the route the TUI uses, and the grid's marker updates from the read-back that follows it.
+**What went, and why it was safe.** The removal was driven by callers, not by this plan's prose: a
+route or path was deleted only when, with the userscript gone, nothing in the repository called it.
+The userscript file (and the now-empty `userscripts/` directory) went with its `autosubscribe=true`
+tab flow; so did `POST /api/sessionid` (the only writer of `_pushed_sessionid`), the bridge's outcome
+reports `POST /api/subscribe_failed/<id>` and `POST /api/subscribe_throttled/<id>`, the
+`/userscript/<file>` install endpoint, the page's `_userscriptPresent` detection and
+`userscript-version` meta, and the now-unread `WEB_DELAY` injection. **Kept because the browser-free
+flow calls them:** `GET /api/queued` (the drain's queue read and its overlay poll),
+`GET /api/subscribe_failures` and `GET /api/subscribe_throttle` (that poll and the per-item throttle
+check — so the plan's "verification poll" and "throttle-reporting endpoints" are only half bridge),
+and `POST /api/subscribed/<id>` (the overlay's Cancel and Clear Failed dequeue calls). The two kept
+reads now have no writer and report the resting state; removing the drain's use of them would be a
+behaviour change, not part of this removal.
 
-One thing this must not quietly drop: the tab flow spread many subscribes across a browser session and reported throttle pages separately, and the replacement needs equivalent pacing rather than a burst of server-side POSTs. The project already has the machinery — the shared AIMD delay and the per-account budget — so this is a matter of routing subscribe through it, not of inventing something. The engine does exactly that: its page read (and the confirmation read, when the switch is on) waits the shared `daemon.web_delay_seconds` and feeds its outcome back into it, while the subscribe POST is the click and is deliberately exempt (it is an XHR, not a page load). The Web UI's drain adds no client-side delay and never has two calls in flight, so the interval is paid once per item inside the route.
+**The pacing did not regress.** The tab flow spread many subscribes across a browser session and
+reported throttle pages separately; the replacement's pacing is the engine's shared AIMD interval —
+the persisted `daemon.web_delay_seconds` — with the subscribe POST deliberately exempt because it is
+an XHR, not a page load. The drain adds no client-side delay and awaits each call, so it never has two
+requests in flight and the interval is paid once per item inside the route. Three tests pin it:
+`tests/test_webserver.py::test_the_queue_drain_calls_the_subscribe_route_once_per_item_in_order`
+(the serial loop), `test_the_route_gates_its_page_read_on_the_shared_interval` (the single gated
+read), and `tests/test_subscribe_engine.py::test_every_page_read_waits_the_interval_and_the_post_does_not`
+with `test_the_pass_spaces_every_item` and `test_a_wall_grows_and_persists_the_shared_interval` (the
+shared interval and its throttle doubling).
 
 ---
 

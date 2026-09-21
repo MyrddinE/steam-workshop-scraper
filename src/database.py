@@ -3170,17 +3170,6 @@ def toggle_subscription_queue(db_path: str, workshop_id: int):
     conn.commit()
     conn.close()
 
-def clear_subscription_queue(db_path: str, workshop_id: int):
-    """Explicitly clears the subscription queue flag for a workshop item."""
-    conn = get_connection(db_path)
-    conn.execute(
-        "UPDATE workshop_items SET is_queued_for_subscription = 0 WHERE workshop_id = ?",
-        (workshop_id,)
-    )
-    conn.commit()
-    conn.close()
-
-
 def mark_own_subscribed(db_path: str, workshop_id: int, seen_at: int | None = None) -> bool:
     """Record that the owner is subscribed to ``workshop_id`` right now.
 

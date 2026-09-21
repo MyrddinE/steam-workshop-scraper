@@ -30,8 +30,9 @@ from an answer body:
   banner can say so.
 
 This module holds the engine those facts dictate. It is deliberately shared:
-the TUI's subscription queue drives it now, and the web UI adopts it next (the
-userscript bridge is the thing being retired -- see ``docs/future-plans.md``).
+the TUI's subscription queue drives it, and the web UI drives it through
+``/api/subscribe`` for both the Subscribe button and its queue drain (see
+``docs/future-plans.md``).
 The request *shape* lives here too, and ``/api/subscribe`` builds its POST from
 :func:`resolve_subscribe_credentials`, :func:`subscribe_headers` and
 :func:`subscribe_form` rather than keeping a second copy.
@@ -344,7 +345,7 @@ def token_log_note(token: str, page_token: str, fallback_token: str) -> str:
     """The one-line fingerprint note both call sites log for a subscribe POST.
 
     Never the token itself. When the page's ``g_sessionID`` differs from the
-    pushed/configured token it replaced, both fingerprints are named: that
+    fallback token it replaced, both fingerprints are named: that
     difference is exactly what a stale CSRF token looks like from the log alone,
     and it is what took an afternoon to find the first time.
     """
@@ -376,14 +377,14 @@ def page_read_authenticated(page_html: str | bytes | None) -> bool:
 
 
 def resolve_subscribe_credentials(config: dict, token_fallback: str = ""):
-    """The cookie set, the pushed/configured token fallback, and the login cookie.
+    """The cookie set, the fallback CSRF token, and the login cookie.
 
     The cookies and the login come from one read of the cookie source, so the
     credential and the cookie set cannot belong to different sessions. The CSRF
     token is deliberately *not* taken from that read: ``sessionid`` is a session
     cookie Firefox never persists, so the profile read cannot supply the current
     one. :func:`resolve_subscribe_token` prefers the page's own ``g_sessionID``;
-    the value returned here is only the pushed ``token_fallback`` or the
+    the value returned here is only an explicit ``token_fallback`` or the
     configured ``session.csrf_token``, for a page that carries no token.
 
     Returns ``(cookies, fallback_token, login)``; the fallbacks may be empty, and
@@ -408,8 +409,8 @@ def resolve_subscribe_token(page_html: str | bytes | None, cookies: dict,
 
     The precedence is the whole fix for a refused subscribe: the token Steam
     injected into the page this attempt already read (``g_sessionID``), then a
-    ``sessionid`` already in the cookie set, then the pushed/configured
-    fallback. Whichever wins is put back into the cookie jar, so the form field
+    ``sessionid`` already in the cookie set, then the configured fallback.
+    Whichever wins is put back into the cookie jar, so the form field
     and the cookie agree -- Steam answers a mismatch between them exactly as it
     answers a stale one.
 
@@ -678,8 +679,9 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
     The exact flow is in the module docstring. ``config`` supplies the cookie
     source (``web_scraper._build_workshop_cookies``) and the configured session
     id; ``db_path`` is where the subscription and any session problem are
-    recorded. ``token_fallback`` is the pushed token the embedded web
-    server keeps in memory; the TUI passes nothing and relies on the config.
+    recorded. ``token_fallback`` is an explicit CSRF token for a caller that
+    already has one; the TUI and the web route pass nothing and rely on the
+    config and the page's own token.
 
     ``interval`` is the shared web interval the page read honours -- and the
     confirmation read too, when :data:`VERIFY_AFTER_SUBSCRIBE` re-enables it. A
@@ -760,8 +762,7 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
         data = resp.json()
     except Exception as exc:  # noqa: BLE001 - the engine reports, never raises
         # A body that is not JSON can be Steam's throttle shell, which is not a
-        # failure of the item: the userscript learned to tell them apart, and so
-        # does this. A 401 with an unreadable body is still a refusal.
+        # failure of the item. A 401 with an unreadable body is still a refusal.
         if getattr(resp, "status_code", None) == 401:
             return refusal_outcome(
                 workshop_id, page_authenticated=page_authenticated,

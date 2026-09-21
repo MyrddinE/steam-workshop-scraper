@@ -153,9 +153,9 @@ An adaptive-timeout poll that keeps a rendered cell's markers in step with the d
   [Unattended Tolerance](#unattended-tolerance)).
 
 **Reading the database rather than hooking each writer.** The poll is the one path that notices a
-subscription change, so every writer of the flag is covered by one refresh: the userscript bridge's
-`POST /api/subscribed/<id>`, this page's own cancel/clear calls to the same route, and the direct
-`POST /api/subscribe/<id>` route (which stamps on Steam `success == 1`). The autosubscribe verifier
+subscription change, so every writer of the flag is covered by one refresh: this page's own
+cancel/clear calls to `POST /api/subscribed/<id>`, and the direct
+`POST /api/subscribe/<id>` route (which stamps on Steam `success == 1`). The subscribe drain
 reads the same queue exit to mark the overlay's rows, independently of the grid. Because
 `_listNeedsPoll` only runs when a batch is rendered, `toggleDetailQueue` also starts the poll on the
 transition into `queued`, so a marker clicked into the queue after the search is watched too.
@@ -284,7 +284,7 @@ translation poll re-render the pane without reverting the toggle. A failed reque
 the pane alone.
 
 The click is not the only writer. A subscribe can land behind a rendered cell through
-`POST /api/subscribed/<id>` (the userscript bridge, or this page's cancel/clear calls) or through the
+`POST /api/subscribed/<id>` (this page's cancel/clear calls) or through the
 direct `POST /api/subscribe/<id>` route, and none of those touches the DOM. The item-update registry
 is what re-reads such a cell: `_startListPoll` keeps re-reading any row whose subscription marker is
 still `queued` at its fastest, and `_startItemUpdatePoll` re-reads every displayed row on its 3-second
@@ -300,14 +300,16 @@ invariant rests on it.
 The marker sits inside the cell that opens the detail pane, so its click handler stops propagation:
 without that, toggling the queue would also drag the pane to the item.
 
-The Web UI's subscribe action now runs through the server, not the browser bridge. `doSubscribe` POSTs
+The Web UI's subscribe action runs entirely through the server. `doSubscribe` POSTs
 `/api/subscribe/<id>`, which reads the item page on the server, takes that page's own CSRF token,
 posts to Steam and records the answer — the route the TUI has always driven
-([data-pipeline.md](data-pipeline.md#subscribe-engine-browser-free)). **The bridge is not removed.**
-The userscript, `/api/sessionid`, `/api/subscribed`, the verification poll and the throttle endpoints
-all stay exactly as they were; the page has simply stopped using the tab flow as its path. The owner
-wants the new route proven in use before anything is deleted, so the bridge stays installed and the
-deprecation stays recorded in
+([data-pipeline.md](data-pipeline.md#subscribe-engine-browser-free)). The browser bridge that used to
+do this from a Steam tab is **removed**: the userscript, the `autosubscribe=true` tab flow,
+`/api/sessionid` and the bridge's outcome reports are gone, and nothing in the page opens a tab or
+looks for an extension any more. What the drain still reads (`/api/queued`,
+`/api/subscribe_failures`, `/api/subscribe_throttle`) stays mounted because it is the browser-free
+flow's own bookkeeping; see [the drain](#queued-row-timing-and-why-it-differs-from-the-tuis). The
+removal is recorded in
 [future-plans.md](future-plans.md#removing-the-browser-bridge-from-the-subscribe-path).
 
 `previously` can only ever mean "we have **seen** this account subscribed". Steam exposes no
@@ -428,66 +430,36 @@ The header toolbar's **Analysis** button (`#btn-analysis`, `templates/index.html
 
 ## Subscribe Feature
 
-### Userscript Bridge (`userscripts/steam_subscribe.user.js`)
+### Browser-free subscribe
 
-A Tampermonkey/Greasemonkey userscript that bridges the Steam session to the web UI:
-- On `steamcommunity.com`: captures `sessionid` and `steamLoginSecure` via `GM_setValue`, shows a toast notification on change
-- On the scraper web UI: stamps `document.body.dataset.userscript = '1'` and `userscriptVer` for detection, and pushes both cookies to `/api/sessionid` — on load, then re-checked every 30 seconds but sent only when a value has actually changed, with a slow re-push as the safety net for a backend that restarted and lost its in-memory session
-- Retries a failed push with a bounded backoff rather than a fixed five-second loop: five seconds, doubling to a one-minute cap, at most six retries, then it gives up. A success resets the backoff, and the thirty-second interval remains the slow probe for a backend that comes back later
-- Version checking: reads `<meta name="userscript-version">` from the page and compares with `GM_info.script.version` — refuses to operate if outdated
-
-**Reading the login cookie needs `GM_cookie`, and HttpOnly.** Steam marks `steamLoginSecure`
-HttpOnly, so `document.cookie` can never contain it — which is why an earlier version reported
-`login_secure: missing` on every push regardless of how the session was configured. `GM_cookie.list`
-does return HttpOnly cookies, but the vendor's documentation states that support is
-**BETA builds of Tampermonkey only**; on a stable build the script silently falls back to
-`document.cookie` and captures `sessionid` alone. The two cookies differ in more than visibility:
-`sessionid` is a CSRF token, while `steamLoginSecure` is the thing that authenticates the session.
-
-The version literal appears in both this file and `templates/index.html`; nothing links them, so
-`tests/test_userscript_contract.py` asserts they agree. Installed copies update from the script's
-`@updateURL`, so bumping the literal is also how an installed bridge receives a behaviour fix.
-
-**Retrying a down backend.** A failed session push is retried, but not forever: six retries
-scheduled five, ten, twenty, forty, sixty and sixty seconds later (doubling, capped at one minute and
-capped again by the attempt limit), after which the fast chain stops. Only one chain runs at a time,
-so a thirty-second interval tick cannot start a parallel stream. The interval itself keeps its
-original job — a slow probe that re-syncs a backend that restarted — and a successful push resets the
-schedule, so a transient failure later retries promptly. The change-detection is untouched: an
-unchanged value still costs no request until the stale re-push window elapses.
-
-**Throttling.** Steam answers an over-budget request with **HTTP 200** and its ordinary page shell
-carrying "too many requests", so the subscribe button is simply absent. The plugin checks for that
-wording before concluding anything, and reports it to `/api/subscribe_throttled/<id>` rather than
-`/api/subscribe_failed/<id>`. The difference matters: a throttled item is **left queued** so the next
-drain retries it, whereas a genuine failure is cleared. The UI polls `/api/subscribe_throttle` once per tab it
-opens and stops opening more while Steam is refusing us, telling the user when the rest can be retried.
-The budget is per account or address and refills over minutes.
-
-### Detection (`_userscriptPresent`)
-
-Checks `document.body.dataset.userscript` for presence and `userscriptVer` against the page's expected version from the meta tag. If outdated, offers to open the install URL.
-
-**Nothing calls it on the subscribe path any more**, because that path is the server route and needs no
-userscript. The function, the `userscript-version` meta and the endpoint it points at are kept as
-part of the bridge, which stays installed; the button's own install prompt is gone with its last
-caller, so the script is reachable by visiting `/userscript/steam_subscribe.user.js` directly. The
-detection contract — the meta tag and the script's own `@version` agreeing — is still asserted by
-`tests/test_userscript_contract.py`.
-
-### Install URL
-
-`/userscript/steam_subscribe.user.js` is a dynamic endpoint that injects `@include` lines for the server's host IP and port, so the script works on LAN IPs as well as localhost. It was the "Subscribe" button's install link; that button no longer opens tabs, so the URL is reached directly.
+The Web UI subscribes through the server. `doSubscribe` POSTs `/api/subscribe/<id>`, and the queue
+drain (`_startAutoSubscribe`) calls the same route once per queued item. There is no userscript, no
+Tampermonkey bridge and no Steam tab: the page holds no session material, and the route builds its
+request from the shared helpers in `src/subscribe_engine.py`. The userscript, its
+`autosubscribe=true` tab flow, the `/api/sessionid` token push, the `/userscript/<file>` install
+endpoint and the `userscript-version` meta tag were removed once the route had been proven in use.
+The removal is recorded in
+[future-plans.md](future-plans.md#removing-the-browser-bridge-from-the-subscribe-path).
 
 ### Subscribe Flow
 
 1. User clicks Subscribe on the web UI → `doSubscribe` POSTs `/api/subscribe/<workshop_id>`
-2. Server reads `steamLoginSecure` (from config `session.login_secure`, which can be a YAML list joined with `%7C%7C`) and the item page it fetches on the shared web interval; the CSRF token is that page's own `g_sessionID`, with the pushed `_pushed_sessionid` and config `session.csrf_token` as fallbacks
+2. Server reads `steamLoginSecure` (from config `session.login_secure`, which can be a YAML list joined with `%7C%7C`) and the item page it fetches on the shared web interval; the CSRF token is that page's own `g_sessionID`, with a `sessionid` in the cookie set and config `session.csrf_token` as fallbacks
 3. Server POSTs to `steamcommunity.com/sharedfiles/subscribe` with browser-like headers (User-Agent, Origin, Referer with workshop URL) and cookies
 4. Steam's answer is mapped to user-facing messages: a refusal (`success: 2`/`15`, or HTTP 401) is a stale CSRF token when the same attempt's page read was authenticated — the login is not reported as expired — and a session problem only when that read was anonymous
 5. On `success: 1` the route stamps `own_subscribed` and clears the queue flag; the page then re-reads `/api/item/<id>` and re-renders the pane and the matching cell's marker from that payload, the same read-back a queue toggle uses
 
-The button sends no tab and needs no userscript. `_userscriptPresent` and its install prompt remain in the page, but nothing in the subscribe action calls them any more: the bridge is kept for its own endpoints, not as this button's fallback. A refusal shows the route's own message rather than falling back to a tab.
+The button sends no tab and needs no userscript; a refusal shows the route's own message rather than
+falling back to a tab.
+
+**Throttling.** Steam answers an over-budget request with **HTTP 200** and its ordinary page shell
+carrying "too many requests", so the subscribe button is simply absent. The engine's page read
+recognises that wording, returns a `throttled` outcome and leaves the item **queued** for the next
+drain, and its shared `WebInterval` doubles the delay so the next request is paced further apart. The
+drain checks `/api/subscribe_throttle` before each item and stops the pass if a throttle is recorded,
+telling the user when the rest can be retried; the bridge that used to write that state through
+`/api/subscribe_throttled/<id>` is gone, so the read now reports the resting state unless something
+records one. The budget is per account or address and refills over minutes.
 
 **A drain serialises; it does not schedule.** `_startAutoSubscribe` loops over `/api/queued` and
 awaits `/api/subscribe/<id>` for each item before starting the next. The route's page read is gated on
@@ -508,12 +480,9 @@ restores the second read). Nothing in the page spaces the requests: the route re
 delay itself, fresh per call, so a throttle's doubling mid-pass moves the pacing without the page
 knowing, and a second client-side delay would pay the interval twice per item.
 
-`daemon.web_delay_seconds` is still injected as `WEB_DELAY`, but the page no longer uses it to space
-anything. It is left in place rather than removed: it is served from `src/webserver.py` and is the
-number a reader would expect the page's own timing to be built from, and the removal of the tab flow
-that used it is the separate workstream recorded in
-[future-plans.md](future-plans.md#removing-the-browser-bridge-from-the-subscribe-path). The TUI
-screen's own description is in [tui.md](tui.md#subscription-queue-sl-keys).
+`daemon.web_delay_seconds` is no longer injected into the page at all: the tab flow was its only
+consumer, so `WEB_DELAY` went with the bridge rather than staying behind as a number nothing reads.
+The TUI screen's own description is in [tui.md](tui.md#subscription-queue-sl-keys).
 
 ---
 
@@ -560,7 +529,7 @@ Saves the current enrichment filters to `app_discovery` for the configured AppID
 
 ### `/api/subscribe/<id>` — POST
 
-Performs the subscribe against Steam directly, with no browser tab, and returns Steam's JSON body unchanged — the TUI reads `success` and `message` from it. The request shares the scraper's session and presents the project's own Firefox User-Agent. The cookies come from one `web_scraper._build_workshop_cookies` read: the signed-in Firefox profile's whole `steamcommunity.com` set when `session.read_firefox_cookies` is on, otherwise the configured `sessionid`/`login_secure` pair. **The CSRF token does not come from that read**, because `sessionid` is a session cookie Firefox keeps in memory and never writes to `cookies.sqlite`; it comes from the item page this route reads for the attempt (`g_sessionID`, the token belonging to the session that served that page), put back into the cookie jar so the form field and the cookie agree. A `sessionid` already in the set, the pushed `_pushed_sessionid` global and `session.csrf_token` are fallbacks only for a page that carries no token. That read is a page load, so it is gated on the shared web interval — `daemon.web_delay_seconds` through `configured_web_delay` and `pacing.wait` — exactly like the engine's reads.
+Performs the subscribe against Steam directly, with no browser tab, and returns Steam's JSON body unchanged — the TUI reads `success` and `message` from it. The request shares the scraper's session and presents the project's own Firefox User-Agent. The cookies come from one `web_scraper._build_workshop_cookies` read: the signed-in Firefox profile's whole `steamcommunity.com` set when `session.read_firefox_cookies` is on, otherwise the configured `sessionid`/`login_secure` pair. **The CSRF token does not come from that read**, because `sessionid` is a session cookie Firefox keeps in memory and never writes to `cookies.sqlite`; it comes from the item page this route reads for the attempt (`g_sessionID`, the token belonging to the session that served that page), put back into the cookie jar so the form field and the cookie agree. A `sessionid` already in the set and `session.csrf_token` are fallbacks only for a page that carries no token; the in-memory token the old userscript pushed through `/api/sessionid` went with the bridge. That read is a page load, so it is gated on the shared web interval — `daemon.web_delay_seconds` through `configured_web_delay` and `pacing.wait` — exactly like the engine's reads.
 
 It refuses before spending a request when the set has no `steamLoginSecure` (**400**, with a message naming the remedy: sign in to Steam in the browser the daemon reads cookies from, or configure `session.login_secure`), and when `session_health.evaluate_login` says the credential's own token has expired (**400**, the reason recorded through `session_health.record_rejected` so the [session warning](#the-session-warning) shows it). A Steam `success` of `2` or `15`, or an **HTTP 401**, is a refusal of the CSRF token, and what it means depends on the page read the same attempt made: beside an **authenticated** page read the credential is proven good, so **no session problem is recorded** and the refusal is logged as a token refusal (recording one is what used to tell the owner to sign in again while the login was working); beside an **anonymous** page read it is recorded as a session problem the same way as before. The response body is passed through untouched either way. A `success` of `1` records the confirmation with `mark_own_subscribed`, setting `own_subscribed` and clearing `is_queued_for_subscription` exactly as `/api/subscribed/<id>` does, and clears any recorded session problem. A missing item still answers **404** `Item not found.`, an item with no AppID still **400** `Item has no AppID.`, and a transport failure still **502**. Each of those refusals logs the `workshop_id` and the reason, and the POST line carries a SHA-256 **fingerprint** of the token — never the token itself.
 
@@ -572,11 +541,15 @@ Flips `is_queued_for_subscription` for one item and answers `{ok: true}`. It is 
 
 Windows only. Opens the item's downloaded workshop folder in Explorer **on the host running the server** (the browser's own machine is not involved), through the shared `src.workshop_folders.open`. It refuses with **400** `{ok: false, message}` when the platform is not Windows, when the item is not in the `downloaded` state (`own_subscribed` and `steam_download_seen_at` both set), and when the folder is not on disk at click time — naming the folders it looked in, and changing nothing. A success is **200** `{ok: true, folder, message}`. The route is not rendered into the page off Windows, and no state is written or cleared either way.
 
-### `/api/sessionid` — POST
+### Bridge-only endpoints — removed
 
-Accepts sessionid from the userscript. Stores it in the `_pushed_sessionid` global (for server-side subscribe, where it is now only the fallback for a page that carries no `g_sessionID` — see `/api/subscribe/<id>` above); if the payload also carries a `login_secure` value that differs from the configured one, that is written to `_config["session"]["login_secure"]` (for the Steam cookie) and persisted so the daemon picks it up. The TUI subscribe action also calls through the server endpoint.
-
-A push whose `login_secure` matches what is already configured writes nothing. The bridge re-pushes on a timer, so without that guard an open Steam tab rewrote `config.yaml` — a YAML serialisation and a file write — every thirty seconds with a value that had not moved. The CSRF token is still taken from every push, because it lives only in memory. A push that *does* carry a changed cookie is also the best local evidence that the login works again — it comes from the operator's own signed-in browser — so a value that is not already expired clears the [session warning](#the-session-warning) without waiting for a scrape to confirm it.
+`POST /api/sessionid` (the userscript's token/login push), `POST /api/subscribe_failed/<id>` and
+`POST /api/subscribe_throttled/<id>` (its outcome reports), and the `/userscript/<file>` dynamic
+install endpoint are gone with the userscript. `GET /api/subscribe_failures` and
+`GET /api/subscribe_throttle` **stay**, because the browser-free drain reads them before and during a
+pass; with their only writer removed they report the resting state (an empty list, and
+`throttled_at: 0`). `POST /api/subscribed/<id>` also stays: the page's own Cancel and Clear Failed
+buttons post it to dequeue the rows they leave behind.
 
 ### `/api/session` — GET
 
@@ -613,7 +586,3 @@ Drive the background daemon through the shared `DaemonController`. Each returns 
 ### `/api/daemon/log` — GET
 
 Incremental log tail and bounded preview. Accepts `since_offset=<byte-offset>` and returns `{lines, offset, reset}`; the pre-rename `since` key is still accepted, because a page served before the rename may still be open in a browser. At most 64 KiB is read (`DaemonController.TAIL_BYTES`, `src/daemon_control.py:23`) and at most 500 lines are returned (`TAIL_LINES`, `src/daemon_control.py:24`), so a first call (`since_offset <= 0`) returns the tail of the file rather than the whole of it. `offset` is the byte position to pass as `since_offset` on the next poll. `reset` is true when the returned lines do not continue from `since_offset` — the first call against a file larger than the window, a rotation or truncation, or the caller having fallen more than `max_bytes` behind — so the client knows its view has a gap and starts over. A missing or unreadable log returns an empty list rather than an error.
-
-### `/userscript/<file>` — dynamic script injection
-
-Serves the userscript with `@include` lines for the server's host (from `request.host`), enabling LAN IP access.

@@ -31,9 +31,9 @@ import time
 from typing import NamedTuple
 
 # The separator between the steamid and the token. Steam hands the cookie out in
-# the encoded form; the raw form is what a config written by hand or by the
-# userscript tends to contain. Both are read, encoded first because the raw
-# separator never occurs inside the encoded one.
+# the encoded form; the raw form is what a config written by hand tends to
+# contain. Both are read, encoded first because the raw separator never occurs
+# inside the encoded one.
 RAW_SEPARATOR = "||"
 ENCODED_SEPARATOR = "%7C%7C"
 SEPARATORS = (ENCODED_SEPARATOR, RAW_SEPARATOR)

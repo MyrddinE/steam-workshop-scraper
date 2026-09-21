@@ -2,14 +2,12 @@
 
 import json
 import os
-import time
 import re
 import logging
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, clear_subscription_queue, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items
+from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items
 from src.analysis import view_window_analysis
 from src import capture
-from src import crash
 from src import activity
 from src import images
 from src import metrics
@@ -22,7 +20,6 @@ from src import workshop_folders
 from src.config import configured_outbox_dir, login_secure_value, save_config
 from src.daemon_control import DaemonController
 from src.firefox_cookies import steam_login_secure
-from src.web_worker import WEB_DELAY_DEFAULT
 
 app = Flask(__name__, template_folder='../templates')
 app.config['TEMPLATES_AUTO_RELOAD'] = True
@@ -48,9 +45,9 @@ def _attach_image_state(rows):
 
 @app.after_request
 def _do_not_cache_generated_pages(response):
-    """Stop the browser serving a stale copy of the page or the userscript.
+    """Stop the browser serving a stale copy of the page.
 
-    Both are generated per request and read from disk each time, so a cached copy
+    The page is generated per request and read from disk each time, so a cached copy
     is always a stale copy — and there were no validators either, no ETag and no
     Last-Modified, so the browser had nothing to revalidate against and reused
     its copy freely. That cost real time: a web-UI fix was deployed and verified
@@ -68,7 +65,6 @@ def _do_not_cache_generated_pages(response):
 _db_path = "workshop.db"
 _config = {}
 _images_dir = "images"
-_pushed_sessionid = ""
 _config_path = "config.yaml"
 _daemon_controller = None
 # The shared folder helper. Created by init_webserver; None until then, which is
@@ -167,43 +163,17 @@ def serve_image(filename):
 
 @app.route('/')
 def index():
-    # The worker owns the default; share its constant so an unset delay does not
-    # display a number the decay rule would immediately raise to the floor.
-    web_delay = float((_config.get("daemon", {}) or {}).get("web_delay_seconds", WEB_DELAY_DEFAULT))
     # The open-folder control is Windows-only, so the page is told whether to
     # render it at all: off Windows the button and the `o` shortcut are absent,
     # not merely inert.
     # The notice wording is shared with the TUI rather than retyped in the
     # template, so the two detail panes cannot describe the same queue state
     # differently.
-    return render_template('index.html', web_delay=web_delay,
+    return render_template('index.html',
                            translation_notice=pending.TRANSLATION_REQUESTED_NOTICE,
                            filter_schema_json=json.dumps(SEARCH_FILTER_SCHEMA),
                            open_folder_enabled=bool(
                                _workshop_folders and _workshop_folders.is_supported()))
-
-
-@app.route('/userscript/<path:filename>')
-def serve_userscript(filename):
-    script_path = os.path.join(os.path.dirname(__file__), '..', 'userscripts', filename)
-    if not os.path.isfile(script_path):
-        return jsonify({"error": "not found"}), 404
-
-    with open(script_path, 'r', encoding='utf-8') as handle:
-        content = handle.read()
-
-    host = request.host
-    if host and not host.startswith('127.') and not host.startswith('localhost'):
-        base = f"http://{host}"
-        metadata_lines = [
-            f'// @include      {base}/*',
-            f'// @updateURL    {base}/userscript/{filename}',
-            f'// @downloadURL  {base}/userscript/{filename}',
-        ]
-        marker = '// ==/UserScript=='
-        content = content.replace(marker, '\n'.join(metadata_lines) + '\n' + marker)
-
-    return content, 200, {'Content-Type': 'application/javascript; charset=utf-8'}
 
 
 @app.route('/api/search', methods=['POST', 'GET'])
@@ -586,27 +556,25 @@ def _ensure_image_flagged(workshop_id, priority):
 def api_subscribe(workshop_id):
     """Subscribe to an item against Steam directly, with no browser tab.
 
-    This is the userscript bridge's half of the flow: it sends the request and
-    records Steam's answer, while the browser plugin watches the page. The
-    browser-free engine in ``src/subscribe_engine.py`` owns the request shape
-    and is what the TUI (and the web UI next) drives; this route builds its POST
-    from the same helpers rather than keeping a second copy.
+    This is the browser-free path: the Web UI's Subscribe button and queue drain
+    both call it, and it is the route the TUI has always driven. The engine in
+    ``src/subscribe_engine.py`` owns the request shape, and this route builds its
+    POST from the same helpers rather than keeping a second copy.
 
-    The CSRF token now comes from the item page this route reads, exactly as the
+    The CSRF token comes from the item page this route reads, exactly as the
     engine's does. ``sessionid`` is a session cookie Firefox keeps in memory and
     never writes to ``cookies.sqlite``, so the profile read can never carry the
     current one; the page's own ``g_sessionID`` is the token that belongs to the
-    credential that authenticated that read. The pushed ``_pushed_sessionid`` global and
-    ``session.csrf_token`` are only a fallback for a page that carries no token, which is
-    what keeps the userscript-driven flow working for an anonymous page. The read
-    is gated on the shared web interval -- ``daemon.web_delay_seconds`` through
-    ``configured_web_delay`` and ``pacing.wait`` -- so it honours the same rate
-    the daemon's worker and the engine keep. **Nothing else this route decides
+    credential that authenticated that read. A ``sessionid`` in the built cookie
+    set and ``session.csrf_token`` are only fallbacks for a page that carries no
+    token. The read is gated on the shared web interval -- ``daemon.web_delay_seconds``
+    through ``configured_web_delay`` and ``pacing.wait`` -- so it honours the same
+    rate the daemon's worker and the engine keep. **Nothing else this route decides
     changed**: the same refusal branches, the same status codes, the same
     response bodies. (What a refusal *records* did change; see the block below.)
     """
     cookies, fallback_token, login = subscribe_engine.resolve_subscribe_credentials(
-        _config, _pushed_sessionid)
+        _config)
     logging.info(
         f"[Subscribe] request for workshop_id={workshop_id}, "
         f"token_fallback={'set' if fallback_token else 'missing'}, "
@@ -674,66 +642,15 @@ def api_subscribe(workshop_id):
                 session_health.record_rejected(
                     _db_path, subscribe_engine.SUBSCRIBE_SESSION_REJECTED_DETAIL)
         elif success == 1:
-            # The confirmation is the same fact `/api/subscribed/<id>` stamps for
-            # the browser bridge: mark it subscribed and clear the queue flag.
-            # The engine's verified branch records it through
-            # `subscribe_engine.record_confirmed_subscription`.
+            # The confirmation is the same fact `/api/subscribed/<id>` stamps:
+            # mark it subscribed and clear the queue flag. The engine's verified
+            # branch records it through `subscribe_engine.record_confirmed_subscription`.
             mark_own_subscribed(_db_path, workshop_id)
             session_health.record_accepted(_db_path)
         return jsonify(data)
     except Exception as e:
         logging.warning(f"[Subscribe] failed for workshop_id={workshop_id}: {e}")
         return jsonify({"success": -1, "message": f"Subscribe request failed: {e}"}), 502
-
-
-@app.route('/api/sessionid', methods=['POST'])
-def api_sessionid():
-    global _pushed_sessionid
-    data = request.get_json(silent=True) or {}
-    sid = data.get("sessionid", "").strip()
-    login_secure = data.get("login_secure", "").strip()
-    if not sid:
-        return jsonify({"ok": False, "message": "No sessionid provided."}), 400
-
-    _pushed_sessionid = sid
-    # A pushed token and a refreshed login cookie may match nothing in the
-    # config or the browser profile, so hand both to the crash reporter now: a
-    # crash inside the subscribe route would otherwise write them verbatim.
-    crash.register_secret(sid)
-    if login_secure:
-        crash.register_secret(login_secure)
-    # Only the login cookie is persisted; the CSRF token stays in memory. The
-    # bridge re-pushes on a timer, and a cookie is valid for days, so a push that
-    # carries the value already on disk must not rewrite the config file. That
-    # rewrite is the expensive half of the old handler: YAML serialisation and a
-    # file write every thirty seconds, per open Steam tab, for no change.
-    changed = bool(login_secure) and login_secure_value(_config) != login_secure
-    if not login_secure:
-        persist_state = "missing"
-    elif not changed:
-        persist_state = "unchanged"
-    else:
-        _config.setdefault("session", {})["login_secure"] = login_secure
-        # Persist it so the daemon sees it. The daemon is a separate process
-        # from this web server, and the web scraper re-reads config.yaml for
-        # each request, so this is what makes a refreshed login cookie take
-        # effect without restarting anything.
-        try:
-            save_config(_config_path, _config)
-            persist_state = "set and persisted"
-        except Exception as exc:
-            persist_state = f"set but not persisted ({exc})"
-        # A push carries the operator's own live credential, so it is the best
-        # evidence available here that the login works again. Judged from the
-        # token alone -- Steam is not asked -- which is the same rule the
-        # recheck route uses, and a value that is not expired clears the warning.
-        if session_health.evaluate_login(login_secure) is None:
-            session_health.record_accepted(_db_path)
-
-    # A push that changed nothing is worth a debug line, not an info one.
-    log_line = logging.info if changed else logging.debug
-    log_line("SessionID updated from userscript (login_secure: %s)", persist_state)
-    return jsonify({"ok": True})
 
 
 @app.route('/api/toggle_subscription_queue/<int:workshop_id>', methods=['POST'])
@@ -744,48 +661,39 @@ def api_toggle_subscription_queue(workshop_id):
 
 @app.route('/api/subscribed/<int:workshop_id>', methods=['POST'])
 def api_subscribed(workshop_id):
-    """The userscript confirming a subscribe that Steam accepted.
+    """Stamp an item as subscribed and clear its queue flag.
 
-    This is the highest-fidelity signal the project gets: it fires the instant
-    the subscribe lands, so the marker is right before the next reconcile, and
-    the stamp is made from a confirmed subscribe rather than a page scrape.
-    ``mark_own_subscribed`` also clears the queue flag -- there is nothing
-    pending for an item that is now subscribed -- which is what the route used
-    to do alone, throwing the subscription fact away.
+    ``mark_own_subscribed`` sets ``own_subscribed`` and clears
+    ``is_queued_for_subscription`` — there is nothing pending for an item that is
+    now subscribed. The Web UI's subscribe overlay posts this for every row a
+    Cancel or Clear Failed leaves behind, and the direct ``POST
+    /api/subscribe/<id>`` route records the same fact from Steam's own
+    ``success: 1``.
     """
     mark_own_subscribed(_db_path, workshop_id)
     return jsonify({"ok": True})
 
 
+# The bridge reported a failed subscribe here; with the userscript gone nothing
+# writes the set, but the Web UI's drain still reads it (GET below) to tell a
+# dropped row apart from a failed one, so the read and the set stay.
 _subscribe_failures = set()  # in-memory set of workshop_ids that failed subscription
-
-
-@app.route('/api/subscribe_failed/<int:workshop_id>', methods=['POST'])
-def api_subscribe_failed(workshop_id):
-    clear_subscription_queue(_db_path, workshop_id)
-    _subscribe_failures.add(workshop_id)
-    return jsonify({"ok": True})
 
 
 # Shipping a throttle as a failure was wrong twice over: the item was never
 # attempted, and clearing it from the queue threw away the work the drain had
-# queued up. A throttled item therefore stays queued, and the UI stops opening
-# tabs until the request budget refills — Steam's is per account or address and
-# refills over minutes.
+# queued up. A throttled item therefore stays queued, and the drain stops
+# spending calls until the request budget refills — Steam's is per account or
+# address and refills over minutes.
+#
+# The bridge used to report a throttle through POST `/api/subscribe_throttled`;
+# with the userscript gone there is no writer, but the drain still reads the
+# state below (`_checkSubThrottle` in `templates/index.html`) before each item,
+# so the read and its globals stay. The engine's own `WebInterval` is what backs
+# the delay off when its page read sees a throttle page.
 SUBSCRIBE_THROTTLE_PAUSE_SECONDS = 300.0
 _subscribe_throttled_at = 0.0
 _subscribe_throttled_id = None
-
-
-@app.route('/api/subscribe_throttled/<int:workshop_id>', methods=['POST'])
-def api_subscribe_throttled(workshop_id):
-    global _subscribe_throttled_at, _subscribe_throttled_id
-    _subscribe_throttled_at = time.time()
-    _subscribe_throttled_id = workshop_id
-    logging.warning(
-        "[Subscribe] Steam throttled the request for workshop_id=%s; it stays queued "
-        "and is retried once the budget refills.", workshop_id)
-    return jsonify({"ok": True, "retry_after": SUBSCRIBE_THROTTLE_PAUSE_SECONDS})
 
 
 @app.route('/api/subscribe_throttle')

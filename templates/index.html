@@ -3,7 +3,6 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="userscript-version" content="10">
 <title>Steam Workshop Scraper</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
 <style>
@@ -320,7 +319,6 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 </style>
 
 <script>
-const WEB_DELAY = {{ web_delay }};
 const SEARCH_FILTER_SCHEMA = {{ filter_schema_json | safe }};
 // The one wording for a queued-for-translation item, shared with the TUI and
 // defined in src/pending.py. Injected rather than retyped so the two detail
@@ -954,8 +952,8 @@ function _startListPoll(filters, sortBy, sortOrder) {
       // marker is still `queued`: a subscribe can land behind the cell's back
       // and that row has no spinner to be found by. Deciding here from the
       // rendered state means the marker is refreshed from the database, so no
-      // writer of the flag -- the userscript's /api/subscribed, this page's own
-      // cancel/clear calls, or /api/subscribe -- can bypass the refresh.
+      // writer of the flag -- this page's cancel/clear calls or /api/subscribe
+      // -- can bypass the refresh.
       grid.querySelectorAll('.grid-cell[data-wid]').forEach(el => {
         const sub = el.querySelector('.grid-sub');
         if (el.classList.contains('has-spinner') ||
@@ -1493,9 +1491,6 @@ async function showDetail(wid) {
   } catch(e) { pane.innerHTML = '<p>Error loading detail: ' + e.message + '</p>'; }
 }
 
-const US_RAW_URL = '/userscript/steam_subscribe.user.js';
-const US_EXPECTED_VER = parseInt(document.querySelector('meta[name="userscript-version"]')?.content || '1', 10);
-
 async function doUpdateVisible() {
   const visibleIds = [];
   document.querySelectorAll('.grid-cell[data-wid]').forEach(el => {
@@ -1548,26 +1543,9 @@ async function doDeleteNeverFetched() {
 }
 
 
-function _userscriptPresent() {
-  const body = document.body;
-  if (!body || !body.dataset.userscript) return false;
-  const ver = parseInt(body.dataset.userscriptVer || '0', 10);
-  if (ver < US_EXPECTED_VER) {
-    const ok = confirm(
-      `Your Subscribe Bridge userscript is outdated (v${ver}). The page expects v${US_EXPECTED_VER}.\n\n` +
-      'Click OK to open the latest version for installation.'
-    );
-    if (ok) window.open(US_RAW_URL, '_blank');
-    return false;
-  }
-  return true;
-}
-
 // Subscribe for real: POST /api/subscribe/<id>, which reads the item page on
 // the server, takes that page's own CSRF token, posts to Steam and records the
-// answer. No tab is opened and the userscript is not involved -- the bridge is
-// still installed and still works (its routes and its version meta are
-// untouched), it is simply no longer the path this button takes.
+// answer. No tab is opened and no browser extension is involved.
 //
 // The route paces its page read on the shared interval and leaves the POST
 // exempt, so the wait is inside the call. Nothing is added on top of it here.
@@ -1893,13 +1871,13 @@ let _subThrottleStopped = false;
 
 // Drain the queue through `/api/subscribe/<id>`, one item at a time.
 //
-// The route does the whole job now -- it reads the item page, takes that page's
-// CSRF token, posts and records the answer -- so this no longer opens Steam tabs
-// for the userscript to fill in. What it still owns is the pacing the route
-// cannot impose on its caller: the loop awaits each call before starting the
-// next, so two items are never in flight at once, and it adds no delay of its
-// own. The route's page read already waits out the shared web interval (the POST
-// is exempt), so a second helper delay here would double the cost per item.
+// The route does the whole job -- it reads the item page, takes that page's
+// CSRF token, posts and records the answer -- and no tab is opened. What this
+// still owns is the pacing the route cannot impose on its caller: the loop
+// awaits each call before starting the next, so two items are never in flight at
+// once, and it adds no delay of its own. The route's page read already waits out
+// the shared web interval (the POST is exempt), so a second helper delay here
+// would double the cost per item.
 //
 // `_subPollIv` still re-reads the queue so the rows reflect the database rather
 // than this loop's own bookkeeping, and the pass still pauses the daemon while
@@ -1942,8 +1920,9 @@ async function _startAutoSubscribe() {
   const verified = new Set();
 
   // Poll for the marker — the loop below marks each call's own answer, but the
-  // database is the authority on the row, and the userscript bridge can still
-  // move the same flag behind this pass's back.
+  // database is the authority on the row, and a write landing elsewhere (this
+  // page's cancel/clear calls, or another tab) can move the same flag behind
+  // this pass's back.
   _subPollIv = setInterval(async () => {
     try {
       const [qresp, fresp] = await Promise.all([

@@ -159,7 +159,7 @@ SHUTDOWN_BUDGET_SECONDS = 20.0
 # The owner's subscriptions are reconciled once per appid at startup and then on
 # this cadence. Daily is the right order for it: the list only moves when a
 # human subscribes or unsubscribes, the one moment that matters (a subscribe the
-# userscript confirmed) is stamped immediately by /api/subscribed, and a walk is
+# engine recorded) is stamped immediately by the subscribe paths, and a walk is
 # a handful of page fetches against Steam's budget. Like the staleness sweep,
 # this is a housekeeping task on the per-batch path, so it runs on the first
 # batch and is guarded by a monotonic interval afterwards.

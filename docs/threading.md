@@ -263,4 +263,4 @@ so it is not covered by this figure.
 
 The TUI starts a Waitress web server in a daemon thread during `ScraperApp.__init__`. The thread uses `waitress.serve()` which blocks until the process exits. The port is persisted to `config.yaml` on first run and reused on subsequent launches. `action_quit` calls `self.exit()`, which terminates the main thread, and the daemon web thread dies with the process.
 
-The web server and the TUI share the same `_db_path` (global variable in webserver module, set by `init_webserver`). They also share `_config` and `_pushed_sessionid` globals. No explicit locking exists; Flask handles request concurrency internally. Database reads use their own connections via `get_connection`.
+The web server and the TUI share the same `_db_path` (global variable in webserver module, set by `init_webserver`). They also share `_config`. No explicit locking exists; Flask handles request concurrency internally. Database reads use their own connections via `get_connection`.
