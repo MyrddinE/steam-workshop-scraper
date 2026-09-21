@@ -17,9 +17,11 @@ the production database on 2026-09-12.
 
 ### Issue 9
 
-**`status = 206` is never written** — *Informational*, Info
+**`fetch_status = 206` is never written** — *Informational*, Info
 
-The migration that flags items needing a web scrape treats `206` as a partial-data status that still needs one (`src/database.py:1123`), but no code writes it and the live database contains zero such rows. [data-model.md](data-model.md#known-gaps).
+**What wrote it.** The daemon's own web-scrape step, inline in the old `process_batch`: when `scrape_extended_details(url)` came back empty it saved the row with `status = 206 # Partial Content` and logged "partial data saved" — the API data was kept, the extended description was not. *Measured* with `git log -S "= 206"`: written once, at `src/daemon.py` in the initial commit `f2c5d9f`; carried through `a7492cb` (`base_data` → `merged_data`, same write); the column renamed `status` → `fetch_status` in `490e832`; and removed in `1de02cd` ("Stages 2+3: Separate web scraping into WebScraperThread"), which moved the scrape into `WebScraperThread`. The worker does not replace it with a partial status: a page without a description has its `web_scrape_priority` cleared and stays, and a missing item is the API's own `404`. So `206` is a fossil of the pre-worker design, and the live database holds zero such rows.
+
+**What is left.** One reference in live logic — migration 2→3 flags `extended_description IS NULL AND status IN (200, 206)` as needing a web scrape (`src/database.py:1535`) — plus a comment naming the column's vocabulary (`src/database.py:2693`). The migration body is *correct history*, not a defect: a v2 database replayed through the chain can hold a `206` row, and dropping the value would leave that row unqueued for the scrape it was waiting on. Same reasoning as the `tags` name issue 8 closes on. [data-model.md](data-model.md#known-gaps).
 
 ### Issue 21
 
