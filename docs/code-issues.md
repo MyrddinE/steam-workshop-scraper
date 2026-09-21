@@ -63,6 +63,12 @@ The line reports `count_never_fetched_items` as "items that have never been fetc
 
 `daemon_runner.main()` writes `.daemon.pid` unconditionally and then calls `initialize_database`, with no check for a daemon already running, so starting `python -m src.daemon_runner` by hand while another runs overwrites the live PID file and applies pending migrations under it — the hazard issue 63 just closed for the UI path. The first daemon watches for the file's *absence* rather than its contents, so it keeps running; the two then share one PID file, and whichever exits first removes it and stops the other. `DaemonController.start()` already checks `is_running()` before spawning, so the UI path is guarded and this is the operator-error path only. Closing it needs a read-before-overwrite probe of the existing PID file plus a liveness check, which conflicts with the deliberate “write the PID file before migrating” order and revives the stale/recycled-PID hazard the controller was fixed to avoid — so it is recorded rather than patched. [threading.md](threading.md), [cross-platform.md](cross-platform.md)
 
+### Issue 67
+
+**Three TUI contrast tests read the checkout's real database** — *Open*, Low
+
+`tests/test_tui_accessibility.py` takes a `mock_config` fixture in all four of its tests, but only `test_details_pane_contrast` patches `load_config` with it. The other three — `test_main_ui_contrast`, `test_command_palette_contrast` and `test_select_dropdown_contrast` — build `ScraperApp()` from the checkout's real configuration, so they open `workshop.db` in the repository root, a gitignored artefact rather than a fixture. It surfaced on 2026-09-21 when `EXPECTED_VERSION` moved 35→36: the leftover v35 `workshop.db` sent `test_main_ui_contrast` down the pending-migration path in `initialize_database_with_daemon_stopped`, which refuses rather than migrate under a daemon it believes is running, so the test failed with `SystemExit: 2` for a reason that has nothing to do with contrast. A re-run passed, because the first run had already migrated the artefact — the worst shape a test failure can have, since the evidence is consumed by the failure itself. [schema-migrations.md](schema-migrations.md), [tui.md](tui.md)
+
 ## Recently closed
 
 Removed from the list above rather than marked resolved. Each is now documented as current
