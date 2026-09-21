@@ -225,8 +225,9 @@ _TIMERS_WITHOUT_THEIR_OWN_READ = {
         "reads through refresh_subscription_rows, which is guarded",
     ("StatsScreen", "_on_scheduler_tick"):
         "reads on the stats worker, which catches a failed metric and retries",
-    ("DaemonManagerScreen", "_poll_tail"):
-        "reads the daemon log file, not the database",
+    ("DaemonManagerScreen", "_tick"):
+        "reads the PID file, the log file's size, and the log itself; "
+        "no database access",
     ("SubscriptionQueueScreen", "_tick_estimates"):
         "redraws an estimate; no database access",
     ("ScraperApp", "_tick_spinners"):
