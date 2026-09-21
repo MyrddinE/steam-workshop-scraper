@@ -63,6 +63,12 @@ The line reports `count_never_fetched_items` as "items that have never been fetc
 
 `daemon_runner.main()` writes `.daemon.pid` unconditionally and then calls `initialize_database`, with no check for a daemon already running, so starting `python -m src.daemon_runner` by hand while another runs overwrites the live PID file and applies pending migrations under it — the hazard issue 63 just closed for the UI path. The first daemon watches for the file's *absence* rather than its contents, so it keeps running; the two then share one PID file, and whichever exits first removes it and stops the other. `DaemonController.start()` already checks `is_running()` before spawning, so the UI path is guarded and this is the operator-error path only. Closing it needs a read-before-overwrite probe of the existing PID file plus a liveness check, which conflicts with the deliberate “write the PID file before migrating” order and revives the stale/recycled-PID hazard the controller was fixed to avoid — so it is recorded rather than patched. [threading.md](threading.md), [cross-platform.md](cross-platform.md)
 
+### Issue 68
+
+**The cursor scan cannot tell when it has run out of new items** — *Open*, High
+
+`seed_database`'s cursor loop (`src/daemon.py:1473`) has exactly two stops: `fill_target` new items found, or Steam returning an empty `next_cursor`. Neither is reachable once the pages it is walking are already known, so it keeps requesting a page every `api_delay` and discovering nothing. *Measured live* on 2026-09-21 for AppID 431960 (~3,211,000 items, about 32,000 pages at 100 per request): the recent passes scanned **13,487 / 1,724 / 5,624 / 6,964 pages**, each discovering **0** new items, at roughly 2.3 pages a second — the whole catalogue between 03:35 and 07:11 — and every pass ended only because the API refused (`API error for AppID 431960. Halting discovery.`), after which the next pass resumed from the saved cursor and repeated. **`Cursor exhausted` never appears in 400,000 lines of the log**, so the fall-back it enables — page-based discovery — has never been reached that way; and `_cursor_exhausted` is in-memory only (`src/daemon.py:456`), so a restart clears even the state the loop cannot reach. The page-based mode already has the rule the cursor loop lacks: it stops on the first page that adds nothing new or updated (`src/daemon.py:1613`). [data-pipeline.md](data-pipeline.md)
+
 ## Recently closed
 
 Removed from the list above rather than marked resolved. Each is now documented as current
