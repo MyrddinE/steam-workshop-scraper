@@ -1050,6 +1050,13 @@ class Daemon:
         merged_data = self._merge_and_clean_api_data(api_data, merged_data, item_id, now_ts)
         display_title = merged_data.get('title_en') or merged_data.get('title', 'Unknown Title')
 
+        # Wilson scoring is a pure computation over the fetched counts, not a
+        # queue stage, so it runs before the ignored-creator branch: a settled
+        # item keeps the scores that describe it, and un-ignoring restores a row
+        # the percentiles can colour correctly instead of one with NULL scores
+        # that nothing will refresh (its `api_fetched_at` is already stamped).
+        self._score_wilson(merged_data)
+
         # Attribution for a new item can only happen here. Discovery's page
         # response carries the `publishedfileid` alone, so the creator is first
         # known once this item's own detail request has returned -- the request
@@ -1067,7 +1074,6 @@ class Daemon:
         # promote an item the enrichment filters excluded above one they selected.
         inherited_priority = stored_item.get("api_priority", 0)
 
-        self._score_wilson(merged_data)
         outcome = self._raise_scrape_and_image_priorities(merged_data, stored_item, item_id, inherited_priority)
 
         merged_data["fetch_status"] = 200

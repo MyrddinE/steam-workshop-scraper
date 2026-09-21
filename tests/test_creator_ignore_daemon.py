@@ -73,6 +73,9 @@ def _payload(creator):
         "preview_url": "https://example.invalid/preview.jpg",
         "creator": creator,
         "time_updated": 1000,
+        "favorited": 50,
+        "subscriptions": 100,
+        "lifetime_subscriptions": 200,
     }
 
 
@@ -107,6 +110,8 @@ def test_a_new_item_from_an_ignored_creator_lands_settled_with_no_queues(db_path
     assert _queue_rows(db_path) == [], "and no translation field is queued either"
     assert row["api_fetched_at"] is not None, \
         "the detail request succeeded, so its clock is recorded"
+    assert row["wilson_favorite_score"] > 0 and row["wilson_subscription_score"] > 0, \
+        "the free derived scores are computed, so an un-ignore restores a colour-able row"
     assert get_next_items_to_fetch(db_path) == [], \
         "an ignored item is in no fetch queue"
 
