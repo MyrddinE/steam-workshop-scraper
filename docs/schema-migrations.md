@@ -46,7 +46,7 @@ Primary key: `workshop_id INTEGER PRIMARY KEY` (aliased from rowid). Columns:
 | web_scrape_priority | INTEGER | Priority for web scraping (10=detail, 5=list, 3=new, 1=backlog, 0=done). Renamed from `needs_web_scrape` in v33: it holds a priority, not a boolean |
 | image_priority | INTEGER | Priority for image download (same scale as web_scrape_priority). Renamed from `needs_image` in v33 |
 | image_answer | TEXT | The download's answer, not only a file extension: a real extension (e.g. "jpg"), a wholly numeric HTTP status, or a served non-image token; NULL if nothing is recorded. Renamed from `image_extension` in v33 |
-| is_queued_for_subscription | INTEGER | Subscription queue flag, set by the TUI and web UI and cleared when the userscript reports an outcome. Transient: reads 0 when nothing is queued |
+| is_queued_for_subscription | INTEGER | Subscription queue flag, set by the TUI and web UI and cleared when the item is subscribed or the overlay drops it. Transient: reads 0 when nothing is queued |
 | own_subscribed | INTEGER | Whether the owner (the account whose key and cookies are configured) is subscribed to this item right now. Reconciled from Steam; not the item-wide `subscriptions` count |
 | own_first_subscribed_at | INTEGER | When we first *saw* the owner subscribed; sticky, and the only source of the `previously` state |
 | steam_download_seen_at | INTEGER | One-way local latch: when this app first saw Steam's downloaded copy of a subscribed item on disk (v26). Set only by `src/workshop_folders`, cleared only beside `own_subscribed` when the item leaves the subscription list. NULL means not confirmed on disk. Renamed from `downloaded_at` in v33: it is a sighting latch, not a completion clock |

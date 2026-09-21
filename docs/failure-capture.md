@@ -173,8 +173,8 @@ in play are usually the whole answer, and they are guarded three ways:
   and OpenAI API keys from the config **and** the environment (`load_config`
   strips an env-derived key from the config before saving, so the config alone is
   not enough), and any value registered at runtime through
-  `crash.register_secret` -- today the pushed CSRF token in `/api/sessionid` and
-  a refreshed `steamLoginSecure` wherever it is persisted.
+  `crash.register_secret` -- today a refreshed `steamLoginSecure` wherever it is
+  persisted.
 * Each value is truncated (~2,000 characters), the locals per frame and the
   whole file are capped (256 KB), and a value whose `repr` raises is skipped
   rather than allowed to break the dump. The caps are recorded in the header.

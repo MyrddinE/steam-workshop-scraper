@@ -404,11 +404,11 @@ def _extract_total_pages(response) -> int:
 def _workshop_cookies_or_empty() -> dict:
     """Cookies for the current config, or none if it cannot be read.
 
-    Read per call rather than cached: the login cookie is short-lived and is
-    refreshed by the userscript pushing to `/api/sessionid`, which persists it.
-    Caching it for the process lifetime would mean a refreshed cookie never took
-    effect until the daemon restarted. An unreadable config yields an anonymous
-    request rather than a failed scrape.
+    Read per call rather than cached: the login cookie is short-lived, and the
+    session recheck route persists a refreshed one. Caching it for the process
+    lifetime would mean a refreshed cookie never took effect until the daemon
+    restarted. An unreadable config yields an anonymous request rather than a
+    failed scrape.
     """
     try:
         return _build_workshop_cookies(load_config("config.yaml"))

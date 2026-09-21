@@ -314,8 +314,9 @@ This browser shape was prompted by the "too many requests" page described above:
 ## Subscribe Engine (browser-free)
 
 `src/subscribe_engine.py` performs the owner's subscription without a browser tab. It is the shared
-implementation both front ends will use: the TUI's subscription queue drives it today, and the Web UI
-adopts it next (the Tampermonkey bridge that does this from a browser tab is being retired — see
+implementation both front ends use: the TUI's subscription queue drives it, and the Web UI drives it
+through `/api/subscribe/<id>` for its Subscribe button and queue drain (the Tampermonkey bridge that
+used to do this from a browser tab has been removed — see
 [future-plans.md](future-plans.md#removing-the-browser-bridge-from-the-subscribe-path)).
 
 The behaviour is dictated by facts measured against production, not by what the response body seems
@@ -332,7 +333,7 @@ to say:
 * `sessionid` is a **session cookie**: Firefox keeps it in memory and never writes it to
   `cookies.sqlite`, so a profile read can never supply the current one. The page carries
   `g_sessionID` instead, which belongs to the session that served that page, and it is the token the
-  POST uses. The cookie set's `sessionid`, the pushed `_pushed_sessionid` global and `session.csrf_token` are only
+  POST uses. The cookie set's `sessionid` and `session.csrf_token` are only
   fallbacks for a page that carries no token.
 
 So one run is:

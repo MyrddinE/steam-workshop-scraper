@@ -123,8 +123,8 @@ _DUMP_LOCK = threading.Lock()
 # only "have we seen this before?" state there is.
 _ERROR_COUNT = 0
 
-# Credentials learned at runtime -- a pushed CSRF token, a refreshed
-# `steamLoginSecure` -- that may exist nowhere in the config or the profile.
+# Credentials learned at runtime -- a refreshed `steamLoginSecure` -- that may
+# exist nowhere in the config or the profile.
 _REGISTERED = deque(maxlen=REGISTERED_SECRET_LIMIT)
 
 _state = {
@@ -225,11 +225,10 @@ def uninstall():
 def register_secret(value):
     """Remember a credential the process learned at runtime, for the scrub.
 
-    The pushed CSRF token and a refreshed ``steamLoginSecure`` exist nowhere in
-    the config and may match nothing in the browser profile, so a crash inside
-    the route that just stored one would otherwise dump it verbatim. Callers are
-    ordinary request handlers: this never raises, and only the most recent
-    handful of values are kept.
+    A refreshed ``steamLoginSecure`` exists nowhere in the config and may match
+    nothing in the browser profile, so a crash inside the route that just stored
+    one would otherwise dump it verbatim. Callers are ordinary request handlers:
+    this never raises, and only the most recent handful of values are kept.
     """
     try:
         if value is None:

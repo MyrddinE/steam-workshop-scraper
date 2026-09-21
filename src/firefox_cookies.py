@@ -1,8 +1,7 @@
 """Read the Steam login cookie from a local Firefox profile.
 
-`steamLoginSecure` is HttpOnly, so a userscript running in the page can never see
-it through `document.cookie`, and Tampermonkey only exposes HttpOnly cookies on
-BETA builds. Firefox keeps it in plaintext in `cookies.sqlite` inside the
+`steamLoginSecure` is HttpOnly, so no page script can see it through
+`document.cookie`. Firefox keeps it in plaintext in `cookies.sqlite` inside the
 profile directory, and the daemon runs as the same user who owns that profile,
 so it can be read with no browser plugin at all — and, because the browser
 refreshes it during ordinary use, without anyone copying it by hand.
@@ -183,8 +182,8 @@ def steam_community_cookies(refresh: bool = False, profiles_root: Path | None = 
     """Every steamcommunity.com cookie in the profile, or {} if unavailable.
 
     The login cookie is the credential, but `sessionid` lives here too — it is
-    not HttpOnly, which is why the userscript could always supply it. Reading the
-    set from one place means the two cannot come from different sessions.
+    not HttpOnly. Reading the set from one place means the two cannot come from
+    different sessions.
 
     The first non-empty read is remembered, and re-read only when ``refresh`` is
     asked for or the remembered ``steamLoginSecure`` says its own token has
