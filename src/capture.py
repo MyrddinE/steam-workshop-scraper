@@ -59,6 +59,7 @@ import threading
 from datetime import datetime, timezone
 
 from src.backup import update_manifest
+from src.config import warn_retired_key
 
 # How many samples of one shape are kept.
 SAMPLES_PER_DIGEST = 3
@@ -226,19 +227,15 @@ def web_download_switch(daemon_config) -> bool:
 
     Two processes read this switch -- the daemon and the web server, which owns
     the server-side subscribe -- so the lookup lives here rather than being
-    copied into both, and the deprecated name is honoured in both with the same
-    warning. A config that still uses ``capture_web_scrapes`` keeps working and
-    is told to rename it; the current key wins when both are present.
+    copied into both. The renamed ``capture_web_scrapes`` spelling is retired:
+    the live log has not shown its warning in a long time, so a config that
+    still carries it gets one warning and captures nothing. The image switch
+    beside this one has no renamed predecessor.
     """
     daemon_config = daemon_config or {}
-    current = daemon_config.get("capture_web_downloads")
-    legacy = daemon_config.get("capture_web_scrapes")
-    if current is None and legacy is not None:
-        logging.warning(
-            "Config key 'capture_web_scrapes' is deprecated and still honoured; "
-            "rename it to 'capture_web_downloads'."
-        )
-    return bool(current if current is not None else (legacy or False))
+    if "capture_web_scrapes" in daemon_config:
+        warn_retired_key("daemon", "capture_web_scrapes", "capture_web_downloads")
+    return bool(daemon_config.get("capture_web_downloads", False))
 
 
 def is_enabled() -> bool:

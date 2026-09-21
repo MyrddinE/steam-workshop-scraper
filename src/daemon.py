@@ -347,21 +347,19 @@ class Daemon:
         self.db_path = config.get("database", {}).get("path", "workshop.db")
         self.api_key = config.get("api", {}).get("key", "")
         daemon_config = config.get("daemon", {})
-        # `daemon.batch_size` and `daemon.user_staleness_days` are retired: their
-        # values are no longer read, so a config that carries only the old
-        # spelling gets the current setting's default, with one warning naming
-        # the dead key. The current spelling is read directly.
+        # `daemon.batch_size`, `daemon.user_staleness_days` and
+        # `daemon.request_delay_seconds` are retired: their values are no longer
+        # read, so a config that carries only the old spelling gets the current
+        # setting's default, with one warning naming the dead key. The current
+        # spelling is read directly.
         if "batch_size" in daemon_config:
             warn_retired_key("daemon", "batch_size", "api_batch_size")
         self.api_batch_size = daemon_config.get("api_batch_size")
         if self.api_batch_size is None:
             self.api_batch_size = 10
-        if daemon_config.get("api_delay_seconds") is None and daemon_config.get("request_delay_seconds") is not None:
-            logging.warning(
-                "Config key 'request_delay_seconds' is deprecated and still honoured; "
-                "rename it to 'api_delay_seconds'."
-            )
-        self.api_delay = daemon_config.get("api_delay_seconds") or daemon_config.get("request_delay_seconds", 1.5)
+        if "request_delay_seconds" in daemon_config:
+            warn_retired_key("daemon", "request_delay_seconds", "api_delay_seconds")
+        self.api_delay = daemon_config.get("api_delay_seconds") or 1.5
         self.item_staleness_days = int(daemon_config.get("item_staleness_days") or 30)
         if "user_staleness_days" in daemon_config:
             warn_retired_key("daemon", "user_staleness_days", "creator_staleness_days")
@@ -402,8 +400,8 @@ class Daemon:
         # collect pages to do it. Image *failures* need neither switch — the
         # outbox alone is enough, like every other failure capture. The web
         # switch is resolved by `capture.web_download_switch` because the web
-        # server process reads the same key for the subscribe route, and the
-        # deprecated `capture_web_scrapes` name has to be honoured in both.
+        # server process reads the same key for the subscribe route. The image
+        # switch has no renamed predecessor, so it is read straight from config.
         self.capture_web_downloads = capture.web_download_switch(daemon_config)
         self.capture_image_downloads = bool(daemon_config.get("capture_image_downloads", False))
         self.backup_interval_seconds = float(daemon_config.get("backup_interval_seconds") or 0)

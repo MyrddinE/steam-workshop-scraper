@@ -14,7 +14,7 @@ def test_seed_database_fetches_multiple_cursors(mock_sleep, mock_query, tmp_path
     config = {
         "database": {"path": db_path},
         "api": {"key": "test_key"},
-        "daemon": {"target_appids": [1062090], "api_batch_size": 10, "request_delay_seconds": 0}
+        "daemon": {"target_appids": [1062090], "api_batch_size": 10, "api_delay_seconds": 0.01}
     }
     daemon = Daemon(config)
 
@@ -41,7 +41,7 @@ def test_seed_database_stops_after_enough_items(mock_sleep, mock_query, tmp_path
     config = {
         "database": {"path": db_path},
         "api": {"key": "test_key"},
-        "daemon": {"target_appids": [1062090], "api_batch_size": 10, "request_delay_seconds": 0}
+        "daemon": {"target_appids": [1062090], "api_batch_size": 10, "api_delay_seconds": 0.01}
     }
     daemon = Daemon(config)
 
@@ -69,7 +69,7 @@ def test_seed_database_resumes_from_cursor(mock_sleep, mock_query, tmp_path):
     config = {
         "database": {"path": db_path},
         "api": {"key": "test_key"},
-        "daemon": {"target_appids": [1062090], "api_batch_size": 10, "request_delay_seconds": 0}
+        "daemon": {"target_appids": [1062090], "api_batch_size": 10, "api_delay_seconds": 0.01}
     }
     daemon = Daemon(config)
 
@@ -96,7 +96,7 @@ def test_seed_database_starts_from_star(mock_sleep, mock_query, tmp_path):
     config = {
         "database": {"path": db_path},
         "api": {"key": "test_key"},
-        "daemon": {"target_appids": [1062090], "api_batch_size": 10, "request_delay_seconds": 0}
+        "daemon": {"target_appids": [1062090], "api_batch_size": 10, "api_delay_seconds": 0.01}
     }
     daemon = Daemon(config)
 

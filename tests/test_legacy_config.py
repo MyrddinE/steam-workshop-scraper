@@ -32,35 +32,43 @@ def _retired_warnings(caplog, legacy_key):
     ]
 
 
-def test_the_legacy_key_is_honoured_and_warns(db_path, caplog):
+# --- the retired delay key --------------------------------------------------
+#
+# `daemon.request_delay_seconds` was the original name of the per-request pause,
+# renamed once the delay was understood as an API rate control. The live log
+# never shows the deprecated warning, so the old value is retired.
+
+def test_the_retired_delay_key_is_not_honoured_and_warns(db_path, caplog):
     with caplog.at_level(logging.WARNING):
         daemon = Daemon(_config(db_path, request_delay_seconds=3.0))
-    assert daemon.api_delay == 3.0
-    assert any("deprecated" in record.message for record in caplog.records)
+    assert daemon.api_delay == 1.5, "the retired value must not be read"
+    warnings = _retired_warnings(caplog, "daemon.request_delay_seconds")
+    assert len(warnings) == 1
+    assert "daemon.api_delay_seconds" in warnings[0]
 
 
-def test_the_current_key_does_not_warn(db_path, caplog):
+def test_the_current_delay_key_works_and_does_not_warn(db_path, caplog):
     with caplog.at_level(logging.WARNING):
         daemon = Daemon(_config(db_path, api_delay_seconds=2.0))
     assert daemon.api_delay == 2.0
-    assert not any("deprecated" in record.message for record in caplog.records)
+    assert not _retired_warnings(caplog, "daemon.request_delay_seconds")
 
 
-def test_the_current_key_wins_when_both_are_present(db_path, caplog):
+def test_the_current_delay_key_wins_and_the_retired_key_still_warns(db_path, caplog):
     with caplog.at_level(logging.WARNING):
         daemon = Daemon(_config(db_path, api_delay_seconds=2.0, request_delay_seconds=9.0))
-    assert daemon.api_delay == 2.0
-    assert not any("deprecated" in record.message for record in caplog.records)
+    assert daemon.api_delay == 2.0, "the current key is the one read"
+    assert len(_retired_warnings(caplog, "daemon.request_delay_seconds")) == 1
 
 
-# --- the renamed capture switch ---------------------------------------------
+# --- the retired capture switch ---------------------------------------------
 #
 # `daemon.capture_web_scrapes` grew into `daemon.capture_web_downloads` when the
 # switch came to cover every Steam community pull rather than the item page
-# alone. The old name has to keep working, or an installation that was capturing
-# would silently stop after an upgrade.
+# alone. The live log never shows the deprecated warning, so the old value is
+# retired: a config that carries only it captures nothing.
 
-def test_the_legacy_capture_key_is_honoured_and_warns(db_path, tmp_path, caplog):
+def test_the_retired_capture_key_is_not_honoured_and_warns(db_path, tmp_path, caplog):
     from src import capture
 
     config = _config(db_path, outbox_dir=str(tmp_path / "outbox"),
@@ -68,9 +76,11 @@ def test_the_legacy_capture_key_is_honoured_and_warns(db_path, tmp_path, caplog)
     with caplog.at_level(logging.WARNING):
         daemon = Daemon(config)
     try:
-        assert daemon.capture_web_downloads is True
-        assert capture.web_download_capture_active() is True, "the old key still captures"
-        assert any("deprecated" in record.message for record in caplog.records)
+        assert daemon.capture_web_downloads is False, "the retired value must not be read"
+        assert capture.web_download_capture_active() is False
+        warnings = _retired_warnings(caplog, "daemon.capture_web_scrapes")
+        assert len(warnings) == 1
+        assert "daemon.capture_web_downloads" in warnings[0]
     finally:
         capture.configure(None)
 
@@ -85,12 +95,12 @@ def test_the_current_capture_key_works_and_does_not_warn(db_path, tmp_path, capl
     try:
         assert daemon.capture_web_downloads is True
         assert capture.web_download_capture_active() is True
-        assert not any("deprecated" in record.message for record in caplog.records)
+        assert not _retired_warnings(caplog, "daemon.capture_web_scrapes")
     finally:
         capture.configure(None)
 
 
-def test_the_current_capture_key_wins_when_both_are_present(db_path, tmp_path, caplog):
+def test_the_current_capture_key_wins_and_the_retired_key_still_warns(db_path, tmp_path, caplog):
     from src import capture
 
     config = _config(db_path, outbox_dir=str(tmp_path / "outbox"),
@@ -100,7 +110,7 @@ def test_the_current_capture_key_wins_when_both_are_present(db_path, tmp_path, c
     try:
         assert daemon.capture_web_downloads is False, "the current key is the one read"
         assert capture.web_download_capture_active() is False
-        assert not any("deprecated" in record.message for record in caplog.records)
+        assert len(_retired_warnings(caplog, "daemon.capture_web_scrapes")) == 1
     finally:
         capture.configure(None)
 

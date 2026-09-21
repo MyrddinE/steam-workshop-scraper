@@ -12,7 +12,7 @@ def test_load_config_yaml(tmp_path):
         "database": {"path": "test.db"},
         "daemon": {
             "api_batch_size": 5,
-            "request_delay_seconds": 2.0,
+            "api_delay_seconds": 2.0,
             "target_appids": [123, 456]
         },
         "logging": {"level": "DEBUG", "file": "test.log"}
@@ -26,7 +26,7 @@ def test_load_config_yaml(tmp_path):
     assert config["api"]["key"] == "test_key"
     assert config["database"]["path"] == "test.db"
     assert config["daemon"]["api_batch_size"] == 5
-    assert config["daemon"]["request_delay_seconds"] == 2.0
+    assert config["daemon"]["api_delay_seconds"] == 2.0
     assert config["daemon"]["target_appids"] == [123, 456]
     assert config["logging"]["level"] == "DEBUG"
 
@@ -147,9 +147,8 @@ def test_example_config_has_the_documented_sections():
 
 
 def test_example_config_uses_the_current_delay_key():
-    """The canonical key is api_delay_seconds; the daemon still accepts the old
-    name as an undocumented fallback (code-issues #9), but the example must not
-    advertise it."""
+    """The canonical key is api_delay_seconds; `request_delay_seconds` is
+    retired, so the example must not advertise it either."""
     with open(EXAMPLE_CONFIG) as f:
         parsed = yaml.safe_load(f)
     assert "api_delay_seconds" in parsed["daemon"]

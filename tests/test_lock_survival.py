@@ -64,7 +64,7 @@ def test_the_daemon_loop_survives_a_lock_and_retries(tmp_path, caplog):
             "database": {"path": db},
             "api": {"key": "TEST_KEY"},
             "daemon": {"target_appids": [1], "api_batch_size": 1,
-                       "request_delay_seconds": 0},
+                       "api_delay_seconds": 0.01},
         },
         config_path=str(tmp_path / "config.yaml"),
     )
@@ -113,7 +113,7 @@ def test_a_stop_reaches_the_daemon_while_the_lock_keeps_failing(
             "database": {"path": db},
             "api": {"key": "TEST_KEY"},
             "daemon": {"target_appids": [1], "api_batch_size": 1,
-                       "request_delay_seconds": 0},
+                       "api_delay_seconds": 0.01},
         },
         config_path=str(tmp_path / "config.yaml"),
         # The runner leaves the file behind before the daemon starts; here it is
