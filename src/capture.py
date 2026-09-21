@@ -764,7 +764,7 @@ def _extract_title_tag(body: bytes):
     return title.decode("utf-8", "replace")[:200] or None
 
 
-def _json_skeleton(body: bytes, depth: int = 0) -> str:
+def _json_skeleton(body: bytes) -> str:
     """A coarse structural signature of a JSON body, or of arbitrary text."""
     try:
         parsed = json.loads(body.decode("utf-8", "replace"))
