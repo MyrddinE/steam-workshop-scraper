@@ -260,7 +260,49 @@ def test_fetch_recency_matches_the_python_it_replaced(db_path, offset_days, expe
     assert _reference_recency(row["last_fetch_attempted_at"]) == expected
 
     actual = metrics.values(metrics.compute(db_path, ["fetch_recency"]))["fetch_recency"]
-    assert actual == {"fresh": 0, "stale": 0, "unknown": 0, **{expected: 1}}
+    assert actual == {"fresh": 0, "stale": 0, "unknown": 0, "window_days": 30,
+                      **{expected: 1}}
+
+
+def test_fetch_recency_window_matches_the_daemon_threshold(db_path):
+    """Issue 73: the bucket boundary is the configured window, reported back.
+
+    A 45-day-old attempt is fresh at the configured 60 days and stale at the
+    daemon's default 30. The window is derived through the one shared reader, so
+    the figure cannot bucket at one number while a front end labels it another,
+    and the value names the window it actually used. Against the pre-change
+    source the reader does not exist, the metric returns no ``window_days``, and
+    every caller was stuck at 30.
+    """
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "title": "x", "fetch_status": 200,
+        "last_fetch_attempted_at": int(time.time()) - 45 * 86400,
+    })
+
+    configured = metrics.item_staleness_days({"item_staleness_days": 60})
+    assert configured == 60
+    at_60 = metrics.values(
+        metrics.compute(db_path, ["fetch_recency"], {"staleness_days": configured})
+    )["fetch_recency"]
+    assert at_60["fresh"] == 1 and at_60["stale"] == 0, \
+        "a 45-day attempt is fresh inside a 60-day window"
+    assert at_60["window_days"] == 60, "the value must name the window it used"
+
+    default = metrics.item_staleness_days({})
+    assert default == 30
+    at_30 = metrics.values(
+        metrics.compute(db_path, ["fetch_recency"], {"staleness_days": default})
+    )["fetch_recency"]
+    assert at_30["stale"] == 1 and at_30["fresh"] == 0, \
+        "the same attempt is stale inside a 30-day window"
+    assert at_30["window_days"] == 30
+
+
+def test_item_staleness_days_reads_the_daemons_key_and_its_default():
+    """One reader for the window: the configured value wins, an absent key is 30."""
+    assert metrics.item_staleness_days({"item_staleness_days": 60}) == 60
+    assert metrics.item_staleness_days({}) == 30
+    assert metrics.item_staleness_days(None) == 30
 
 
 def test_fetch_recency_honours_a_non_default_staleness(db_path):
@@ -299,7 +341,9 @@ def test_get_db_stats_still_returns_every_key_its_callers_use(db_path):
         "Translated": 0,
         "No data (never scraped)": 0,
     }
-    assert stats["fetch_recency_counts"] == {"fresh": 0, "stale": 0, "unknown": 1}
+    assert stats["fetch_recency_counts"] == {
+        "fresh": 0, "stale": 0, "unknown": 1, "window_days": 30,
+    }
     assert stats["status_counts"] == [{"fetch_status": 200, "count": 1}]
 
 

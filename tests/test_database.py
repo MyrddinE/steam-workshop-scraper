@@ -857,7 +857,9 @@ def test_get_db_stats_fetch_recency_uses_last_fetch_attempted_at(db_path):
                                     "steam_updated_at": now - 40 * 86400})
 
     stats = get_db_stats(db_path)
-    assert stats["fetch_recency_counts"] == {"fresh": 1, "stale": 1, "unknown": 1}
+    assert stats["fetch_recency_counts"] == {
+        "fresh": 1, "stale": 1, "unknown": 1, "window_days": 30,
+    }
     assert "dt_updated_counts" not in stats
     assert "highest_api_fetched_at" in stats
 
