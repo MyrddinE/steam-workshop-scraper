@@ -176,6 +176,11 @@ def index():
                            # sentence, shared with the TUI, so the two panels
                            # cannot describe the figure differently (issue 73).
                            fetch_recency_meaning=metrics.FETCH_RECENCY_MEANING,
+                           # The dead-queue caveat is also the metric module's
+                           # sentence, shared with the TUI, so both panels name
+                           # the same consequence of a dead row holding a flag
+                           # (issue 74).
+                           dead_queued_meaning=metrics.DEAD_QUEUED_MEANING,
                            filter_schema_json=json.dumps(SEARCH_FILTER_SCHEMA),
                            # The rotation button's wording is the TUI's constant,
                            # retyped nowhere, so the two daemon pages cannot say

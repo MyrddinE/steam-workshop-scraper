@@ -654,6 +654,12 @@ fetch poll excludes dead rows: a priority written onto a dead row could never be
 `_settle_api_failure` would never run for it again to clear it. Migration 37→38 cleared the rows
 the unguarded writers had already stranded, so both counters read zero (issue 74).
 
+The rendered explanation of these counters is careful for the same reason. The API fetch poll
+excludes dead rows, so the API queue still drains even when a dead row holds its flag; it is the
+web, image and translation polls — which select on their flag alone — that would keep spending
+requests on a page that no longer exists. Both front ends print that sentence from
+`metrics.DEAD_QUEUED_MEANING`, defined once rather than retyped.
+
 ---
 
 ## Coverage bars

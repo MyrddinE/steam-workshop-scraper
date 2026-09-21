@@ -336,6 +336,11 @@ const TRANSLATION_NOTICE = {{ translation_notice | tojson }};
 // the same figure differently (issue 73).
 const FETCH_RECENCY_MEANING = {{ fetch_recency_meaning | tojson }};
 
+// Why a dead row still holding a queue flag matters. The metric module owns the
+// sentence so the TUI and this page cannot say different things about the same
+// figure (issue 74).
+const DEAD_QUEUED_MEANING = {{ dead_queued_meaning | tojson }};
+
 // Derived from schema
 const ALL_FIELDS = SEARCH_FILTER_SCHEMA.map(f => f.field);
 const FIELD_OPS = {};
@@ -2468,7 +2473,7 @@ function _renderDeadItemsByQueue(stuck) {
   return '<p class="stats-stuck">&#x26A0; ' + fmtCount(total)
     + ' dead item(s) are still sitting in a work queue</p>'
     + '<ul>' + items + '</ul>'
-    + '<p class="stat-label">These rows can never complete; the queues will not drain until they are cleared.</p>';
+    + '<p class="stat-label">' + _escapeHtml(DEAD_QUEUED_MEANING) + '</p>';
 }
 
 function _renderItemCounts(t) {

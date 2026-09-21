@@ -780,7 +780,9 @@ class StatsScreen(Screen):
         ]
         for key, label in labels:
             lines.append(f"  {label}: {stuck.get(key, 0) or 0:,}")
-        lines.append("\n[dim]These rows can never complete; the queues will not drain.[/dim]")
+        # The metric module owns the sentence, so this screen and the web panel
+        # say the same thing about the same figure (issue 74).
+        lines.append(f"\n[dim]{metrics.DEAD_QUEUED_MEANING}[/dim]")
         return "\n".join(lines)
 
     @staticmethod

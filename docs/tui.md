@@ -336,8 +336,13 @@ from it and the API inflow subtracted. The metric's docstring and
 own the active-time and net/gross detail.
 
 `dead_items_by_queue`
-(`_format_dead_items_by_queue`, `src/tui.py:720`) names any dead items still sitting in a queue and says
-the queues will not drain until they are cleared; a zero value shows an all-clear. The two
+(`_format_dead_items_by_queue`, `src/tui.py:720`) names any dead items still sitting in a queue and
+prints `metrics.DEAD_QUEUED_MEANING` beneath the breakdown — the accurate consequence of a row no
+queue can ever complete: the API fetch poll excludes dead rows, so that queue still drains, while
+the web, image and translation polls select on their flag alone and would keep spending requests on
+a page that no longer exists. The sentence is defined once in `src/metrics.py` and rendered by both
+front ends, so the TUI and the web panel cannot describe the same figure differently (issue 74). A
+zero value shows an all-clear. The two
 handoff counters share `_format_handoff_metric`: `dead_queued` names any dead items still
 sitting in a work queue — a flag left set, or a `translation_queue` row the poll still holds — and
 `queued_nowhere` any live items in no queue the pipeline never completed,

@@ -52,6 +52,25 @@ def test_the_page_carries_the_shared_translation_notice(web_client):
         "the notice element must print the shared constant"
 
 
+def test_the_page_carries_the_shared_dead_queue_meaning(web_client):
+    """Issue 74: the dead-queue callout is the metric module's sentence.
+
+    Rendered from ``metrics.DEAD_QUEUED_MEANING`` rather than retyped here, so
+    the page and the TUI cannot describe the same figure differently -- and the
+    wording is accurate: the API fetch poll excludes dead rows, so only the
+    flag-only polls would keep spending requests.
+    """
+    client, _ = web_client
+    html = client.get('/').data.decode()
+    assert json.dumps(metrics.DEAD_QUEUED_MEANING) in html, \
+        "the page must be rendered with the shared wording"
+    assert "DEAD_QUEUED_MEANING" in html, \
+        "the renderer must print the shared constant"
+    assert "the queues will not drain" not in html, (
+        "that sentence is false for the API fetch queue"
+    )
+
+
 def test_the_server_no_longer_registers_the_unused_number_filters(web_client):
     """The browser formats counts in JS; these filters had no template consumer."""
     from src.webserver import app
