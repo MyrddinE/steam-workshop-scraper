@@ -129,6 +129,8 @@ On `Input.Blurred` (when the value input loses focus), `_clamp_percentile()` rou
 
 Renders a single item in the list. Shows title (preferring `title_en`), creator name (preferring `personaname_en`), and subscription status. Each item stores `item_data` (the full search result dict) for detail rendering and state tracking.
 
+**An ignored item's title is underlined.** `_title_markup` draws `[b][u]…[/u][/b]` when the row's `fetch_status` is `-2`, and plain bold otherwise. The status, not the action that set it, decides: a row the item-update poll reports as ignored — settled in the web UI, by the daemon or in a previous session — draws the underline from the same path. The Steam title is escaped before the markup wraps it, exactly as before.
+
 ### Steam text is escaped before it is rendered
 
 Titles, tag names and persona names routinely contain square brackets — *measured live*, 129,533 titles in the library hold a bracket pair, and 2 of the 9 items queued for subscription did — and every widget here parses markup from a string (`Label.update`, `Static`, `DataTable` cells all do). A title is therefore markup unless it is escaped: `[najar]偶像大师 樋口円香（有断面+配音版）` raised `MissingStyle` and took the subscription queue down, while in the Textual-parsed widgets the same interpolation silently *ate* the tag instead of raising.
@@ -540,3 +542,18 @@ there is no rolling window — the pass in front of the screen is the only evide
 still read fresh on every tick, so a throttle that doubles the engine's `WebInterval` mid-pass moves
 the seed the mean is built on. This differs from the web overlay's countdown on purpose; see
 [web-ui.md](web-ui.md#subscribe-feature) for why the two cover different flows.
+
+### Ignoring an item (i key)
+
+`i` toggles the owner's ignored marker on the highlighted row, through the shared
+`database.toggle_ignored_item`: a row already at `fetch_status = -2` goes back through
+`unignore_item`, every other row through `ignore_item`, which settles it exactly as death does — all
+four queue priorities cleared and its `translation_queue` rows deleted. The same key restores, so the
+direction is never chosen by the key handler.
+
+`action_ignore_item` is modelled on `action_toggle_subscription_queue`: it acts on the highlighted
+row's `workshop_id`, hands the fresh row (read with `get_items_by_ids`) to the one dispatch point so
+the row's underline appears or clears at once, and then moves the selection to the next row. **The row
+is not dropped.** The list is only re-queried by the next search, so a search that already returned
+the row keeps it on screen with its new underline — the TUI counterpart of the web grid keeping the
+struck-through cell until its next query.

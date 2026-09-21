@@ -20,7 +20,7 @@ test passes either way and is kept as documentation rather than as proof.
 from unittest.mock import patch
 
 import pytest
-from textual.widgets import ListView, Static
+from textual.widgets import Label, ListView, Static
 
 from src import database
 from src import metrics
@@ -99,6 +99,17 @@ def _ids(rows):
 
 def _metric(db_path, *names, **params):
     return metrics.values(metrics.compute(db_path, list(names), params or None))
+
+
+def _title_underline(item) -> bool:
+    """Whether the row's title Label carries Rich's underline style.
+
+    ``WorkshopItem.compose`` writes ``[b][u]title[/u][/b]`` for an ignored row,
+    and Textual's ``Content.spans`` is where the parsed style survives, so this
+    reads the rendered widget rather than the source text.
+    """
+    content = item.query(Label).first().render()
+    return any(span.style == "u" for span in content.spans)
 
 
 FLAG_COLUMNS = (
@@ -583,3 +594,96 @@ async def test_the_tui_totals_panel_draws_ignored_beside_dead(mock_config, monke
             rendered = str(screen.query_one("#item-counts-content", Static).render())
 
     assert "Ignored:" in rendered and "1" in rendered
+
+
+# ── stage 2: the TUI's `i` toggle and the underline ──────────────────────────
+
+
+def test_the_tui_binds_i_to_the_ignore_toggle():
+    from src.tui import app_bindings
+
+    assert ("i", "ignore_item", "Ignore Item") in app_bindings()
+
+
+def _tui_search_patch(real_search):
+    """Surface settled rows the way the TUI's own search does, but include them.
+
+    No UI passes ``include_settled`` yet, so an ignored row can only reach a test
+    list by patching the search; the point of the tests below is the action and
+    the rendering, not the visibility (pinned in stage 1).
+    """
+    return patch("src.tui.search_items",
+                 side_effect=lambda *a, **k: real_search(*a, include_settled=True, **k))
+
+
+@pytest.mark.asyncio
+async def test_the_tui_i_key_toggles_ignore_keeps_the_row_and_advances(db_path):
+    """`i` ignores the highlighted row, underlines it in place and moves on; the
+    same key restores it."""
+    from src.tui import ScraperApp
+    from src.database import search_items as real_search
+
+    _live(db_path, 1, api_fetched_at=123, extended_description="present", title="First")
+    _live(db_path, 2, api_fetched_at=123, extended_description="present", title="Second")
+    config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
+
+    with patch("src.tui.load_config", return_value=config), \
+         _tui_search_patch(real_search), \
+         patch("src.tui.get_all_creator_ids", return_value=[]):
+        app = ScraperApp()
+        async with app.run_test(size=(120, 200)) as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+            list_view = app.query_one(ListView)
+            assert len(list_view.children) == 2
+            first = next(r for r in list_view.children
+                         if r.item_data["workshop_id"] == 1)
+            list_view.index = list(list_view.children).index(first)
+            assert _title_underline(first) is False
+
+            await pilot.press("i")
+            await pilot.pause(ASYNC_PAUSE)
+
+            assert len(list_view.children) == 2, "the ignored row is not dropped"
+            assert first in list_view.children, "and it stays in place"
+            assert first.item_data["fetch_status"] == -2
+            assert _title_underline(first) is True, "the title underlines at once"
+            assert list_view.index == list(list_view.children).index(first) + 1, \
+                "the selection advances"
+            assert _row(db_path, 1)["fetch_status"] == -2
+
+            # The second press is the restore, on the same row.
+            list_view.index = list(list_view.children).index(first)
+            await pilot.press("i")
+            await pilot.pause(ASYNC_PAUSE)
+
+            assert _row(db_path, 1)["fetch_status"] == 200
+            assert first.item_data["fetch_status"] == 200
+            assert _title_underline(first) is False, "the underline clears"
+
+
+@pytest.mark.asyncio
+async def test_a_row_the_item_update_poll_reports_ignored_is_underlined(db_path):
+    """The underline keys off the status, not off the `i` action.
+
+    A block from the one dispatch point -- what the 3-second item-update poll
+    sends -- carries the ignored status, and the row draws the same underline as
+    a row ignored from the keyboard.
+    """
+    from src.tui import ScraperApp
+
+    _live(db_path, 1, title="Polled")
+    config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
+
+    with patch("src.tui.load_config", return_value=config), \
+         patch("src.tui.get_all_creator_ids", return_value=[]):
+        app = ScraperApp()
+        async with app.run_test(size=(120, 200)) as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+            row = app.query_one(ListView).children[0]
+            assert _title_underline(row) is False
+
+            app.dispatch_item_update({"workshop_id": 1, "fetch_status": -2})
+            await pilot.pause(ASYNC_PAUSE)
+
+            assert row.item_data["fetch_status"] == -2
+            assert _title_underline(row) is True
