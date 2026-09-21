@@ -15,12 +15,6 @@ the production database on 2026-09-12.
 
 ## Open
 
-### Issue 72
-
-**A finished cursor walk is announced every 30 seconds** — *Open*, Low
-
-`seed_database` logs at INFO, on every pass, that an AppID's cursor walk is recorded as finished and skipped (`src/daemon.py:1545`), and the discovery thread runs every `DISCOVERY_IDLE_SECONDS` (30 s, `src/daemon.py:156`), so a permanent state is reported as news forever. *Measured live* on 2026-09-21: the line appeared **25 times in the 13 minutes** from 15:38:00 to 15:51:20 for AppID 431960 — once per pass — in a log that already grows about 115 MB a day. The skip itself is correct and deliberate (issue 68's latch), and nothing else in the discovery path repeats this way: the page-mode and fetchable-guard lines fire only when those decisions change or those passes actually run. A one-time fact wants to be said once per process per AppID, at INFO, and afterwards at DEBUG — the shape the config-key and stale-artefact warnings already use. [threading.md](threading.md)
-
 ### Issue 73
 
 **The fetch-recency window is hardcoded at 30 days while the daemon re-fetches at 60** — *Open*, Low
@@ -445,3 +439,11 @@ So the workflow the feature exists for — a persistent tail in another window p
 **Was issue 70.** The engine decays the shared delay on every clean read by the healthy elapsed time — `WebInterval.after_read` calls `pacing.decay(self.delay, self._elapsed, WEB_DELAY_FLOOR)` (`src/subscribe_engine.py:615`) — so an assertion of the *exact* interval after a clean read is really an assertion about how fast the mocked work ran. `test_the_pass_spaces_every_item` asserted the second wait was `pytest.approx(8.0)`, whose default relative tolerance of 1e-6 is 8e-6 absolute: the decay exceeds that once the first item takes more than about 0.9 ms, so the test passed or failed with the load on the machine. *Measured* on 2026-09-21: 7 passed and 13 failed across a 20-run loop, the failures landing between 7.9999894 and 7.9999919, and it failed a full-suite run at random (`1 failed, 1887 passed`). The adjacent `test_every_page_read_waits_the_interval_and_the_post_does_not` has the same shape on `events[3][1] == pytest.approx(12.0)` and was latent only because its elapsed stays under the same threshold — 20 of 20 passed here, which is exactly why it would have failed on a busier machine rather than never.
 
 Both now freeze the one clock-dependent term, `pacing.decay`, to its input, and say in a comment that the decay has its own coverage in `tests/test_pacing.py` while these tests pin the spacing: that one interval spans the pass, and that every page read waits it while the subscribe POST does not. No tolerance was widened and every assertion they made about which calls waited is kept — including the exact `waits[0] == 8.0` and the full event sequence. *Verified*: a 20-run loop of each test alone passes 20/20 where the flaky one was 7/20 before, and a mutated `after_read` that resets the delay to the default fails both tests (`assert 6.0 == 8.0 ± 8.0e-06` and `assert 6.0 == 12.0 ± 1.2e-05`), so freezing the decay did not make them blind to a broken shared interval.
+
+### A finished cursor walk was announced every 30 seconds
+
+**Was issue 72.** `seed_database` logged at INFO on *every* pass that an AppID's cursor walk was recorded as finished and skipped, and the discovery thread runs every `DISCOVERY_IDLE_SECONDS` (30 s), so a permanent fact was reported as news forever. *Measured live* on 2026-09-21: the line appeared **25 times in the 13 minutes** from 15:38:00 to 15:51:20 for AppID 431960 — once per pass — in a log already growing about 115 MB a day.
+
+The skip itself is correct and untouched (issue 68's latch). What changed is the reporting: the `Daemon` keeps an in-memory set of the AppIDs whose finished walk it has already announced (`_cursor_walk_finished_reported`), so the fact is INFO once per process and DEBUG afterwards — the shape `warn_retired_key` and the stale-artefact warning already use. Because it is not persisted, a restart re-announces it once, which is what an operator wants. The single INFO line also stands on its own now: it says new items arrive from the page-based updated-order scan, which the 24-hour cooldown paces, so the one line explains why discovery has gone quiet instead of leaving it a mystery.
+
+*Verified*: two consecutive `seed_database` passes with the latch set log `[INFO]` then `[DEBUG]`, and a freshly constructed `Daemon` logs INFO once more; the test fails against the pre-change source with `assert [20] == [10]` — the old code's two INFO records. The scope check that no other per-pass repeat exists in `seed_database` or `_run_page_discovery` was measured from a 4000-line tail of the live log, where the fetchable-guard and page-mode lines did not appear at all. [threading.md](threading.md)
