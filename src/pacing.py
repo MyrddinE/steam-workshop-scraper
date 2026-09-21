@@ -33,9 +33,25 @@ delay is far below what two decimal places can express, so rounding in memory
 would silently stop the decay: at a 0.5 s delay one step is ~0.0006 s, and
 `round(0.4994, 3)` is `0.5`. Precision is kept where the arithmetic happens and
 given up where it is only a restart point.
+
+**The delay is state, not configuration.** Each of the three workers owns a
+section of the daemon state file beside the database -- `src/daemon_state.py`,
+the same restart-surviving store the translator's backoff uses -- and writes its
+delay there as it moves. It is not read from `config.yaml`: the delay describes
+what the daemon is currently doing about a condition that will pass, not a
+setting anyone chose, and an operator resetting one deletes its section rather
+than editing a Python file or restarting anything unusual. The sections are
+separate so one worker's write cannot clobber another's, which is the merge
+property `StateStore.save` provides.
 """
 
 import time
+
+# The daemon-state section each rate-seeking worker owns. One per worker, so a
+# write by one cannot lose another's delay.
+API_DELAY_SECTION = "api_delay"
+WEB_DELAY_SECTION = "web_delay"
+IMAGE_DELAY_SECTION = "image_delay"
 
 # The delay halves for every this many seconds of healthy operation. Ten minutes
 # is the owner's figure, chosen so every queue recovers from a doubling over the
@@ -46,10 +62,10 @@ HALF_LIFE_SECONDS = 600.0
 # response: it halves the request rate, which is the quantity actually limited.
 BACKOFF_FACTOR = 2.0
 
-# How far the delay must move before the new value is worth a config write. The
-# decay now runs on every success, so without a step of its own it would rewrite
-# config.yaml per request -- the failure mode the old 100-success rule happened
-# to avoid.
+# How far the delay must move before the new value is worth a state-file write.
+# The decay now runs on every success, so without a step of its own it would
+# rewrite the state file per request -- the failure mode the old 100-success
+# rule happened to avoid.
 PERSIST_STEP_SECONDS = 0.05
 
 # The persisted value is a restart point, not the working value, so it does not
@@ -117,8 +133,43 @@ def persistable(delay: float) -> float:
 
 
 def needs_persist(delay: float, last_persisted: float) -> bool:
-    """Whether the delay has moved far enough to be worth a config write."""
+    """Whether the delay has moved far enough to be worth a state write."""
     return abs(delay - last_persisted) >= PERSIST_STEP_SECONDS
+
+
+def load_delay(store, section: str) -> float | None:
+    """The delay ``section`` holds, or ``None`` when there is no usable one.
+
+    ``store`` is a :class:`src.daemon_state.StateStore`, or ``None`` for a
+    construction that has no state file (a test, or an embedded caller): both
+    answer ``None``, which the caller turns into its default. A section holding
+    a non-number, or one that is zero or negative, is treated as absent for the
+    same reason ``config.get(key) or default`` did -- a delay of zero is not a
+    rate, and a corrupt value must not become one by being trusted.
+
+    The store already treats an unreadable file as empty, so this does not catch
+    anything itself: a broken state file costs one default start, never a crash.
+    """
+    if store is None:
+        return None
+    try:
+        value = store.load().get(section)
+        delay = float(value)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return delay if delay > 0 else None
+
+
+def save_delay(store, section: str, delay: float) -> bool:
+    """Persist ``delay`` into its own state-file ``section``.
+
+    Only the copy on disk is rounded (:func:`persistable`); the working delay
+    keeps its precision. A store of ``None`` is a no-op, so a worker constructed
+    without one behaves exactly as it did before the state file existed.
+    """
+    if store is None:
+        return False
+    return store.save({section: persistable(delay)})
 
 
 def wait(seconds: float, keep_running) -> bool:

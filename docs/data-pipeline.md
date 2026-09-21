@@ -213,20 +213,24 @@ A 5xx is `UNKNOWN` whatever its body says: the status is a server fault with no 
 
 **A missing item.** A live probe found that the Workshop serves its item-error page with **HTTP 200**, not 404 — a well-formed but absent id returned "There was a problem accessing the item", and a malformed id returned "That item does not exist" — so the status is not trusted and the wording is matched as well (`looks_like_missing_item`). The worker clears `web_scrape_priority` but deliberately does **not** mark the row dead: existence is the API's call, and the API makes it on its own 404. Clearing the flag is the conservative move — the API re-flags the item while its description is still missing if Steam ever serves it again — and it is what stops a gone item spinning in the queue at full pace now that it no longer backs off. Both the status (when there is one) and the matched wording are logged, and the page is captured as evidence, because there was no capture of this page before. A definitive HTTP 404/410 does not even earn the cookie refresh — no credential materialises a gone item — while the HTTP 200 wording still re-reads the cookie, since there the status proves nothing.
 
-**Dynamic delay**: The shape is shared with the other queues (`src/pacing.py`) even though the unit is not: a page scrape is one request per item and cannot be batched, so the worker keeps its own `web_delay_seconds`. Every refusal doubles the delay and healthy operation halves it for every 600 s it has been running, so the web scraper recovers over the same wall-clock window as the API and the image worker. The old per-item 100-success / 2-failure compounding rule is gone: a success count is a different amount of time at every delay, so it made the worker recover faster the faster it was already going.
+**Dynamic delay**: The shape is shared with the other queues (`src/pacing.py`) even though the unit is not: a page scrape is one request per item and cannot be batched, so the worker keeps its own delay. Every refusal doubles the delay and healthy operation halves it for every 600 s it has been running, so the web scraper recovers over the same wall-clock window as the API and the image worker. The old per-item 100-success / 2-failure compounding rule is gone: a success count is a different amount of time at every delay, so it made the worker recover faster the faster it was already going.
 
 Only an **unknown** outcome — a transport failure, a 5xx, or a page that is neither the item's nor a recognised condition — is unattributable, and it needs two consecutive ones after a streak before the delay moves. A **rate limit** is the budget itself speaking, so it doubles the delay immediately rather than waiting for a second strike. A missing item and a description-less item page are answers the item gave; a gate is a session problem a slower pace cannot fix. None of those reaches the failure counter, so the scraper is not slowed for a reason a lower request rate could not address. The item page with no description must not count as a success either: it yielded nothing, so counting it as one would let the delay fall again while unknown outcomes continued.
 
 The decay stops at a **6.0 s floor** (raised from 1.0 s): the same Steam budget is shared with the owner's own hand-browsing, so when scrapes start failing the worker has to back off far enough that the Workshop is still usable manually while the daemon runs. The starting default is the floor. There is **no ceiling** any more — it went with the fixed 300 s pause, which was a second pacing rule that could not converge: the same pause however often the throttle recurred, and no slower a rate afterwards. A rate that moves on every refusal needs no separate rule, and it cannot run away (see the API rule above).
 
-The delay is persisted as `daemon.web_delay_seconds`, and that persisted value is the only shared truth
-between processes: `src.web_worker.configured_web_delay` reads it fresh from the config rather than from
-a module-level snapshot, so the subscribe engine's page reads and the subscriptions walk wait the same
-interval the worker is using. A page read that does not go through the worker therefore gates itself
-with it; the subscribe POST does not, because it is a click rather than a page load — see
+The delay is persisted in the daemon state file beside the database — its own `web_delay` section of
+`.daemon_state.yaml`, written as it moves and bounded by `pacing.PERSIST_STEP_SECONDS` — and that
+persisted value is the only shared truth between processes: `src.web_worker.configured_web_delay` reads
+it fresh from there rather than from a module-level snapshot, so the subscribe engine's page reads and
+the subscriptions walk wait the same interval the worker is using. It is no longer a `config.yaml` key:
+the three pacing delays are daemon state now, one section per worker, and an operator resets one by
+editing or deleting its section ([config-security.md](config-security.md#pacing-delays-are-state-not-config)).
+A page read that does not go through the worker therefore gates itself with it; the subscribe POST does
+not, because it is a click rather than a page load — see
 [Subscribe Engine](#subscribe-engine-browser-free).
 
-**One owner for the interval.** `web_delay_seconds` is the web interval's only owner. The scraper used to enforce a second, fixed 5 s gate of its own — `_WEB_DELAY`/`_rate_limit()` inside `scrape_extended_details`, movable only through `set_web_delay()`, which had no callers — so every worker scrape paid the adaptive delay *and* the fixed one, and a re-scrape that bypassed the worker's pacing was spaced by the fixed gate alone. That gate is removed; the scraper now sends as soon as it is called, and any caller that needs spacing gates itself on the configured `web_delay_seconds` through `pacing.wait`, as the worker does.
+**One owner for the interval.** The persisted web delay is the web interval's only owner. The scraper used to enforce a second, fixed 5 s gate of its own — `_WEB_DELAY`/`_rate_limit()` inside `scrape_extended_details`, movable only through `set_web_delay()`, which had no callers — so every worker scrape paid the adaptive delay *and* the fixed one, and a re-scrape that bypassed the worker's pacing was spaced by the fixed gate alone. That gate is removed; the scraper now sends as soon as it is called, and any caller that needs spacing gates itself on the persisted delay through `pacing.wait`, as the worker does.
 
 **Throttling**: Steam answers many requests with **HTTP 200** and its ordinary Workshop shell
 carrying "too many requests", so the status code proves nothing and the page is otherwise
@@ -291,7 +295,7 @@ the caller must test the description and not the dict. On any miss the dict also
 stores only `description`; the `tags` key is discarded.
 
 The function paces nothing itself: it sends the request as soon as it is called. The interval between
-requests belongs to the caller and is owned by the configured `web_delay_seconds` — the worker sleeps
+requests belongs to the caller and is owned by the persisted web delay — the worker sleeps
 it through `pacing.wait`, and any other caller must do the same (see [One owner for the
 interval](#web-scraping-phase)).
 
@@ -398,15 +402,15 @@ of letting the daily reconcile be the confirmer, are recorded in
 [future-plans.md](future-plans.md#retiring-the-subscribe-confirmation-read).
 
 **Pacing.** Every page read is a page load, so `WebInterval` gates it on the web scraper's shared
-adaptive interval — the persisted `daemon.web_delay_seconds`, read fresh through
+adaptive interval — the persisted `web_delay` section of `.daemon_state.yaml`, read fresh through
 `src.web_worker.configured_web_delay` rather than snapshotted, decayed with `pacing.decay` on a read
-that carried a button and doubled with `pacing.backoff` on a throttle page, then written back through
-the config the way the daemon's `_save_config_value` writes it. On the default path an item pays that
-once; the confirmation read, when the switch re-enables it, honours the same gate. A pass builds one
-interval and threads it through every item, so the items are spaced. **The subscribe POST is exempt**:
-it is the button click, a browser-initiated XHR rather than a page load, so it never waits. The
-subscriptions walk in `src/subscription_sync.py` uses the same gate, and it only waits — a reconcile is
-not a rate-seeking queue and does not move the shared delay.
+that carried a button and doubled with `pacing.backoff` on a throttle page, then written back into the
+same section. On the default path an item pays that once; the confirmation read, when the switch
+re-enables it, honours the same gate. A pass builds one interval and threads it through every item, so
+the items are spaced. **The subscribe POST is exempt**: it is the button click, a browser-initiated XHR
+rather than a page load, so it never waits. The subscriptions walk in `src/subscription_sync.py` uses
+the same gate, and it only waits — a reconcile is not a rate-seeking queue and does not move the shared
+delay.
 
 **Capture.** Every page read and the POST go through
 `capture.record_web_download` under the `item_page` and `subscribe` kinds, covered by the existing
@@ -431,7 +435,7 @@ A daemon thread that picks up items from `get_next_image_item`, ordered by `imag
 
 **Evidence capture.** Every image failure — an HTTP status, a transport exception, or an unclassifiable MIME type — is captured whenever `daemon.outbox_dir` is set, with its status, response headers, URL, content type and length, and the exception text when there is no response. A download that succeeds is captured **only** while the `daemon.capture_image_downloads` debug switch is on, with the same metadata plus the number of bytes written and the path of the saved file. The image bytes themselves are never copied into the outbox: the file under `images/` is the artefact, so a capture holds metadata only (see [failure-capture.md](failure-capture.md)).
 
-**Dynamic delay**: The shared shape (`src/pacing.py`) with its own `image_delay_seconds`: every refusal doubles the delay and healthy operation halves it for every 600 s it has been running, floored at 0.5 s and with no ceiling. An unrecognised MIME type and a permanent status do **not** count as failures: both answer a question about the *item* rather than about our request rate, so neither grows the delay nor breaks a run of successes. The captures proved the distinction was real — 404s outnumbered timeouts 6,517 to 163 over one window, so the delay had been moved almost entirely by the class that says nothing about being refused.
+**Dynamic delay**: The shared shape (`src/pacing.py`) with its own `image_delay` state section: every refusal doubles the delay and healthy operation halves it for every 600 s it has been running, floored at 0.5 s and with no ceiling. An unrecognised MIME type and a permanent status do **not** count as failures: both answer a question about the *item* rather than about our request rate, so neither grows the delay nor breaks a run of successes. The captures proved the distinction was real — 404s outnumbered timeouts 6,517 to 163 over one window, so the delay had been moved almost entirely by the class that says nothing about being refused.
 
 ---
 

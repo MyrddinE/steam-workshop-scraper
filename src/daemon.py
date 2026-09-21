@@ -110,6 +110,12 @@ PERMANENT_API_STATUSES = frozenset({404})
 # negative one is nonsense.
 API_DELAY_FLOOR = 0.01
 
+# The starting API delay when no value has been persisted yet. The delay is
+# daemon state, not configuration: `config.yaml` no longer carries it (see
+# `src/pacing.py`), and this is the fallback only for an installation that has
+# never written one.
+API_DELAY_DEFAULT = 1.5
+
 # The staleness sweep is a full-table UPDATE whose threshold is measured in days
 # (`item_staleness_days`, 60 in production). Running it on every batch -- every
 # few seconds -- scans the table thousands of times for a decision that changes
@@ -372,19 +378,32 @@ class Daemon:
         self.db_path = config.get("database", {}).get("path", "workshop.db")
         self.api_key = config.get("api", {}).get("key", "")
         daemon_config = config.get("daemon", {})
-        # `daemon.batch_size`, `daemon.user_staleness_days` and
-        # `daemon.request_delay_seconds` are retired: their values are no longer
-        # read, so a config that carries only the old spelling gets the current
-        # setting's default, with one warning naming the dead key. The current
-        # spelling is read directly.
+        # The restart-surviving state, beside the database. Each worker owns a
+        # section: the three rate-seeking delays (the API one here, the web and
+        # image ones in their threads) and the translator's backoff. The delays
+        # are state rather than configuration -- `config.yaml` no longer carries
+        # them -- so this is where each worker reads its starting value from and
+        # writes it back to as it moves.
+        self.state_store = StateStore(state_path_for(self.db_path))
+        # `daemon.batch_size`, `daemon.user_staleness_days` and the delay keys
+        # `daemon.request_delay_seconds`, `daemon.api_delay_seconds`,
+        # `daemon.web_delay_seconds` and `daemon.image_delay_seconds` are all
+        # retired: their values are no longer read. The renamed keys get a
+        # warning naming the current spelling; the delays were removed outright
+        # (their state lives in `.daemon_state.yaml`), so their warning says the
+        # value is no longer read and names no successor.
         if "batch_size" in daemon_config:
             warn_retired_key("daemon", "batch_size", "api_batch_size")
         self.api_batch_size = daemon_config.get("api_batch_size")
         if self.api_batch_size is None:
             self.api_batch_size = 10
-        if "request_delay_seconds" in daemon_config:
-            warn_retired_key("daemon", "request_delay_seconds", "api_delay_seconds")
-        self.api_delay = daemon_config.get("api_delay_seconds") or 1.5
+        for retired in ("request_delay_seconds", "api_delay_seconds",
+                        "web_delay_seconds", "image_delay_seconds"):
+            if retired in daemon_config:
+                warn_retired_key("daemon", retired)
+        stored_api_delay = pacing.load_delay(self.state_store, pacing.API_DELAY_SECTION)
+        self.api_delay = (stored_api_delay if stored_api_delay is not None
+                          else API_DELAY_DEFAULT)
         self.item_staleness_days = int(daemon_config.get("item_staleness_days") or 30)
         if "user_staleness_days" in daemon_config:
             warn_retired_key("daemon", "user_staleness_days", "creator_staleness_days")
@@ -410,9 +429,7 @@ class Daemon:
         # Translator thread. It owns a slice of the daemon state file beside the
         # database, so the delay it has backed off to survives a restart rather
         # than beginning again at the base on every one.
-        self.translator = TranslatorThread(
-            config, state_store=StateStore(state_path_for(self.db_path))
-        )
+        self.translator = TranslatorThread(config, state_store=self.state_store)
 
         # Optional database backup into a pull-outbox. The feature defaults to
         # OFF: it is only enabled when both `outbox_dir` and a positive
@@ -450,8 +467,8 @@ class Daemon:
         # failure counter is a diagnostic; the delay itself is the state that
         # matters.
         self.api_failures = 0
-        # The last delay written to config, so the per-request decay does not
-        # rewrite the file on every request.
+        # The last delay written to the state file, so the per-request decay
+        # does not rewrite it on every request.
         self._persisted_api_delay = self.api_delay
         # In memory only, so a daemon restarted after a day resumes at the delay
         # it had reached rather than treating the downtime as healthy operation.
@@ -513,12 +530,15 @@ class Daemon:
         signal.signal(signal.SIGINT, self.handle_shutdown)
         signal.signal(signal.SIGTERM, self.handle_shutdown)
 
-    def _save_config_value(self, key: str, value):
-        """Saves a daemon config key=value to the config file. Usable as callback from threads."""
-        if "daemon" not in self.config:
-            self.config["daemon"] = {}
-        self.config["daemon"][key] = value
-        save_config(self.config_path, self.config)
+    def _persist_api_delay(self) -> None:
+        """Write the API delay into its own daemon-state section.
+
+        The delay is daemon state, not configuration, so it no longer goes
+        through ``save_config``: the state file beside the database is the home
+        that lets a restart resume at the delay reached, and lets an operator
+        reset one worker without touching the others.
+        """
+        pacing.save_delay(self.state_store, pacing.API_DELAY_SECTION, self.api_delay)
 
     def _refresh_login_cookie(self) -> bool:
         """Re-read the login cookie from the browser, persisting it if it moved.
@@ -1318,8 +1338,7 @@ class Daemon:
             # Persist immediately: a restart during an outage must not resume at
             # the old, refused pace.
             self._persisted_api_delay = self.api_delay
-            self._save_config_value(
-                "api_delay_seconds", pacing.persistable(self.api_delay))
+            self._persist_api_delay()
 
     def _decay_api_delay(self) -> None:
         """Shave one step off the delay for a healthy request.
@@ -1340,8 +1359,7 @@ class Daemon:
                 self._persisted_api_delay = self.api_delay
                 logging.info(
                     f"Healthy API requests; decreasing API delay to {self.api_delay} seconds.")
-                self._save_config_value(
-                    "api_delay_seconds", pacing.persistable(self.api_delay))
+                self._persist_api_delay()
             else:
                 # One line per step would flood the log while the delay walks
                 # down from a back-off; the persisted steps are the reportable
@@ -1368,10 +1386,12 @@ class Daemon:
         self.translator.start()
         self._discovery_thread = DiscoveryThread(self)
         self._discovery_thread.start()
-        self._web_worker = WebScraperThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value,
-                                              session_refresh=self._refresh_login_cookie)
+        self._web_worker = WebScraperThread(self.db_path, self.pause_lock_file,
+                                            state_store=self.state_store,
+                                            session_refresh=self._refresh_login_cookie)
         self._web_worker.start()
-        self._image_worker = ImageDownloadThread(self.db_path, self.pause_lock_file, daemon_config=self.config.get("daemon", {}), save_callback=self._save_config_value)
+        self._image_worker = ImageDownloadThread(self.db_path, self.pause_lock_file,
+                                                 state_store=self.state_store)
         self._image_worker.start()
         if self._backup_worker is not None:
             self._backup_worker.start()

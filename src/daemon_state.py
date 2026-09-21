@@ -7,6 +7,10 @@ condition that will pass — not a setting anyone chose. Keeping them in
 deliberately" from "the backoff was mid-flight", and would put a value nobody
 edits into the file people edit.
 
+The translator's backoff and the three rate-seeking pacing delays all live here,
+one section per worker (``src/pacing.py``), so each writer's entry cannot clobber
+another's and an operator can reset one delay by deleting its section.
+
 It is a file rather than a table for the same reason: the database holds the
 library, the queues and the work, and its schema is versioned and migrated.
 Transient pacing state has no place in that history — the ``app_state`` table

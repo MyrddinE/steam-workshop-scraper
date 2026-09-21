@@ -41,9 +41,9 @@ authenticated session (``src.web_scraper._get_session`` and
 module builds a session or a cookie of its own.
 
 **The walk is paced.** Each page is a page load, so it waits the web scraper's
-adaptive interval (``daemon.web_delay_seconds``, read fresh through
-``configured_web_delay``) before the request. It only waits -- it does not move
-the shared delay, because a reconcile is not a rate-seeking queue.
+adaptive interval (the persisted web delay in the daemon state file, read fresh
+through ``configured_web_delay``) before the request. It only waits -- it does
+not move the shared delay, because a reconcile is not a rate-seeking queue.
 """
 
 from __future__ import annotations
@@ -150,9 +150,10 @@ def _fetch_page(appid: int, page: int, config: dict, keep_running=None) -> str:
     into a failed sync rather than a cleared flag.
 
     This is a page load, so it honours the web scraper's adaptive interval
-    (``daemon.web_delay_seconds``, read fresh from ``config``) before the
-    request, exactly as an item-page read does. The walk is not a rate-seeking
-    queue, so it only waits; it does not move the shared delay.
+    (the persisted web delay from the daemon state file, read fresh through
+    ``configured_web_delay``) before the request, exactly as an item-page read
+    does. The walk is not a rate-seeking queue, so it only waits; it does not
+    move the shared delay.
 
     The whole exchange is captured under the web-download debug switch, before
     the sign-in check: a sign-in page is exactly what the capture is for, and

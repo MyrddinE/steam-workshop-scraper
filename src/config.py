@@ -98,7 +98,8 @@ def _key_where(section_name: str, key: str) -> str:
     return f"{section_name}.{key}" if section_name else key
 
 
-def warn_retired_key(section_name: str, legacy_key: str, current_key: str) -> None:
+def warn_retired_key(section_name: str, legacy_key: str,
+                     current_key: str | None = None) -> None:
     """Name a config key that is no longer read, and the key that replaced it.
 
     A renamed key is retired once its old value stops being read. A config file
@@ -107,10 +108,23 @@ def warn_retired_key(section_name: str, legacy_key: str, current_key: str) -> No
     would leave a dead key in place forever. The shape matches the retired
     ``openai.batch_items`` warning in :mod:`src.translator`.
 
+    ``current_key`` is ``None`` for a key that was **removed** rather than
+    renamed -- the pacing delays moved to the daemon state file and no config
+    spelling replaced them. The warning then says the value is no longer read
+    and names no successor, because telling the operator to rename it to a key
+    that does not exist would be worse than saying nothing.
+
     ``section_name`` is only for the warning, so it can name the key the way the
     operator wrote it (``daemon.batch_size``, not ``batch_size``).
     """
     if not _is_first_warning(section_name, legacy_key):
+        return
+    if current_key is None:
+        logging.warning(
+            "Config key '%s' is no longer used and its value is no longer read. "
+            "Remove the key.",
+            _key_where(section_name, legacy_key),
+        )
         return
     logging.warning(
         "Config key '%s' is no longer used; it was renamed to '%s'. Remove the key.",

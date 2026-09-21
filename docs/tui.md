@@ -518,10 +518,11 @@ of a countdown, and a reported outcome drops the countdown and keeps its status 
 deliberately an estimate, not a promise: the pass can be refused, throttled or cancelled after it is
 drawn, and the screen's own status line says so.
 
-It **starts** from the configured web delay — the same `daemon.web_delay_seconds` the engine reads
-through `src.web_worker.configured_web_delay` — times **one** on the default path, because each item
-costs one gated page read (the pre-read) while the subscribe POST is an XHR and pays no interval; with
-`VERIFY_AFTER_SUBSCRIBE` on it is times **two** (the retired confirmation read is restored).
+It **starts** from the persisted web delay — the `web_delay` section of `.daemon_state.yaml` the
+engine reads through `src.web_worker.configured_web_delay` — times **one** on the default path, because
+each item costs one gated page read (the pre-read) while the subscribe POST is an XHR and pays no
+interval; with `VERIFY_AFTER_SUBSCRIBE` on it is times **two** (the retired confirmation read is
+restored).
 *Measured live* (issue 41) that starting figure is about a third low: a gated read costs the interval
 **plus** the request, and the POST spends time on the clock even though it pays no interval. So from
 the first result on the screen nudges it: `run_subscription_pass` calls its per-item callback

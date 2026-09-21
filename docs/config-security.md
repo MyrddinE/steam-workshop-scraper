@@ -63,15 +63,44 @@ silently truncating what comes back.
 |---|---|---|---|
 | `daemon.target_appids` | list[int] | (required) | Steam AppIDs to scrape. The daemon refuses to start without this. |
 | `daemon.api_batch_size` | int | 10 | Items to process per `process_batch` iteration. `daemon.batch_size` is **no longer read**: a config that still carries it gets one warning naming the key, and the value must be moved to the current spelling, which is the only one that influences anything. |
-| `daemon.api_delay_seconds` | float | 1.5 | A literal pause added between Steam API requests, not a target rate. Adjusted per **request** (batched item results do not move it): decays 10 ms on each healthy request and doubles on each refusal, so it converges just under the sustainable rate. `daemon.request_delay_seconds` is **no longer read**: a config that still carries it gets one warning naming the key, and the value must be moved to the current spelling, which is the only one that influences anything. |
-| `daemon.web_delay_seconds` | float | 6.0 | Seconds to wait between web scrape requests. Dynamically adjusted; the decay rule floors it at 6.0 s, so the default is set to the floor rather than below it. |
-| `daemon.image_delay_seconds` | float | 2.0 | Seconds to wait between image downloads. Dynamically adjusted. |
 | `daemon.item_staleness_days` | int | 30 | Days before a successfully-scraped item is considered stale and re-scraped. |
 | `daemon.creator_staleness_days` | int | 90 | Days before a creator profile is re-fetched from Steam. `daemon.user_staleness_days` is **no longer read**: a config that still carries it gets one warning naming the key, and the value must be moved to the current spelling, which is the only one that influences anything. |
 | `daemon.outbox_dir` | string | None | Directory a separate machine pulls artefacts from. Enables [failure capture](failure-capture.md) on its own, and database backups together with `backup_interval_seconds` below. The daemon and the puller must not run as the same OS user unless the outbox is writable by both. The **debug** capture trees (`web_downloads/`, `image_downloads/`, and the legacy `scrapes/`) are pruned by housekeeping once a file is seven days old; `failures/` and `crashes/` are never pruned by age, and the pull tool moves a file (removing it and its manifest entry) once it has been fetched for review. `daemon.backup_dir` is a **still-honoured** legacy alias: it supplies this value when the current key is absent, and the daemon, the web server and the crash writer all read it through one accessor that logs one deprecation warning per process. Rename it to `daemon.outbox_dir`; the alias is retained until the log shows it unused. |
 | `daemon.backup_interval_seconds` | float | 0 (off) | Seconds between verified database snapshots into `<outbox_dir>/db/`. Backups are **off** unless this is positive *and* `outbox_dir` is set, so enabling backups on the live instance is a deliberate switch. |
 | `daemon.capture_web_downloads` | bool | false | **Debugging switch.** Save *every* Steam community web pull — the item page, the subscriptions page, and the server-side subscribe `POST` — to `<outbox_dir>/web_downloads`, with both sides of the exchange: request method, URL, headers, cookies and form data, and response status, final URL, headers and body, the body kept whole. The failure capture only ever holds misses, so it cannot show what a working, signed-in exchange looks like; this is the instrument for finishing the subscribe path against real traffic. **No credential value is ever written:** cookie values, the `sessionid` form field and `Cookie`/`Set-Cookie`/`Authorization` header values become `***` (their *names* stay — knowing which cookie was sent is the diagnostic point), and those literal values are scrubbed from everything written, including the body file. Deliberately not thinned while it is on, and the body is kept whole: it is on for a session or two, and thinning a sample before anyone has looked at it only means collecting the evidence twice. What bounds the directory is age rather than volume — housekeeping prunes a debug capture after seven days ([failure-capture.md](failure-capture.md#retention)). Does **not** cover the Steam Web API (`src/steam_api.py`, a different surface with its own failure capture) or image downloads (`daemon.capture_image_downloads`). `daemon.capture_web_scrapes` is **no longer read**: a config that still carries it gets one warning naming the key and captures nothing, so the value must be moved to the current spelling. Turn it off when done. |
 | `daemon.capture_image_downloads` | bool | false | **Debugging switch**, separate from the web one. Save *every* image download — successes as well as failures — to `<outbox_dir>/image_downloads`, as metadata and headers only: status, URL, content type, bytes written, and the path of the image on disk. The image bytes are never copied into the outbox; the downloaded file is the artefact. Image *failures* need neither this switch nor `capture_web_downloads` — an `outbox_dir` alone captures them. The directory is a debug tree, so it is pruned by age like the web captures ([failure-capture.md](failure-capture.md#retention)). Turn it off when done. |
+
+#### Pacing delays are state, not config
+
+The three inter-request pacing delays are **not configuration**. Each is daemon
+state, kept in `.daemon_state.yaml` beside the database — the same
+restart-surviving store the translator's backoff uses (`src/daemon_state.py`) —
+and written as the delay moves, bounded by `pacing.PERSIST_STEP_SECONDS` so it is
+not rewritten on every request. One section per worker:
+
+| State section | Default | What it paces |
+|---|---|---|
+| `api_delay` | 1.5 s | Steam API requests, adjusted per **request** (batched item results do not move it): it decays with healthy operation and doubles on each refusal, converging just under the sustainable rate. |
+| `web_delay` | 6.0 s | Web scrape requests, from the same shape and floored at 6.0 s, so the default is the floor rather than below it. |
+| `image_delay` | 2.0 s | Image downloads, from the same shape and floored at 0.5 s. |
+
+`daemon.api_delay_seconds`, `daemon.web_delay_seconds`,
+`daemon.image_delay_seconds` and their original spelling
+`daemon.request_delay_seconds` are **no longer read**. A config that still
+carries one of them gets one warning saying the value is no longer read, and is
+otherwise ignored: there is no current key to rename it to, because the value
+moved to the state file rather than to another config spelling. Deleting the
+retired key is the only change an operator needs to make.
+
+**Resetting a delay by hand.** The reason these values used to live in
+`config.yaml` was that an operator needs to pull a delay back down when it
+over-reacts, and that stays cheap: edit or delete the worker's section in
+`.daemon_state.yaml`. Deleting `web_delay` (or any of the three) returns that
+worker to the default above; the next daemon start reads it. It is one section
+per worker, so resetting one leaves the other two — and the translator's
+`translation_backoff`, which is not part of this — alone. It needs no Python file
+changed and no unusual restart, and a text editor or a YAML tool is the only
+client required.
 
 ### `web`
 

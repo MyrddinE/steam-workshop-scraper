@@ -86,13 +86,13 @@ credential elision is the mechanism that keeps the login cookie out of the
 outbox; nothing here bypasses it.
 
 **Pacing.** Every page read is a page load, so it honours the web scraper's
-adaptive interval through :class:`WebInterval` -- the same persisted
-``daemon.web_delay_seconds`` the daemon's worker moves, re-read from the config
-rather than snapshotted, decayed on a clean read and doubled on a throttle page.
-On the default path an item pays that once; with :data:`VERIFY_AFTER_SUBSCRIBE`
-on, the confirmation read pays it too. The subscribe POST is the button click, a
-browser-initiated XHR rather than a page load, so it is deliberately exempt and
-never waits.
+adaptive interval through :class:`WebInterval` -- the same persisted web delay
+the daemon's worker moves, held in the daemon state file beside the database and
+read fresh on every pass rather than snapshotted, decayed on a clean read and
+doubled on a throttle page. On the default path an item pays that once; with
+:data:`VERIFY_AFTER_SUBSCRIBE` on, the confirmation read pays it too. The
+subscribe POST is the button click, a browser-initiated XHR rather than a page
+load, so it is deliberately exempt and never waits.
 
 No browser tab is involved at any point, and the engine never sends an
 unsubscribe: an already-subscribed item returns before any request is made.
@@ -107,11 +107,12 @@ import re
 from dataclasses import dataclass
 
 from src import activity, capture, pacing, session_health, web_scraper
-from src.config import save_config, warn_retired_key
+from src.config import warn_retired_key
 from src.database import get_connection, mark_own_subscribed
 from src.web_worker import (
     WEB_DELAY_FLOOR,
     configured_web_delay,
+    web_delay_store_for,
 )
 
 # --- the one endpoint and the one button ------------------------------------
@@ -583,19 +584,15 @@ class WebInterval:
 
     The working delay is in memory for the pass and the persisted copy is the
     restart point, exactly as the worker's ``web_delay`` is: the delay is a float
-    and only the copy on disk is rounded (``pacing.persistable``). The
-    configured value is re-read from ``config`` when this object is built, never
-    snapshotted at import, and each move is written back through ``config`` and
-    ``config.yaml`` the way the daemon's ``_save_config_value`` writes
-    ``web_delay_seconds`` -- so the engine and the worker cannot disagree about
-    the interval they are sharing.
+    and only the copy on disk is rounded (``pacing.persistable``). It is daemon
+    **state**, so the starting value is read from the daemon state file beside
+    the database and every move is written back there -- not into ``config.yaml``
+    -- so the engine, the worker and the TUI all share the one delay.
     """
 
-    def __init__(self, config: dict | None = None, *, config_path: str | None = None,
-                 save=None, keep_running=None, clock=None):
+    def __init__(self, config: dict | None = None, *, keep_running=None, clock=None):
         self.config = config if isinstance(config, dict) else {}
-        self.config_path = config_path
-        self._save = save
+        self._store = web_delay_store_for(self.config)
         self._keep_running = keep_running or _always_running
         self._clock = clock or pacing.Clock()
         self.delay = configured_web_delay(self.config)
@@ -632,14 +629,10 @@ class WebInterval:
         if not force and not pacing.needs_persist(self.delay, self._persisted_delay):
             return
         self._persisted_delay = self.delay
-        rounded = pacing.persistable(self.delay)
-        # The same two writes `_save_config_value` makes: the in-memory config
-        # (so the next read sees it) and config.yaml (so the daemon does).
-        self.config.setdefault("daemon", {})["web_delay_seconds"] = rounded
-        if self._save is not None:
-            self._save("web_delay_seconds", rounded)
-        elif self.config_path:
-            save_config(self.config_path, self.config)
+        # The one write the worker makes too: the delay lives in the state file
+        # beside the database, in the web worker's own section, which is what
+        # lets the daemon's worker and the front ends share it across processes.
+        pacing.save_delay(self._store, pacing.WEB_DELAY_SECTION, self.delay)
 
 
 def fetch_item_page(workshop_id: int, *, interval: WebInterval,
@@ -672,7 +665,6 @@ def fetch_item_page(workshop_id: int, *, interval: WebInterval,
 
 def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
                    token_fallback: str = "", interval: WebInterval | None = None,
-                   config_path: str | None = None,
                    keep_running=None) -> SubscribeOutcome:
     """Subscribe one item without a browser, from the pre-read and the POST.
 
@@ -686,12 +678,11 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
     ``interval`` is the shared web interval the page read honours -- and the
     confirmation read too, when :data:`VERIFY_AFTER_SUBSCRIBE` re-enables it. A
     pass builds one and passes it down so the delay spans every item; a single
-    standalone call builds its own from ``config`` (and writes it back to
-    ``config_path`` when given). The submit POST is not gated on it.
+    standalone call builds its own from ``config``, whose persisted delay it
+    reads and moves in the daemon state file. The submit POST is not gated on it.
     """
     if interval is None:
-        interval = WebInterval(config, config_path=config_path,
-                               keep_running=keep_running)
+        interval = WebInterval(config, keep_running=keep_running)
     page = fetch_item_page(workshop_id, interval=interval)
     page_html = page_body(page)
     button_before = parse_button_state(page_html)
@@ -898,7 +889,6 @@ class PauseLock:
 
 def run_subscription_pass(items, *, config: dict, db_path: str,
                           pause_lock_file: str, on_result=None,
-                          config_path: str | None = None,
                           keep_running=None) -> list:
     """Subscribe every queued ``item``, holding the pause for the pass.
 
@@ -916,8 +906,7 @@ def run_subscription_pass(items, *, config: dict, db_path: str,
     """
     outcomes = []
     with PauseLock(pause_lock_file, db_path=db_path):
-        interval = WebInterval(config, config_path=config_path,
-                               keep_running=keep_running)
+        interval = WebInterval(config, keep_running=keep_running)
         for item in items:
             outcome = subscribe_item(
                 item["workshop_id"], config=config, db_path=db_path,

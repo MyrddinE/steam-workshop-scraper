@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, queue_field_for_translation, translation_is_current
 from src import pacing
 from src import session_health
+from src.daemon_state import StateStore, state_path_for
+from src.config import warn_retired_key
 from src.web_scraper import (DESCRIPTION_SELECTOR, ITEM_MISSING_HTTP_STATUSES, looks_like_gated,
                              looks_like_item_page_without_description, looks_like_missing_item,
                              looks_like_rate_limited, looks_like_signed_out, missing_item_reason,
@@ -33,33 +35,44 @@ WEB_DELAY_FLOOR = 6.0
 WEB_DELAY_DEFAULT = WEB_DELAY_FLOOR
 
 
-def configured_web_delay(config: dict) -> float:
-    """The shared web interval currently configured, floored at the floor.
+def web_delay_store_for(config: dict) -> StateStore | None:
+    """The daemon state store the shared web delay lives in, for ``config``.
 
-    The delay is adaptive, and the daemon persists it; the TUI and the web
-    server run in different processes, so the persisted value is the only shared
-    truth. This reads it *fresh* from the config dict -- never from a
-    module-level snapshot -- so a value this process or the daemon just wrote is
-    what the next page read honours.
-
-    Both shapes are accepted: the daemon's own section
-    (``config["daemon"]["web_delay_seconds"]``, which is what ``config.yaml``
-    holds) and the flattened section the worker is constructed with
-    (``config["web_delay_seconds"]``). A missing or unreadable value falls back
-    to :data:`WEB_DELAY_DEFAULT`.
+    The delay is state, not configuration, so it is stored beside the database
+    the config points at. A config with no ``database.path`` falls back to the
+    same default the rest of the app uses (``workshop.db`` in the working
+    directory), so the resolver never fails on a partial config.
     """
-    raw = None
-    if isinstance(config, dict):
-        raw = config.get("web_delay_seconds")
-        if raw is None:
-            daemon = config.get("daemon")
-            if isinstance(daemon, dict):
-                raw = daemon.get("web_delay_seconds")
-    try:
-        delay = float(raw)
-    except (TypeError, ValueError):
-        delay = WEB_DELAY_DEFAULT
-    return max(WEB_DELAY_FLOOR, delay)
+    if not isinstance(config, dict):
+        return None
+    database = config.get("database")
+    db_path = database.get("path") if isinstance(database, dict) else None
+    return StateStore(state_path_for(db_path or "workshop.db"))
+
+
+def configured_web_delay(config: dict) -> float:
+    """The shared web interval currently persisted, floored at the floor.
+
+    The delay is adaptive and it is daemon **state**, not configuration: it is
+    written to the daemon state file beside the database (one section per
+    worker, ``src/daemon_state.py``) and read back from there. The TUI and the
+    web server run in different processes from the daemon's worker, and the
+    state file -- not an in-memory config dict -- is what they can all see, so
+    this reads it *fresh* on every call rather than caching it.
+
+    A config that still carries the retired ``daemon.web_delay_seconds`` key is
+    ignored; the warning is logged once per process by
+    :func:`src.config.warn_retired_key`. With no persisted value the default
+    applies, and the result is floored, because a delay under the floor is one
+    the decay would not have chosen.
+    """
+    daemon = config.get("daemon") if isinstance(config, dict) else None
+    if isinstance(daemon, dict) and "web_delay_seconds" in daemon:
+        warn_retired_key("daemon", "web_delay_seconds")
+    stored = pacing.load_delay(web_delay_store_for(config), pacing.WEB_DELAY_SECTION)
+    if stored is None:
+        return WEB_DELAY_DEFAULT
+    return max(WEB_DELAY_FLOOR, stored)
 
 
 class ScrapeOutcome(enum.Enum):
@@ -142,17 +155,24 @@ def classify_scrape(scrape_result: dict | None) -> ScrapeOutcome:
 
 
 class WebScraperThread(threading.Thread):
-    def __init__(self, db_path: str, pause_lock_file: str, daemon_config: dict = None,
-                 save_callback=None, session_refresh=None):
+    def __init__(self, db_path: str, pause_lock_file: str, state_store=None,
+                 session_refresh=None):
         super().__init__(daemon=True)
         self.db_path = db_path
         self.pause_lock_file = pause_lock_file
-        self._save_callback = save_callback
+        # Where this worker's delay is persisted. None means "no state file" --
+        # a test or an embedded construction -- and it then behaves exactly as
+        # it did before the delay moved out of config: it moves in memory only.
+        self._state_store = state_store
         # Re-reads the browser login cookie and reports whether it changed. None
         # when no browser source is configured.
         self._session_refresh = session_refresh
         self.running = True
-        self.web_delay = float((daemon_config or {}).get("web_delay_seconds") or WEB_DELAY_DEFAULT)
+        # The starting delay is the one persisted when the worker last ran, so a
+        # restart resumes at the delay it had reached; the default applies only
+        # when there is no state at all.
+        stored = pacing.load_delay(state_store, pacing.WEB_DELAY_SECTION)
+        self.web_delay = stored if stored is not None else WEB_DELAY_DEFAULT
         self.web_successes = 0
         self.web_failures = 0
         self.web_had_success_streak = False
@@ -245,18 +265,17 @@ class WebScraperThread(threading.Thread):
             self._persist_delay()
 
     def _persist_delay(self, force: bool = False) -> None:
-        """Write the delay back when it has moved far enough to be worth it.
+        """Write the delay into its state section when it has moved far enough.
 
         The decay runs on every success now, so without a step of its own it
-        would rewrite config.yaml once per scrape.
+        would rewrite the state file once per scrape. The state file is the home
+        the config file used to provide, and the step bound is unchanged.
         """
-        if not self._save_callback:
-            return
         if not force and not pacing.needs_persist(
                 self.web_delay, self._persisted_web_delay):
             return
         self._persisted_web_delay = self.web_delay
-        self._save_callback("web_delay_seconds", pacing.persistable(self.web_delay))
+        pacing.save_delay(self._state_store, pacing.WEB_DELAY_SECTION, self.web_delay)
 
     def _record_web_failure(self) -> None:
         """Count one scrape whose outcome we cannot attribute, and grow the delay.

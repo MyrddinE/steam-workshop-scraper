@@ -466,8 +466,8 @@ behaviour change, not part of this removal.
 
 **The pacing did not regress.** The tab flow spread many subscribes across a browser session and
 reported throttle pages separately; the replacement's pacing is the engine's shared AIMD interval —
-the persisted `daemon.web_delay_seconds` — with the subscribe POST deliberately exempt because it is
-an XHR, not a page load. The drain adds no client-side delay and awaits each call, so it never has two
+the persisted `web_delay` state section of `.daemon_state.yaml` — with the subscribe POST deliberately
+exempt because it is an XHR, not a page load. The drain adds no client-side delay and awaits each call, so it never has two
 requests in flight and the interval is paid once per item inside the route. Three tests pin it:
 `tests/test_webserver.py::test_the_queue_drain_calls_the_subscribe_route_once_per_item_in_order`
 (the serial loop), `test_the_route_gates_its_page_read_on_the_shared_interval` (the single gated

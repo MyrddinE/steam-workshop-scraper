@@ -1128,13 +1128,11 @@ class SubscriptionQueueScreen(ModalScreen):
     # countdown: the item being processed is visibly not one still waiting.
     _CURRENT_LABEL = "subscribing..."
 
-    def __init__(self, db_path: str, pause_lock_file: str, config: dict | None = None,
-                 config_path: str | None = None):
+    def __init__(self, db_path: str, pause_lock_file: str, config: dict | None = None):
         super().__init__()
         self.db_path = db_path
         self.pause_lock_file = pause_lock_file
         self.config = config or {}
-        self.config_path = config_path
         self._items: list[dict] = []
         self._pass_running = False
         # workshop_id -> SubscribeOutcome, in the order the pass reports them.
@@ -1345,7 +1343,6 @@ class SubscriptionQueueScreen(ModalScreen):
                 db_path=self.db_path,
                 pause_lock_file=self.pause_lock_file,
                 on_result=self._deliver_result,
-                config_path=self.config_path,
                 keep_running=lambda: not self._closing,
             )
 
@@ -3350,7 +3347,7 @@ class ScraperApp(App):
         screen; the screen itself owns the pause for as long as it is open.
         """
         self.push_screen(SubscriptionQueueScreen(
-            self.db_path, self.pause_lock_file, self.config, self.config_path))
+            self.db_path, self.pause_lock_file, self.config))
 
     async def action_quit(self) -> None:
         """Quit the application."""

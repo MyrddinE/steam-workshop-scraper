@@ -45,7 +45,7 @@ Before running the application, you need to configure it. Copy the provided exam
 cp config.yaml.example config.yaml
 ```
 
-Edit `config.yaml` to set your desired `api_batch_size`, `api_delay_seconds` (to avoid Steam rate limits), and the SQLite database path.
+Edit `config.yaml` to set your desired `api_batch_size` and the SQLite database path. The inter-request pacing delays are not configuration: the daemon keeps them in `.daemon_state.yaml` beside the database as they adapt to Steam's rate limits.
 
 **Obtaining a Steam API Key:** You can obtain a free Steam Web API key directly from Valve by visiting the [Official Steam Community Developer Page](https://steamcommunity.com/dev/apikey). You will need to log in with your Steam account and provide a domain name (you can use `localhost` for personal/local development).
 
