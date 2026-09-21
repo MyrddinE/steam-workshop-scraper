@@ -708,14 +708,18 @@ Surfacing them needs, at minimum:
 * a keystroke or UI element (a filter control, a "show settled" toggle) in both front ends that
   passes `include_settled=True` to the three queries, so the grid, the Wilson colours and the
   creator picker all move together;
-* the rendering that makes a settled row legible once it is visible — dead and ignored already
-  share mechanics but not yet appearance;
+* the rendering that makes a settled row legible once it is visible — ignored rows now have an
+  appearance of their own (a struck-through title on the web, underlined in the TUI, keyed off the
+  status rather than off the action that set it), but **dead** rows still have none and the two
+  settled statuses are not told apart; that gap is what
+  [Improve how ignored and dead items are rendered](#improve-how-ignored-and-dead-items-are-rendered)
+  covers;
 * a decision about what a visible settled row may do: it has no page to open and nothing to
   subscribe to, so the actions that would fail on it have to be disabled or explained.
 
-The `i` keystroke, the toggle and the in-place strikethrough/underline are a separate, nearer piece
-of work (stage 2 of the ignored-item feature); this entry is about making the settled rows reachable
-again.
+The `i` keystroke, the toggle and the in-place strikethrough/underline have since **landed** (stage 2
+of the ignored-item feature; the behaviour is described in [tui.md](tui.md) and
+[web-ui.md](web-ui.md)). What remains here is the part that makes the settled rows reachable again.
 
 ---
 
