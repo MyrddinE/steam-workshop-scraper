@@ -25,8 +25,9 @@ from unittest.mock import patch
 import pytest
 from textual.app import App, ComposeResult
 from textual.content import Content
-from textual.widgets import Label, Static
+from textual.widgets import Label, Markdown, Static
 
+from src import pending
 from src import subscription
 from src.tui import (
     DetailsPane,
@@ -229,3 +230,68 @@ async def test_the_list_row_renders_a_hostile_title_and_creator(hostile):
         drawn = " ".join(_plain(w) for w in row.query(Label))
 
     assert hostile in drawn
+
+
+# ---------------------------------------------------------------------------
+# the translation-request notice: its own element, not markdown
+# ---------------------------------------------------------------------------
+
+
+def _pane_text(pane) -> str:
+    """The detail text as drawn, with markup resolved.
+
+    `Markdown` renders through child blocks that are `Static` widgets, so
+    querying `Static` reaches the description as the reader receives it rather
+    than only the source string handed to `Markdown.update`.
+    """
+    return "\n".join(_plain(widget) for widget in pane.query(Static))
+
+
+@pytest.mark.asyncio
+async def test_a_queued_item_draws_the_translation_notice_as_its_own_element():
+    """The notice is an element, not a Rich tag inside the markdown.
+
+    `Markdown` does not interpret Rich markup, so the old
+    `> *[yellow]Translation requested...[/yellow]*` blockquote reached the reader
+    with the brackets showing. The wording now comes from `src/pending.py`, the
+    same string the web pane prints, and the emphasis is Textual markup resolved
+    by the `Label`.
+    """
+    item = _item(translation_priority=5, translate_version=None,
+                 short_description="The original description")
+    app = _DetailPaneApp()
+    async with app.run_test() as pilot:
+        pane = app.query_one(DetailsPane)
+        pane.item_data = item
+        await pilot.pause(ASYNC_PAUSE)
+
+        drawn = _pane_text(pane)
+        assert "The original description" in drawn, "the description still renders"
+        assert "[yellow]" not in drawn, "the tag must not reach the reader as text"
+        assert pending.TRANSLATION_REQUESTED_NOTICE in drawn
+        assert "[yellow]" not in pane.query_one("#detail-content", Markdown)._markdown
+
+        notice = pane.query_one("#translation-notice", Label).render()
+
+    assert str(notice) == pending.TRANSLATION_REQUESTED_NOTICE
+    assert any("italic" in str(span.style) for span in notice.spans), \
+        "the notice keeps the web pane's italic emphasis"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("item", [
+    _item(translation_priority=5, translate_version=7),
+    _item(translation_priority=0),
+])
+async def test_the_notice_stays_hidden_when_it_does_not_apply(item):
+    """Issue 42 did not change when the notice appears."""
+    app = _DetailPaneApp()
+    async with app.run_test() as pilot:
+        pane = app.query_one(DetailsPane)
+        pane.item_data = item
+        await pilot.pause(ASYNC_PAUSE)
+
+        notice = pane.query_one("#translation-notice", Label)
+
+        assert str(notice.render()) == ""
+        assert not notice.display

@@ -49,6 +49,14 @@ STAGES = (
 
 STAGE_NAMES = tuple(stage for stage, _multiplier, _colour, _label in STAGES)
 
+# What both detail panes print while an item is queued for translation and no
+# translation is stored yet. The TUI draws it as a Textual `Label` and the page
+# as its own `.translation-notice` paragraph, so it lives here, next to the
+# stage wording, for the same reason: two copies could describe one state
+# differently. The page takes the string from `src/webserver.py`, which renders
+# the template with it.
+TRANSLATION_REQUESTED_NOTICE = "Translation requested, currently in queue…"
+
 
 def _is_pending(stage: str, item: dict) -> bool:
     if stage == "image":

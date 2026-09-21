@@ -1499,7 +1499,14 @@ class DetailsPane(VerticalScroll):
                 yield Label("Subscribers: N/A", id="stat-subscribers")
                 yield Label("Favorites: N/A", id="stat-favorites")
 
+        # The translation notice is its own element rather than a blockquote in
+        # the markdown: `Markdown` renders Rich tags literally, and the web
+        # pane draws the same sentence as its own `.translation-notice`
+        # paragraph. A `Label` does interpret Textual markup, so the notice can
+        # keep the web's italic, muted emphasis. It stays above the description,
+        # where the blockquote sat.
         desc_container = Vertical(
+            Label("", id="translation-notice"),
             Markdown(id="detail-content"),
             id="desc-container"
         )
@@ -1561,6 +1568,8 @@ class DetailsPane(VerticalScroll):
     def update_content(self) -> None:
         if not self.item_data:
             self.query_one("#detail-content", Markdown).update("Select an item to see details.")
+            self.query_one("#translation-notice", Label).update("")
+            self.query_one("#translation-notice", Label).display = False
             self.query_one("#item-title", Label).update("")
             self.query_one("#item-sub-marker", Label).update("")
             self.query_one("#item-sub-marker", Label).display = False
@@ -1685,10 +1694,19 @@ class DetailsPane(VerticalScroll):
         wilson_label.display = bool(item.get("wilson_favorite_score") is not None)
 
         md_content = bbcode_to_markdown(desc)
-        if item.get("translation_priority", 0) > 0 and not item.get("translate_version"):
-             md_content = f"> *[yellow]Translation requested, currently in queue...[/yellow]*\n\n{md_content}"
-             
         self.query_one("#detail-content", Markdown).update(md_content)
+
+        # The wording is shared with the page (`src/pending.py`); only the
+        # styling is Textual markup, on a widget that interprets it. The notice
+        # shows from the moment the item is queued and no translation is
+        # stored -- the same test the web pane uses.
+        notice = self.query_one("#translation-notice", Label)
+        if item.get("translation_priority", 0) > 0 and not item.get("translate_version"):
+            notice.update(f"[italic]{pending.TRANSLATION_REQUESTED_NOTICE}[/italic]")
+            notice.display = True
+        else:
+            notice.update("")
+            notice.display = False
 
     def _format_wilson_scores(self, item: dict, cutoffs: dict) -> str:
         """Formats Wilson scores with percentile-based coloring."""
@@ -2268,6 +2286,11 @@ class ScraperApp(App):
         border-left: none;
         margin: 0;
         padding: 0;
+        height: auto;
+    }
+    #translation-notice {
+        color: $text-muted;
+        margin: 0 0 1 0;
         height: auto;
     }
     #subscription-queue-container {

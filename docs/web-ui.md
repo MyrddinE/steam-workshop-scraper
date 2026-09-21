@@ -314,8 +314,11 @@ The toggle appears only when the server reports `has_translation`, which is `tra
 set — the same test the TUI uses. An item can hold translated text that happens to match the
 original, so the presence of the field is not a reliable signal. When an item has no translation the
 two variants are identical rather than one being empty, so the pane has something to render either
-way. A pending translation is noted above the description while `translation_priority > 0` and no
-translation has been stored yet, matching the TUI's notice.
+way. A pending translation is noted above the description in its own `.translation-notice`
+paragraph while `translation_priority > 0` and no translation has been stored yet, matching the
+TUI's notice. The sentence is `pending.TRANSLATION_REQUESTED_NOTICE` in `src/pending.py`, rendered
+into the page as the `TRANSLATION_NOTICE` constant rather than retyped in the template, so the two
+detail panes print the same words.
 
 ---
 

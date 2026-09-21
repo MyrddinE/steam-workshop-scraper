@@ -219,7 +219,7 @@ so the column is already in the payload the pane renders from.
 
 **The pane deliberately shows the foreign text for a field that has no translation.** It is not hiding a gap and it is not a stopgap: with the original in front of them the reader can copy it and translate it themselves rather than waiting on the queue. Note that this makes a missing translation invisible on its own — `translate_version` and `translation_priority` are item-level while the `_en` columns are per field, so the translated view can fall back to the original for one field while another is translated. The pending marker is the signal for that, which is why it names the stage.
 
-**Queue indicator**: If `translation_priority > 0` and `translate_version` is not set, a banner shows "Translation requested, currently in queue..."
+**Queue indicator**: If `translation_priority > 0` and `translate_version` is not set, the pane shows `#translation-notice`, a `Label` above the description inside `#desc-container`. It is its own element rather than a blockquote in the markdown: `Markdown` renders Rich tags literally, so the old `> *[yellow]Translation requested, currently in queue...[/yellow]*` reached the reader with the brackets showing. The label keeps the web pane's emphasis as Textual markup (italic) and its muted colour from CSS. The sentence is `pending.TRANSLATION_REQUESTED_NOTICE` in `src/pending.py` — the one copy both front ends print; the page is rendered with it rather than retyping it.
 
 ### Detail Fetching
 
