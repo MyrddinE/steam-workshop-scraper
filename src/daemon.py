@@ -1,6 +1,7 @@
 import time
 import math
 import signal
+import sqlite3
 import json
 import logging
 import os
@@ -151,6 +152,14 @@ DISCOVERY_IDLE_SECONDS = 30.0
 # pins the pairing. ``daemon_control`` mirrors this value instead of importing
 # it, so the coupling is stated in both comments and checked by that test.
 SHUTDOWN_BUDGET_SECONDS = 5.0
+
+# How long a loop waits after losing a lock race before it tries again. The
+# connection's busy timeout is 15 s, so reaching this pause means a writer held
+# the lock longer than the timeout allowed; retrying at once would usually meet
+# the same lock and spin. Five seconds is the same brief pause the fetch path
+# already serves on a database error, and it is short enough that a lock which
+# clears quickly costs one iteration.
+DB_LOCK_RETRY_SECONDS = 5.0
 
 # The owner's subscriptions are reconciled once per appid at startup and then on
 # this cadence. Daily is the right order for it: the list only moves when a
@@ -1319,7 +1328,19 @@ class Daemon:
         if self._backup_worker is not None:
             self._backup_worker.start()
         while self.running:
-            self.process_batch()
+            try:
+                self.process_batch()
+            except sqlite3.OperationalError as exc:
+                # A write lock that outlived the connection's 15 s busy timeout
+                # is a lost iteration, not the end of the daemon: the rows this
+                # pass did not reach are still queued, so nothing is recovered
+                # per item -- the next pass simply retries them.
+                logging.warning(
+                    "Database locked during a fetch pass; leaving the queue "
+                    "alone and retrying in %gs: %s", DB_LOCK_RETRY_SECONDS, exc)
+                # Responsive, so a stop is not held for the whole pause.
+                pacing.wait(DB_LOCK_RETRY_SECONDS, lambda: self.running)
+                continue
             self._pid_file_removed()
         logging.info("Daemon gracefully exited.")
         self._shutdown_workers()

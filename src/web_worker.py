@@ -4,6 +4,7 @@ import enum
 import time
 import os
 import logging
+import sqlite3
 import threading
 from datetime import datetime, timezone
 from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, queue_field_for_translation, translation_is_current
@@ -30,6 +31,12 @@ WEB_DELAY_FLOOR = 6.0
 # that has never written a delay starts at the slowest rate the decay will take
 # it to anyway.
 WEB_DELAY_DEFAULT = WEB_DELAY_FLOOR
+
+# How long the loop waits after losing a lock race before its next attempt. A
+# `sqlite3.OperationalError` here means a write lock outlived the connection's
+# 15 s busy timeout, so retrying at once would usually meet the same lock; a
+# brief pause keeps a persistent lock from becoming a hot loop.
+DB_LOCK_RETRY_SECONDS = 5.0
 
 
 def configured_web_delay(config: dict) -> float:
@@ -414,98 +421,116 @@ class WebScraperThread(threading.Thread):
             while os.path.exists(self.pause_lock_file) and self.running:
                 time.sleep(1)
 
-            item = get_next_web_scrape_item(self.db_path)
-            if not item:
-                # Responsive, so an idle worker is not deaf to a stop for the
-                # whole nap. The blind ten-second sleep this replaced was why a
-                # shutdown with nothing queued had to wait out the daemon's join
-                # timeout: the stop flag was set, and the worker would not look
-                # at it until the sleep ended.
-                pacing.wait(10.0, lambda: self.running)
-                continue
+            item = None
+            try:
+                item = get_next_web_scrape_item(self.db_path)
+                if not item:
+                    # Responsive, so an idle worker is not deaf to a stop for the
+                    # whole nap. The blind ten-second sleep this replaced was why a
+                    # shutdown with nothing queued had to wait out the daemon's join
+                    # timeout: the stop flag was set, and the worker would not look
+                    # at it until the sleep ended.
+                    pacing.wait(10.0, lambda: self.running)
+                    continue
 
-            workshop_id = item["workshop_id"]
-            url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}"
-            # When web-download capture is on, ask for the body even on
-            # success: the whole point is to see what a working, signed-in page
-            # looks like. One interval per attempt, advanced whether or not it
-            # succeeds; a failure must not leave it running, or the next success
-            # would read the whole outage as elapsed time and collapse the delay
-            # at once.
-            elapsed = self._clock.since()
-            capture_body = capture.web_download_capture_active()
-            scrape_result = scrape_extended_details(url, keep_body=capture_body)
-            self._refresh_login_cookie_if_gated_or_signed_out(item, scrape_result)
-            if capture_body and scrape_result:
-                capture.record_web_download(
-                    capture.ITEM_PAGE_KIND, workshop_id, url, scrape_result,
-                    succeeded=scrape_result.get("description") is not None)
+                workshop_id = item["workshop_id"]
+                url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}"
+                # When web-download capture is on, ask for the body even on
+                # success: the whole point is to see what a working, signed-in page
+                # looks like. One interval per attempt, advanced whether or not it
+                # succeeds; a failure must not leave it running, or the next success
+                # would read the whole outage as elapsed time and collapse the delay
+                # at once.
+                elapsed = self._clock.since()
+                capture_body = capture.web_download_capture_active()
+                scrape_result = scrape_extended_details(url, keep_body=capture_body)
+                self._refresh_login_cookie_if_gated_or_signed_out(item, scrape_result)
+                if capture_body and scrape_result:
+                    capture.record_web_download(
+                        capture.ITEM_PAGE_KIND, workshop_id, url, scrape_result,
+                        succeeded=scrape_result.get("description") is not None)
 
-            outcome = classify_scrape(scrape_result)
-            if outcome is ScrapeOutcome.SUCCESS:
-                item_update = {
-                    "workshop_id": workshop_id,
-                    "extended_description": scrape_result.get("description"),
-                    "web_scrape_priority": 0,
-                    # Our clock, taken now that the page is in hand. Only this
-                    # success branch writes it; a miss, a wall or a transport
-                    # failure leaves the previous completion time, or NULL,
-                    # alone.
-                    "web_scraped_at": int(time.time()),
-                }
-                insert_or_update_item(self.db_path, item_update)
+                outcome = classify_scrape(scrape_result)
+                if outcome is ScrapeOutcome.SUCCESS:
+                    item_update = {
+                        "workshop_id": workshop_id,
+                        "extended_description": scrape_result.get("description"),
+                        "web_scrape_priority": 0,
+                        # Our clock, taken now that the page is in hand. Only this
+                        # success branch writes it; a miss, a wall or a transport
+                        # failure leaves the previous completion time, or NULL,
+                        # alone.
+                        "web_scraped_at": int(time.time()),
+                    }
+                    insert_or_update_item(self.db_path, item_update)
 
-                # Flag extended description for translation, unless the stored
-                # translation was taken at the item's current Steam revision.
-                desc = scrape_result.get("description") or ""
-                if desc and not translation_is_current(
-                        item.get("extended_description_en"),
-                        item.get("translate_version"),
-                        item.get("steam_updated_at")):
-                    queue_field_for_translation(self.db_path, "item", workshop_id, "extended_description_en", desc, 3)
+                    # Flag extended description for translation, unless the stored
+                    # translation was taken at the item's current Steam revision.
+                    desc = scrape_result.get("description") or ""
+                    if desc and not translation_is_current(
+                            item.get("extended_description_en"),
+                            item.get("translate_version"),
+                            item.get("steam_updated_at")):
+                        queue_field_for_translation(self.db_path, "item", workshop_id, "extended_description_en", desc, 3)
 
-                title = item.get("title_en") or item.get("title") or str(workshop_id)
-                logging.info(f"[W:{workshop_id}] Scraped \"{title}\"")
-                self.web_successes += 1
-                self.web_failures = 0
-                if self.web_successes >= 5:
-                    self.web_had_success_streak = True
-                self._decay_delay(elapsed)
-            elif outcome is ScrapeOutcome.RATE_LIMITED:
-                # Not a bad item and not necessarily a stale cookie: the page
-                # itself reports too many requests, and that is the only thing
-                # observed. The item is left alone either way -- the reply is not
-                # the item -- so the cause stays unnamed.
-                #
-                # A throttle is a refusal, and an unambiguous one, so it halves
-                # the request rate immediately rather than waiting for the
-                # second strike an unattributable failure needs.
-                # same way any other refusal does. It used to sleep a fixed
-                # 300 s and leave the delay alone, which made it a second pacing
-                # rule that could not converge: the same pause every time,
-                # forever. The doubling is served by the wait at the end of this
-                # iteration, so a sustained throttle backs off geometrically.
-                old_delay = self.web_delay
-                self.web_delay = pacing.backoff(self.web_delay)
-                logging.warning(
-                    "[W:%s] Steam returned a page reporting too many requests; "
-                    "increasing the delay from %.2fs to %.2fs and leaving the "
-                    "item untouched.",
-                    workshop_id, old_delay, self.web_delay)
-                self._persist_delay(force=True)
-                self.web_failures += 1
-                self.web_successes = 0
-            elif outcome is ScrapeOutcome.ITEM_MISSING:
-                self._handle_missing_item(item, url, scrape_result)
-            elif outcome is ScrapeOutcome.ITEM_PAGE_WITHOUT_DESCRIPTION:
-                self._handle_item_page_without_description(item, url, scrape_result)
-            elif outcome is ScrapeOutcome.GATED:
-                self._handle_gate(item, url, scrape_result)
-            else:  # ScrapeOutcome.UNKNOWN
-                self._handle_unknown(item, url, scrape_result)
-            # Responsive, so a long backoff cannot make the worker deaf to a
-            # stop or a pause. It serves the delay in full; it does not shorten it.
-            pacing.wait(self.web_delay, lambda: self.running)
+                    title = item.get("title_en") or item.get("title") or str(workshop_id)
+                    logging.info(f"[W:{workshop_id}] Scraped \"{title}\"")
+                    self.web_successes += 1
+                    self.web_failures = 0
+                    if self.web_successes >= 5:
+                        self.web_had_success_streak = True
+                    self._decay_delay(elapsed)
+                elif outcome is ScrapeOutcome.RATE_LIMITED:
+                    # Not a bad item and not necessarily a stale cookie: the page
+                    # itself reports too many requests, and that is the only thing
+                    # observed. The item is left alone either way -- the reply is not
+                    # the item -- so the cause stays unnamed.
+                    #
+                    # A throttle is a refusal, and an unambiguous one, so it halves
+                    # the request rate immediately rather than waiting for the
+                    # second strike an unattributable failure needs.
+                    # same way any other refusal does. It used to sleep a fixed
+                    # 300 s and leave the delay alone, which made it a second pacing
+                    # rule that could not converge: the same pause every time,
+                    # forever. The doubling is served by the wait at the end of this
+                    # iteration, so a sustained throttle backs off geometrically.
+                    old_delay = self.web_delay
+                    self.web_delay = pacing.backoff(self.web_delay)
+                    logging.warning(
+                        "[W:%s] Steam returned a page reporting too many requests; "
+                        "increasing the delay from %.2fs to %.2fs and leaving the "
+                        "item untouched.",
+                        workshop_id, old_delay, self.web_delay)
+                    self._persist_delay(force=True)
+                    self.web_failures += 1
+                    self.web_successes = 0
+                elif outcome is ScrapeOutcome.ITEM_MISSING:
+                    self._handle_missing_item(item, url, scrape_result)
+                elif outcome is ScrapeOutcome.ITEM_PAGE_WITHOUT_DESCRIPTION:
+                    self._handle_item_page_without_description(item, url, scrape_result)
+                elif outcome is ScrapeOutcome.GATED:
+                    self._handle_gate(item, url, scrape_result)
+                else:  # ScrapeOutcome.UNKNOWN
+                    self._handle_unknown(item, url, scrape_result)
+                # Responsive, so a long backoff cannot make the worker deaf to a
+                # stop or a pause. It serves the delay in full; it does not shorten it.
+                pacing.wait(self.web_delay, lambda: self.running)
+            except sqlite3.OperationalError as exc:
+                # A lock that outlived the busy timeout is one lost iteration.
+                # The row is left exactly as it was -- this pass never reached
+                # its write -- so it is still queued for the next attempt.
+                if item is not None:
+                    logging.warning(
+                        "[W:%s] Database locked; leaving the item queued and "
+                        "retrying in %gs: %s",
+                        item["workshop_id"], DB_LOCK_RETRY_SECONDS, exc)
+                else:
+                    logging.warning(
+                        "Web scraper could not read the queue (database "
+                        "locked); retrying in %gs: %s",
+                        DB_LOCK_RETRY_SECONDS, exc)
+                # Responsive, so a stop is not held for the whole pause.
+                pacing.wait(DB_LOCK_RETRY_SECONDS, lambda: self.running)
 
         self._persist_delay(force=True)
         # No "Web scraper thread stopped." here: the daemon logs one line per
