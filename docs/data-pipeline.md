@@ -554,7 +554,8 @@ Every item is, at all times, in exactly one state:
 * queued for the API fetch (`api_priority > 0`), or
 * queued for a web scrape (`web_scrape_priority > 0`), or
 * queued for an image (`image_priority > 0`), or
-* queued for translation (`translation_priority > 0`), or
+* queued for translation (a `translation_queue` row exists; `translation_priority > 0` is the
+  item-level mirror of it), or
 * complete for the stage that owns it, or
 * deliberately dead (`fetch_status = -1`) and therefore in **no** queue.
 
@@ -567,8 +568,8 @@ to implement it — the producer that writes the column and the consumer that re
 | Discovery → API fetch | `api_priority = 3` for a cursor-discovered item, `5` for a page-discovered new or changed one, with `fetch_status` and `api_fetched_at` left NULL (`seed_database`, `_run_page_discovery`) | `get_next_items_to_fetch`: `api_priority > 0 AND (fetch_status IS NULL OR fetch_status != -1)` | `api_fetch_queue_predicate()` |
 | API fetch → web scrape | `fetch_status = 200`, `api_fetched_at = now`, then `raise_web_scrape_priority(max(3, requested))` — or `max(1, requested)` for an item the enrichment filters exclude (`_raise_scrape_and_image_priorities`) | `get_next_web_scrape_item`: `web_scrape_priority > 0`. The worker's own success test is that it stored a description, not merely that the flag is clear | `web_scrape_queue_predicate()` |
 | API fetch → image | `raise_image_priority(max(3, requested))`, or `max(1, requested)` when the filters exclude, whenever `preview_url` is present (`_raise_scrape_and_image_priorities`) | `get_next_image_item`: `image_priority > 0`; `image_answer` records the answer, so a permanent `404` or a non-image type also settles the stage | `image_queue_predicate()` |
-| API fetch and web scrape → translation | `queue_field_for_translation` raises the item's `translation_priority` with `MAX` and inserts a `translation_queue` row for each non-ASCII `title`/`short_description` (`_queue_translations`) or `extended_description` (`WebScraperThread`) | `get_next_batch_for_translation`: any `translation_queue` row; the translator clears the mirror to `0` when the item has no queue entries left | `translation_queue_predicate()` (the poll's; `translation_priority_predicate()` is the item-level mirror the invariant reads) |
-| any stage → dead | `_settle_api_failure` on a permanent `404`: `fetch_status = -1` and `api_priority`, `web_scrape_priority`, `image_priority` and `translation_priority` all cleared | every queue predicate. The web, image and translation polls have **no** dead-item guard, so that clear is what keeps a dead item out; the fetch queue also tests `fetch_status != -1` on its own | `queued_anywhere_predicate()` (built from the four above) |
+| API fetch and web scrape → translation | `queue_field_for_translation` raises the item's `translation_priority` with `MAX` and inserts a `translation_queue` row for each non-ASCII `title`/`short_description` (`_queue_translations`) or `extended_description` (`WebScraperThread`) | `get_next_batch_for_translation`: any `translation_queue` row; the translator clears the mirror to `0` when the item has no queue entries left | `translation_queue_predicate()` (the poll's; `translation_priority_predicate()` is the item-level mirror, and the invariant asks the queue row as well) |
+| any stage → dead | `_settle_api_failure` on a permanent `404`: `fetch_status = -1`, `api_priority`, `web_scrape_priority`, `image_priority` and `translation_priority` all cleared, and every `translation_queue` row for the item (`entity_type = 'item'`) deleted in the same transaction | every queue predicate. The web and image polls select on their flag alone and the translation poll on the row, all with **no** dead-item guard, so the producer's clear is what keeps a dead item out; the fetch queue also tests `fetch_status != -1` on its own | `queued_anywhere_predicate()` (the four flags **or** a `translation_queue` row) |
 
 Each predicate is a named function, not a copy of its SQL: the worker poll
 interpolates the fragment into its statement and the tests in
@@ -590,19 +591,27 @@ Two statistics watch the invariant, each meant to read zero:
 
 * `queued_nowhere` — live items in no queue that the pipeline never completed. It is the shape of
   issue 19 (dequeued as scraped with no description stored) and issue 20 (discovered with no fetch
-  priority).
-* `dead_queued` — dead items still holding a queue flag, the shape of issue 17.
+  priority). A live item with a `translation_queue` row is queued, so it is not in this population
+  even when its `translation_priority` mirror reads zero.
+* `dead_queued` — dead items a work queue would still select: a queue flag left set (issue 17) or a
+  `translation_queue` row the poll still holds (issue 66).
 
 `dead_queued` and `dead_items_by_queue` are one question at two resolutions, and both are wanted:
 `dead_queued` is the scalar that must read zero, and `dead_items_by_queue` is the per-queue breakdown that says
-which flag was left set, so a non-zero reading points at the queue to look in. Neither replaces the
-other — the scalar is the invariant, the breakdown is the diagnosis.
+where the item is held, so a non-zero reading points at the queue to look in. Neither replaces the
+other — the scalar is the invariant, the breakdown is the diagnosis — and the two must agree: the
+breakdown's `translation` column counts the mirror **or** a `translation_queue` row, the same test the
+scalar's union makes, so an item held only by a row is named in both.
 
 Both count; neither repairs. The consumer's predicates are named functions shared
 with the handoff contract tests, so a divergence between a predicate and the
 producer's write is now caught at the handoff rather than inferred from these two
 numbers; the counters remain how the same divergence is noticed in the field,
-where no test is running.
+where no test is running. The producers that mark an item dead clear its
+`translation_queue` rows in the same transaction as the status write, and
+migration 35→36 removed the rows already stranded at the time of the fix (910
+dead items held 1,016 rows on the v35 snapshot, each with its mirror already
+cleared), so no dead item's fields are translated or paid for.
 
 ---
 

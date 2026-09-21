@@ -2428,7 +2428,7 @@ function _renderDeadItemsByQueue(stuck) {
     return '<li>' + q[1] + ': ' + fmtCount(stuck[q[0]] || 0) + '</li>';
   }).join('');
   return '<p class="stats-stuck">&#x26A0; ' + fmtCount(total)
-    + ' dead item(s) are still flagged in a work queue</p>'
+    + ' dead item(s) are still sitting in a work queue</p>'
     + '<ul>' + items + '</ul>'
     + '<p class="stat-label">These rows can never complete; the queues will not drain until they are cleared.</p>';
 }
@@ -2575,7 +2575,8 @@ function _renderMetricBody(name, value) {
   if (name === 'coverage') return _renderCoverage(value);
   if (name === 'dead_items_by_queue') return _renderDeadItemsByQueue(value);
   if (name === 'dead_queued') return _renderHandoffCount(
-    value, 'No dead item is holding a queue flag.', 'dead item(s) still hold a queue flag.');
+    value, 'No dead item is still in a work queue.',
+    'dead item(s) are still in a work queue.');
   if (name === 'queued_nowhere') return _renderHandoffCount(
     value, 'No item is stranded: every live item is queued or complete.',
     'item(s) are in no queue and not complete.');

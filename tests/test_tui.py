@@ -707,7 +707,7 @@ async def test_stats_screen_puts_every_metric_in_its_own_chunk(mock_config):
             assert "API Data" in coverage and "100.0%" in coverage
             assert "Extended Web" in coverage
             stuck = str(screen.query_one("#dead-items-by-queue-content", Static).render())
-            assert "dead item(s) are still flagged" in stuck
+            assert "dead item(s) are still sitting in a work queue" in stuck
             assert "Web scrape" in stuck
             translation = str(screen.query_one("#translation-stats-content", Static).render())
             assert "Translated" in translation

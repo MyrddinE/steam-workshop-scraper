@@ -9,11 +9,11 @@ The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_
 
 A **pending** migration is DDL that rewrites tables — 34→35's `DROP COLUMN` rewrote `workshop_items` and took *measured live* **283 s** in production — and the daemon is a detached process that may still be writing to them. So the two UI entry points do not call `initialize_database` directly. They call `initialize_database_with_daemon_stopped` (`src/daemon_control.py`), which reads the recorded `user_version` read-only first, stops a running daemon through `DaemonController.stop()` when — and only when — a migration is pending, refuses to migrate when that stop did not succeed, migrates, and restarts the daemon afterwards. A database already at `EXPECTED_VERSION` leaves a running daemon untouched: that is the ordinary relaunch. The daemon's own startup still calls `initialize_database` directly, because a daemon performs its own pending migrations before it begins writing; see [threading.md](threading.md#a-pending-migration-and-a-running-daemon).
 
-The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v36) for what that means when you add one.
+The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v37) for what that means when you add one.
 
 ---
 
-## Current Schema (v35)
+## Current Schema (v36)
 
 The application-level reference for every table and column is
 [data-model.md](data-model.md); the timestamp conventions are in
@@ -51,7 +51,7 @@ Primary key: `workshop_id INTEGER PRIMARY KEY` (aliased from rowid). Columns:
 | own_first_subscribed_at | INTEGER | When we first *saw* the owner subscribed; sticky, and the only source of the `previously` state |
 | steam_download_seen_at | INTEGER | One-way local latch: when this app first saw Steam's downloaded copy of a subscribed item on disk (v26). Set only by `src/workshop_folders`, cleared only beside `own_subscribed` when the item leaves the subscription list. NULL means not confirmed on disk. Renamed from `downloaded_at` in v33: it is a sighting latch, not a completion clock |
 
-The columns above are what the database holds at v35, and they are reached two ways.
+The columns above are what the database holds at v36, and they are reached two ways.
 `_create_current_schema` creates them directly, so a fresh database starts at `EXPECTED_VERSION`
 with these names. `_create_legacy_schema`'s `CREATE TABLE` instead declares the historical names
 (`dt_found`, `dt_updated`, `dt_attempted`, `dt_translated`, `time_created`, `time_updated`) and a
@@ -206,15 +206,15 @@ independently, allowing crash recovery on a per-migration basis.
 from 1 to `EXPECTED_VERSION`, that each entry names the function for its own
 version, and that a fresh database reaches `EXPECTED_VERSION`.
 
-### Adding the next migration (target v36)
+### Adding the next migration (target v37)
 
-1. bump `EXPECTED_VERSION` in `src/database.py` to `36`;
-2. append `def _migration_35_to_36(cursor, conn, db_path): ...` immediately
-   after `_migration_34_to_35`, keeping the body self-contained and preserving
-   what the step meant at v35 (no tidying an older step, no changing a
+1. bump `EXPECTED_VERSION` in `src/database.py` to `37`;
+2. append `def _migration_36_to_37(cursor, conn, db_path): ...` immediately
+   after `_migration_35_to_36`, keeping the body self-contained and preserving
+   what the step meant at v36 (no tidying an older step, no changing a
    `PRAGMA user_version = N` target);
-3. append `(36, _migration_35_to_36)` as the last entry of `MIGRATIONS`;
-4. add a `### v35 → v36: ...` entry below, in the same shape as the others;
+3. append `(37, _migration_36_to_37)` as the last entry of `MIGRATIONS`;
+4. add a `### v36 → v37: ...` entry below, in the same shape as the others;
 5. **mirror the step in `_create_current_schema`.** It is the shape a fresh
    database is created at now, so a schema change that lands only in the chain
    moves the legacy endpoint and not the fresh one. Update the table, index or
@@ -1186,7 +1186,54 @@ versions — which is exactly why the drop needs guards on that side:
 (row counts across every app table and the two column sets), the two index removals, the
 re-initialisation, the `window_size` safe-add guard, the empty-discovery populate step,
 the already-dropped-under-the-old-marker case, and a `legacy_chain=True` fresh database
-that still reaches v35.
+that still reaches v36.
+
+### v35 → v36: dead items give up their translation queue rows
+
+The defect is issue 66. `_settle_api_failure` marked an item dead
+(`fetch_status = -1`) and cleared the four item-level queue flags, but it did not delete
+the item's rows from `translation_queue`. The translation poll selects **every** row of
+that table (`translation_queue_predicate()` is `1`) with no dead-item guard, so a dead
+item's fields were still handed out and paid for. Nothing detected it either:
+`queued_anywhere_predicate` was built from `translation_priority_predicate`, the
+item-level mirror, so `dead_queued` counted only the flag half of the handoff.
+
+*Measured* on the v35 snapshot (1,725,544 items, 68,323 dead): `dead_queued` read **0**
+while **910 dead items held 1,016 `translation_queue` rows**, every one of them with the
+mirror already cleared. The v22 backup shows 914 items and 1,022 rows. Left alone, the
+translator pays to translate dead items' fields, and the detector meant to notice cannot.
+
+The step is **data-only** — no table, column or index changes:
+
+```sql
+DELETE FROM translation_queue
+WHERE entity_type = 'item'
+  AND entity_id IN (SELECT workshop_id FROM workshop_items WHERE fetch_status = -1);
+```
+
+Only `entity_type = 'item'` rows keyed to a dead `workshop_id`. A creator row
+(`entity_type = 'user'`) is a different entity whose numeric id may collide with a dead
+item's id; it is not the dead item's work. `_create_current_schema` needs no mirror,
+because nothing about the shape changes, but `EXPECTED_VERSION` moves to 36 and the
+current-schema docstring and heading move with it — `test_schema_equivalence` compares the
+version marker both paths leave, so a data-only step that left the marker at 35 would fail
+it on the next schema change. `tests/test_dead_translation_rows_migration.py` pins the
+dead-row deletion, the live and creator rows it leaves, the logged count, the rewind
+idempotency, and the version.
+
+The ongoing half of the fix is not in the migration. Every producer that marks an item
+dead deletes the item's rows *in the same transaction as the status write*
+(`insert_or_update_item(..., clear_translation_queue=True)`), so the clear cannot race a
+translator drain; and `queued_anywhere_predicate` now asks the consumer's real question —
+a flag **or** a `translation_queue` row — which is what makes `dead_queued` see a
+row-without-a-flag and keeps `queued_nowhere` from calling an item with outstanding
+translation work stranded. `dead_items_by_queue` makes the same translation test (mirror
+**or** row) in its `translation` column, so the scalar and the per-queue diagnostic that
+exists to say *which* queue holds the item cannot disagree. There is deliberately no
+poll-side dead guard: the producer's clear is the mechanism the stage-handoff plan names,
+so the translator's select is unchanged. Pinned by
+`tests/test_daemon.py::test_process_item_404_deletes_the_items_translation_queue_rows`,
+two tests in `tests/test_handoff_contract.py`, and three in `tests/test_metrics.py`.
 
 ---
 
@@ -1216,7 +1263,7 @@ The exception exists rather than a bare `ValueError` because the three entry poi
 
 ### `_create_current_schema`, `_create_legacy_schema`, `_ensure_indexes`, `MIGRATIONS` (database)
 
-`_create_current_schema(cursor, conn)` creates a brand-new database directly at `EXPECTED_VERSION`. Every table, index and trigger definition it holds was dumped from `sqlite_master` of a database the migration chain itself produced at v35 — not written from reading the migrations — so the index SQL it creates is the exact text SQLite stores. It deliberately does **not** repeat the query indexes `_ensure_indexes` owns, because that runs after it on both paths; those are the ones with historical names such as `idx_time_created`, whose definitions a `RENAME COLUMN` rewrote. It does create the indexes a *migration* owns, because no migration runs on this path. It does not carry the three columns 34→35 dropped.
+`_create_current_schema(cursor, conn)` creates a brand-new database directly at `EXPECTED_VERSION`. Every table, index and trigger definition it holds was dumped from `sqlite_master` of a database the migration chain itself produced at v35 — not written from reading the migrations — so the index SQL it creates is the exact text SQLite stores. v36 is data-only, so that dump is still the terminal shape. It deliberately does **not** repeat the query indexes `_ensure_indexes` owns, because that runs after it on both paths; those are the ones with historical names such as `idx_time_created`, whose definitions a `RENAME COLUMN` rewrote. It does create the indexes a *migration* owns, because no migration runs on this path. It does not carry the three columns 34→35 dropped.
 
 `_create_legacy_schema(cursor, conn)` creates the tables (`IF NOT EXISTS`) and the baseline columns in their historical form, and runs the legacy data conversions every database history shares. It is the unversioned part of the schema, run before the versioned steps. Because it runs on every startup for an existing database, it also runs on both sides of migration 29→30: it resolves the creator and discovery table names once with `_current_table_name` (new name if it exists, else the historical one, else the historical one for a brand-new file) and routes its `CREATE TABLE`, `_safe_add_columns`, populate step and legacy-filter conversion through the resolved name.
 
@@ -1226,11 +1273,11 @@ The exception exists rather than a bare `ValueError` because the three entry poi
 
 ### `_safe_add_columns` (database)
 
-Adds columns to an existing table, catching `OperationalError` for duplicates. It is the unversioned builder's half of the forward rule, since it runs on every startup: a historical name whose renamed current form is already present is skipped (`_RENAMED_COLUMN_NAMES`), and a name a migration has dropped is skipped once the database is at or past the dropping version (`_DROPPED_COLUMN_NAMES`). Without the second guard, re-initialising a v35 database would add `window_size` back beside the columns the migration left. `scrape_version` and `last_historical_date_scanned` are in no safe-add list, so `window_size` is the only dropped-name entry.
+Adds columns to an existing table, catching `OperationalError` for duplicates. It is the unversioned builder's half of the forward rule, since it runs on every startup: a historical name whose renamed current form is already present is skipped (`_RENAMED_COLUMN_NAMES`), and a name a migration has dropped is skipped once the database is at or past the dropping version (`_DROPPED_COLUMN_NAMES`). Without the second guard, re-initialising a database at or past v35 would add `window_size` back beside the columns the migration left. `scrape_version` and `last_historical_date_scanned` are in no safe-add list, so `window_size` is the only dropped-name entry.
 
 ### `insert_or_update_item` (database)
 
-Upserts an item row using `INSERT ... ON CONFLICT(workshop_id) DO UPDATE SET`. Filters keys against `WORKSHOP_ITEM_COLUMNS` frozenset before building the SQL. Handles tags via junction table (parses JSON, calls `_ensure_tag_ids`, updates `workshop_tags`). Tags are excluded from the INSERT column list since they're no longer a workshop_items column.
+Upserts an item row using `INSERT ... ON CONFLICT(workshop_id) DO UPDATE SET`. Filters keys against `WORKSHOP_ITEM_COLUMNS` frozenset before building the SQL. Handles tags via junction table (parses JSON, calls `_ensure_tag_ids`, updates `workshop_tags`). Tags are excluded from the INSERT column list since they're no longer a workshop_items column. The keyword-only `clear_translation_queue` (default `False`) also deletes the item's `translation_queue` rows on the same connection before the single commit; the producer that marks an item dead passes it so the status write and the queue clear are one transaction (v36).
 
 ### `insert_or_update_creator` (database)
 

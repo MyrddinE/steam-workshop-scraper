@@ -477,8 +477,8 @@ class StatsScreen(Screen):
         elif name == "dead_queued":
             self._set_text(name, self._format_handoff_metric(
                 value,
-                "No dead item is holding a queue flag.",
-                "dead item(s) still hold a queue flag",
+                "No dead item is still in a work queue.",
+                "dead item(s) are still in a work queue",
             ))
         elif name == "queued_nowhere":
             self._set_text(name, self._format_handoff_metric(
@@ -759,7 +759,7 @@ class StatsScreen(Screen):
         if not total:
             return "[green]No dead items are still sitting in a queue.[/green]"
         lines = [
-            f"[bold red]{total:,} dead item(s) are still flagged in a work queue[/bold red]",
+            f"[bold red]{total:,} dead item(s) are still sitting in a work queue[/bold red]",
             "",
         ]
         for key, label in labels:

@@ -415,21 +415,35 @@ def _dead_items_by_queue(conn, params) -> dict:
     """Work queued against items that are already known to be gone.
 
     An item marked dead should be in no queue, so this is expected to read zero.
-    It is kept because the queues used to strand these rows: the daemon now
-    clears the flags when it marks an item dead, and migration 16->17 cleared the
-    rows already stranded. A non-zero reading means that cause has come back,
+    It is kept because the queues used to strand these rows, in two shapes. The
+    first is a queue flag: the daemon used to clear only `api_priority` when it
+    marked an item dead, and migration 16->17 cleared the `web_scrape_priority`,
+    `image_priority` and `translation_priority` flags already stranded. The
+    second is a `translation_queue` row with its mirror cleared: the daemon did
+    not delete those rows until issue 66, and migration 35->36 removed the ones
+    already there. A non-zero reading means one of those causes has come back,
     which is more useful than a button that would hide the symptom.
 
-    This is the diagnostic form of the question `dead_queued` answers: that
-    metric is the scalar that must read zero, and this one breaks the same
-    population down so the reading says *which* queue still holds dead rows.
-    They are one question at two resolutions, not two findings.
+    This is the other resolution of the question `dead_queued` answers: that metric
+    is the scalar that must read zero, and this one breaks the same population
+    down so the reading says which queue still holds the dead rows. The
+    translation column therefore counts the mirror *or* a `translation_queue` row,
+    exactly as the scalar's union does -- a dead item held only by a row has no
+    flag column to name it, and a breakdown that read flags alone would put the
+    item in the scalar and leave this diagnostic reading zero, which is the
+    disagreement the breakdown exists to prevent. They are one question at two
+    resolutions, not two findings.
     """
     row = conn.execute(
         """
         SELECT COALESCE(SUM(CASE WHEN web_scrape_priority > 0 THEN 1 ELSE 0 END), 0) AS web,
                COALESCE(SUM(CASE WHEN image_priority > 0 THEN 1 ELSE 0 END), 0) AS image,
-               COALESCE(SUM(CASE WHEN translation_priority > 0 THEN 1 ELSE 0 END), 0) AS translation,
+               COALESCE(SUM(CASE
+                              WHEN translation_priority > 0
+                                OR EXISTS (SELECT 1 FROM translation_queue q
+                                           WHERE q.entity_type = 'item'
+                                             AND q.entity_id = workshop_items.workshop_id)
+                              THEN 1 ELSE 0 END), 0) AS translation,
                COALESCE(SUM(CASE WHEN api_priority > 0 THEN 1 ELSE 0 END), 0) AS api
         FROM workshop_items
         WHERE fetch_status = -1
@@ -438,28 +452,30 @@ def _dead_items_by_queue(conn, params) -> dict:
     return {k: row[k] for k in ("web", "image", "translation", "api")}
 
 
-@metric("dead_queued", 58, "Dead items still holding a queue flag.")
+@metric("dead_queued", 58, "Dead items a work queue would still select.")
 def _dead_queued(conn, params) -> int:
-    """Dead items a work queue would still select -- the shape of issue 17.
+    """Dead items a work queue would still select -- the shape of issues 17 and 66.
 
     The handoff invariant is that every item is in exactly one state: queued for
     the API fetch (``api_priority > 0``), a web scrape (``web_scrape_priority > 0``),
-    an image (``image_priority > 0``) or a translation (``translation_priority > 0``);
-    complete for the stage that owns it; or deliberately dead (``fetch_status = -1``)
-    and therefore in **no** queue.
+    an image (``image_priority > 0``) or a translation (a ``translation_queue`` row
+    exists); complete for the stage that owns it; or deliberately dead
+    (``fetch_status = -1``) and therefore in **no** queue.
 
-    A dead item holding a queue flag is the second kind of violation: the stage
-    that marked it dead wrote ``fetch_status = -1`` but left a flag set, so the web,
-    image or translation poll -- each of which selects on its flag alone, with no
-    dead-item guard -- keeps handing out a row that can never complete.
+    A dead item a queue would still select is the second kind of violation: the
+    stage that marked it dead wrote ``fetch_status = -1`` but left work behind. It
+    can be a flag -- the web, image and translation polls each select on their flag
+    alone, with no dead-item guard -- or, for translation, the queue row itself,
+    which is the consumer's real predicate and outlives a cleared mirror.
 
     Zero is the healthy reading. A non-zero value is the number of dead items
     still encumbered by a queue, each item counted once however many flags it
-    holds. `dead_items_by_queue` answers the same question at the other resolution: this
-    is the scalar that must read zero, and that metric is the per-queue breakdown
-    that says where the flag was left set. Both are wanted -- the scalar is the
-    invariant, the breakdown is the diagnosis -- so one is not a replacement for
-    the other.
+    holds. `dead_items_by_queue` answers the same question at the other
+    resolution: this is the scalar that must read zero, and that metric is the
+    per-queue breakdown that says where the item is held -- a flag, or for
+    translation a queue row. Both are wanted -- the scalar is the invariant, the
+    breakdown is the diagnosis -- so one is not a replacement for the other, and
+    the two must agree.
     """
     # The union comes from the named queue predicates, so a change to one of them
     # moves this with it. ``api_priority`` is then added on its own, because the
@@ -470,9 +486,11 @@ def _dead_queued(conn, params) -> int:
     # priority would stop being counted, and it is the same violation:
     # `_settle_api_failure` clears all four flags when it writes ``fetch_status = -1``.
     #
-    # Measured against the 2026-09-18 backup: the hand-written union and this one
-    # both count 4, and all 4 are dead rows holding only ``api_priority > 0``;
-    # the bare named union counts 0.
+    # Measured against the 2026-09-18 backup, before the queue-row term below
+    # existed: the hand-written union and this one both counted 4, all 4 dead
+    # rows holding only ``api_priority > 0``, while the bare named union counted 0.
+    # The named union now also asks the translation queue, which only ever adds
+    # to that count.
     return conn.execute(
         f"""
         SELECT COUNT(*) AS n
@@ -489,10 +507,10 @@ def _queued_nowhere(conn, params) -> int:
 
     The handoff invariant is that every item is in exactly one state: queued for
     the API fetch (``api_priority > 0``), a web scrape (``web_scrape_priority > 0``),
-    an image (``image_priority > 0``) or a translation (``translation_priority > 0``);
-    complete for the stage that owns it; or deliberately dead (``fetch_status = -1``) in
-    no queue. This counts the first kind of violation -- an item that fell out of
-    the pipeline without being finished:
+    an image (``image_priority > 0``) or a translation (a ``translation_queue`` row
+    exists); complete for the stage that owns it; or deliberately dead
+    (``fetch_status = -1``) in no queue. This counts the first kind of violation --
+    an item that fell out of the pipeline without being finished:
 
     * discovered but never fetched (``fetch_status IS NULL``) with no fetch priority,
       which is issue 20; or
@@ -511,9 +529,12 @@ def _queued_nowhere(conn, params) -> int:
     # Stated as the negation of the same union, so the two halves of the handoff
     # invariant cannot drift apart. Inside this population the API predicate's
     # fetch_status guard is always true -- an item here is either ``fetch_status IS NULL`` or
-    # ``fetch_status = 200``, never dead -- so the negation says exactly what the four
-    # hand-written ``<= 0`` terms said. Verified equal on the 2026-09-18 backup:
-    # both forms count 3456.
+    # ``fetch_status = 200``, never dead -- so before the translation-queue term
+    # was added the negation said exactly what the four hand-written ``<= 0``
+    # terms said. Verified equal on the 2026-09-18 backup: both forms counted 3456.
+    # The translation-queue term now also keeps an item with outstanding
+    # translation work out of this population, which is the correct reading of
+    # the invariant (issue 66).
     return conn.execute(
         f"""
         SELECT COUNT(*) AS n

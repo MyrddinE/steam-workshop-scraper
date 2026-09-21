@@ -619,6 +619,41 @@ def test_process_item_404_clears_every_queue_flag(db_path, tmp_path):
     assert row["translation_priority"] == 0
 
 
+def test_process_item_404_deletes_the_items_translation_queue_rows(db_path, tmp_path):
+    """A dead item's translation work goes with it (issue 66).
+
+    The translation poll hands out every `translation_queue` row with no dead-item
+    guard, so clearing only the item-level mirror would leave the dead item's
+    fields to be translated and paid for. The delete is keyed to the item's own
+    entity; a creator row that happens to share the numeric id is a different
+    entity and must survive.
+    """
+    from src.database import (insert_or_update_item, get_connection,
+                              queue_field_for_translation)
+
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "fetch_status": 200, "api_priority": 5,
+    })
+    queue_field_for_translation(db_path, "item", 1, "title_en", "テスト", 3)
+    queue_field_for_translation(db_path, "user", 1, "personaname_en", "テスト", 3)
+    daemon = _real_db_daemon(db_path, tmp_path)
+    existing = {"workshop_id": 1, "fetch_status": 200, "api_priority": 5,
+                "translation_priority": 3}
+
+    with patch("src.daemon.get_workshop_details", return_value={"status": 404}):
+        daemon._process_item(existing)
+
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        "SELECT entity_type, entity_id, field FROM translation_queue "
+        "ORDER BY entity_type, field"
+    ).fetchall()
+    conn.close()
+    assert [tuple(r) for r in rows] == [("user", 1, "personaname_en")], (
+        "the dead item's translation rows must be deleted; the creator's must stay"
+    )
+
+
 def test_process_item_success_moves_both_clocks(db_path, tmp_path):
     from src.database import insert_or_update_item, get_connection
 

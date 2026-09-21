@@ -135,7 +135,7 @@ def _regress_to_v33(db_path) -> None:
 
 
 def test_a_fresh_database_names_the_two_columns(db_path):
-    assert EXPECTED_VERSION == 35
+    assert EXPECTED_VERSION == 36
     assert _version(db_path) == EXPECTED_VERSION
     columns = _columns(db_path)
     assert set(NEW_NAMES) <= columns

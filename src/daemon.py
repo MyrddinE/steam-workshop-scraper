@@ -1024,7 +1024,14 @@ class Daemon:
             merged_data["web_scrape_priority"] = 0
             merged_data["image_priority"] = 0
             merged_data["translation_priority"] = 0
-            insert_or_update_item(self.db_path, merged_data)
+            # The translation poll's real predicate is the queue row, not the
+            # mirror cleared above: it hands out every row of
+            # `translation_queue` with no dead-item guard, so the item's rows
+            # have to go in the same transaction as the status write. Clearing
+            # only the mirror would leave the dead item's fields to be
+            # translated and paid for (issue 66).
+            insert_or_update_item(self.db_path, merged_data,
+                                  clear_translation_queue=True)
             return
 
         retry_priority = max(1, previous_priority - 1)
