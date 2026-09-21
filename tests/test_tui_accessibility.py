@@ -1,16 +1,46 @@
 import pytest
 from textual.color import Color
 from textual.widgets import Label, Button, Select, ListItem, ListView, Markdown
+from src.database import initialize_database
 from src.tui import ScraperApp, DetailsPane
 from tests.conftest import ASYNC_PAUSE
 from unittest.mock import patch
 
 @pytest.fixture
-def mock_config():
+def mock_config(tmp_path):
+    """A config pointing at an initialized throwaway database.
+
+    The app queries a database as it mounts -- the search and the Wilson
+    percentile computation -- so these tests need a real schema to run against,
+    just not the checkout's. ``tmp_path`` gives them one that no other process
+    shares and that is removed with the test.
+    """
+    db_path = str(tmp_path / "test_workshop.db")
+    initialize_database(db_path)
     return {
-        "database": {"path": "test.db"},
+        "database": {"path": db_path},
         "logging": {"level": "INFO"}
     }
+
+@pytest.fixture(autouse=True)
+def hermetic_tui_environment(mock_config):
+    """Keep every test in this file off the checkout's configuration and database.
+
+    ``ScraperApp.__init__`` reads ``load_config(config_path)`` itself and then
+    calls ``initialize_database_with_daemon_stopped`` on the path that yields.
+    Unpatched, that is the repository's ``config.yaml`` -- or ``workshop.db`` in
+    the repository root when the config is absent -- a gitignored artefact, not a
+    fixture. A stale one sent ``test_main_ui_contrast`` down the pending-migration
+    path on 2026-09-21 and failed it with ``SystemExit: 2`` for a reason unrelated
+    to contrast; the failed run had itself migrated the artefact, so the re-run
+    passed. Both reads are patched away here, so the app is built from the
+    fixture's ``tmp_path`` database and never runs the migration/daemon
+    machinery. Each test then asserts its app came from the mock, and that
+    assertion (not this fixture) is what fails if the patch is dropped.
+    """
+    with patch('src.tui.load_config', return_value=mock_config), \
+         patch('src.tui.initialize_database_with_daemon_stopped'):
+        yield
 
 def is_readable(widget):
     """Checks if text is readable by comparing brightness of FG and BG."""
@@ -26,6 +56,10 @@ def is_readable(widget):
 async def test_main_ui_contrast(mock_config):
     """Check contrast of primary static elements."""
     app = ScraperApp()
+    # Hermeticity guard: a `ScraperApp` built from the checkout's configuration
+    # would not carry the fixture's database path, so this fails if the patches
+    # above are ever dropped.
+    assert app.config["database"] == mock_config["database"]
     async with app.run_test() as pilot:
         btn = app.query_one("#btn-search")
         assert is_readable(btn)
@@ -40,12 +74,13 @@ async def test_details_pane_contrast(mock_config):
         "tags": '["Tag1"]', "api_fetched_at": None, "first_seen_at": "2023", "fetch_status": 200
     }]
     
-    with patch('src.tui.load_config', return_value=mock_config), \
-         patch('src.tui.search_items', return_value=results), \
+    with patch('src.tui.search_items', return_value=results), \
          patch('src.tui.get_item_details', return_value=results[0]), \
          patch('src.tui.get_all_creator_ids', return_value=[]):
         
         app = ScraperApp()
+        # Hermeticity guard, as above.
+        assert app.config["database"] == mock_config["database"]
         async with app.run_test() as pilot:
             await pilot.pause(ASYNC_PAUSE)
             list_view = app.query_one(ListView)
@@ -60,6 +95,8 @@ async def test_details_pane_contrast(mock_config):
 async def test_command_palette_contrast(mock_config):
     """Check contrast of items in the Command Palette."""
     app = ScraperApp()
+    # Hermeticity guard, as above.
+    assert app.config["database"] == mock_config["database"]
     async with app.run_test() as pilot:
         await pilot.press("ctrl+p")
         await pilot.pause(ASYNC_PAUSE)
@@ -93,6 +130,8 @@ async def test_command_palette_contrast(mock_config):
 async def test_select_dropdown_contrast(mock_config):
     """Check contrast of Select dropdown menus."""
     app = ScraperApp()
+    # Hermeticity guard, as above.
+    assert app.config["database"] == mock_config["database"]
     async with app.run_test() as pilot:
         await pilot.click(Select)
         await pilot.pause(ASYNC_PAUSE)
