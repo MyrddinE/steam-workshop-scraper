@@ -56,7 +56,7 @@ def test_daemon_init_missing_appids():
     with pytest.raises(ValueError, match="must be provided as a list"):
         Daemon(invalid_config)
 
-@patch('src.daemon.count_never_fetched_items')
+@patch('src.daemon.count_stranded_never_fetched_items')
 @patch('src.daemon.get_next_items_to_fetch')
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.get_creator')
@@ -82,7 +82,7 @@ def test_daemon_process_batch_success(mock_sleep, mock_flag_web, mock_insert, mo
     assert inserted_data["workshop_id"] == 123
     assert inserted_data["title"] == "Test Mod"
 
-@patch('src.daemon.count_never_fetched_items')
+@patch('src.daemon.count_stranded_never_fetched_items')
 @patch('src.daemon.get_next_items_to_fetch')
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
@@ -114,7 +114,7 @@ def test_daemon_run_loop(mock_process, mock_config):
     daemon.run()
     mock_process.assert_called_once()
 
-@patch('src.daemon.count_never_fetched_items')
+@patch('src.daemon.count_stranded_never_fetched_items')
 @patch('src.daemon.get_next_items_to_fetch')
 @patch('src.daemon.Daemon.seed_database')
 @patch('time.sleep')
@@ -131,7 +131,7 @@ def test_daemon_process_batch_empty(mock_sleep, mock_seed, mock_get_items, mock_
     mock_sleep.assert_called_with(1)
     assert mock_sleep.call_count == 600
 
-@patch('src.daemon.count_never_fetched_items')
+@patch('src.daemon.count_stranded_never_fetched_items')
 @patch('src.daemon.get_next_items_to_fetch')
 @patch('src.daemon.get_workshop_details_batch')
 def test_daemon_process_batch_exit_early(mock_api, mock_get_items, mock_count, mock_config):
@@ -143,7 +143,7 @@ def test_daemon_process_batch_exit_early(mock_api, mock_get_items, mock_count, m
     daemon.process_batch()
     mock_api.assert_not_called()
 
-@patch('src.daemon.count_never_fetched_items')
+@patch('src.daemon.count_stranded_never_fetched_items')
 @patch('src.daemon.get_next_items_to_fetch')
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.get_creator')
@@ -175,7 +175,7 @@ def test_api_delay_decays_on_every_healthy_request(mock_sleep, mock_flag_web, mo
     assert daemon.api_delay == pytest.approx(0.5, rel=1e-4), \
         "a half-life of healthy operation halves the delay, whatever the call count"
 
-@patch('src.daemon.count_never_fetched_items')
+@patch('src.daemon.count_stranded_never_fetched_items')
 @patch('src.daemon.get_next_items_to_fetch')
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
@@ -365,7 +365,7 @@ def test_the_api_merge_never_carries_the_downloaded_latch(mock_config):
 @patch('src.database.initialize_database')
 @patch('src.daemon.save_config')
 @patch('src.daemon.get_next_items_to_fetch')
-@patch('src.daemon.count_never_fetched_items', return_value=0)
+@patch('src.daemon.count_stranded_never_fetched_items', return_value=0)
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
 @patch('src.daemon.raise_web_scrape_priority')
@@ -393,7 +393,7 @@ def test_process_batch_404_permanent_status_marker(
 @patch('src.database.initialize_database')
 @patch('src.daemon.save_config')
 @patch('src.daemon.get_next_items_to_fetch')
-@patch('src.daemon.count_never_fetched_items', return_value=0)
+@patch('src.daemon.count_stranded_never_fetched_items', return_value=0)
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
 @patch('src.daemon.raise_web_scrape_priority')
@@ -429,7 +429,7 @@ def test_process_batch_inherits_priority(
 @patch('src.database.initialize_database')
 @patch('src.daemon.save_config')
 @patch('src.daemon.get_next_items_to_fetch')
-@patch('src.daemon.count_never_fetched_items', return_value=0)
+@patch('src.daemon.count_stranded_never_fetched_items', return_value=0)
 @patch('src.daemon.get_workshop_details_batch')
 @patch('src.daemon.insert_or_update_item')
 @patch('src.daemon.raise_web_scrape_priority')

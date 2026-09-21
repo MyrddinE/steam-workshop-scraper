@@ -60,7 +60,7 @@ def test_daemon_pipeline_mocked(db_path):
 
     insert_or_update_item(db_path, {"workshop_id": 555})
 
-    with patch("src.daemon.count_never_fetched_items", return_value=100), \
+    with patch("src.daemon.count_stranded_never_fetched_items", return_value=100), \
          patch("src.daemon.get_workshop_details_batch") as mock_api, \
          patch("src.daemon.get_creator") as mock_get_creator, \
          patch("src.daemon.insert_or_update_creator") as mock_ins_creator, \

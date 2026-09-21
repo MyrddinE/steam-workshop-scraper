@@ -1332,7 +1332,7 @@ Returns all columns for a single workshop_id, joined with the creators table. Ta
 
 ### `count_never_fetched_items` (database)
 
-Counts items where `api_fetched_at IS NULL` (never successfully fetched) — used to determine if the processing queue needs more items.
+Counts items where `api_fetched_at IS NULL` (never successfully fetched) with no queue predicate at all, so it includes dead, queued and settled-`404` rows. It is not a measure of outstanding fetch work; the discovery guard's diagnostic is `count_stranded_never_fetched_items` (`src/database.py`), and the fetch queue's own count is `count_fetchable_items`.
 
 ### `toggle_subscription_queue` / `get_subscription_queue_items` (database)
 

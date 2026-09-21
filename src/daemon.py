@@ -11,7 +11,7 @@ from typing import NamedTuple
 from src.database import (
     get_next_items_to_fetch, 
     insert_or_update_item, 
-    count_never_fetched_items, 
+    count_stranded_never_fetched_items, 
     count_fetchable_items, 
     insert_or_update_creator, 
     get_creator, 
@@ -1550,15 +1550,19 @@ class Daemon:
 
             # The guard must measure work the fetch queue can actually hand out.
             # It used to test count_never_fetched_items -- items never successfully
-            # fetched -- which is a disjoint population: on production this read
-            # 890 while the fetch queue held 1, so discovery was suppressed
-            # permanently and the queue could never refill.
+            # fetched -- as though that population were the queue: on production it
+            # read 890 while the fetch queue held 1, so discovery was suppressed
+            # permanently and the queue could never refill. The two populations are
+            # not disjoint and not a fixed partition: they overlap, and items move
+            # between them as _promote_stale_items re-ingests a settled row,
+            # discovery re-queues, or a later API revision settles or revives a row.
             fetchable = count_fetchable_items(self.db_path)
             if fetchable >= fill_target:
                 logging.info(
                     "Queue appropriately filled (%d fetchable, >= %d) for AppID %s. "
-                    "Skipping discovery. (%d items have never been fetched but are not queued.)",
-                    fetchable, fill_target, appid, count_never_fetched_items(self.db_path),
+                    "Skipping discovery. (%d live never-fetched items are in no queue.)",
+                    fetchable, fill_target, appid,
+                    count_stranded_never_fetched_items(self.db_path),
                 )
                 continue
 

@@ -3690,14 +3690,73 @@ def count_fetchable_items(db_path: str) -> int:
     This is the population ``get_next_items_to_fetch`` selects: queued and not
     dead. It is deliberately distinct from ``count_never_fetched_items``, which
     counts items never successfully fetched regardless of whether they are
-    queued. Those two populations do not overlap, and treating the second as a
-    measure of the first is how discovery came to be suppressed permanently
-    while the fetch queue held a single item.
+    queued, and from ``count_stranded_never_fetched_items``, which counts the
+    never-fetched live rows no queue holds. The populations are not disjoint and
+    not a fixed partition: they overlap, and items move between them.
+    ``_promote_stale_items`` re-ingests a settled row, discovery re-queues, and a
+    later API revision can settle or revive a row. Treating
+    ``count_never_fetched_items`` as a measure of this queue is how discovery came
+    to be suppressed permanently while the fetch queue held a single item.
     """
     conn = get_connection(db_path)
     cursor = conn.execute(
         "SELECT COUNT(workshop_id) as count FROM workshop_items "
         f"WHERE {api_fetch_queue_predicate()}"
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row["count"] if row else 0
+
+
+def count_stranded_never_fetched_items(db_path: str) -> int:
+    """Never-fetched, live items no queue is carrying and the pipeline has not settled.
+
+    The population the discovery guard's log line names. It is everything with
+    ``api_fetched_at IS NULL`` (never successfully fetched) that is live and in no
+    queue. Each excluded class is excluded because the pipeline has already
+    answered the item or because another stage is carrying it:
+
+    * dead (``fetch_status = -1``) is settled: ``_settle_api_failure``
+      (``src/daemon.py:1077``) recorded the API's permanent refusal and cleared
+      the item's queues, so it is not work;
+    * ``fetch_status = 404`` is the API's permanent answer -- the status named by
+      ``PERMANENT_API_STATUSES`` (``src/daemon.py:65``), which the same method now
+      persists as ``-1``; the legacy rows that still carry ``404`` are settled and
+      not outstanding work either;
+    * queued is work a stage already holds, whether the API fetch queue, the web
+      scrape or image queue, or a ``translation_queue`` row, and counting it here
+      would report it twice.
+
+    The queue test is ``queued_anywhere_predicate()`` (``src/database.py:3623``),
+    never a hand-written union, so a change to any stage predicate moves this
+    count with it. ``count_fetchable_items`` and this are therefore not a
+    partition: they overlap, and items move between them as
+    ``_promote_stale_items`` re-ingests a settled row, discovery re-queues, or a
+    later API revision settles or revives a row.
+
+    Queue membership is entirely persisted, so this count reads committed state
+    rather than a read-time claim. Every poll is a pure ``SELECT`` over the item's
+    own columns plus its ``translation_queue`` rows:
+    ``get_next_items_to_fetch`` (``src/database.py:3657``) interpolates
+    ``api_fetch_queue_predicate`` (``src/database.py:3570``),
+    ``get_next_web_scrape_item`` (``src/database.py:4139``)
+    ``web_scrape_queue_predicate`` (``src/database.py:3580``),
+    ``get_next_image_item`` (``src/database.py:4188``)
+    ``image_queue_predicate`` (``src/database.py:3590``), and
+    ``get_next_batch_for_translation`` (``src/database.py:4356``) selects
+    ``translation_queue`` rows. None of them clears a flag, deletes a row or
+    claims work as it reads. A queue is emptied only by the stage that finished or
+    refused the work -- the translator deletes the row it stored
+    (``src/translator.py:752``), ``_settle_api_failure`` clears a refused item's
+    flags and queue rows (``src/daemon.py:1112``) -- and no queue exists only as an
+    in-memory list.
+    """
+    conn = get_connection(db_path)
+    cursor = conn.execute(
+        "SELECT COUNT(workshop_id) as count FROM workshop_items "
+        "WHERE api_fetched_at IS NULL "
+        "AND (fetch_status IS NULL OR (fetch_status != -1 AND fetch_status != 404)) "
+        f"AND NOT ({queued_anywhere_predicate()})"
     )
     row = cursor.fetchone()
     conn.close()
