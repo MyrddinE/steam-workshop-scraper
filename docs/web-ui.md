@@ -368,9 +368,13 @@ The row under the detail pane (`#detail-buttons`) holds the queue and database a
 
 ## Daemon Panel
 
-The header toolbar's **Daemon** button (`#btn-daemon`) opens `#daemon-modal`, a modal panel with the running status and PID, Start / Stop / Restart buttons, and a live log view (`#daemon-log`).
+The header toolbar's **Daemon** button (`#btn-daemon`) opens `#daemon-modal`, a modal panel with the running status and PID, Start / Stop / Restart buttons, a log size readout with a **Rotate Log** button, and a live log view (`#daemon-log`).
 
 While the panel is open, `_refreshDaemonStatus` polls `/api/daemon` and `_pollDaemonLog` polls `/api/daemon/log?since_offset=<byte-offset>` every 2 seconds. The offset is the byte position returned by the previous response, so each poll transfers only new lines. The view is a bounded preview: the server reads at most 64 KiB and returns at most 500 lines, so a first poll against a large log shows its tail rather than the whole file. A `reset: true` response means the returned lines do not continue the caller's view — a first call that had to seek to the tail, a rotation or truncation, or the client having fallen more than one window behind — and `_pollDaemonLog` clears the pane before showing them, so a gap is never rendered as if it were continuous. `_closeDaemonPanel` clears the interval, so nothing polls while the panel is hidden.
+
+The same `/api/daemon` poll fills `#daemon-log-size`, `#daemon-log-message` and the state of `#daemon-rotate`: the readout line, the last rotation's outcome and the button's enabled state are the server's own strings and flags — the values the TUI's daemon page draws — so the two front ends cannot disagree on the size or the wording. The button is rendered with the TUI's `ROTATE_BUTTON_LABEL` constant rather than retyped in the template.
+
+**Rotation is manual only** — nothing rotates on a timer, on a size threshold, or at startup. Pressing **Rotate Log** posts `/api/daemon/rotate`; the route renames the live log to `logs/<stem>-<UTC stamp>.log.gz` beside it and leaves a fresh empty file before it answers, so the next poll's readout already reads `Rotating… (<size>)` while the gzip runs on a background thread in the server process. When it finishes, `rotation_message` carries `Rotated: logs/<name> (<size>)` and the button comes back; a refusal (nothing to rotate, one already in progress) or a filesystem fault is shown in the same line and appended to the log pane. **A `tail -f` on the log follows the old descriptor and will appear to stop; a follow-by-name tail picks the new file up** — the rotation is manual precisely because only the operator can accept that. The mechanism that makes the daemon and the TUI reopen the fresh file is in [config-security.md](config-security.md#manual-rotation-and-why-it-is-manual).
 
 ---
 
@@ -577,11 +581,15 @@ One metric, computed on its own: `{name, value, ms, note, seed_ms}`, where `ms` 
 
 ### `/api/daemon` — GET
 
-Daemon status: `{running, pid, log_file}`, where `log_file` is the configured `logging.file` path or null.
+Daemon status: `{running, pid, log_file}`, where `log_file` is the configured `logging.file` path or null. The same response carries the log panel's other fields, from `DaemonController.log_status`: `log_size` (bytes or null), `log_readout` (the exact line the readout shows, e.g. `Log size: 594.0 MB`), `can_rotate`, `rotating`, `rotation_ok` and `rotation_message` (the last rotation's outcome, or `""`). `log_readout` and `rotation_message` come from `src/log_rotation.py`, the same strings the TUI draws, so the two front ends cannot disagree on the size or the wording.
 
 ### `/api/daemon/start`, `/api/daemon/stop`, `/api/daemon/restart` — POST
 
 Drive the background daemon through the shared `DaemonController`. Each returns `{ok, changed, message}`; starting a running daemon or stopping a stopped one is an idempotent no-op that still reports success.
+
+### `/api/daemon/rotate` — POST
+
+Manual log rotation; nothing calls it on a timer or at startup. Renames the configured log to `logs/<stem>-<UTC stamp>.log.gz` beside it and leaves a fresh empty file **before answering**, then compresses the archive on a background thread, so the response is prompt whatever the file's size. Returns `{ok, started, archive, message}` (`200`) when a rotation began, and `{ok: false, started: false, message}` with **400** for a refusal or a fault (no log configured, the log missing, the log empty, one already in progress, or a filesystem error) — always that bounded JSON body, never a traceback and never the log's contents. The outcome of the background compression is read back from `/api/daemon`'s `rotation_message` and `log_readout` on the panel's next poll.
 
 ### `/api/daemon/log` — GET
 

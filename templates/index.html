@@ -217,6 +217,13 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
       <button id="daemon-restart" style="width:auto">Restart</button>
       <button id="daemon-close" class="secondary" style="width:auto">Close</button>
     </div>
+    <!-- Manual log rotation. The readout is the same string the TUI draws (from
+         log_status), and the button's label is rendered from the TUI's own
+         constant, so the two daemon pages cannot disagree on either. Rotation is
+         manual only: nothing here runs on a timer or on a size threshold. -->
+    <p id="daemon-log-size" style="color:var(--pico-muted-color);font-size:.8rem;margin:.25rem 0">Log size: —</p>
+    <button id="daemon-rotate" style="width:auto;margin-bottom:.25rem">{{ rotate_label }}</button>
+    <p id="daemon-log-message" style="color:var(--pico-muted-color);font-size:.8rem;margin:.25rem 0 .5rem 0"></p>
     <pre id="daemon-log" style="height:50vh;overflow-y:auto;padding:.5rem;border:1px solid var(--pico-muted-border-color);border-radius:4px;font-size:.75rem;white-space:pre-wrap"></pre>
   </div>
 </div>
@@ -2088,6 +2095,17 @@ async function _refreshDaemonStatus() {
     if (!el) return;
     const log = st.log_file ? ' — log: ' + st.log_file : '';
     el.textContent = (st.running ? 'Running (PID: ' + st.pid + ')' : 'Not running') + log;
+    // The log readout is the server's own line -- the same one the TUI draws --
+    // so the size and the wording cannot differ between the two front ends.
+    const sizeEl = document.getElementById('daemon-log-size');
+    if (sizeEl && st.log_readout) sizeEl.textContent = st.log_readout;
+    // The last rotation's outcome, also the server's sentence.
+    const msgEl = document.getElementById('daemon-log-message');
+    if (msgEl) msgEl.textContent = st.rotation_message || '';
+    // Disabled while a compression runs (either process's) and when no log is
+    // configured at all.
+    const rotateBtn = document.getElementById('daemon-rotate');
+    if (rotateBtn) rotateBtn.disabled = !st.can_rotate || !!st.rotating;
   } catch(e) { console.debug('Daemon status poll error', e); /* keep polling */ }
 }
 
@@ -2237,6 +2255,34 @@ async function _daemonTransition(path) {
 document.getElementById('daemon-start').onclick = () => _daemonTransition('/api/daemon/start');
 document.getElementById('daemon-stop').onclick = () => _daemonTransition('/api/daemon/stop');
 document.getElementById('daemon-restart').onclick = () => _daemonTransition('/api/daemon/restart');
+
+async function _daemonRotate() {
+  // Manual only. The route renames the live log before it answers, so the
+  // readout goes to "Rotating… (<size>)" on the next poll while the gzip runs on
+  // the server's background thread; the finished outcome arrives in the same
+  // poll's `rotation_message` and is shown above the log. A refusal (nothing to
+  // rotate, already running, a filesystem fault) is reported here and joins the
+  // log buffer so the two-second redraw does not wipe it.
+  const btn = document.getElementById('daemon-rotate');
+  if (btn) btn.disabled = true;
+  let result = {};
+  try {
+    const resp = await fetch('/api/daemon/rotate', {method:'POST'});
+    result = await resp.json();
+  } catch(e) { console.debug('Daemon rotate error', e); /* the status poll reports the outcome */ }
+  if (result.message && !result.started) {
+    _daemonLogLines = _daemonLogLines.concat([result.message]).slice(-500);
+    const pre = document.getElementById('daemon-log');
+    if (pre) {
+      pre.innerHTML = _daemonLogLines.map(_ansiToHtml).join('\n') + '\n';
+      pre.scrollTop = pre.scrollHeight;
+    }
+    const msgEl = document.getElementById('daemon-log-message');
+    if (msgEl) msgEl.textContent = result.message;
+  }
+  _refreshDaemonStatus();
+}
+document.getElementById('daemon-rotate').onclick = _daemonRotate;
 
 // ── Statistics panel ──────────────────────────────────────────────────────
 // Every metric is an independent chunk: the panel asks the server for the

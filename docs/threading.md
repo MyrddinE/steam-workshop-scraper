@@ -189,7 +189,7 @@ The detail poll runs at a fixed 3-second interval for the currently selected ite
 1. `_fix_windows_encoding()` — sets console to UTF-8 on Windows
 2. Loads config, optionally invokes `_daemonize()` (double-fork on Unix, no-op on Windows)
 3. Writes PID to `.daemon.pid`, registers `atexit` handler to remove it
-4. Configures logging (file handler, stdout handler with `_SafeStreamHandler` on Windows)
+4. Configures logging (file handler, stdout handler with `_SafeStreamHandler` on Windows). The file handler is rotation-aware: it reopens the log when the generation marker beside it changes, which is how it follows the operator's **manual** rotation instead of writing into the compressed archive (`src/log_rotation.py`)
 5. Initializes database (runs migrations)
 6. Creates `Daemon` instance, calls `daemon.run()`
 

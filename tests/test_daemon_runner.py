@@ -84,7 +84,7 @@ def test_main_logging_daemon_with_file():
          patch('src.daemon_runner.initialize_database'), \
          patch('src.daemon_runner.Daemon'), \
          patch('logging.basicConfig') as mock_basic_config, \
-         patch('logging.FileHandler') as mock_file_handler, \
+         patch('src.daemon_runner.log_rotation.log_file_handler') as mock_file_handler, \
          patch('logging.StreamHandler') as mock_stream_handler:
 
         mock_load.return_value = {
@@ -108,7 +108,7 @@ def test_main_logging_no_daemon_with_file():
          patch('src.daemon_runner.initialize_database'), \
          patch('src.daemon_runner.Daemon'), \
          patch('logging.basicConfig') as mock_basic_config, \
-         patch('logging.FileHandler') as mock_file_handler, \
+         patch('src.daemon_runner.log_rotation.log_file_handler') as mock_file_handler, \
          patch('logging.StreamHandler') as mock_stream_handler:
 
         mock_load.return_value = {
