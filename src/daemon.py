@@ -417,8 +417,8 @@ class Daemon:
                           self.capture_image_downloads)
         
         # State variables for the request-level congestion-control delay. The
-        # counters are diagnostics; the delay itself is the state that matters.
-        self.api_successes = 0
+        # failure counter is a diagnostic; the delay itself is the state that
+        # matters.
         self.api_failures = 0
         # The last delay written to config, so the per-request decay does not
         # rewrite the file on every request.
@@ -1249,7 +1249,6 @@ class Daemon:
         ceiling; see the module comment.
         """
         self.api_failures += 1
-        self.api_successes = 0
         self._api_clock.since()
         old_delay = self.api_delay
         self.api_delay = pacing.backoff(self.api_delay)
@@ -1273,7 +1272,6 @@ class Daemon:
         for a higher sustainable rate and converge on the limit. The decay is
         persisted only once it has moved far enough to be worth a config write.
         """
-        self.api_successes += 1
         self.api_failures = 0
         old_delay = self.api_delay
         self.api_delay = pacing.decay(
