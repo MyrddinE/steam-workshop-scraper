@@ -230,7 +230,7 @@ USER_PRIORITY_FLOOR = 5
 # that is older than its database cannot know what the newer schema means, and
 # reading it as though it did is how an older build ends up writing beside the
 # real tables instead of stopping. Raise this value only by adding a migration.
-EXPECTED_VERSION = 37
+EXPECTED_VERSION = 38
 
 
 class SchemaVersionError(Exception):
@@ -3007,6 +3007,81 @@ def _migration_36_to_37(cursor, conn, db_path):
         "existing AppID's cursor walk is unfinished."
     )
 
+def _migration_37_to_38(cursor, conn, db_path):
+    logging.info("Running migration 37->38: clearing dead items' queue flags...")
+
+    # Issue 74: three writers raised a queue priority on an item that already
+    # existed without guarding against the dead flag -- the image worker's and
+    # the web worker's "the item changed" bump, and the two discovery call
+    # sites. A dead item is final (`fetch_status = -1` is the API's permanent
+    # answer) and belongs to no queue, but the fetch poll excludes dead rows,
+    # so `_settle_api_failure` -- which clears all four flags and deletes the
+    # translation queue rows -- never runs for such a row again. Nothing else
+    # clears the flag. *Measured live* 2026-09-21: `dead_queued` and
+    # `dead_items_by_queue` both read 4, and the four dead rows held
+    # `api_priority` 2, 3, 5 and 5 with every other flag already zero.
+    #
+    # The writers now guard (issue 74's first half) and this step clears the
+    # rows already stranded. It is the data-only shape of 16->17 (the three
+    # non-API flags) and 19->20 (`api_priority`), done together because a dead
+    # item is in no queue, plus 35->36's delete of the item's translation queue
+    # rows because the translation poll selects them with no dead guard.
+    #
+    # Data-only: no table, column or index changes, so `_create_current_schema`
+    # needs no mirror. `EXPECTED_VERSION` still moves to 38, because the
+    # fresh-schema equivalence test compares the version marker both paths
+    # leave.
+    #
+    # The columns are resolved, not hard-coded. A marker rewound to 37 -- which
+    # is how a migration test reaches this step -- presents the pre-rename
+    # names: only the steps above the marker replay, so 30->31's `status`,
+    # 32->33's `needs_web_scrape`/`needs_image` and 33->34's
+    # `item_type`/`item_id` renames do not run again, and naming only the
+    # current spelling raises "no such column". The two table names are stable
+    # across the whole chain, so only the columns need the helper.
+    status_col = _current_column_name(
+        cursor, "workshop_items", "fetch_status", "status")
+    web_col = _current_column_name(
+        cursor, "workshop_items", "web_scrape_priority", "needs_web_scrape")
+    image_col = _current_column_name(
+        cursor, "workshop_items", "image_priority", "needs_image")
+    queue_type = _current_column_name(
+        cursor, "translation_queue", "entity_type", "item_type")
+    queue_id = _current_column_name(
+        cursor, "translation_queue", "entity_id", "item_id")
+
+    # Match only a row that actually holds a flag, so the count is what was
+    # cleared rather than the number of dead rows scanned and a re-run reports
+    # zero. `translation_priority` and `api_priority` were never renamed.
+    cursor.execute(
+        f"UPDATE workshop_items "
+        f"SET api_priority = 0, {web_col} = 0, {image_col} = 0, "
+        f"translation_priority = 0 "
+        f"WHERE {status_col} = -1 "
+        f"AND (api_priority > 0 OR {web_col} > 0 OR {image_col} > 0 "
+        f"OR translation_priority > 0)"
+    )
+    cleared = cursor.rowcount
+
+    # The item's own queue rows only: a creator row (`entity_type = 'user'`) is
+    # a different entity whose numeric id may collide with a dead item's id.
+    cursor.execute(
+        f"DELETE FROM translation_queue "
+        f"WHERE {queue_type} = 'item' "
+        f"AND {queue_id} IN "
+        f"(SELECT workshop_id FROM workshop_items WHERE {status_col} = -1)"
+    )
+    dead_rows = cursor.rowcount
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 38")
+    conn.commit()
+    logging.info(
+        "Migration 37->38 complete. Cleared queue flags on %d dead item(s) and "
+        "removed %d translation queue row(s) of dead items.",
+        cleared, dead_rows,
+    )
+
 def _ensure_indexes(cursor):
     """Create the query indexes, after the column renames migrations perform.
 
@@ -3098,6 +3173,7 @@ MIGRATIONS = [
     (35, _migration_34_to_35),
     (36, _migration_35_to_36),
     (37, _migration_36_to_37),
+    (38, _migration_37_to_38),
 ]
 
 def read_schema_version(db_path: str) -> int:
@@ -3447,7 +3523,8 @@ def get_subscription_states(db_path: str, workshop_ids) -> dict[int, dict]:
     return {row["workshop_id"]: dict(row) for row in rows}
 
 def insert_or_update_item(db_path: str, item_data: dict, *,
-                          clear_translation_queue: bool = False) -> bool:
+                          clear_translation_queue: bool = False,
+                          preserve_dead_api_priority: bool = False) -> bool:
     """
     Inserts a new item or updates an existing item.
     Returns True if a new item was discovered (inserted), False if it was updated.
@@ -3461,6 +3538,16 @@ def insert_or_update_item(db_path: str, item_data: dict, *,
     queue (issue 66). It is opt-in rather than inferred from ``fetch_status = -1``
     so every writer states its exit, and only the item's own ``entity_type = 'item'``
     rows are touched -- a creator row is a different entity.
+
+    ``preserve_dead_api_priority`` makes the conflict update leave ``api_priority``
+    alone when the row that already exists is dead (``fetch_status = -1``). It is
+    for the two discovery call sites: discovery re-encounters items the API has
+    already answered ``-1`` for, and a dead item is deliberately final and in no
+    queue, so re-seeing it must not write a new discovery priority onto it. It is
+    opt-in because this is a generic upsert -- ``_settle_api_failure`` also writes
+    ``api_priority`` through it, including the ``0`` that marks the item dead --
+    so the guard belongs to the callers that need it, not to the function's
+    ordinary contract (issue 74).
     """
     conn = get_connection(db_path)
 
@@ -3529,7 +3616,20 @@ def insert_or_update_item(db_path: str, item_data: dict, *,
             ON CONFLICT(workshop_id) DO NOTHING
         """
     else:
-        updates = ",".join([f"{col}=excluded.{col}" for col in update_cols])
+        # `preserve_dead_api_priority` guards the one column discovery must not
+        # write onto a dead row. The guard is an expression in the conflict
+        # update rather than a `SELECT` before it, so the fetch thread marking
+        # the item dead between a check and this write cannot slip a revive
+        # past it: the UPDATE and the test are the same statement.
+        updates = ",".join(
+            (
+                "api_priority=CASE WHEN workshop_items.fetch_status = -1 "
+                "THEN workshop_items.api_priority ELSE excluded.api_priority END"
+                if preserve_dead_api_priority and col == "api_priority"
+                else f"{col}=excluded.{col}"
+            )
+            for col in update_cols
+        )
         sql = f"""
             INSERT INTO workshop_items ({",".join(columns)})
             VALUES ({placeholders})

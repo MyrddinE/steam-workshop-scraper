@@ -29,7 +29,7 @@ APPID = 431960
 
 
 def test_the_expected_version_is_37():
-    assert EXPECTED_VERSION == 37
+    assert EXPECTED_VERSION == 38
 
 
 def test_migration_36_to_37_adds_the_column_defaulting_to_zero(db_path):
@@ -52,6 +52,8 @@ def test_migration_36_to_37_adds_the_column_defaulting_to_zero(db_path):
         "SELECT last_cursor, cursor_walk_finished FROM app_discovery WHERE appid = ?",
         (APPID,)).fetchone()
     assert dict(row) == {"last_cursor": "saved", "cursor_walk_finished": 0}
+    # The step's own target, not the build's EXPECTED_VERSION: it is called
+    # directly here, so a later version bump must not move this literal.
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 37
     conn.close()
 
@@ -72,7 +74,7 @@ def test_an_existing_v36_database_reaches_37_with_the_unfinished_default(db_path
 
     conn = get_connection(db_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == EXPECTED_VERSION == 37
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == EXPECTED_VERSION == 38
         row = conn.execute(
             "SELECT last_cursor, cursor_walk_finished FROM app_discovery WHERE appid = ?",
             (APPID,)).fetchone()

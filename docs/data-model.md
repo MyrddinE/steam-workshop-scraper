@@ -1,6 +1,6 @@
 # Data Model
 
-The database is a single SQLite file in WAL mode. Its current schema version is 37
+The database is a single SQLite file in WAL mode. Its current schema version is 38
 (`EXPECTED_VERSION` in `src/database.py`). All application state lives in four tables —
 `workshop_items`, `creators`, `translation_queue`, and `app_discovery` — plus two tables that
 hold tags, `tags` and `workshop_tags`.
@@ -182,10 +182,22 @@ The work-queue columns share a vocabulary but not a single distribution. The int
 
 Higher wins, and writers use `MAX(stored, new)` so a flag is never downgraded. The queues do not
 each use every value. `2` is the narrowest of them: it is written only by the image worker's
-download-failure path (`src/image_worker.py:201`) and the web worker's request-failure path
-(`src/web_worker.py:336`), both raising the item's *API* priority so that the refresh which
+download-failure path (`src/image_worker.py:237`) and the web worker's request-failure path
+(`src/web_worker.py:424`), both raising the item's *API* priority so that the refresh which
 re-evaluates it happens soon — above the backlog, below an item someone is looking at. See
 [live-data-profile.md](live-data-profile.md) for the measured distribution of each queue.
+
+**A dead item is final and takes no queue flag.** `fetch_status = -1` is the API's permanent
+answer and `_promote_stale_items` promotes only `fetch_status = 200`, so a dead row can never
+complete and belongs to no queue. Every writer that raises a priority on a row that already
+exists therefore has to refuse one, and a dead item is in no queue for the reader too: the
+handoff metrics `dead_queued` and `dead_items_by_queue` must read zero. The image and web
+"the item changed" bumps carry the `fetch_status IS NULL OR fetch_status != -1` predicate, and
+the two discovery call sites pass `preserve_dead_api_priority=True` to
+`insert_or_update_item`, so re-seeing an item the API already answered `-1` for cannot revive
+it. Migration 37→38 cleared the flags those writers had already stranded (issue 74). This
+matters because the API fetch poll excludes dead rows, so `_settle_api_failure` — which clears
+all four flags — never runs for such a row again and nothing else would clear them.
 
 **The translation queue demotes a missed row as a retry policy.** When the model's reply leaves a
 field out, `_translate_batch` lowers that row's `priority` by one and leaves it queued: the row
