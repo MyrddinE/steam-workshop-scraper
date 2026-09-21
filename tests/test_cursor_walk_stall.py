@@ -209,3 +209,55 @@ def test_page_discovery_is_eligible_once_a_walk_is_finished_and_survives_a_resta
     assert restarted._cursor_exhausted is False, "the in-memory flag starts clear"
     assert restarted._page_discovery_eligible() is True, \
         "a restart cannot re-enable the deep march"
+
+
+# --- the skip is a one-time fact, not per-pass news (issue 72) ---------------
+
+def _skip_records(caplog):
+    """The finished-walk skip lines, at whatever level, for this AppID."""
+    return [r for r in caplog.records
+            if str(APPID) in r.getMessage()
+            and "recorded as finished" in r.getMessage()]
+
+
+def test_a_finished_walk_is_announced_once_per_process_then_debug(db_path, caplog):
+    """Issue 72: the latch is permanent, so the skip is INFO once and DEBUG
+    afterwards, and a freshly constructed `Daemon` announces it once again.
+
+    The discovery thread runs `seed_database` every 30 s, so an INFO line per
+    pass reported a static fact as news forever, in a log that already grows
+    about 115 MB a day.
+    """
+    database.mark_cursor_walk_finished(db_path, APPID)
+    daemon = _daemon(db_path)
+
+    with caplog.at_level(logging.DEBUG):
+        caplog.clear()
+        daemon.seed_database(fill_target=FILL_TARGET)
+        first = _skip_records(caplog)
+
+        caplog.clear()
+        daemon.seed_database(fill_target=FILL_TARGET)
+        second = _skip_records(caplog)
+
+    assert [r.levelno for r in first] == [logging.INFO], (
+        "the first pass announces the finished walk exactly once, at INFO")
+    assert [r.levelno for r in second] == [logging.DEBUG], (
+        "the second pass repeats the permanent fact at DEBUG, not INFO")
+    info = first[0].getMessage()
+    assert "page-based updated-order scan" in info and "24 hours" in info, (
+        "the single INFO line stands alone: it names where new items now come "
+        "from and at most how often, without over-claiming")
+
+    # Logging state is per process, not persisted: a fresh `Daemon` reports it
+    # once more rather than staying silent.
+    restarted = _daemon(db_path)
+    with caplog.at_level(logging.DEBUG):
+        caplog.clear()
+        restarted.seed_database(fill_target=FILL_TARGET)
+        after_restart = _skip_records(caplog)
+
+    assert [r.levelno for r in after_restart] == [logging.INFO], (
+        "a freshly constructed Daemon reports the fact again")
+    assert daemon._cursor_walk_finished_reported == {APPID}
+    assert restarted._cursor_walk_finished_reported == {APPID}
