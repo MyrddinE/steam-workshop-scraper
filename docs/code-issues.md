@@ -15,12 +15,6 @@ the production database on 2026-09-12.
 
 ## Open
 
-### Issue 8
-
-**Migration chain still references the dropped `tags` column** — *Informational*, Info
-
-`CREATE TABLE` keeps the historical `tags` name because migrations 1→2 and 5→6 read it (`src/database.py:889`), and a later migration drops it defensively while logging the skip. Fresh databases must therefore replay the old shape. [schema-migrations.md](schema-migrations.md).
-
 ### Issue 9
 
 **`status = 206` is never written** — *Informational*, Info
@@ -248,10 +242,6 @@ It is now part of it: the Queue Priorities table in [data-model.md](data-model.m
 
 `update_app_tracking_page` had no caller anywhere and no test, so it is gone. `update_app_tracking` is exercised by `tests/test_database.py` and stays, but the daemon imported both without using either — `update_app_tracking_cursor` is what the discovery loop calls (`src/daemon.py:1363`) — so both dead imports are removed. What is left is a DB-layer function whose only callers are tests, writing a column nothing reads; that is recorded as issue 30 rather than pretended away.
 
-### `scrape_version` was written by two workers, and one overwrote the other
-
-The column records the revision the *page* was scraped at, and the image worker wrote the item's `steam_updated_at` into it on every download — so an item whose page had never been scraped still claimed a scrape at its current revision. The web worker is the writer that gives the column its meaning; the image worker no longer touches it, pinned by `test_a_downloaded_image_does_not_rewrite_the_scrape_version`. Nothing observable changed, because nothing reads the column — which is why it went unnoticed for so long, and is now tracked as issue 30.
-
 ### The subscription reconcile walked with a dead login and blamed the page
 
 Its one walk a day ran on a credential that expires about daily, so a daemon that had been up since yesterday arrived at the walk with a cookie that died overnight — *measured live*, 13.7 hours dead, while `_resolve_login_secure` read a process-lifetime cache that cannot notice. The only symptom was a warning that the page "may be a sign-in wall or an error page", repeated three times, and a log line asserting no flags had changed. The reconcile now re-reads the cookie from the browser before walking, refuses one whose token says it has expired without spending a request, and recognises Steam's sign-in page — `/login/`, served with a **200** — if one arrives anyway, ending the walk there rather than retrying it. Either way the reason is recorded in `.daemon_state.yaml` through `src/session_health.py`, and the web UI reads it and offers the link that fixes it — [web-ui.md](web-ui.md#the-session-warning). While that reason is recorded the walk is retried every 15 minutes rather than daily, because the daily walk has already run for the day by the time anyone responds to the warning; the retry costs no request while the token is still expired. Pinned by `tests/test_subscription_sync.py` and `tests/test_subscription_daemon.py`, whose new cases fail against the old code.
@@ -395,3 +385,7 @@ production has already paid, kept here as the evidence that the index is used. [
 ### The cursor scan could not tell when it had run out of new items
 
 **Was issue 68.** The cursor walk had exactly two stops — `fill_target` new items found, or Steam returning an empty `next_cursor` — and once the pages it walked were already known neither was reachable, so it requested a page every `api_delay` and discovered nothing. *Measured live* on 2026-09-21 for AppID 431960 (~3.21 M items, ~32,000 pages): passes of **13,487 / 1,724 / 5,624 / 6,964 pages** each adding **0** new items, at ~2.3 pages a second, every pass ending only because the API refused, and `Cursor exhausted` never appears in 400,000 lines because the exhaustion path was unreachable. The walk now stops after **five consecutive pages that add nothing** — a page that adds anything resets the count, and the `fill_target` and API-error exits are deliberately not stalls — and records `app_discovery.cursor_walk_finished` per AppID, so it is not resumed and a restart cannot re-enable it (`_page_discovery_eligible` reads the persisted latch, not only the in-memory flag). *Reproduced* against the real copy: the old loop issued **31 requests for 0 new items**, stopping only on a refusal; five is the new stop. The accepted trade is stated in the docs: a finished walk is never re-armed, so newly published items come from the daily page-based (updated-order) scan — **up to ~24 hours' latency**, normally far less. Migration **36→37** adds the column; `EXPECTED_VERSION` is **37**. [data-pipeline.md](data-pipeline.md), [data-model.md](data-model.md), [schema-migrations.md](schema-migrations.md)
+
+### The migration chain names a column it dropped
+
+**Was issue 8.** The historical `CREATE TABLE` keeps the `tags` name because migrations 1→2 and 5→6 read it, and a later migration drops it defensively while logging the skip. That is what a migration chain is for: a migration that speaks the shape of its own era is correct history, and rewriting it to match today's schema is how a chain stops being replayable. The owner's reading is the right one, and the clean-slate half now exists — `_create_current_schema` builds a fresh database at `EXPECTED_VERSION` and replays none of it. So there is nothing wrong here to fix, and the entry was *Informational* only while the old shape still had to be replayed. [schema-migrations.md](schema-migrations.md)
