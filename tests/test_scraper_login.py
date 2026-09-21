@@ -16,25 +16,6 @@ from src.web_scraper import _build_workshop_cookies, scrape_extended_details
 ITEM_URL = "https://steamcommunity.com/sharedfiles/filedetails/?id=1"
 
 
-@pytest.fixture(autouse=True)
-def _restore_webserver_globals():
-    """Leave the webserver module as we found it.
-
-    `init_webserver` mutates module globals and `_pushed_sessionid` is process state.
-    Without restoring them, a test here that pushes a sessionid makes a later
-    "no session configured" test see one — which is exactly how this file first
-    broke `test_webserver.py::test_api_subscribe_no_session` when the two ran in
-    the same session.
-    """
-    from src import webserver
-
-    saved = (webserver._db_path, webserver._config, webserver._images_dir,
-             webserver._config_path, webserver._pushed_sessionid)
-    yield
-    (webserver._db_path, webserver._config, webserver._images_dir,
-     webserver._config_path, webserver._pushed_sessionid) = saved
-
-
 # --- normalising the config key -------------------------------------------
 
 def test_login_secure_raw_string():
@@ -96,39 +77,6 @@ def test_scrape_survives_a_missing_config():
         scrape_extended_details(ITEM_URL)
         _, kwargs = session_cls.return_value.get.call_args
         assert kwargs["cookies"] == {}
-
-
-# --- a refreshed cookie must reach the daemon ------------------------------
-
-def test_sessionid_endpoint_persists_the_login_cookie(tmp_path):
-    """The daemon is a separate process; without persisting, it never sees it."""
-    from src.webserver import app, init_webserver
-
-    config = {"session": {"csrf_token": "abc"}}
-    init_webserver(":memory:", config, config_path=str(tmp_path / "config.yaml"))
-
-    with patch("src.webserver.save_config") as save:
-        with app.test_client() as client:
-            response = client.post("/api/sessionid",
-                                   json={"sessionid": "s1", "login_secure": "L1"})
-
-    assert response.status_code == 200
-    assert config["session"]["login_secure"] == "L1"
-    save.assert_called_once()
-
-
-def test_sessionid_endpoint_does_not_persist_when_the_cookie_is_absent(tmp_path):
-    from src.webserver import app, init_webserver
-
-    init_webserver(":memory:", {"session": {"csrf_token": "abc"}},
-                   config_path=str(tmp_path / "config.yaml"))
-
-    with patch("src.webserver.save_config") as save:
-        with app.test_client() as client:
-            response = client.post("/api/sessionid", json={"sessionid": "s1"})
-
-    assert response.status_code == 200
-    save.assert_not_called()
 
 
 # --- the User-Agent trap ---------------------------------------------------

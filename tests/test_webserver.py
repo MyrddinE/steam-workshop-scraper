@@ -112,8 +112,8 @@ def test_served_inline_script_is_valid_javascript(web_client, tmp_path):
 
     This replaces assertions on JavaScript source text (declaration order of a `desc`
     variable, presence of a `try {`/`catch`). The page is rendered from the Jinja
-    template, so the response body contains concrete values (e.g. `const WEB_DELAY =
-    5.0;`) and is valid JavaScript we can parse as-is.
+    template, so the response body contains concrete values (e.g. `const
+    SEARCH_FILTER_SCHEMA = ...;`) and is valid JavaScript we can parse as-is.
 
     Coverage note: a syntax check proves the script parses, NOT that it runs without
     a ReferenceError. The historical `desc`-used-before-declaration regression is
@@ -742,7 +742,7 @@ def subscribe_env(tmp_path, monkeypatch):
     `test_the_subscribe_route_has_no_bare_requests_call`.
 
     The default page is authenticated (so a Steam refusal is a token refusal,
-    not a session problem) and carries no `g_sessionID` (so the pushed/configured
+    not a session problem) and carries no `g_sessionID` (so the configured
     fallback is exercised); a test that wants the page's own token sets
     `state["page"]`.
     """
@@ -753,7 +753,6 @@ def subscribe_env(tmp_path, monkeypatch):
     config = {"database": {"path": db_path}, "daemon": {"target_appids": [294100]},
               "session": {}}
     init_webserver(db_path, config)
-    monkeypatch.setattr(webserver, "_pushed_sessionid", "")
     # The route's page read waits the shared interval; tests must not sleep.
     monkeypatch.setattr(pacing, "wait", lambda seconds, keep_running=None: True)
 
@@ -797,12 +796,11 @@ def _item_row(db_path, wid=1):
     return dict(row)
 
 
-def test_subscribe_token_comes_from_the_built_cookie_set(subscribe_env, monkeypatch):
+def test_subscribe_token_comes_from_the_built_cookie_set(subscribe_env):
     """(a) With no token on the page, the built set's token is used."""
     _, state = subscribe_env
     state["cookies"] = {"sessionid": "FROM_COOKIES",
                         "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
-    monkeypatch.setattr(webserver, "_pushed_sessionid", "PUSHED_GLOBAL")
     webserver._config.setdefault("session", {})["csrf_token"] = "CONFIG_ID"
     client = app.test_client()
 
@@ -814,18 +812,18 @@ def test_subscribe_token_comes_from_the_built_cookie_set(subscribe_env, monkeypa
     assert call["cookies"]["sessionid"] == "FROM_COOKIES"
 
 
-def test_subscribe_pushed_global_is_the_fallback(subscribe_env, monkeypatch):
-    """(b) A built set with no sessionid still uses the pushed global."""
+def test_subscribe_configured_token_is_the_fallback(subscribe_env):
+    """(b) A built set with no sessionid falls back to `session.csrf_token`."""
     _, state = subscribe_env
     state["cookies"] = {"steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
-    monkeypatch.setattr(webserver, "_pushed_sessionid", "PUSHED_GLOBAL")
+    webserver._config.setdefault("session", {})["csrf_token"] = "CONFIG_ID"
 
     resp = _post_subscribe(app.test_client())
 
     assert resp.status_code == 200
     call = state["calls"][0]
-    assert call["data"]["sessionid"] == "PUSHED_GLOBAL"
-    assert call["cookies"]["sessionid"] == "PUSHED_GLOBAL"
+    assert call["data"]["sessionid"] == "CONFIG_ID"
+    assert call["cookies"]["sessionid"] == "CONFIG_ID"
 
 
 @pytest.mark.parametrize("cookies", [
@@ -909,13 +907,14 @@ def test_a_refused_token_with_an_authenticated_page_read_is_not_a_session_proble
 
 
 def test_a_refused_token_with_an_anonymous_page_read_is_still_a_session_problem(
-        subscribe_env, monkeypatch):
+        subscribe_env):
     """(g) A refusal beside an anonymous read records the session problem."""
     db_path, state = subscribe_env
     state["cookies"] = {"steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
     state["page"] = _synthetic_page(authenticated=False)
     state["payload"] = {"success": 2}
-    monkeypatch.setattr(webserver, "_pushed_sessionid", "PUSHED_TOKEN")
+    # A fallback token is needed to reach the POST at all when the page carries none.
+    webserver._config.setdefault("session", {})["csrf_token"] = "CONFIG_TOKEN"
 
     resp = _post_subscribe(app.test_client())
 
@@ -926,19 +925,19 @@ def test_a_refused_token_with_an_anonymous_page_read_is_still_a_session_problem(
     assert resp.get_json() == {"success": 2}
 
 
-def test_subscribe_token_comes_from_the_page_when_it_carries_one(subscribe_env, monkeypatch):
+def test_subscribe_token_comes_from_the_page_when_it_carries_one(subscribe_env):
     """(h) The regression for issue 38: g_sessionID beats the configured token.
 
     `sessionid` is a session cookie Firefox never persists, so the profile read
     cannot supply the current one; the page the attempt reads is the honest
-    source. The pushed global and the cookie set are only fallbacks, and the
+    source. The cookie set and `session.csrf_token` are only fallbacks, and the
     form token and the cookie must end up as the page's value together.
     """
     _, state = subscribe_env
     state["cookies"] = {"sessionid": "COOKIE_TOKEN",
                         "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
     state["page"] = _synthetic_page("PAGE_SESSION_TOKEN")
-    monkeypatch.setattr(webserver, "_pushed_sessionid", "PUSHED_TOKEN")
+    webserver._config.setdefault("session", {})["csrf_token"] = "CONFIG_TOKEN"
 
     resp = _post_subscribe(app.test_client())
 
@@ -1176,22 +1175,13 @@ def test_waitress_monkeypatch_graceful_when_add_task_missing(monkeypatch):
     # Restore is unnecessary since we used monkeypatch in a test fixture
 
 
-def test_api_subscribe_failed(web_client):
-    """POST /api/subscribe_failed dequeues item and tracks failure."""
-    client, db_path = web_client
-    insert_or_update_item(db_path, {"workshop_id": 999, "is_queued_for_subscription": 1})
-    resp = client.post('/api/subscribe_failed/999')
-    assert resp.status_code == 200
-    # Item should be dequeued
-    queued = client.get('/api/queued').get_json()
-    assert not any(q["workshop_id"] == 999 for q in queued)
-    # Failure should be tracked
-    failures = client.get('/api/subscribe_failures').get_json()
-    assert 999 in failures
-
-
 def test_api_subscribe_failures_empty(web_client):
-    """GET /api/subscribe_failures returns empty list when no failures."""
+    """GET /api/subscribe_failures returns empty list when no failures.
+
+    The bridge's writer (`POST /api/subscribe_failed/<id>`) is gone, but the
+    browser-free drain still reads this route, so it stays mounted and reports
+    the resting state.
+    """
     client, _ = web_client
     import src.webserver as ws
     ws._subscribe_failures.clear()
@@ -1390,92 +1380,6 @@ def test_detail_translation_flag_follows_translate_version(web_client):
         "workshop_id": 81, "title": "A", "translate_version": 5, "fetch_status": 200,
     })
     assert client.get('/api/item/81').get_json()["has_translation"] is True
-
-
-# ── the userscript bridge's session push ─────────────────────────────────────
-#
-# The bridge re-pushes on a timer, so this handler is on a hot path: an open
-# Steam tab calls it every thirty seconds whether or not anything has changed.
-
-
-@pytest.fixture
-def session_client(tmp_path, monkeypatch):
-    """A client with a real config path, and save_config counted."""
-    import src.webserver as ws
-
-    db_path = str(tmp_path / "test_session.db")
-    initialize_database(db_path)
-    config_path = str(tmp_path / "config.yaml")
-    config = {"database": {"path": db_path}, "daemon": {"target_appids": [1]}}
-
-    saves = []
-    monkeypatch.setattr(ws, "save_config", lambda path, cfg: saves.append(path))
-    # _pushed_sessionid is module state and would otherwise leak between tests.
-    monkeypatch.setattr(ws, "_pushed_sessionid", "")
-
-    init_webserver(db_path, config, config_path=config_path)
-    return app.test_client(), ws, saves, config_path
-
-
-def test_sessionid_push_stores_the_login_cookie(session_client):
-    client, ws, saves, config_path = session_client
-
-    resp = client.post('/api/sessionid', json={"sessionid": "abc123", "login_secure": "cookie-1"})
-
-    assert resp.get_json() == {"ok": True}
-    assert ws._pushed_sessionid == "abc123"
-    assert ws._config["session"]["login_secure"] == "cookie-1"
-    assert saves == [config_path], "a changed cookie must be persisted for the daemon"
-
-
-def test_sessionid_push_does_not_rewrite_an_unchanged_cookie(session_client):
-    """Regression: this rewrote config.yaml every thirty seconds.
-
-    The bridge re-pushes on a timer and a cookie is valid for days, so an
-    unchanged value cost a YAML serialisation and a file write per open Steam
-    tab, forever.
-    """
-    client, _ws, saves, _ = session_client
-
-    client.post('/api/sessionid', json={"sessionid": "abc", "login_secure": "same"})
-    assert len(saves) == 1
-
-    client.post('/api/sessionid', json={"sessionid": "abc", "login_secure": "same"})
-    assert len(saves) == 1, "an unchanged cookie must not rewrite the config"
-
-    client.post('/api/sessionid', json={"sessionid": "abc", "login_secure": "different"})
-    assert len(saves) == 2, "a changed cookie must still be persisted"
-
-
-def test_sessionid_push_updates_the_token_even_when_the_cookie_is_unchanged(session_client):
-    """The CSRF token lives in memory and is stored, not compared."""
-    client, ws, _saves, _ = session_client
-
-    client.post('/api/sessionid', json={"sessionid": "first", "login_secure": "same"})
-    client.post('/api/sessionid', json={"sessionid": "second", "login_secure": "same"})
-
-    assert ws._pushed_sessionid == "second"
-
-
-def test_sessionid_push_without_a_cookie_does_not_persist(session_client):
-    """No cookie to store is not a reason to write the config file."""
-    client, ws, saves, _ = session_client
-
-    resp = client.post('/api/sessionid', json={"sessionid": "abc"})
-
-    assert resp.get_json() == {"ok": True}
-    assert ws._pushed_sessionid == "abc"
-    assert saves == []
-
-
-def test_sessionid_push_without_a_sessionid_is_rejected(session_client):
-    client, _ws, saves, _ = session_client
-
-    resp = client.post('/api/sessionid', json={"login_secure": "cookie"})
-
-    assert resp.status_code == 400
-    assert resp.get_json()["ok"] is False
-    assert saves == []
 
 
 # ── the honest save report and the header port ───────────────────────────────
@@ -2425,11 +2329,10 @@ def test_author_mode_scaffold_is_in_the_served_page(web_client):
 
 # ── the subscribe action's target ─────────────────────────────────────────────
 #
-# The bridge is not being retired, only bypassed by this page: the route does the
-# whole job now, so the button and the queue drain call it. What the drivers pin
-# is the target and the absence of a tab, plus the ordering the route's shared
-# interval depends on. `tests/test_userscript_contract.py`, run alongside this
-# file, is what holds the untouched bridge's own contract.
+# The route does the whole job, so the button and the queue drain call it. What
+# the drivers pin is the target and the absence of a tab, plus the ordering the
+# route's shared interval depends on. The bridge that used to do this from a
+# Steam tab is removed; the test at the end of this section pins that.
 
 
 SUBSCRIBE_ACTION_DRIVER = """
@@ -2472,8 +2375,7 @@ def test_subscribe_action_calls_the_server_route_and_opens_no_tab(web_client, tm
     It used to `window.open` the item page with `autosubscribe=true` and let the
     userscript do the work. The route does that work now, so the only request is
     a POST to `/api/subscribe/<id>`; a tab appearing is the old behaviour and
-    fails this test. The userscript scaffolding is deliberately still installed
-    (see the bridge test below) -- it is just no longer this button's path.
+    fails this test. The userscript is gone; nothing in the page opens a tab.
     """
     client, _ = web_client
     script = _served_inline_script(client)
@@ -2504,7 +2406,6 @@ let _subPollIv = null;
 let _subScheduleIv = null;
 let _subCanceled = false;
 let _subThrottleStopped = false;
-const WEB_DELAY = 1.0;
 // The row HTML escapes the tooltip; the real helper is a string replace with no
 // behaviour worth re-running here.
 function _escapeHtml(text) { return String(text); }
@@ -2619,39 +2520,45 @@ def test_the_queue_drain_calls_the_subscribe_route_once_per_item_in_order(web_cl
     assert out["progress"] == "2 / 2"
 
 
-def test_the_subscribe_bridge_scaffolding_is_left_in_place(web_client):
-    """The new path is proven before anything is deleted; nothing is deleted.
+def test_the_bridge_is_gone_and_the_drain_endpoints_remain(web_client):
+    """The bridge is removed; the browser-free drain's own reads stay mounted.
 
-    The userscript, its endpoints and the version meta stay exactly as they
-    were. This pins their presence so a later change cannot quietly drop the
-    bridge while retiring this page's use of it; `tests/test_userscript_contract.py`
-    independently pins the script and the meta tag to each other.
+    This is the inverse of the pin that used to guard the bridge while the new
+    path was being proven: it now fails if a bridge-only route is reintroduced,
+    or if the page starts calling one again.
     """
     client, _ = web_client
 
-    # The routes are still mounted and still POST-only where they were.
-    assert client.get('/api/sessionid').status_code == 405
-    assert client.get('/api/subscribed/1').status_code == 405
-    assert client.get('/api/subscribe_failed/1').status_code == 405
-    assert client.get('/api/subscribe_throttled/1').status_code == 405
+    # The bridge-only writers and the install endpoint are unmounted.
+    assert client.post('/api/sessionid', json={"sessionid": "x"}).status_code == 404
+    assert client.post('/api/subscribe_failed/1').status_code == 404
+    assert client.post('/api/subscribe_throttled/1').status_code == 404
+    assert client.get('/userscript/steam_subscribe.user.js').status_code == 404
+
+    # The routes the browser-free flow uses are still mounted.
+    assert client.get('/api/subscribed/1').status_code == 405  # POST-only
     assert client.get('/api/subscribe_throttle').status_code == 200
     assert set(client.get('/api/subscribe_throttle').get_json()) == \
         {"throttled_at", "throttled_id", "retry_after"}
     assert client.get('/api/subscribe_failures').status_code == 200
 
-    # The userscript is still served, and the page still carries the contract it
-    # checks the script against.
-    served = client.get('/userscript/steam_subscribe.user.js')
-    assert served.status_code == 200
-    assert b"@version" in served.data
-
+    # The page carries no userscript scaffolding and calls no bridge-only route,
+    # while still calling the kept reads and the browser-free subscribe route.
     html = client.get('/').data.decode()
-    assert 'name="userscript-version"' in html
-    assert "US_EXPECTED_VER" in html
-    assert "function _userscriptPresent()" in html
-    assert "US_RAW_URL" in html
-    assert "autosubscribe=true" in client.get(
-        '/userscript/steam_subscribe.user.js').data.decode()
+    assert 'name="userscript-version"' not in html
+    assert "US_EXPECTED_VER" not in html
+    assert "function _userscriptPresent()" not in html
+    assert "US_RAW_URL" not in html
+    assert "autosubscribe=true" not in html
+    assert "/api/sessionid" not in html
+    assert "/api/subscribe_failed" not in html
+    assert "/api/subscribe_throttled" not in html
+    assert "userscript" not in html.lower(), "no bridge vocabulary is left in the page"
+    assert "fetch('/api/queued')" in html
+    assert "fetch('/api/subscribe_failures')" in html
+    assert "fetch('/api/subscribe_throttle')" in html
+    assert "fetch('/api/subscribed/'" in html
+    assert "fetch('/api/subscribe/' + wid" in html
 
 
 def test_analysis_panel_dom_contract(web_client):
@@ -3441,25 +3348,17 @@ def test_the_search_does_not_wait_for_the_cutoff_query(web_client):
 
 # ── the served page must not be cached ────────────────────────────────────────
 #
-# Both the page and the injected userscript are generated per request from files
-# on disk, so a cached copy is a stale copy. With no Cache-Control and no
-# validators either, the browser had nothing to revalidate against: a web-UI fix
-# was deployed and verified on the server while the browser kept running the
-# previous page, and the fix looked broken.
+# The page is generated per request from a template on disk, so a cached copy is
+# a stale copy. With no Cache-Control and no validators either, the browser had
+# nothing to revalidate against: a web-UI fix was deployed and verified on the
+# server while the browser kept running the previous page, and the fix looked
+# broken.
 
 def test_the_page_is_served_without_cache(web_client):
     client, _ = web_client
     resp = client.get('/')
     assert resp.headers.get('Cache-Control') == 'no-store', \
         "a generated page must not be cached; there is nothing to revalidate against"
-
-
-def test_the_userscript_is_served_without_cache(web_client):
-    client, _ = web_client
-    resp = client.get('/userscript/steam_subscribe.user.js')
-    assert resp.status_code == 200
-    assert resp.headers.get('Cache-Control') == 'no-store', \
-        "the injected userscript changes with the server's host; it must not be cached"
 
 
 def test_images_may_still_be_cached(web_client):

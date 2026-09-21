@@ -6,8 +6,8 @@ wrong:
 * the read endpoints carry the marker's state and its whole appearance, computed
   from `src/subscription.py`, so the page owns no copy of the glyph/colour table;
 * ``POST /api/subscribed`` stamps the subscription as well as clearing the queue
-  flag -- that call is the highest-fidelity signal the project gets, and it used
-  to throw the subscription fact away;
+  flag -- it is the confirmation the Web UI's subscribe overlay posts for the
+  rows it leaves behind, and it used to throw the subscription fact away;
 * the marker's click routes the three actionable states through the existing
   toggle route and sends nothing for ``subscribed``.
 
@@ -264,7 +264,7 @@ def test_the_open_folder_control_is_rendered_only_on_windows(web_client, monkeyp
 # --- the stamp --------------------------------------------------------------
 
 def test_api_subscribed_stamps_the_subscription_and_clears_the_queue(web_client):
-    """The userscript's confirmation is the highest-fidelity signal there is."""
+    """The overlay's dequeue call is also a confirmed-subscription stamp."""
     client, db_path = web_client
     insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "fetch_status": 200,
                                     "is_queued_for_subscription": 1})
@@ -486,7 +486,7 @@ def test_the_poll_re_reads_a_row_queued_only_for_subscription(web_client, tmp_pa
     Driving one tick shows the ids the page actually posts to /api/items: the
     spinner row and the queued row, and not the settled one. Refreshing the
     cell here rather than at each writer is what stops one write path -- the
-    userscript's /api/subscribed, the page's own cancel/clear handlers, the
+    page's own cancel/clear handlers, the
     direct /api/subscribe route -- being able to bypass the refresh.
     """
     client, _ = web_client
