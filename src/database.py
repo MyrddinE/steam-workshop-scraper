@@ -230,7 +230,7 @@ USER_PRIORITY_FLOOR = 5
 # that is older than its database cannot know what the newer schema means, and
 # reading it as though it did is how an older build ends up writing beside the
 # real tables instead of stopping. Raise this value only by adding a migration.
-EXPECTED_VERSION = 36
+EXPECTED_VERSION = 37
 
 
 class SchemaVersionError(Exception):
@@ -1160,7 +1160,8 @@ def _create_legacy_schema(cursor, conn):
         excluded_tags TEXT DEFAULT '[]',
         window_size INTEGER DEFAULT 2592000,
         enrichment_filters TEXT DEFAULT '[]',
-        last_cursor TEXT DEFAULT ''
+        last_cursor TEXT DEFAULT '',
+        cursor_walk_finished INTEGER NOT NULL DEFAULT 0
     )
     """)
 
@@ -1172,6 +1173,11 @@ def _create_legacy_schema(cursor, conn):
         ("window_size", "INTEGER DEFAULT 2592000"),
         ("enrichment_filters", "TEXT DEFAULT '[]'"),
         ("last_cursor", "TEXT DEFAULT ''"),
+        # Issue 68: whether this AppID's cursor walk has finished for lack of
+        # new items. Declared here as well as in `_create_current_schema` so a
+        # `legacy_chain` database starts with it; migration 36->37 is therefore
+        # normally only the version bump.
+        ("cursor_walk_finished", "INTEGER NOT NULL DEFAULT 0"),
     ])
 
     # Data Migration: Populate the discovery table from existing workshop_items
@@ -1272,6 +1278,13 @@ def _create_current_schema(cursor, conn):
     36, and this function reports the constant it is told to, so both paths still
     leave the same version marker.
 
+    Migration 36->37 (issue 68) adds ``app_discovery.cursor_walk_finished``, the
+    per-AppID latch that says the cursor walk stopped for lack of new items and
+    must not be resumed. It is declared below, in the ``app_discovery`` CREATE
+    TABLE, so a fresh database carries it at :data:`EXPECTED_VERSION`; the
+    legacy builder declares it too and migration 36->37 adds it to a database
+    that reaches the step without it.
+
     **Forward rule:** when a migration changes the schema, mirror it here as
     well -- update the definition below and bump :data:`EXPECTED_VERSION` --
     so both paths still end at the same shape.
@@ -1366,7 +1379,8 @@ def _create_current_schema(cursor, conn):
         required_tags TEXT DEFAULT '[]',
         excluded_tags TEXT DEFAULT '[]',
         enrichment_filters TEXT DEFAULT '[]',
-        last_cursor TEXT DEFAULT ''
+        last_cursor TEXT DEFAULT '',
+        cursor_walk_finished INTEGER NOT NULL DEFAULT 0
     )
     """)
 
@@ -2940,6 +2954,59 @@ def _migration_35_to_36(cursor, conn, db_path):
         dead_rows,
     )
 
+def _migration_36_to_37(cursor, conn, db_path):
+    logging.info(
+        "Running migration 36->37: recording that an AppID's cursor walk is finished..."
+    )
+
+    # Issue 68: `seed_database`'s cursor walk had exactly two stops -- reaching
+    # `fill_target` new items, or Steam returning an empty `next_cursor` -- and
+    # once the pages it walked were all already known neither was reachable, so
+    # it paged the whole catalogue at ~2.3 pages/s until the API refused and the
+    # next pass resumed and repeated. The walk now stops after five consecutive
+    # pages that add nothing and records that here, so a restart cannot re-enable
+    # the deep march.
+    #
+    # The column is declared by both schema builders (`_create_current_schema`
+    # and `_create_legacy_schema` plus `_safe_add_columns`), which run before the
+    # migration loop on every existing database, so in the ordinary upgrade this
+    # step finds the column already present and only records the version. The
+    # guarded `ALTER` is what makes a database that reaches this step without the
+    # column -- a rewound marker, a direct call -- gain it, and it is why the
+    # migration is self-contained rather than assuming the builder ran.
+    #
+    # The table name is resolved the way `_create_legacy_schema` resolves it. A
+    # real v36 database is past migration 29->30 and holds `app_discovery`, but
+    # the migration tests rewind the version marker over a database that still
+    # carries the historical `app_tracking` name; naming only the new table would
+    # raise "no such table" there, exactly as it would for the unversioned
+    # builder.
+    discovery_table = _current_table_name(cursor, "app_discovery", "app_tracking")
+    #
+    # `0` for every existing row: no AppID's walk has finished yet under the new
+    # rule, and defaulting them to finished would disable discovery outright.
+    discovery_columns = {
+        row[1] for row in cursor.execute(
+            f"PRAGMA table_info({discovery_table})").fetchall()
+    }
+    if "cursor_walk_finished" in discovery_columns:
+        logging.info("  %s.cursor_walk_finished already present; nothing to add",
+                     discovery_table)
+    else:
+        cursor.execute(
+            f"ALTER TABLE {discovery_table} "
+            "ADD COLUMN cursor_walk_finished INTEGER NOT NULL DEFAULT 0"
+        )
+        logging.info("  added %s.cursor_walk_finished", discovery_table)
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 37")
+    conn.commit()
+    logging.info(
+        "Migration 36->37 complete. cursor_walk_finished defaults to 0: every "
+        "existing AppID's cursor walk is unfinished."
+    )
+
 def _ensure_indexes(cursor):
     """Create the query indexes, after the column renames migrations perform.
 
@@ -3030,6 +3097,7 @@ MIGRATIONS = [
     (34, _migration_33_to_34),
     (35, _migration_34_to_35),
     (36, _migration_35_to_36),
+    (37, _migration_36_to_37),
 ]
 
 def read_schema_version(db_path: str) -> int:
@@ -4292,6 +4360,44 @@ def update_app_tracking_cursor(db_path: str, appid: int, cursor: str) -> None:
         "INSERT INTO app_discovery (appid, last_cursor) VALUES (?, ?) "
         "ON CONFLICT(appid) DO UPDATE SET last_cursor = excluded.last_cursor",
         (appid, cursor)
+    )
+    conn.commit()
+    conn.close()
+
+def cursor_walk_finished(db_path: str, appid: int) -> bool:
+    """Whether this AppID's cursor walk has stopped for lack of new items.
+
+    The persistent half of issue 68's stop rule. `seed_database` sets it when
+    five consecutive pages add nothing, and skips the walk for an AppID whose
+    flag is set. Unlike the in-memory `_cursor_exhausted`, it survives a
+    restart, which is what keeps a restarted daemon from resuming the deep march
+    that the previous run concluded was pointless. An AppID with no
+    `app_discovery` row reads as False: it has never finished a walk.
+    """
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT cursor_walk_finished FROM app_discovery WHERE appid = ?",
+            (appid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return bool(row and row[0])
+
+def mark_cursor_walk_finished(db_path: str, appid: int) -> None:
+    """Record that this AppID's cursor walk is finished, permanently.
+
+    Idempotent, and it leaves `last_cursor` alone: the cursor is the record of
+    how far the walk reached, while this flag is what decides whether it is
+    resumed. There is deliberately no automatic clear -- a finished walk is the
+    conclusion the run drew, and re-arming it is an operator decision, not
+    something the next pass may undo.
+    """
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT INTO app_discovery (appid, cursor_walk_finished) VALUES (?, 1) "
+        "ON CONFLICT(appid) DO UPDATE SET cursor_walk_finished = 1",
+        (appid,)
     )
     conn.commit()
     conn.close()

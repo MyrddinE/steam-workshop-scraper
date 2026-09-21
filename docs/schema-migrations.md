@@ -9,11 +9,11 @@ The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_
 
 A **pending** migration is DDL that rewrites tables — 34→35's `DROP COLUMN` rewrote `workshop_items` and took *measured live* **283 s** in production — and the daemon is a detached process that may still be writing to them. So the two UI entry points do not call `initialize_database` directly. They call `initialize_database_with_daemon_stopped` (`src/daemon_control.py`), which reads the recorded `user_version` read-only first, stops a running daemon through `DaemonController.stop()` when — and only when — a migration is pending, refuses to migrate when that stop did not succeed, migrates, and restarts the daemon afterwards. A database already at `EXPECTED_VERSION` leaves a running daemon untouched: that is the ordinary relaunch. The daemon's own startup still calls `initialize_database` directly, because a daemon performs its own pending migrations before it begins writing; see [threading.md](threading.md#a-pending-migration-and-a-running-daemon).
 
-The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v37) for what that means when you add one.
+The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v38) for what that means when you add one.
 
 ---
 
-## Current Schema (v36)
+## Current Schema (v37)
 
 The application-level reference for every table and column is
 [data-model.md](data-model.md); the timestamp conventions are in
@@ -51,7 +51,7 @@ Primary key: `workshop_id INTEGER PRIMARY KEY` (aliased from rowid). Columns:
 | own_first_subscribed_at | INTEGER | When we first *saw* the owner subscribed; sticky, and the only source of the `previously` state |
 | steam_download_seen_at | INTEGER | One-way local latch: when this app first saw Steam's downloaded copy of a subscribed item on disk (v26). Set only by `src/workshop_folders`, cleared only beside `own_subscribed` when the item leaves the subscription list. NULL means not confirmed on disk. Renamed from `downloaded_at` in v33: it is a sighting latch, not a completion clock |
 
-The columns above are what the database holds at v36, and they are reached two ways.
+The columns above are what the database holds at v37, and they are reached two ways.
 `_create_current_schema` creates them directly, so a fresh database starts at `EXPECTED_VERSION`
 with these names. `_create_legacy_schema`'s `CREATE TABLE` instead declares the historical names
 (`dt_found`, `dt_updated`, `dt_attempted`, `dt_translated`, `time_created`, `time_updated`) and a
@@ -112,7 +112,8 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 | Column | Type | Purpose |
 |---|---|---|
 | appid | INTEGER PK | Steam AppID |
-| last_cursor | TEXT | Cursor for cursor-based discovery |
+| last_cursor | TEXT | Cursor for cursor-based discovery. Kept when a walk finishes |
+| cursor_walk_finished | INTEGER NOT NULL DEFAULT 0 | `1` once the cursor walk stopped for lack of new items (issue 68, v37). `seed_database` skips a finished AppID's cursor scan; never reset automatically |
 | filter_text, required_tags, excluded_tags | TEXT | Legacy filter columns |
 | enrichment_filters | TEXT | JSON filter array for enrichment gating |
 
@@ -184,7 +185,7 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 5. calls `_ensure_indexes(cursor)`, then commits and closes.
 
 `MIGRATIONS` is an ordered list of `(target version, function)` pairs, from
-`(1, _migration_0_to_1)` to `(35, _migration_34_to_35)`. The functions are
+`(1, _migration_0_to_1)` to `(37, _migration_36_to_37)`. The functions are
 defined in `src/database.py` immediately above the table, in that same ascending
 order, so the file still reads as the schema's history top to bottom; each
 function body is the migration exactly as it stood at its version.
@@ -206,15 +207,15 @@ independently, allowing crash recovery on a per-migration basis.
 from 1 to `EXPECTED_VERSION`, that each entry names the function for its own
 version, and that a fresh database reaches `EXPECTED_VERSION`.
 
-### Adding the next migration (target v37)
+### Adding the next migration (target v38)
 
-1. bump `EXPECTED_VERSION` in `src/database.py` to `37`;
-2. append `def _migration_36_to_37(cursor, conn, db_path): ...` immediately
-   after `_migration_35_to_36`, keeping the body self-contained and preserving
-   what the step meant at v36 (no tidying an older step, no changing a
+1. bump `EXPECTED_VERSION` in `src/database.py` to `38`;
+2. append `def _migration_37_to_38(cursor, conn, db_path): ...` immediately
+   after `_migration_36_to_37`, keeping the body self-contained and preserving
+   what the step meant at v37 (no tidying an older step, no changing a
    `PRAGMA user_version = N` target);
-3. append `(37, _migration_36_to_37)` as the last entry of `MIGRATIONS`;
-4. add a `### v36 → v37: ...` entry below, in the same shape as the others;
+3. append `(38, _migration_37_to_38)` as the last entry of `MIGRATIONS`;
+4. add a `### v37 → v38: ...` entry below, in the same shape as the others;
 5. **mirror the step in `_create_current_schema`.** It is the shape a fresh
    database is created at now, so a schema change that lands only in the chain
    moves the legacy endpoint and not the fresh one. Update the table, index or
@@ -1186,7 +1187,7 @@ versions — which is exactly why the drop needs guards on that side:
 (row counts across every app table and the two column sets), the two index removals, the
 re-initialisation, the `window_size` safe-add guard, the empty-discovery populate step,
 the already-dropped-under-the-old-marker case, and a `legacy_chain=True` fresh database
-that still reaches v36.
+that still reaches `EXPECTED_VERSION`.
 
 ### v35 → v36: dead items give up their translation queue rows
 
@@ -1235,6 +1236,48 @@ so the translator's select is unchanged. Pinned by
 `tests/test_daemon.py::test_process_item_404_deletes_the_items_translation_queue_rows`,
 two tests in `tests/test_handoff_contract.py`, and three in `tests/test_metrics.py`.
 
+### v36 → v37: an AppID's cursor walk can be finished
+
+The defect is issue 68. `seed_database`'s cursor walk stopped only on `fill_target` new
+items or an empty `next_cursor`. Once the pages it walked were all already known, neither
+was reachable: a pass paged an exhausted catalogue at ~2.3 pages a second until the API
+refused, and the next pass resumed from the saved cursor and repeated. *Measured live* on
+2026-09-21 (AppID 431960): passes of 13,487 / 1,724 / 5,624 / 6,964 pages, each adding **0**
+new items, every one ended by an API refusal; `Cursor exhausted` never appears in 400,000
+log lines, so the page-based fall-back it enables never fired.
+
+The step adds the latch that keeps a finished walk from being resumed:
+
+```sql
+ALTER TABLE app_discovery ADD COLUMN cursor_walk_finished INTEGER NOT NULL DEFAULT 0;
+```
+
+`0` for every existing row: under the new rule no AppID's walk has finished yet, and
+defaulting them to finished would disable cursor discovery outright. The walk now stops after
+five consecutive pages that add nothing (`CURSOR_STALL_PAGES`); a page that adds anything
+resets the count; and only that stall — not `fill_target` and not an API error — sets the
+flag through `mark_cursor_walk_finished`. `last_cursor` is deliberately untouched: it records
+how far the walk reached, while the flag decides whether it may resume. `seed_database` skips
+a finished AppID's cursor scan, and `_page_discovery_eligible` returns true once any target
+AppID's flag is set (it is also still true on an empty cursor, on the `.fetch_new` trigger,
+or after 500 items have been scraped), so page mode carries new and changed items from then
+on.
+
+The column is declared by both schema builders — `_create_legacy_schema`'s `CREATE TABLE`
+and `_safe_add_columns`, and `_create_current_schema` — so on the ordinary upgrade the
+builder adds it and this step only records the version. The guarded `ALTER` is what makes a
+database that reaches the step without the column gain it; it resolves the table name with
+`_current_table_name` because the migration tests rewind the version marker over a database
+that still carries the historical `app_tracking` name, and naming only `app_discovery` would
+raise `no such table` there. `EXPECTED_VERSION` moves to 37 and the current-schema heading
+and docstring move with it.
+
+`tests/test_cursor_walk_stall.py` pins the five-page stop, the reset by a page that adds
+items, the two exits that must not mark the walk finished, the skip after a restart,
+page-mode eligibility surviving the restart, the kept cursor, the migration and its `0`
+default, and the fresh path; `tests/test_fresh_schema_path.py::test_schema_equivalence` pins
+that both paths leave the same shape.
+
 ---
 
 ## Database Utility Functions
@@ -1263,7 +1306,7 @@ The exception exists rather than a bare `ValueError` because the three entry poi
 
 ### `_create_current_schema`, `_create_legacy_schema`, `_ensure_indexes`, `MIGRATIONS` (database)
 
-`_create_current_schema(cursor, conn)` creates a brand-new database directly at `EXPECTED_VERSION`. Every table, index and trigger definition it holds was dumped from `sqlite_master` of a database the migration chain itself produced at v35 — not written from reading the migrations — so the index SQL it creates is the exact text SQLite stores. v36 is data-only, so that dump is still the terminal shape. It deliberately does **not** repeat the query indexes `_ensure_indexes` owns, because that runs after it on both paths; those are the ones with historical names such as `idx_time_created`, whose definitions a `RENAME COLUMN` rewrote. It does create the indexes a *migration* owns, because no migration runs on this path. It does not carry the three columns 34→35 dropped.
+`_create_current_schema(cursor, conn)` creates a brand-new database directly at `EXPECTED_VERSION`. Every table, index and trigger definition it holds was dumped from `sqlite_master` of a database the migration chain itself produced at v35 — not written from reading the migrations — so the index SQL it creates is the exact text SQLite stores. v36 was data-only, so the dump stayed the terminal shape for that step; v37 adds `app_discovery.cursor_walk_finished`, which is now declared in the `app_discovery` `CREATE TABLE` here as the migration leaves it. It deliberately does **not** repeat the query indexes `_ensure_indexes` owns, because that runs after it on both paths; those are the ones with historical names such as `idx_time_created`, whose definitions a `RENAME COLUMN` rewrote. It does create the indexes a *migration* owns, because no migration runs on this path. It does not carry the three columns 34→35 dropped.
 
 `_create_legacy_schema(cursor, conn)` creates the tables (`IF NOT EXISTS`) and the baseline columns in their historical form, and runs the legacy data conversions every database history shares. It is the unversioned part of the schema, run before the versioned steps. Because it runs on every startup for an existing database, it also runs on both sides of migration 29→30: it resolves the creator and discovery table names once with `_current_table_name` (new name if it exists, else the historical one, else the historical one for a brand-new file) and routes its `CREATE TABLE`, `_safe_add_columns`, populate step and legacy-filter conversion through the resolved name.
 
