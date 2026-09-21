@@ -1,5 +1,6 @@
 import pytest
 from textual.widgets import Button, ListView, Static
+from src.database import insert_or_update_item, toggle_subscription_queue
 from src.tui import ScraperApp, SubscriptionQueueScreen
 from unittest.mock import patch
 from tests.conftest import ASYNC_PAUSE
@@ -10,10 +11,17 @@ async def test_tui_toggle_subscription_queue(mock_config):
         {"workshop_id": 1, "title": "Item 1", "creator_steamid": "A", "is_queued_for_subscription": 0},
         {"workshop_id": 2, "title": "Item 2", "creator_steamid": "B", "is_queued_for_subscription": 0},
     ]
+    # The rows render from the mocked search, but the action hands the change to
+    # the registry by reading the item back, so the rows must exist in the
+    # database the read hits.
+    for item in mock_results:
+        insert_or_update_item(mock_config["database"]["path"],
+                              dict(item, fetch_status=200))
 
     with patch('src.tui.load_config', return_value=mock_config), \
          patch('src.tui.search_items', return_value=mock_results), \
-         patch('src.tui.toggle_subscription_queue') as mock_toggle_db:
+         patch('src.tui.toggle_subscription_queue',
+               wraps=toggle_subscription_queue) as mock_toggle_db:
         
         app = ScraperApp()
         async with app.run_test() as pilot:

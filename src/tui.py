@@ -13,12 +13,13 @@ from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, L
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.worker import Worker, WorkerState
-from src.database import search_items, get_all_creator_ids, SchemaVersionError, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, raise_api_priority_for_list, raise_api_priority_for_detail, get_subscription_states, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES, normalise_subscribed_value
+from src.database import search_items, get_all_creator_ids, SchemaVersionError, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, raise_api_priority_for_list, raise_api_priority_for_detail, get_subscription_states, get_items_by_ids, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES, normalise_subscribed_value
 from src.analysis import view_window_analysis
 from src import metrics
 from src import db_poll
 from src import activity
 from src import images
+from src import item_updates
 from src import pending
 from src import subscription
 from src import subscribe_engine
@@ -1456,6 +1457,10 @@ class DetailsPane(VerticalScroll):
     workshop_id = reactive(None)
     item_data = reactive(None) # Detailed data fetched from DB
     show_translated = reactive(True)
+    # The id this pane is subscribed to in the app's item-update registry, or
+    # None. It is tracked separately from `workshop_id` so the watcher can
+    # unsubscribe the item the pane is leaving.
+    _subscribed_id = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="details-buttons-row"):
@@ -1513,13 +1518,46 @@ class DetailsPane(VerticalScroll):
         desc_container.border_title = "Description"
         yield desc_container
 
-    def on_mount(self) -> None:
-        """Setup background refresh to catch translation updates."""
-        self.set_interval(2.0, self.refresh_data)
+    def on_unmount(self) -> None:
+        self._unsubscribe_from_item()
 
     def _folder_service(self):
         """The app's folder helper, or None in a bare pane (markup tests)."""
         return getattr(self.app, "workshop_folders", None)
+
+    def _registry(self):
+        """The app's item-update registry, or None in a bare pane."""
+        return getattr(self.app, "item_updates", None)
+
+    def _subscribe_to_item(self, workshop_id) -> None:
+        """Join the registry while this pane displays ``workshop_id``."""
+        self._unsubscribe_from_item()
+        registry = self._registry()
+        if registry is not None and registry.subscribe(workshop_id, self):
+            self._subscribed_id = int(workshop_id)
+
+    def _unsubscribe_from_item(self) -> None:
+        registry = self._registry()
+        if registry is not None and self._subscribed_id is not None:
+            registry.unsubscribe(self._subscribed_id, self)
+        self._subscribed_id = None
+
+    def apply_item_update(self, item: dict) -> None:
+        """The pane's one way to receive a change to the item it displays.
+
+        A block is merged over what the pane already has rather than replacing
+        it, so a producer that carried only the marker columns cannot blank the
+        description, and a producer that carried the whole row fills everything
+        the pane draws. Any field the pane renders is therefore refreshed by
+        whichever update arrives, without this pane being a target its caller
+        has to remember.
+        """
+        if int(item.get("workshop_id", -1)) != int(self.workshop_id or -2):
+            return
+        merged = dict(self.item_data or {})
+        merged.update(item)
+        if merged != (self.item_data or {}):
+            self.item_data = merged
 
     def _open_folder_button(self) -> Button | None:
         try:
@@ -1529,35 +1567,44 @@ class DetailsPane(VerticalScroll):
 
     @db_poll.guard_db_poll("detail pane poll")
     async def refresh_data(self) -> None:
-        """Fetches fresh data from DB for the current workshop_id.
+        """Read the adopted item and hand it to the app's dispatch point.
 
-        A transient lock skips this tick instead of ending the session: the poll
-        fires every two seconds, so the next one is the retry. ``item_data`` is
-        left exactly as it was, because the read that would have replaced it did
-        not happen.
+        The pane is one subscriber among however many display this id, so the
+        read is not drawn by the reader: it is dispatched, exactly like a poll's
+        or an action's update, and the pane redraws because it subscribed. A
+        transient lock skips this read instead of ending the session, and
+        ``item_data`` is left exactly as it was because the read did not happen.
         """
         if self.workshop_id:
             # We access db_path via self.app (ScraperApp instance)
             fresh_data = get_item_details(self.app.db_path, self.workshop_id)
             if fresh_data:
-                self.item_data = fresh_data
+                dispatch = getattr(self.app, "dispatch_item_update", None)
+                if dispatch is not None:
+                    dispatch(fresh_data)
+                else:
+                    self.item_data = fresh_data
 
     async def watch_workshop_id(self, workshop_id: int) -> None:
-        """When the pane adopts an item, apply detail priority once and fetch it.
+        """When the pane adopts an item, subscribe and apply detail priority once.
 
         The bump lives here rather than in the list-view highlight handler so it
-        fires on pane load, not on every highlight event. The 2-second
-        refresh_data poll below stays read-only on purpose: re-applying detail
-        priority there would re-queue whatever is on screen indefinitely.
+        fires on pane load, not on every highlight event. The pane subscribes
+        before the read so the dispatch of the initial read reaches it, and the
+        read stays read-only on purpose: re-applying detail priority there would
+        re-queue whatever is on screen indefinitely.
         """
         self.item_data = None
         if workshop_id:
+            self._subscribe_to_item(workshop_id)
             db_path = self.app.db_path
             raise_web_scrape_priority_for_detail(db_path, workshop_id)
             raise_translation_priority_for_detail(db_path, workshop_id)
             raise_image_priority_for_detail(db_path, workshop_id)
             raise_api_priority_for_detail(db_path, workshop_id)
             await self.refresh_data()
+        else:
+            self._unsubscribe_from_item()
 
     def watch_item_data(self, item_data: dict) -> None:
         self.update_content()
@@ -1783,6 +1830,46 @@ class WorkshopItem(ListItem):
     async def refresh_item(self) -> None:
         """Re-compose the item to reflect any changes in item_data."""
         await self.recompose()
+
+    def on_mount(self) -> None:
+        """Subscribe this row to the item it is showing.
+
+        The registry describes what is on screen, so a row joins it when it
+        mounts and leaves it when it unmounts; a new search's ``clear()``
+        therefore unsubscribes the whole previous result set without the search
+        path knowing anything about the registry.
+        """
+        self._subscribe_to_item()
+
+    def on_unmount(self) -> None:
+        self._unsubscribe_from_item()
+
+    def _subscribe_to_item(self) -> None:
+        registry = getattr(self.app, "item_updates", None)
+        if registry is not None:
+            registry.subscribe(self.item_data.get("workshop_id"), self)
+
+    def _unsubscribe_from_item(self) -> None:
+        registry = getattr(self.app, "item_updates", None)
+        if registry is not None:
+            registry.unsubscribe(self.item_data.get("workshop_id"), self)
+
+    def apply_item_update(self, item: dict) -> None:
+        """The row's one way to receive a change to the item it displays.
+
+        ``item`` is a block, not a field: whatever the producer had is merged
+        over this row's data, so a block carrying only the subscription columns
+        leaves the title and creator alone, and a block carrying a column this
+        row does not draw yet is simply stored. Recomposing is skipped when
+        nothing the row holds moved, which keeps the general poll free of
+        needless redraws.
+        """
+        if int(item.get("workshop_id", -1)) != int(self.item_data.get("workshop_id", -2)):
+            return
+        changed = any(self.item_data.get(key) != value for key, value in item.items())
+        self.item_data.update(item)
+        if changed:
+            self.refresh(recompose=True)
 
 
 class SearchRow(Horizontal):
@@ -2358,6 +2445,11 @@ class ScraperApp(App):
         # is still queued. Armed only while such a row exists, and disarmed by
         # its own tick when none does; see `_start_subscription_poll`.
         self._sub_poll_timer = None
+        # The one item-update path: every component displaying an item
+        # subscribes here, and every update this process receives is handed to
+        # it through `dispatch_item_update`. See `src/item_updates.py` and
+        # `docs/tui.md#one-item-update-path`.
+        self.item_updates = item_updates.ItemUpdateRegistry()
         
         # Pagination state
         self.current_offset = 0
@@ -2514,6 +2606,13 @@ class ScraperApp(App):
         # Animate braille spinner on pending items
         self.set_interval(0.15, self._tick_spinners)
 
+        # The general item-update poll: the trigger that is not conditional on
+        # anything being pending. It runs for as long as this screen is open and
+        # reads only the ids the registry holds, so a change written behind this
+        # process's back reaches every display of the item -- see
+        # `_poll_item_updates`.
+        self.set_interval(item_updates.ITEM_UPDATE_POLL_SECONDS, self._poll_item_updates)
+
         # The downloaded-star scan, on the daemon's own cadence. It is skipped
         # while this process can see a daemon running, because the daemon runs
         # the same scan and two of them would check the same folders in
@@ -2543,6 +2642,43 @@ class ScraperApp(App):
         # Cosmetic spinner refresh; a failure is retried on the next 0.15 s tick.
         except Exception:
             pass
+
+    # --- the one item-update path -------------------------------------------
+
+    def dispatch_item_update(self, item: dict) -> int:
+        """Hand one item's block to every component displaying that id.
+
+        This is the TUI's single dispatch point. A callback, a poll, an action
+        and the daemon's folder scan all end here, and none of them knows which
+        component draws the item: the registry holds whatever subscribed to the
+        ``workshop_id`` while it is on screen. See `src/item_updates.py`.
+        """
+        return self.item_updates.dispatch(item)
+
+    def dispatch_item_updates(self, items) -> int:
+        """Dispatch a batch of blocks; returns the number of deliveries."""
+        return self.item_updates.dispatch_many(items)
+
+    @db_poll.guard_db_poll("item update poll")
+    def _poll_item_updates(self) -> None:
+        """The general trigger: refresh everything on screen, pending or not.
+
+        One batched read of exactly the ids the registry holds -- the rendered
+        rows plus the detail pane, never a table scan and never one read per
+        component -- and one dispatch of the blocks to their subscribers. It is
+        deliberately not conditional on a spinner or a queued marker: that
+        condition is what let a change written behind this process's back (the
+        daemon's folder scan stamping ``steam_download_seen_at``) sit unfetched,
+        leaving the row and the pane disagreeing about the same item.
+
+        An empty registry does no read at all, so a screen with nothing on it
+        costs nothing. A transient lock skips this tick; the next one is the
+        retry, and the interval is the term the guard's docstring promises.
+        """
+        workshop_ids = self.item_updates.workshop_ids()
+        if not workshop_ids:
+            return
+        self.dispatch_item_updates(get_items_by_ids(self.db_path, workshop_ids))
 
     # --- the subscription-marker poll ---------------------------------------
 
@@ -2607,13 +2743,21 @@ class ScraperApp(App):
 
     @db_poll.guard_db_poll("subscription marker poll")
     async def refresh_subscription_rows(self, workshop_ids) -> None:
-        """Re-read the given rendered rows and redraw the ones that moved.
+        """Read the given ids' marker columns and dispatch them as a block.
+
+        This is the fast path, not the mechanism: the general
+        :meth:`_poll_item_updates` is what guarantees that every displayed item
+        is refreshed whether or not anything is pending. This one exists so a
+        row whose marker moved during a subscribe pass moves at once rather than
+        at the general poll's next tick. It used to redraw the row in place and
+        only for the four subscription columns; it now dispatches the block
+        through the same one path as every other update, and a subscriber merges
+        it, so the block's narrowness costs the row nothing.
 
         The reader is the shared database, so a write by *any* process -- this
         TUI's own subscribe pass, the web UI's routes, or the daemon's daily
         reconcile -- is picked up; no writer is hooked and no callback is
-        required. Only the subscription columns are replaced, so the rest of the
-        row's data is left as it was.
+        required.
 
         A transient lock skips this read without raising. That matters twice
         over: the one-shot poll re-arms itself from the rendered state, so the
@@ -2621,28 +2765,8 @@ class ScraperApp(App):
         method from a callback of its own, where an exception would take the
         session down just as the timer did.
         """
-        try:
-            list_view = self.query_one("#results-list", ListView)
-        except Exception:
-            return
-        wanted = set(workshop_ids)
-        states = get_subscription_states(self.db_path, wanted)
-        for child in list(list_view.children):
-            data = getattr(child, "item_data", None)
-            if not data or data.get("workshop_id") not in wanted:
-                continue
-            fresh = states.get(data["workshop_id"])
-            if not fresh:
-                continue
-            moved = False
-            for column in ("own_subscribed", "is_queued_for_subscription",
-                           "own_first_subscribed_at", "steam_download_seen_at"):
-                value = fresh.get(column)
-                if data.get(column) != value:
-                    data[column] = value
-                    moved = True
-            if moved:
-                await child.refresh_item()
+        states = get_subscription_states(self.db_path, set(workshop_ids))
+        self.dispatch_item_updates(states.values())
 
     @db_poll.guard_db_poll("downloaded-item scan")
     def _maybe_scan_downloaded_items(self) -> None:
@@ -3024,23 +3148,21 @@ class ScraperApp(App):
 
         # Toggle in DB
         toggle_subscription_queue(self.db_path, workshop_id)
-        
-        # Update UI state in place
-        item.item_data["is_queued_for_subscription"] = not item.item_data.get("is_queued_for_subscription", 0)
 
-        # Refresh the ListItem to show the change
-        await item.refresh_item()
+        # The change reaches the row and the pane through the one dispatch
+        # point. Patching the row here and the pane below is what the registry
+        # replaces: any component showing this id hears the update, including
+        # one added later, and neither has to be named by this action.
+        states = get_subscription_states(self.db_path, [workshop_id])
+        fresh = states.get(workshop_id)
+        if fresh:
+            self.dispatch_item_update(fresh)
 
         # A row queued from the keyboard is watched too: the web grid starts its
         # poll on the transition into `queued` for the same reason.
-        if subscription.subscription_state(item.item_data) == subscription.QUEUED:
+        if fresh and subscription.subscription_state(fresh) == subscription.QUEUED:
             self._start_subscription_poll()
 
-        # Update details pane if it's showing the same item
-        detail_pane = self.query_one("#detail-pane", DetailsPane)
-        if detail_pane.workshop_id == workshop_id and detail_pane.item_data is not None:
-            detail_pane.item_data["is_queued_for_subscription"] = item.item_data["is_queued_for_subscription"]
-            detail_pane.update_content()
         # Move to next item
         if list_view.index < len(list_view) - 1:
             list_view.index += 1

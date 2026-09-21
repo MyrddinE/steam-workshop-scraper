@@ -337,6 +337,9 @@ const _imageState = () => 'absent';
 const _imageCellHtml = () => '';
 const wClass = () => '';
 const _listNeedsPoll = () => true;
+// The tick dispatches every block through the one path; this driver measures
+// the retry, so the dispatch is stubbed.
+const dispatchItemUpdates = () => {};
 function cell() {
   return {
     classList: {contains: (c) => c === 'has-spinner'},

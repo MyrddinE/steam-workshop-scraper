@@ -300,23 +300,18 @@ def _detail_payload(workshop_id):
 def _attach_subscription(item: dict) -> dict:
     """Attach the shared subscription marker fields to a payload in place.
 
-    `own_subscribed` / `own_first_subscribed_at` stay on the payload as well, so
-    the raw columns remain inspectable; `subscription_state` and the glyph,
-    colour, class, label and tooltip that accompany it are what the page renders
-    from. They are computed in Python rather than in the page so the page owns no
-    copy of the glyph/colour table: a marker that disagreed with the TUI about
-    what "previously" looks like is the drift the shared module exists to stop.
+    Delegates to :func:`src.subscription.attach_marker`, which the TUI's
+    item-update registry also uses, so the block a browser subscriber receives
+    and the block a TUI subscriber receives carry the same field names for the
+    same stored row. `own_subscribed` / `own_first_subscribed_at` stay on the
+    payload as well, so the raw columns remain inspectable; `subscription_state`
+    and the glyph, colour, class, label and tooltip that accompany it are what
+    the page renders from. They are computed in Python rather than in the page so
+    the page owns no copy of the glyph/colour table: a marker that disagreed with
+    the TUI about what "previously" looks like is the drift the shared module
+    exists to stop.
     """
-    state = subscription.subscription_state(item)
-    glyph, colour, css, label = subscription.marker_spec(state)
-    item["subscription_state"] = state
-    item["subscription_glyph"] = glyph
-    item["subscription_colour"] = colour
-    item["subscription_class"] = css
-    item["subscription_label"] = label
-    item["subscription_tooltip"] = subscription.tooltip(state)
-    item["subscription_clickable"] = subscription.is_clickable(state)
-    return item
+    return subscription.attach_marker(item)
 
 
 @app.route('/api/item/<int:workshop_id>')

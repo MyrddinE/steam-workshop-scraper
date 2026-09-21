@@ -3640,6 +3640,35 @@ def get_item_details(db_path: str, workshop_id: int) -> dict | None:
     conn.close()
     return dict(row) if row else None
 
+def get_items_by_ids(db_path: str, workshop_ids) -> list[dict]:
+    """Every stored column for a batch of ids, in one read.
+
+    The reader behind the front ends' item-update poll. The registry says which
+    items are on screen, so the poll answers that whole set with one query
+    rather than reading the database once per component; the bound is the
+    on-screen count, never the size of the table. The column list is
+    :func:`get_item_details`', so a block from here can fill the detail pane as
+    well as redraw a list row -- that is what lets one update carry everything
+    about an item instead of one field's worth.
+    """
+    ids = [int(wid) for wid in workshop_ids]
+    if not ids:
+        return []
+    conn = get_connection(db_path)
+    try:
+        placeholders = ",".join("?" * len(ids))
+        sql = f"""
+            SELECT w.*, u.personaname, u.personaname_en, u.translated_at as user_translated_at,
+                   (SELECT GROUP_CONCAT(t.tag_name, ', ') FROM workshop_tags wt JOIN tags t USING(tag_id) WHERE wt.workshop_id = w.workshop_id) as tags
+            FROM workshop_items w
+            LEFT JOIN creators u ON w.creator_steamid = u.steamid
+            WHERE w.workshop_id IN ({placeholders})
+        """
+        rows = conn.execute(sql, ids).fetchall()
+    finally:
+        conn.close()
+    return [dict(row) for row in rows]
+
 def search_items(db_path: str, query: str = "", appid: int = None, 
                  title_query: str = "", desc_query: str = "", filename_query: str = "",
                  tags: str = "", filters: list[dict] = None,
