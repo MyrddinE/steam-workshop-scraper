@@ -322,6 +322,10 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
 <script>
 const WEB_DELAY = {{ web_delay }};
 const SEARCH_FILTER_SCHEMA = {{ filter_schema_json | safe }};
+// The one wording for a queued-for-translation item, shared with the TUI and
+// defined in src/pending.py. Injected rather than retyped so the two detail
+// panes cannot drift.
+const TRANSLATION_NOTICE = {{ translation_notice | tojson }};
 
 // Derived from schema
 const ALL_FIELDS = SEARCH_FILTER_SCHEMA.map(f => f.field);
@@ -1199,9 +1203,9 @@ function renderDetail(item) {
   // indicators of the same flag is exactly what this replaced.
   const subMarker = showSubscriptionMarker(item);
   // Matches the TUI, which notes a pending translation only while there is no
-  // stored one yet.
+  // stored one yet. The sentence comes from the shared constant above.
   const notice = ((item.translation_priority || 0) > 0 && !item.translate_version)
-    ? '<p class="translation-notice">Translation requested, currently in queue&hellip;</p>'
+    ? '<p class="translation-notice">' + TRANSLATION_NOTICE + '</p>'
     : '';
 
   pane.innerHTML = `

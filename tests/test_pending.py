@@ -219,3 +219,16 @@ def test_the_marker_carries_the_wording_as_its_title():
     assert "title" in js
     assert "_pendingLabel(stage)" in js, \
         "the label must come from the stage _pendingStage just returned"
+
+
+def test_the_translation_notice_wording_is_shared_not_retyped():
+    """The TUI and the page print one sentence, defined once, here.
+
+    The notice is a detail-pane element on both sides; a retyped copy in the
+    template is exactly the drift the shared table exists to prevent.
+    """
+    html = TEMPLATE.read_text(encoding="utf-8")
+    assert pending.TRANSLATION_REQUESTED_NOTICE.strip()
+    assert "currently in queue" not in html, \
+        "the page must not retype the notice; take it from src/pending.py"
+    assert "TRANSLATION_NOTICE" in html, "the page must use the shared wording"

@@ -13,6 +13,7 @@ from src import crash
 from src import activity
 from src import images
 from src import metrics
+from src import pending
 from src import session_health
 from src import subscribe_engine
 from src import subscription
@@ -172,7 +173,11 @@ def index():
     # The open-folder control is Windows-only, so the page is told whether to
     # render it at all: off Windows the button and the `o` shortcut are absent,
     # not merely inert.
+    # The notice wording is shared with the TUI rather than retyped in the
+    # template, so the two detail panes cannot describe the same queue state
+    # differently.
     return render_template('index.html', web_delay=web_delay,
+                           translation_notice=pending.TRANSLATION_REQUESTED_NOTICE,
                            filter_schema_json=json.dumps(SEARCH_FILTER_SCHEMA),
                            open_folder_enabled=bool(
                                _workshop_folders and _workshop_folders.is_supported()))

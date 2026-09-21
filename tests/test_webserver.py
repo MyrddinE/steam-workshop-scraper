@@ -17,6 +17,7 @@ from src.webserver import app, init_webserver
 from src.database import initialize_database, insert_or_update_item, normalize_tags, get_image_subdirs, get_connection
 from src import metrics
 from src import pacing
+from src import pending
 from src import web_scraper
 
 
@@ -34,6 +35,21 @@ def test_index_returns_html(web_client):
     resp = client.get('/')
     assert resp.status_code == 200
     assert b'<!DOCTYPE html>' in resp.data
+
+
+def test_the_page_carries_the_shared_translation_notice(web_client):
+    """Issue 42: the page's notice is the TUI's sentence, not a retyped copy.
+
+    The wording is defined once in `src/pending.py` and rendered into the page,
+    so the two detail panes cannot describe the same queue state differently.
+    """
+    client, _ = web_client
+    html = client.get('/').data.decode()
+    assert "TRANSLATION_NOTICE" in html
+    assert json.dumps(pending.TRANSLATION_REQUESTED_NOTICE) in html, \
+        "the page must be rendered with the shared wording"
+    assert "TRANSLATION_NOTICE +" in html, \
+        "the notice element must print the shared constant"
 
 
 def test_the_server_no_longer_registers_the_unused_number_filters(web_client):
