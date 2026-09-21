@@ -493,6 +493,12 @@ class Daemon:
         self._web_worker = None
         self._image_worker = None
         self._cursor_exhausted = False
+        # AppIDs whose finished-walk skip has already been announced at INFO in
+        # this process. The latch is permanent, so re-announcing it on every
+        # discovery pass (30 s) reports a static fact as news forever; after the
+        # first line the skip is DEBUG. Logging state, not behaviour: it is not
+        # persisted, so a restart re-announces it once.
+        self._cursor_walk_finished_reported: set[int] = set()
         # Whether the absence of `.daemon.pid` is a stop request yet. The runner
         # wrote the file before it constructed this Daemon, so for a launched
         # daemon it is expected from the first check onward -- ``expect_pid_file``
@@ -1541,11 +1547,21 @@ class Daemon:
             # exhausted catalogue again. Page-based (updated-order) discovery is
             # the source of new and changed items from here on.
             if cursor_walk_finished(self.db_path, appid):
-                logging.info(
-                    "Cursor walk for AppID %s is recorded as finished "
-                    "(app_discovery.cursor_walk_finished); skipping the cursor scan.",
-                    appid,
-                )
+                if appid in self._cursor_walk_finished_reported:
+                    logging.debug(
+                        "Cursor walk for AppID %s is recorded as finished "
+                        "(app_discovery.cursor_walk_finished); skipping the cursor scan.",
+                        appid,
+                    )
+                else:
+                    self._cursor_walk_finished_reported.add(appid)
+                    logging.info(
+                        "Cursor walk for AppID %s is recorded as finished "
+                        "(app_discovery.cursor_walk_finished); skipping the cursor scan. "
+                        "New items now arrive from the page-based updated-order scan, "
+                        "which runs at most once per 24 hours per process.",
+                        appid,
+                    )
                 continue
 
             # The guard must measure work the fetch queue can actually hand out.
