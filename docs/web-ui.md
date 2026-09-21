@@ -227,6 +227,31 @@ browser can afford it and the mode's point is that a half-restore is worse than 
 `JSON.parse` and the filter would name a different account (`src/webserver.py`, `_detail_payload`). An
 item with no creator renders the name plainly and offers no jump.
 
+### The creator-ignore toggle
+
+The author box carries an **Ignore creator / Un-ignore creator** button
+(`#btn-ignore-creator`). It sits at the far end of the bar from `Return`, with the author label and
+name between them, so a press meant for `Return` cannot land on it by mistake. It acts on the creator
+the view is pinned to (`_authorCreator`, set by the same `_setAuthorModeUi` call that names the
+creator on screen), **not** on the selected item: the mode is one creator's whole catalogue and the
+selection may be nothing at all, because an ignored view comes back empty.
+
+Flagging a creator makes every one of their items ignored (`fetch_status = -2`), and un-flagging
+restores them; new items from that creator are settled as they are scraped. It is a two-way toggle
+with no provenance, so un-flagging also restores items that were ignored individually, and a dead
+item (`-1`) is untouched in both directions — see [data-model.md](data-model.md#creators). The
+direction and the wording are **not** this page's: the button calls
+`POST /api/creator/<steamid>/ignore`, whose answer carries `ignored` and the `label` built from
+`creator_ignore_label` in `src/database.py`, and the TUI action uses the same
+`toggle_creator_ignored`. The label always names the next press, so a second press cannot disagree
+with the first. Entering the mode reads the creator's stored flag once through the same route's GET
+so the button is labelled correctly before any press.
+
+Unlike the item `i` toggle, which patches the one row in place, this is a **whole-view** change:
+every item of the creator settles at once. `toggleCreatorIgnored` therefore re-runs the author search
+after the write, so the items that just settled leave the view and an un-ignore brings them back. The
+author bar itself stays; only the results are re-read.
+
 ### The creator list
 
 `#btn-authors` in the header opens a picker (`#author-modal`, `#author-list`), which
@@ -572,6 +597,22 @@ owns the rule, sending an ignored row through `unignore_item` and every other ro
 its `translation_queue` rows deleted). Like the queue route, it returns no new state, so the client
 reads the item back through the read-only `/api/item/<id>` route and draws the marker from that
 payload rather than from a local flip.
+
+### `/api/creator/<steamid>/ignore` — GET and POST
+
+The creator-scoped counterpart of `/api/ignore/<id>`. **GET** answers the creator's current state and
+the wording its control should carry — `{"ignored": bool, "label": ...}` — so entering author mode can
+label the button before it is pressed. **POST** toggles the flag through `toggle_creator_ignored` and
+answers `{"ok": true, "ignored": bool, "label": ...}`; `ignored` is the state *after* the call, so a
+second press reports the reverse. The label is built by `creator_ignore_label`, one source shared
+with the TUI, so the two front ends use the same words for the same direction.
+
+The path names the **creator**, not an item: the route acts on the creator the author view is pinned
+to. `ignore_creator` settles every non-dead item of theirs (`-2`, all four priorities zero, its
+`translation_queue` rows deleted) and sets the creator's flag; `unignore_creator` clears the flag and
+restores their `-2` items by `unignore_item`'s rule. A dead item is untouched in both directions.
+Because the write moves a whole catalogue, the page re-runs the author search after it rather than
+patching one row — see [The creator-ignore toggle](#the-creator-ignore-toggle).
 
 ### `/api/open_folder/<id>` — POST
 

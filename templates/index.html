@@ -155,6 +155,12 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
            took. The named creator is the whole state: the view is otherwise the
            search it re-ran. -->
       <div id="author-mode-bar" class="author-bar">
+        <!-- The creator-ignore toggle. It sits at the far end of the bar from
+             Return, with the author label and name between them, so a press
+             meant for Return cannot land on it. It acts on the creator being
+             viewed, not on the selected item; its label names the next move and
+             is drawn from the route so both front ends share the wording. -->
+        <button id="btn-ignore-creator" title="Ignore this creator: all of their items become ignored, and new ones as they are scraped">{{ creator_ignore_default_label }}</button>
         <span class="author-bar-label">Author:</span>
         <span id="author-mode-name"></span>
         <button id="btn-return-author" title="Leave author mode and restore the filters it replaced">Return</button>
@@ -1166,6 +1172,12 @@ function toggleTranslation() {
 // between the jump and the Return.
 let _authorMode = false;
 let _preJumpView = null;
+// The creator the view is pinned to, or null outside author mode. The creator
+// toggle acts on this, never on `_selectedWid`: the mode is one creator's whole
+// catalogue, and the selected item may be nothing at all (an ignored view comes
+// back empty). It is set by `_setAuthorModeUi`, the same call that names the
+// creator on screen, so the two cannot disagree.
+let _authorCreator = null;
 
 function _authorModeActive() {
   return _authorMode;
@@ -1200,6 +1212,7 @@ function _setAuthorModeUi(on, creator) {
   // the scraper's stored filter with one they never chose.
   if (save) save.style.display = on ? 'none' : '';
   if (name) name.textContent = on ? String(creator) : '';
+  _authorCreator = on ? String(creator) : null;
 }
 
 // The item jump and the author list both enter the mode through here. It is the
@@ -1220,7 +1233,61 @@ function jumpToAuthor(creator) {
   container.innerHTML = '';
   addRow(undefined, {field: 'Author ID', op: 'is', value: String(creator)});
   _syncSubscribedOverlay();
+  // Fire-and-forget: the label is the creator's stored flag, which only the
+  // route knows. The jump itself stays synchronous so the view is complete
+  // before anything awaits; a failed read leaves the default wording in place.
+  _refreshCreatorIgnoreControl();
   doSearch(true);
+}
+
+// ── the creator-ignore toggle ─────────────────────────────────────────────
+// The trigger the owner asked for: flagging the creator being viewed makes
+// every one of their items ignored, and un-flagging restores them. The
+// direction and the wording live in src/database (`toggle_creator_ignored`,
+// `creator_ignore_label`), so this page and the TUI cannot disagree about
+// either. Unlike the item `i` toggle, this is a whole-view change: every item
+// of the creator moves at once, so the view is re-queried after it rather than
+// patching one row.
+function _drawCreatorIgnoreControl(button, data) {
+  if (!button) return;
+  if (data && data.label) button.textContent = data.label;
+  button.dataset.ignored = (data && data.ignored) ? '1' : '0';
+}
+
+async function _refreshCreatorIgnoreControl() {
+  const button = document.getElementById('btn-ignore-creator');
+  if (!button || _authorCreator == null) return;
+  try {
+    const resp = await fetch(
+      '/api/creator/' + encodeURIComponent(_authorCreator) + '/ignore');
+    if (!resp.ok) return;
+    _drawCreatorIgnoreControl(button, await resp.json());
+  } catch (e) { console.debug('Creator ignore state refresh failed', e); }
+}
+
+async function toggleCreatorIgnored() {
+  if (_authorCreator == null) return;
+  let resp;
+  try {
+    resp = await fetch(
+      '/api/creator/' + encodeURIComponent(_authorCreator) + '/ignore',
+      {method: 'POST'});
+  } catch (e) {
+    alert('Creator ignore update failed: ' + e.message);
+    return;
+  }
+  if (!resp.ok) {
+    alert('Creator ignore update failed: ' + resp.status + ' ' + resp.statusText);
+    return;
+  }
+  try {
+    _drawCreatorIgnoreControl(
+      document.getElementById('btn-ignore-creator'), await resp.json());
+  } catch (e) { console.debug('Creator ignore state refresh failed', e); }
+  // Re-query the author view: the items that just settled must leave it, and
+  // an un-ignore must bring them back. The author bar stays; only the results
+  // are re-read.
+  await doSearch(true);
 }
 
 // Return from author mode: the TUI's `action_return_from_author_mode`. The snapshot
@@ -2939,6 +3006,7 @@ document.getElementById('analysis-close').onclick = _closeAnalysisPanel;
 document.getElementById('analysis-recalc').onclick = _runAnalysis;
 _initAuthorList();
 document.getElementById('btn-return-author').onclick = returnFromAuthor;
+document.getElementById('btn-ignore-creator').onclick = toggleCreatorIgnored;
 
 loadState();
 _refreshSessionWarning();

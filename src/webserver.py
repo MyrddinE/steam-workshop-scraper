@@ -5,7 +5,7 @@ import os
 import re
 import logging
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, toggle_ignored_item, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items, live_fetch_status_predicate, IGNORED_FETCH_STATUS
+from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, toggle_ignored_item, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items, live_fetch_status_predicate, IGNORED_FETCH_STATUS, creator_is_ignored, creator_ignore_label, toggle_creator_ignored
 from src.analysis import view_window_analysis
 from src import capture
 from src import activity
@@ -185,6 +185,13 @@ def index():
                            # src.database, injected so the page's rendering test
                            # keys off the status rather than a retyped -2.
                            ignored_fetch_status=IGNORED_FETCH_STATUS,
+                           # The creator-ignore control's default wording. The
+                           # page draws the label from the route's answer, and
+                           # this is the same shared string for the moment
+                           # before that answer lands, so the wording has one
+                           # source (src.database) rather than a retyped copy in
+                           # the template.
+                           creator_ignore_default_label=creator_ignore_label(False),
                            filter_schema_json=json.dumps(SEARCH_FILTER_SCHEMA),
                            # The rotation button's wording is the TUI's constant,
                            # retyped nowhere, so the two daemon pages cannot say
@@ -703,6 +710,29 @@ def api_ignore(workshop_id):
     """
     toggle_ignored_item(_db_path, workshop_id)
     return jsonify({"ok": True})
+
+
+@app.route('/api/creator/<int:creator_steamid>/ignore', methods=['GET', 'POST'])
+def api_creator_ignore(creator_steamid):
+    """Read or toggle the owner's creator-ignore flag for one creator.
+
+    GET answers the creator's current state and the wording the control should
+    carry; POST toggles it with ``toggle_creator_ignored`` and answers the same
+    shape. The label is built here from ``creator_ignore_label`` rather than in
+    the page, and the toggle direction comes from the shared database rule, so
+    the web control and the TUI action can neither choose a different direction
+    nor use different words for the same one.
+
+    The route acts on the creator named in the path -- the one the author view is
+    pinned to -- not on any item. ``ignored`` is the state *after* the call, so a
+    second press is reported as the reverse it was.
+    """
+    if request.method == 'POST':
+        ignored = toggle_creator_ignored(_db_path, creator_steamid)
+        return jsonify({"ok": True, "ignored": ignored,
+                        "label": creator_ignore_label(ignored)})
+    ignored = creator_is_ignored(_db_path, creator_steamid)
+    return jsonify({"ignored": ignored, "label": creator_ignore_label(ignored)})
 
 
 @app.route('/api/subscribed/<int:workshop_id>', methods=['POST'])
