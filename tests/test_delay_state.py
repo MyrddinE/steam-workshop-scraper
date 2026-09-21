@@ -220,7 +220,7 @@ def test_the_translator_section_survives_every_delay_write(db_path):
                           "kind": "service"}
     store.save({"translation_backoff": translator_section})
 
-    daemon = Daemon(_config(db_path), )
+    daemon = Daemon(_config(db_path))
     daemon._back_off_api_delay()
     web = WebScraperThread(db_path, ".pauselock", state_store=daemon.state_store)
     web.web_delay = 15.0

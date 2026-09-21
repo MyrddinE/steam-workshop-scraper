@@ -529,7 +529,7 @@ the first result on the screen nudges it: `run_subscription_pass` calls its per-
 synchronously after each item returns, so the screen times each finished item between two callbacks
 (on the worker thread, where the report arrives — not on the UI thread, whose queueing delay would be
 counted in) and prices the rows still waiting from the running mean of those observed durations,
-seeded with the configured guess. The seed is one virtual observation, which is why the first item
+seeded with the delay-derived guess. The seed is one virtual observation, which is why the first item
 moves the mean a lot and later ones less; the mean is not persisted, no history is consulted, and
 there is no rolling window — the pass in front of the screen is the only evidence used. The delay is
 still read fresh on every tick, so a throttle that doubles the engine's `WebInterval` mid-pass moves

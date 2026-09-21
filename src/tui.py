@@ -7,7 +7,7 @@ from textual.app import App, ComposeResult
 from textual import on, events
 from textual.command import Provider, Hit, DiscoveryHit
 from textual.system_commands import SystemCommandsProvider
-from typing import Iterable
+from typing import Iterable, NamedTuple
 from textual.screen import Screen, ModalScreen
 from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, Label, Select, Button, Markdown, DataTable, RichLog
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -1089,6 +1089,22 @@ class DaemonManagerScreen(Screen):
             self.app.pop_screen()
 
 
+class _EstimateBasis(NamedTuple):
+    """One redraw's shared inputs for the row estimates.
+
+    ``_render_rows`` builds this once and threads it through every row, so a
+    redraw of N rows reads the ``web_delay`` state section once and walks the
+    observed durations once. A direct call to an estimate method with no basis
+    builds its own, which is what keeps the mid-pass throttle check honest: the
+    delay is read fresh rather than reused from an earlier redraw.
+    """
+    # The running mean the waiting rows are priced at, built from the
+    # delay-derived seed and the observed durations.
+    item_seconds: float
+    # Total seconds already spent on the items that have finished.
+    spent_on_finished: float
+
+
 class SubscriptionQueueScreen(ModalScreen):
     """The subscription queue: the engine subscribes each queued item.
 
@@ -1108,18 +1124,18 @@ class SubscriptionQueueScreen(ModalScreen):
     same lock (``subscribe_engine.run_subscription_pass``), which is what covers
     a caller that runs the engine outside this screen.
 
-    The estimate *starts* from the configured web delay: on the default path an
+    The estimate *starts* from the persisted web delay: on the default path an
     item costs the engine **one gated page read** -- the pre-read that guards the
     POST; the retired confirmation read would make it a second when the switch is
-    on -- so the initial per-item guess is that many times the shared configured
+    on -- so the initial per-item guess is that many times the shared persisted
     delay (the POST is an XHR and pays no interval). From then on it is nudged by
     what the pass has actually done: the wall-clock cost of each finished item is
     timed between the per-item results the pass already delivers, and the rows
     still waiting are priced from the running mean of those durations, seeded
-    with the configured guess so the first item moves it most. It is an estimate,
-    not a promise, because the pass can also be refused, throttled or cancelled
-    after it is drawn. See ``docs/tui.md`` and, for why this differs from the web
-    overlay's countdown, ``docs/web-ui.md``.
+    with the delay-derived guess so the first item moves it most. It is an
+    estimate, not a promise, because the pass can also be refused, throttled or
+    cancelled after it is drawn. See ``docs/tui.md`` and, for why this differs
+    from the web overlay's countdown, ``docs/web-ui.md``.
     """
 
     # Four ticks a second, the web overlay's cadence.
@@ -1139,7 +1155,7 @@ class SubscriptionQueueScreen(ModalScreen):
         self._outcomes: dict[int, subscribe_engine.SubscribeOutcome] = {}
         self._pass_started_at: float | None = None
         # Wall-clock cost of each item the pass has finished, in the order it
-        # reported them. The running mean is seeded with the configured guess.
+        # reported them. The running mean is seeded with the delay-derived guess.
         self._observed_seconds: list[float] = []
         self._last_result_at: float | None = None
         self._estimate_timer = None
@@ -1197,33 +1213,51 @@ class SubscriptionQueueScreen(ModalScreen):
         :data:`subscribe_engine.VERIFY_AFTER_SUBSCRIBE`, so when it is on each
         item pays a second gated read. The guess follows that count, and every
         gated read waits the shared adaptive web interval, so the starting
-        figure is the configured delay times one or two; the delay is read fresh
-        from the same owner every time
-        (``src.web_worker.configured_web_delay``) rather than snapshotted,
-        because the engine's ``WebInterval`` writes a throttle's doubling back
-        through this screen's own config dict while the pass runs.
+        figure is the persisted ``web_delay`` state section times one or two.
+        The delay is read fresh from the same owner every time
+        (``src.web_worker.configured_web_delay``) rather than snapshotted, so a
+        throttle doubling the engine writes into that section mid-pass moves the
+        estimate on the next redraw.
         """
         reads = 2 if subscribe_engine.VERIFY_AFTER_SUBSCRIBE else 1
         return reads * configured_web_delay(self.config)
 
-    def _estimated_item_seconds(self) -> float:
-        """The mean cost of a finished item, seeded with the configured guess.
+    def _estimate_basis(self) -> _EstimateBasis:
+        """One redraw's shared estimate inputs: one delay read, one observed sum.
+
+        ``_render_rows`` builds this once and passes it to every row, so a
+        redraw of N rows neither re-reads the state file N times nor re-sums the
+        observed durations N times. A direct estimate call builds its own.
+        """
+        seed = self._seed_item_seconds()
+        observed = self._observed_seconds
+        spent_on_finished = sum(observed)
+        if not observed:
+            item_seconds = seed
+        else:
+            item_seconds = (seed + spent_on_finished) / (len(observed) + 1)
+        return _EstimateBasis(item_seconds, spent_on_finished)
+
+    def _estimated_item_seconds(self, basis: _EstimateBasis | None = None) -> float:
+        """The mean cost of a finished item, seeded with the delay-derived guess.
 
         One running mean over every item the pass has reported, as
         ``(seed + sum(observed)) / (1 + count)``: the seed is one virtual
         observation, so the first real item moves the estimate a lot and later
-        ones less, and the configured delay still pulls on it. A rolling window,
-        a rate learned from past passes or anything else persisted is
+        ones less, and the delay-derived guess still pulls on it. A rolling
+        window, a rate learned from past passes or anything else persisted is
         deliberately not used -- the pane is transient, and the items of the pass
         in front of it are the only evidence worth pricing the rest of it with.
-        """
-        seed = self._seed_item_seconds()
-        observed = self._observed_seconds
-        if not observed:
-            return seed
-        return (seed + sum(observed)) / (len(observed) + 1)
 
-    def _estimate_remaining(self, index: int, elapsed: float) -> int:
+        ``basis`` is the redraw's shared inputs when a caller already has them;
+        with none, the delay is read fresh and the mean built from it.
+        """
+        if basis is None:
+            basis = self._estimate_basis()
+        return basis.item_seconds
+
+    def _estimate_remaining(self, index: int, elapsed: float,
+                            basis: _EstimateBasis | None = None) -> int:
         """Whole seconds until item ``index`` is reached, never negative.
 
         ``index`` is the row's position in the queue and ``elapsed`` is the
@@ -1232,21 +1266,27 @@ class SubscriptionQueueScreen(ModalScreen):
         finished items' observed costs come out of it; every item still ahead of
         the row costs the running mean. Rounded up so an estimate is never drawn
         as "0s" while the item has not started.
+
+        ``basis`` is ``_render_rows``' one-per-redraw inputs; with none -- a
+        direct call -- the delay and the observed durations are read fresh.
         """
-        spent_on_finished = sum(self._observed_seconds)
+        if basis is None:
+            basis = self._estimate_basis()
         waiting_before = max(0, index - len(self._outcomes))
-        spent_on_current = max(0.0, elapsed - spent_on_finished)
-        remaining = waiting_before * self._estimated_item_seconds() - spent_on_current
+        spent_on_current = max(0.0, elapsed - basis.spent_on_finished)
+        remaining = waiting_before * basis.item_seconds - spent_on_current
         return max(0, math.ceil(remaining))
 
-    def _row_display(self, index: int, elapsed: float):
+    def _row_display(self, index: int, elapsed: float,
+                     basis: _EstimateBasis | None = None):
         """``(countdown, status, colour)`` for the row at ``index``.
 
         The engine takes the queue in order, so the item it is reading now is
         the one after the outcomes already reported. That row carries the
         ``subscribing...`` word instead of a countdown, which is what makes it
         distinct from the rows still waiting; a reported outcome keeps its
-        status word and drops the countdown.
+        status word and drops the countdown. ``basis`` is the redraw's shared
+        estimate inputs; with none, the countdown is read fresh.
         """
         item = self._items[index]
         outcome = self._outcomes.get(item["workshop_id"])
@@ -1257,22 +1297,25 @@ class SubscriptionQueueScreen(ModalScreen):
             return None, None, None
         if index == len(self._outcomes):
             return None, self._CURRENT_LABEL, "cyan"
-        return f"~{self._estimate_remaining(index, elapsed)}s", None, None
+        return f"~{self._estimate_remaining(index, elapsed, basis)}s", None, None
 
     def _render_rows(self) -> None:
         """Redraw every row from the current outcomes and the estimate.
 
         Estimate times are not promises, so this only ever runs while the pass
         is live (moved by ``_tick_estimates``) or when an outcome lands; a
-        finished screen has no countdown left on it.
+        finished screen has no countdown left on it. The estimate inputs are
+        built once for the whole redraw -- one read of the shared delay and one
+        sum of the observed durations -- rather than once per row.
         """
         if not self.is_mounted:
             return
         elapsed = 0.0
         if self._pass_started_at is not None:
             elapsed = max(0.0, time.monotonic() - self._pass_started_at)
+        basis = self._estimate_basis()
         for index, item in enumerate(self._items):
-            countdown, status, colour = self._row_display(index, elapsed)
+            countdown, status, colour = self._row_display(index, elapsed, basis)
             try:
                 row = self.query_one(f"#sub-queue-item-{item['workshop_id']}", Static)
             except Exception:
@@ -1355,7 +1398,7 @@ class SubscriptionQueueScreen(ModalScreen):
         The pass calls its per-item callback synchronously right after each
         item's engine run returns (``run_subscription_pass``), so the gap
         between two callbacks is that item's whole cost -- both gated reads and
-        the POST -- which is what the configured delay alone does not price. The
+        the POST -- which is what the persisted delay alone does not price. The
         first item is measured from the pass's start. Clamped at zero so a clock
         that steps back cannot feed a negative weight to the mean.
         """

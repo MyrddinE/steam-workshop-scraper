@@ -529,7 +529,7 @@ therefore ran about 18 s against an estimate of 12 s.
 The decided fix keeps that starting number and adds **a live correction for the rest of the queue**.
 `run_subscription_pass` calls its per-item callback synchronously after each item, so the screen times
 each finished item between two callbacks and prices the rows still waiting from a running mean of those
-observed durations, seeded with the configured guess. The seed is one virtual observation, which is why
+observed durations, seeded with the delay-derived guess. The seed is one virtual observation, which is why
 the first item moves the estimate a lot and later ones less; the row being processed is already drawn
 distinctly ("subscribing...") with no countdown, which is where the timing starts. Nothing is persisted
 and no rolling window or rate from past passes is used. See
@@ -544,7 +544,7 @@ rejected with the live correction above: a transient pane does not need persiste
 and keeping it would have cost a store, a re-derivation rule and a staleness question for a number that
 is on screen for a minute or two. A rolling mean of the last few item durations was considered and
 rejected for the same reason: the running mean over the pass already converges within two or three
-items, and seeding it with the configured guess is enough.
+items, and seeding it with the delay-derived guess is enough.
 
 ---
 

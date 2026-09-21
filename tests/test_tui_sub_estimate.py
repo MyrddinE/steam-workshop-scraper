@@ -254,3 +254,61 @@ def test_the_current_item_is_distinct_and_has_no_countdown(tmp_path):
     # And with the pass over there is no countdown and no "current" row left.
     screen._pass_running = False
     assert screen._row_display(2, 0.0) == (None, None, None)
+
+
+def test_one_redraw_reads_the_shared_delay_once(tmp_path, monkeypatch):
+    """A redraw of N rows must not re-read the delay N times.
+
+    `_render_rows` builds the estimate inputs once and threads them through
+    every row, so the state file is parsed once per redraw however long the
+    queue is. A direct `_estimate_remaining`/`_estimated_item_seconds` call
+    passes no basis, so it keeps reading fresh -- the mid-pass throttle check
+    depends on that.
+    """
+    config = _delay_config(tmp_path, 12.0)
+    screen = _screen(tmp_path, config)
+    screen._items = [{"workshop_id": wid} for wid in range(1, 7)]
+    screen._pass_running = True
+    screen._pass_started_at = time.monotonic()
+
+    loads = []
+    real_load = StateStore.load
+
+    def counting_load(self, *args, **kwargs):
+        loads.append(self.path)
+        return real_load(self, *args, **kwargs)
+
+    monkeypatch.setattr(StateStore, "load", counting_load)
+    monkeypatch.setattr(type(screen), "is_mounted", property(lambda self: True))
+
+    class _Row:
+        def update(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(screen, "query_one", lambda *args, **kwargs: _Row())
+
+    screen._render_rows()
+
+    assert len(screen._items) > 1, "the test needs several rows to be meaningful"
+    assert len(loads) == 1, (
+        "the shared delay must be read once per redraw, not once per row")
+
+
+def test_a_direct_estimate_still_reads_the_delay_fresh(tmp_path):
+    """With no basis passed in, a direct call re-reads the delay.
+
+    This is the property `test_a_changed_configured_delay_changes_the_estimate`
+    relies on: the engine's mid-pass doubling is picked up without a redraw.
+    """
+    config = _delay_config(tmp_path, 12.0)
+    screen = _screen(tmp_path, config)
+
+    assert screen._seed_item_seconds() == 12.0
+    assert screen._estimated_item_seconds() == 12.0
+    before = screen._estimate_remaining(1, 0.0)
+    _set_delay(config, 24.0)
+
+    assert before == 12
+    assert screen._seed_item_seconds() == 24.0
+    assert screen._estimated_item_seconds() == 24.0
+    assert screen._estimate_remaining(1, 0.0) == 24
