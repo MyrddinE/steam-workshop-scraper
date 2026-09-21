@@ -93,6 +93,36 @@ def test_main_logging_no_daemon_no_file():
         assert len(kwargs["handlers"]) == 2
 
 
+def test_main_installs_the_crash_hooks_before_reading_the_config():
+    """The daemon's crash hooks go in before anything that can fail.
+
+    A failure in `load_config` or in the logging setup below used to be dumped
+    nowhere, because `crash.install` ran last. This pins the order: hooks,
+    Windows console fix-up, then the config.
+    """
+    order = []
+
+    def record_hooks(process_name):
+        order.append(("hooks", process_name))
+
+    def explode(config_path):
+        order.append(("config", config_path))
+        raise FileNotFoundError(config_path)
+
+    with patch('sys.argv', ['daemon_runner.py']), \
+         patch('src.daemon_runner._fix_windows_encoding',
+               lambda: order.append(("encoding", None))), \
+         patch('src.daemon_runner.crash.install_hooks', record_hooks), \
+         patch('src.daemon_runner.load_config', explode), \
+         patch('logging.basicConfig'):
+        with pytest.raises(SystemExit) as caught:
+            main()
+
+    assert caught.value.code == 1
+    assert order == [("hooks", "daemon"), ("encoding", None),
+                     ("config", "config.yaml")]
+
+
 def test_main_logging_daemon_with_file():
     """--daemon with log file: FileHandler + stderr (2 handlers)."""
     import logging

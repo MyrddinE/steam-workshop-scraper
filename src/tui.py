@@ -3499,6 +3499,12 @@ class ScraperApp(App):
             logging.warning(f"Web server failed to start: {e}")
 
 def main():
+    # Before anything can fail: a crash raised while `load_config` runs or while
+    # logging is being configured has no destination otherwise -- the log
+    # handlers are the thing being built, and the hooks are not installed yet.
+    # The hooks do not need logging; `crash.install` below adds the ring buffer
+    # once `basicConfig` has run, so a forced configuration cannot drop it.
+    crash.install_hooks("tui")
     config_path = "config.yaml"
     import sys
     if len(sys.argv) > 1:
