@@ -238,6 +238,42 @@ def test_the_readout_is_honest_when_there_is_no_log(tmp_path):
     assert log_rotation.log_status(None)["log_readout"] == "Log size: not configured"
 
 
+def test_the_generation_marker_falls_back_to_an_in_place_write(tmp_path, monkeypatch):
+    """On Windows a reader can hold the marker open and refuse the replace.
+
+    `write_generation` retries, then rewrites in place; the value only has to
+    differ from the previous one, so a non-atomic write is still enough to make
+    the handlers reopen.
+    """
+    log = tmp_path / "daemon.log"
+
+    def refuse(source, target):
+        raise PermissionError(13, "The process cannot access the file")
+
+    monkeypatch.setattr(log_rotation.os, "replace", refuse)
+    log_rotation.write_generation(str(log), "daemon-x.log.gz")
+    assert log_rotation.read_generation(str(log)) == "daemon-x.log.gz"
+
+
+def test_the_handler_opens_the_log_with_delete_sharing_on_windows():
+    """Pins the Windows half of the rename, which no test here can execute.
+
+    Python's `io.open()` requests only read/write sharing, so a file a handler
+    holds cannot be renamed by another process and `os.replace` would fail for as
+    long as the daemon or the TUI runs -- the rotation would never work on the
+    platform it is for. The handler therefore has its own opener, and it is the
+    one that asks for FILE_SHARE_DELETE. This is a source guard on purpose: a
+    revert to a plain `logging.FileHandler` is invisible on Linux.
+    """
+    import inspect
+
+    source = inspect.getsource(log_rotation.RotationAwareFileHandler._open)
+    assert "_windows_append_stream" in source
+    assert "win32" in source
+    windows_source = inspect.getsource(log_rotation._windows_fd)
+    assert "_WINDOWS_SHARE_DELETE" in windows_source
+
+
 def test_format_size():
     assert log_rotation.format_size(0) == "0 B"
     assert log_rotation.format_size(1023) == "1023 B"

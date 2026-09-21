@@ -36,8 +36,10 @@ rather than lost.
 from __future__ import annotations
 
 import gzip
+import io
 import logging
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -65,6 +67,28 @@ STALE_LOCK_SECONDS = 600.0
 _CHUNK_BYTES = 1024 * 1024
 _DRAIN_ATTEMPTS = 3
 _DRAIN_PAUSE_SECONDS = 0.05
+
+#: How hard the marker publish tries the atomic replace before falling back.
+_REPLACE_ATTEMPTS = 3
+_REPLACE_PAUSE_SECONDS = 0.01
+
+# Windows: ``io.open()``/``os.open()`` request only FILE_SHARE_READ |
+# FILE_SHARE_WRITE, so a file a handler holds **cannot be renamed by another
+# process** -- ``os.replace`` fails with a sharing violation for as long as the
+# daemon or the TUI is running, which is exactly when a rotation is wanted.
+# (CPython issue 15244; ``logging.handlers.WatchedFileHandler`` has the mirror
+# problem on Windows, which is why it is not the mechanism here either.) The
+# handler therefore opens the log itself on Windows with the delete share the
+# rename needs, and reads the marker the same way so the marker's own
+# ``os.replace`` is not blocked by a reader.
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_GENERIC_WRITE = 0x40000000
+_WINDOWS_SHARE_READ = 0x00000001
+_WINDOWS_SHARE_WRITE = 0x00000002
+_WINDOWS_SHARE_DELETE = 0x00000004
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_OPEN_ALWAYS = 4
+_WINDOWS_ATTRIBUTE_NORMAL = 0x00000080
 
 _state_lock = threading.Lock()
 #: Per-log rotation state: ``{"in_progress", "bytes", "result", "thread"}``.
@@ -113,21 +137,80 @@ def format_size(num_bytes) -> str:
 
 # ── the generation marker ────────────────────────────────────────────────────
 
+def _windows_fd(path: str, access: int, creation: int, flags: int) -> int:
+    """A CRT descriptor for ``path`` opened with FILE_SHARE_DELETE.
+
+    Only called on Windows. ``msvcrt.open_osfhandle`` takes ownership of the
+    handle, so it is closed by hand if the conversion fails.
+    """
+    import _winapi
+    import msvcrt
+
+    handle = _winapi.CreateFile(
+        path, access,
+        _WINDOWS_SHARE_READ | _WINDOWS_SHARE_WRITE | _WINDOWS_SHARE_DELETE,
+        None, creation, _WINDOWS_ATTRIBUTE_NORMAL, None)
+    try:
+        return msvcrt.open_osfhandle(handle, flags)
+    except BaseException:
+        _winapi.CloseHandle(handle)
+        raise
+
+
+def _windows_append_stream(path: str, encoding, errors):
+    """The append stream the handler uses on Windows (delete-sharing)."""
+    binary_flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0)
+    descriptor = _windows_fd(path, _WINDOWS_GENERIC_READ | _WINDOWS_GENERIC_WRITE,
+                             _WINDOWS_OPEN_ALWAYS, binary_flags)
+    binary = io.open(descriptor, "ab", closefd=True)
+    return io.TextIOWrapper(binary, encoding=encoding or "utf-8", errors=errors)
+
+
+def _windows_read_text(path: str):
+    binary_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    descriptor = _windows_fd(path, _WINDOWS_GENERIC_READ,
+                             _WINDOWS_OPEN_EXISTING, binary_flags)
+    return io.open(descriptor, "r", encoding="utf-8", closefd=True)
+
+
 def write_generation(log_file: str, value: str) -> None:
     """Publish a new generation atomically.
 
     Written to a temporary file and ``os.replace``d so a reader never sees a
     half-written value, and so the marker's inode changes: that is what makes the
     handler's cached stat reliable even on a filesystem with coarse mtimes.
+
+    On Windows a reader can hold the marker open without delete sharing, which
+    makes the replace fail for an instant; it is retried, and if the OS still
+    refuses, the marker is rewritten in place. That is not atomic, but the value
+    only has to differ from the previous one, and a handler that reads it
+    half-written merely reopens once more than necessary.
     """
     target = generation_path(log_file)
     directory = os.path.dirname(target) or "."
     os.makedirs(directory, exist_ok=True)
+    payload = value + "\n"
     handle, temporary = tempfile.mkstemp(dir=directory, prefix=".generation-")
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as fh:
-            fh.write(value + "\n")
-        os.replace(temporary, target)
+            fh.write(payload)
+        last_error = None
+        for _ in range(_REPLACE_ATTEMPTS):
+            try:
+                os.replace(temporary, target)
+                return
+            except OSError as exc:
+                last_error = exc
+                time.sleep(_REPLACE_PAUSE_SECONDS)
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+        try:
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+        except OSError:
+            raise last_error
     except BaseException:
         try:
             os.remove(temporary)
@@ -137,8 +220,12 @@ def write_generation(log_file: str, value: str) -> None:
 
 
 def read_generation(log_file: str) -> str:
+    path = generation_path(log_file)
     try:
-        with open(generation_path(log_file), "r", encoding="utf-8") as fh:
+        if sys.platform == "win32":
+            with _windows_read_text(path) as fh:
+                return fh.read().strip()
+        with open(path, "r", encoding="utf-8") as fh:
             return fh.read().strip()
     # A missing or unreadable marker means "no rotation recorded yet".
     except OSError:
@@ -171,6 +258,26 @@ class RotationAwareFileHandler(logging.FileHandler):
         super().__init__(filename, mode=mode, encoding=encoding, delay=delay,
                          errors=errors)
         self._remember_generation()
+
+    def _open(self):
+        """On Windows, open with delete sharing so the rotator can rename the log.
+
+        ``io.open`` requests only read/write sharing, so a plain ``FileHandler``
+        holds the log in a way that makes ``os.replace`` fail while this process
+        is running -- the feature would work on POSIX and never on the platform
+        it is for. Any failure here falls back to the ordinary stream: logging
+        keeps working, and a rotation that the OS then refuses reports its
+        failure rather than losing a record.
+        """
+        if sys.platform == "win32":
+            try:
+                return _windows_append_stream(self.baseFilename, self.encoding,
+                                              self.errors)
+            except Exception:
+                logging.getLogger(__name__).debug(
+                    "Log opened without delete sharing; a manual rotation may be "
+                    "refused by the OS", exc_info=True)
+        return super()._open()
 
     def _remember_generation(self) -> None:
         self._marker_identity = _generation_identity(self._marker_path)
