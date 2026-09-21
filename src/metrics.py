@@ -615,8 +615,10 @@ def _coverage_scan(conn, where_sql: str, params: list) -> dict:
     queue it: non-empty and non-ASCII (``queue_field_for_translation`` returns
     early on an empty or ASCII field), and a stored translation counts only when
     :func:`translation_is_current` says it is current. The creator's name is the
-    same test read through ``creators``, counted per item so the bar is comparable
-    with the per-item bars around it.
+    same test read through ``creators``, but it is counted in **authors**, not
+    items: a persona lives once per creator and is shared by every item that
+    creator made, so ``COUNT(DISTINCT w.creator_steamid)`` is the population the
+    Creator rows report.
 
     ``blank_answers`` is the scrape's legitimate-blank ceiling: a page that was
     scraped and answered with an empty description can never make the Extended
@@ -638,7 +640,10 @@ def _coverage_scan(conn, where_sql: str, params: list) -> dict:
                                   AND COALESCE(w.extended_description, '') = ''
                                  THEN 1 ELSE 0 END), 0) AS blank_answers,
                COALESCE(SUM(CASE WHEN COALESCE(w.image_answer, '') <> '' THEN 1 ELSE 0 END), 0) AS imaged,
-               COALESCE(SUM(CASE WHEN COALESCE(w.creator_steamid, '') <> '' THEN 1 ELSE 0 END), 0) AS attributed,
+               COUNT(DISTINCT CASE WHEN COALESCE(w.creator_steamid, '') <> ''
+                                   THEN w.creator_steamid END) AS authors,
+               COUNT(DISTINCT CASE WHEN u.steamid IS NOT NULL
+                                   THEN w.creator_steamid END) AS authors_known,
                COALESCE(SUM(CASE WHEN COALESCE(w.title, '') <> '' AND NOT ({title})
                                  THEN 1 ELSE 0 END), 0) AS title_need,
                COALESCE(SUM(CASE WHEN COALESCE(w.title, '') <> '' AND NOT ({title})
@@ -654,14 +659,11 @@ def _coverage_scan(conn, where_sql: str, params: list) -> dict:
                COALESCE(SUM(CASE WHEN COALESCE(w.extended_description, '') <> '' AND NOT ({extended})
                                   AND ({_field_current_sql('extended_description_en')})
                                  THEN 1 ELSE 0 END), 0) AS extended_done,
-               COALESCE(SUM(CASE WHEN u.personaname IS NOT NULL AND NOT ({persona})
-                                 THEN 1 ELSE 0 END), 0) AS creator_need,
-               COALESCE(SUM(CASE WHEN u.personaname IS NOT NULL AND NOT ({persona})
-                                  AND ({_creator_current_sql()})
-                                 THEN 1 ELSE 0 END), 0) AS creator_done,
-               COALESCE(SUM(CASE WHEN (COALESCE(w.title, '') = '' OR ({title}))
-                                  AND (COALESCE(w.short_description, '') = '' OR ({short}))
-                                 THEN 1 ELSE 0 END), 0) AS api_needs_none
+               COUNT(DISTINCT CASE WHEN u.personaname IS NOT NULL AND NOT ({persona})
+                                   THEN w.creator_steamid END) AS creator_need,
+               COUNT(DISTINCT CASE WHEN u.personaname IS NOT NULL AND NOT ({persona})
+                                    AND ({_creator_current_sql()})
+                                   THEN w.creator_steamid END) AS creator_done
         FROM workshop_items w
         LEFT JOIN creators u ON w.creator_steamid = u.steamid
         WHERE {where_sql}
@@ -686,16 +688,42 @@ def _reachable_detail(total: int, maximum: int, explanation: str) -> str:
             f"{explanation}")
 
 
+def _share_note(need: int, slots: int) -> str | None:
+    """The short share of a translation bar's track that still needs work.
+
+    A translation bar's track counts *slots* -- the fields the stage could
+    translate -- so the one number worth printing under it is what fraction of
+    those slots still needs a translation. It is written here, once, so the
+    terminal and the browser print the identical string; a bar with nothing to
+    translate returns ``None`` and the front end shows its ``empty`` wording
+    instead of a note that would read "0% need translation".
+    """
+    if slots <= 0 or need <= 0:
+        return None
+    return f"{need / slots * 100:.0f}% need translation"
+
+
 def _coverage_bar(key: str, label: str, subsidiary: bool, done: int, maximum: int,
-                  total: int, detail: str | None, empty: str | None = None) -> dict:
+                  total: int, detail: str | None, empty: str | None = None,
+                  slot_units: bool = False) -> dict:
     """One bar, with everything a front end needs to draw and label it.
 
-    ``pct`` is the bar's length as a share of the scope's live items, computed
-    here once so the terminal and the browser cannot print different numbers. It
-    is ``None`` when the reachable population is empty, which is the case a
-    front end renders with ``empty`` instead of a stuck 0.0%.
+    ``pct`` is the bar's fill as a share of its own track, computed here once so
+    the terminal and the browser cannot print different numbers. For most bars
+    the track is the scope's live items, so that share is coverage of the
+    library; for a translation bar ``total`` is the stage's **slots** instead --
+    two per entry for the API fields, one per described item for the web
+    description, one per author for the Creator name -- and the fill is the
+    share of the work that is done.
+
+    ``slot_units`` marks those translation bars: the track then has a third
+    part, the gray share ``total - maximum`` that needs no translation at all.
+    ``no_work`` and ``gray_pct`` are computed here, beside ``pct``, so both
+    front ends draw the same two segments. ``pct`` is ``None`` when the
+    reachable population is empty, which is the case a front end renders with
+    ``empty`` instead of a stuck 0.0%.
     """
-    return {
+    bar = {
         "key": key,
         "label": label,
         "subsidiary": subsidiary,
@@ -705,7 +733,14 @@ def _coverage_bar(key: str, label: str, subsidiary: bool, done: int, maximum: in
         "pct": None if maximum <= 0 or total <= 0 else round(done / total * 100, 1),
         "detail": detail,
         "empty": empty,
+        "no_work": None,
+        "gray_pct": None,
     }
+    if slot_units and total > 0 and maximum > 0:
+        no_work = max(0, int(total) - int(maximum))
+        bar["no_work"] = no_work
+        bar["gray_pct"] = round(no_work / total * 100, 1)
+    return bar
 
 
 def _enrichment_scope_predicate(conn, target_appids) -> tuple[str, list, dict]:
@@ -784,25 +819,34 @@ def _coverage_bars(counts: dict, total: int, translations: dict) -> list[dict]:
     ``counts`` is the scope's scan and ``translations`` the filter-selected scan
     that feeds the Translations bar at both scopes (the flagging path only ever
     queues enriched items, so that bar's population does not follow the scope).
-    Every bar is on the same width -- ``total`` live items -- and a bar's
-    ``maximum`` is the count it can ever reach, its population.
+
+    Every bar's track is its own 100%. For the item-scale bars that is ``total``
+    live items. The **Translation** bars are drawn in **slots** instead, because
+    that is the unit the queue works in: two per entry for the API's title and
+    short description, one per described item for the scraped description, and
+    one per author for the Creator name. A bar's ``maximum`` is the count it can
+    ever reach, its population, and the part of the slot track above it needs no
+    translation at all -- the gray segment ``_coverage_bar`` computes.
+
+    The two **Creator** bars are in **author** units, not items: a persona is
+    shared by every item its creator made, so counting items under "Creator"
+    printed roughly the item count where the population is the scope's unique
+    authors.
     """
     blank = counts["blank_answers"]
     reachable_web = max(0, total - blank)
-    translation_max = translations["title_need"] + translations["short_need"]
+    translation_slots = 2 * total
+    translation_need = translations["title_need"] + translations["short_need"]
     translation_done = translations["title_done"] + translations["short_done"]
+    web_slots = counts["described"]
     return [
         _coverage_bar("api_fetched", "API Data", False,
                       counts["api_fetched"], total, total, None),
         _coverage_bar(
             "translations", "Translations", True,
-            translation_done, translation_max, total,
-            _reachable_detail(
-                total, translation_max,
-                "non-ASCII title/short-description fields of filter-selected "
-                f"items; {translations['api_needs_none']:,} filter-selected "
-                "items need none"),
-            NOTHING_TO_TRANSLATE),
+            translation_done, translation_need, translation_slots,
+            _share_note(translation_need, translation_slots),
+            NOTHING_TO_TRANSLATE, slot_units=True),
         _coverage_bar(
             "described", "Extended Web", False,
             counts["described"], reachable_web, total,
@@ -811,22 +855,19 @@ def _coverage_bars(counts: dict, total: int, translations: dict) -> list[dict]:
                 f"{blank:,} scraped pages answered with no description")),
         _coverage_bar(
             "web_translated", "Extended Web Translation", True,
-            counts["extended_done"], counts["extended_need"], total,
-            _reachable_detail(
-                total, counts["extended_need"],
-                "non-ASCII descriptions of scraped items"),
-            NOTHING_TO_TRANSLATE),
+            counts["extended_done"], counts["extended_need"], web_slots,
+            _share_note(counts["extended_need"], web_slots),
+            NOTHING_TO_TRANSLATE, slot_units=True),
         _coverage_bar("imaged", "Images", False,
                       counts["imaged"], total, total, None),
         _coverage_bar("attributed", "Creator", False,
-                      counts["attributed"], total, total, None),
+                      counts["authors_known"], counts["authors"],
+                      counts["authors"], None),
         _coverage_bar(
             "creator_translated", "Creator Translation", True,
-            counts["creator_done"], counts["creator_need"], total,
-            _reachable_detail(
-                total, counts["creator_need"],
-                "items whose creator's name is non-ASCII"),
-            NOTHING_TO_TRANSLATE),
+            counts["creator_done"], counts["creator_need"], counts["authors"],
+            _share_note(counts["creator_need"], counts["authors"]),
+            NOTHING_TO_TRANSLATE, slot_units=True),
     ]
 
 
@@ -861,22 +902,31 @@ def _coverage(conn, params) -> dict:
       was enriched, so its population is the non-ASCII API fields of the
       **filter-selected** items. It is the one population that does not follow
       the displayed scope: the same absolute figures appear in both blocks, only
-      the denominator (the block's live items) changes.
+      the track -- two slots per live item -- changes. It is drawn in those
+      translation units, so its 100% is two translations per entry, with a gray
+      segment for the fields that need no translation at all.
     * **Extended Web Translation** is over ``extended_description``. The scrape
       flags its description for translation regardless of enrichment, so its
       population is **any scraped item** with a non-ASCII description -- not only
-      the filter-selected ones. Its maximum is at most the Extended Web bar's,
-      because a non-ASCII description is a description.
+      the filter-selected ones. It is drawn the same way, one slot per described
+      item; its maximum is at most the Extended Web bar's, because a non-ASCII
+      description is a description.
     * **Creator Translation** is over ``creators.personaname``. Only enriched items
       refresh a persona, but the name lives per creator and is shared by every item
-      that creator made, so the bar counts **items attributed to a creator whose
-      name is non-ASCII**, which keeps it comparable with the per-item bars.
+      that creator made, so the bar counts **authors whose name is non-ASCII**,
+      one slot per author in the scope.
+
+    The two **Creator** bars are in author units for the same reason: the
+    population under the "Creator" label is the scope's unique authors, not the
+    items they made, so the fill is the share of authors the stage has reached.
 
     The **Extended Web** bar is the scrape's coverage, not one field's: live items
     with a non-empty ``extended_description``. Its maximum excludes the pages
     that legitimately carried no description -- a scrape that answered with an
     empty description can never move the bar -- so the ceiling is shown rather
-    than a full-width track promising work that cannot exist.
+    than a full-width track promising work that cannot exist. That count of
+    scraped-but-blank pages stays on the parent's sentence, which is not a
+    translation bar and keeps its explanation.
 
     A bar whose population is zero is not a divide by zero and not a stuck 0.0%:
     its ``pct`` is ``None`` and both front ends print ``NOTHING_TO_TRANSLATE``.
