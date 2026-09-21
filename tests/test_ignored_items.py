@@ -400,6 +400,20 @@ def test_the_wilson_cutoffs_ignore_settled_rows(db_path):
     assert with_settled["wilson_favorite_max"] == 1000
 
 
+def test_the_by_id_lookups_still_resolve_a_settled_row(db_path):
+    """The detail pane and the item-update poll resolve a row by id.
+
+    A control rather than a proof: the by-id lookups were already unfiltered,
+    and this pins that the hiding above did not reach them.
+    """
+    from src.database import get_item_details, get_items_by_ids
+
+    _raw(db_path, 1, fetch_status=-2)
+
+    assert get_item_details(db_path, 1)["fetch_status"] == -2
+    assert {row["workshop_id"] for row in get_items_by_ids(db_path, [1])} == {1}
+
+
 # ── the metrics answer over the settled set ──────────────────────────────────
 
 
