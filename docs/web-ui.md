@@ -302,6 +302,23 @@ invariant rests on it.
 The marker sits inside the cell that opens the detail pane, so its click handler stops propagation:
 without that, toggling the queue would also drag the pane to the item.
 
+### Ignoring an item (`i`)
+
+The `i` key, with a `.grid-cell` focused, toggles the owner's ignored marker on that cell's item
+through `POST /api/ignore/<id>`; it mirrors `s`, acting on the same focused cell's `data-wid` and
+calling `preventDefault()`. The same key restores an item that is already ignored. Where `s` leaves
+focus alone, `i` then advances the way the arrow keys do — through the shared `_focusGridCell`
+helper, to the next cell, or to the previous one when the focused cell is the last.
+
+**The row is not removed.** Ignoring does not re-query the list, so a search that already returned
+the row keeps it on screen until the next search hides it; the toggle has to show what it did to the
+live session. The `ignored` class is set on the cell from the status the read-back reports, and
+`.grid-cell.ignored .grid-title` renders the title with `text-decoration: line-through` — the web
+counterpart of the TUI's underline. The class is keyed off `fetch_status == -2`, not off the
+keystroke that set it, so the same path draws a row the 3-second item-update poll reports as
+ignored, whether the owner, another front end or a `POST /api/ignore/<id>` settled it. A block that
+carries no `fetch_status` makes no claim and leaves the class as it is.
+
 The Web UI's subscribe action runs entirely through the server. `doSubscribe` POSTs
 `/api/subscribe/<id>`, which reads the item page on the server, takes that page's own CSRF token,
 posts to Steam and records the answer — the route the TUI has always driven
@@ -323,8 +340,8 @@ tooltip says this rather than implying a complete record.
 ### Opening the downloaded item's folder (Windows only)
 
 When the pane's item is in the `downloaded` state, `Open Folder` in `#detail-buttons` opens the
-item's workshop folder — and the `o` key does the same for the focused grid cell, beside the `s` and
-`l` shortcuts. The button is **visible but disabled** for anything not downloaded, with the reason in
+item's workshop folder — and the `o` key does the same for the focused grid cell, beside the `s`, `l`
+and `i` shortcuts. The button is **visible but disabled** for anything not downloaded, with the reason in
 its label (`Open Folder (not downloaded)`) and title, so the affordance is discoverable rather than
 invisible; the key path shows the same refusal as an alert. The button and the shortcut are rendered
 **only on Windows** (`open_folder_enabled`, computed by the server from
@@ -406,7 +423,7 @@ The 📊 button (`#btn-stats`, `templates/index.html:128`) opens `#stats-modal` 
 `_openStatsPanel` (`templates/index.html:2467`) fetches `/api/metrics` for the catalogue — each metric's name, note and `seed_ms` hint — then builds one `<section class="stats-section" data-metric="...">` per metric, each with its own body element, and requests **every metric independently** through `GET /api/metrics/<name>` (`_loadMetric`, `templates/index.html:2437`). It deliberately does not `Promise.all` the requests: each section is filled and its own refresh timer armed the moment that metric lands, so a fast section draws while a slow one is still running. Every metric shows a human label, its note, and a value rendered to suit it, with its measured `ms` shown quietly in the heading:
 
 * **coverage** — seven bars (API Data, Translations, Extended Web, Extended Web Translation, Images, Creator, Creator Translation), at two scopes: the whole live library (dead items excluded), and the items the target AppIDs' stored `enrichment_filters` select — what the owner cares about. A bar is a **track with two fills**, because `<progress>` cannot show two segments: the coloured fill is the share done, a gray fill is the slots that need no translation at all, and the track shows through for the work still to do. Each bar's population is the flagging rule, mirrored in SQL, and its track is 100% of the unit its stage works in: **Translations** is per field (`title`, `short_description`) over the filter-selected items, so its track is two translation slots per entry — 100% is two translations per entry — because `_queue_translations` returns early unless the item was enriched; **Extended Web** is the scrape's coverage and its maximum excludes the pages that answered with no description, whose count and ceiling are printed with the bar (that bar is not a translation bar and keeps its sentence); **Extended Web Translation** hangs off it and can never be longer than it, its population is any scraped item, not only the filter-selected ones, and its track is one slot per described item; **Creator** and **Creator Translation** are in **author units** — the scope's unique authors, not the items they made. The three translation bars carry the metric's own short note (`need / slots`, for example "25% need translation"), drawn at half the standard track's CSS height and sitting flush under their parent — no margin, padding or row between them — with the same left edge, so a shorter bar still means less coverage. A bar whose population is zero reads "Nothing to translate" rather than a stuck 0.0%, with no note and no gray segment. The second figure is the search builder's SQL translation of the filters, which also searches each text field's `_en` counterpart, so it can disagree with the daemon's in-memory per-item check; where they disagree, the search builder's answer is shown. With more than one target AppID the population is the union of what any target's filters select. A scope note names the AppIDs and says why the two figures coincide when a filter set is empty, unreadable, or has no fixed predicate (a percentile); an unreadable set means no exclusion, never "excludes everything". The labels, counts, percentages, gray shares and notes come from the metric, so the two front ends make the same claim about the same data in the same words.
-* **item_counts** — alive and dead counts with the overall total.
+* **item_counts** — alive, dead and ignored counts with the overall total. Alive is the live population, so the two settled statuses (`-1` dead, `-2` ignored) are both excluded from it and each reported beside the other, and the three counts account for every row.
 * **dead_items_by_queue** — flagged in red when non-zero: the number of dead items still sitting in a queue, broken down per queue (the `translation` column counts a `translation_queue` row as well as the `translation_priority` mirror). Beneath the breakdown it prints the shared `metrics.DEAD_QUEUED_MEANING`, injected exactly as the TUI prints it: the API fetch poll excludes dead rows, so that queue still drains, while the web, image and translation polls select on their flag alone and would keep spending requests on a page that no longer exists. A zero value renders as an all-clear.
 * **dead_queued**, **queued_nowhere** — the two handoff-invariant counters, rendered like `dead_items_by_queue`: red with the count when non-zero, a green all-clear sentence at the healthy zero. `dead_queued` counts dead items still sitting in a work queue — a flag left set, or a `translation_queue` row the poll still holds; `queued_nowhere` counts live items in no queue that the pipeline never completed, where a `translation_queue` row counts as being queued. `dead_queued` and `dead_items_by_queue` are one question at two resolutions — the scalar invariant that must read zero, and the per-queue breakdown that says where to look, which makes the same translation test — so both are kept, and they agree on every dead item.
 * **priority_breakdowns** — one "queue: N waiting" block per queue with the priority mix.
@@ -544,6 +561,17 @@ It refuses before spending a request when the set has no `steamLoginSecure` (**4
 ### `/api/toggle_subscription_queue/<id>` — POST
 
 Flips `is_queued_for_subscription` for one item and answers `{ok: true}`. It is the route behind both the `s` shortcut on a grid cell and the detail pane's Queue/Unqueue button. It returns no new state, so the detail pane reads the item back through the read-only `/api/item/<id>` route to label its button.
+
+### `/api/ignore/<id>` — POST
+
+Toggles the owner's ignored marker (`fetch_status = -2`) for one item and answers `{ok: true}`, the
+same shape as `/api/toggle_subscription_queue/<id>` so the page treats the two uniformly. It is the
+route behind the `i` shortcut on a grid cell. The direction is not passed in: `toggle_ignored_item`
+owns the rule, sending an ignored row through `unignore_item` and every other row through
+`ignore_item` (which settles the item exactly as death does — all four queue priorities cleared and
+its `translation_queue` rows deleted). Like the queue route, it returns no new state, so the client
+reads the item back through the read-only `/api/item/<id>` route and draws the marker from that
+payload rather than from a local flip.
 
 ### `/api/open_folder/<id>` — POST
 

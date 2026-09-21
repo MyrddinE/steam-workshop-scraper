@@ -33,6 +33,8 @@ from typing import Any, Callable, Iterator
 from src import activity
 from src import db_poll
 from src.database import (
+    DEAD_FETCH_STATUS,
+    IGNORED_FETCH_STATUS,
     api_fetch_queue_predicate,
     build_filters_sql,
     get_enrichment_filters,
@@ -225,16 +227,32 @@ def _high_water(conn, params):
     return conn.execute("SELECT MAX(api_fetched_at) AS v FROM workshop_items").fetchone()["v"]
 
 
-@metric("item_counts", 2, "Item counts, split by whether the item is still alive.")
+@metric("item_counts", 2, "Item counts: live, dead and ignored, with the overall total.")
 def _item_counts(conn, params) -> dict:
+    """The table split into live, dead and ignored rows, plus the total.
+
+    ``alive`` is the *live* population the searchable library shows -- the
+    predicate is :func:`live_fetch_status_predicate`, so both settled statuses,
+    dead (``-1``) and ignored (``-2``), are excluded from it rather than only
+    death being subtracted from the total. The two settled counts are reported
+    beside it so the Totals panel accounts for every row exactly once:
+    ``alive + dead + ignored == total``.
+    """
     row = conn.execute(
         "SELECT COUNT(*) AS total, "
-        "       COALESCE(SUM(CASE WHEN fetch_status = -1 THEN 1 ELSE 0 END), 0) AS dead "
-        "FROM workshop_items"
+        "       COALESCE(SUM(CASE WHEN fetch_status = ? THEN 1 ELSE 0 END), 0) AS dead, "
+        "       COALESCE(SUM(CASE WHEN fetch_status = ? THEN 1 ELSE 0 END), 0) AS ignored, "
+        f"       COALESCE(SUM(CASE WHEN {live_fetch_status_predicate()} "
+        "                    THEN 1 ELSE 0 END), 0) AS alive "
+        "FROM workshop_items",
+        (DEAD_FETCH_STATUS, IGNORED_FETCH_STATUS),
     ).fetchone()
-    total = row["total"] or 0
-    dead = row["dead"] or 0
-    return {"total": total, "dead": dead, "alive": total - dead}
+    return {
+        "total": row["total"] or 0,
+        "dead": row["dead"] or 0,
+        "ignored": row["ignored"] or 0,
+        "alive": row["alive"] or 0,
+    }
 
 
 @metric("app_discovery", 3, "Discovery position per application.")

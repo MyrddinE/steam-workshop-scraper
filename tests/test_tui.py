@@ -542,7 +542,7 @@ def _fake_coverage(total=2, filtered_total=1):
 #: screen's real per-metric renderers run.
 _FAKE_METRIC_VALUES = {
     "high_water": 1_700_000_000,
-    "item_counts": {"total": 3, "alive": 2, "dead": 1},
+    "item_counts": {"total": 4, "alive": 2, "dead": 1, "ignored": 1},
     "app_discovery": [{"appid": 294100, "last_cursor": "abc"}],
     "status_counts": [{"fetch_status": 200, "count": 2}, {"fetch_status": -1, "count": 1}],
     "dead_items_by_queue": {"web": 1, "image": 0, "translation": 0, "api": 0},
@@ -704,6 +704,7 @@ async def test_stats_screen_puts_every_metric_in_its_own_chunk(mock_config):
 
             item_counts = str(screen.query_one("#item-counts-content", Static).render())
             assert "Live items" in item_counts and "2" in item_counts
+            assert "Ignored" in item_counts and "1" in item_counts
             coverage = str(screen.query_one("#coverage-content", Static).render())
             assert "API Data" in coverage and "100.0%" in coverage
             assert "Extended Web" in coverage

@@ -101,7 +101,7 @@ def test_catalogue_matches_the_registry_in_seed_order():
 def test_compute_reports_value_cost_and_seed(db_path):
     result = metrics.compute(db_path, ["item_counts"])
     entry = result["item_counts"]
-    assert entry["value"] == {"total": 0, "dead": 0, "alive": 0}
+    assert entry["value"] == {"total": 0, "dead": 0, "ignored": 0, "alive": 0}
     assert entry["ms"] >= 0.0
     assert entry["note"]
     assert entry["seed_ms"] == metrics.REGISTRY["item_counts"].seed_ms
@@ -169,7 +169,7 @@ def test_a_broken_metric_does_not_take_down_the_others(db_path, monkeypatch):
 
 def test_values_strips_the_timing_wrapper(db_path):
     assert metrics.values(metrics.compute(db_path, ["item_counts"])) == {
-        "item_counts": {"total": 0, "dead": 0, "alive": 0}
+        "item_counts": {"total": 0, "dead": 0, "ignored": 0, "alive": 0}
     }
 
 
@@ -373,7 +373,7 @@ def test_item_counts_separates_dead_items(db_path):
     insert_or_update_item(db_path, {"workshop_id": 2, "title": "gone", "fetch_status": -1})
 
     assert metrics.values(metrics.compute(db_path, ["item_counts"]))["item_counts"] == {
-        "total": 2, "dead": 1, "alive": 1,
+        "total": 2, "dead": 1, "ignored": 0, "alive": 1,
     }
 
 

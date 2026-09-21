@@ -13,7 +13,7 @@ from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, L
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.worker import Worker, WorkerState
-from src.database import search_items, get_all_creator_ids, SchemaVersionError, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, raise_api_priority_for_list, raise_api_priority_for_detail, get_subscription_states, get_items_by_ids, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES, normalise_subscribed_value, live_fetch_status_predicate
+from src.database import search_items, get_all_creator_ids, SchemaVersionError, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, raise_api_priority_for_list, raise_api_priority_for_detail, get_subscription_states, get_items_by_ids, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES, normalise_subscribed_value, live_fetch_status_predicate, toggle_ignored_item, IGNORED_FETCH_STATUS
 from src.analysis import view_window_analysis
 from src import metrics
 from src import db_poll
@@ -463,6 +463,7 @@ class StatsScreen(Screen):
                 name,
                 f"[b]Live items:[/b] {value.get('alive', 0):,}   "
                 f"[b]Dead:[/b] {value.get('dead', 0):,}   "
+                f"[b]Ignored:[/b] {value.get('ignored', 0):,}   "
                 f"[dim](total {value.get('total', 0):,})[/dim]",
             )
         elif name == "app_discovery":
@@ -1948,14 +1949,28 @@ class WorkshopItem(ListItem):
         glyph, colour, _css, _label = subscription.marker_spec(state)
         return f"[{colour}]{glyph}[/]"
 
+    def _title_markup(self) -> str:
+        """The bold title markup, underlined while the item is ignored.
+
+        Keyed off the stored status rather than off the action that set it: the
+        item-update poll can report a row the owner ignored in another front end
+        or a previous session, and the same path must draw the underline. Only
+        markup this module writes itself is left unescaped; the Steam title goes
+        through ``escape_markup`` first (see the module docstring).
+        """
+        title = self.item_data.get("title_en") or self.item_data.get("title", "Untitled")
+        escaped = escape_markup(title)
+        if self.item_data.get("fetch_status") == IGNORED_FETCH_STATUS:
+            return f"[b][u]{escaped}[/u][/b]"
+        return f"[b]{escaped}[/b]"
+
     def compose(self) -> ComposeResult:
         wid = self.item_data.get("workshop_id", "N/A")
-        title = self.item_data.get("title_en") or self.item_data.get("title", "Untitled")
         creator = self.item_data.get("personaname_en") or self.item_data.get("personaname") or self.item_data.get("creator_steamid", "Unknown Creator")
         spin = self._spinner()
         marker = self._subscription_marker()
 
-        yield Label(f"[b]{escape_markup(title)}[/b] ({wid})")
+        yield Label(f"{self._title_markup()} ({wid})")
         yield Label(f"  By: {escape_markup(creator)}   {spin} {marker}")
 
     async def refresh_item(self) -> None:
@@ -2276,6 +2291,7 @@ def app_bindings(platform: str | None = None) -> list[tuple[str, str, str]]:
         ("ctrl+d", "show_daemon", "Daemon"),
         ("ctrl+r", "show_stats", "Stats"),
         ("s", "toggle_subscription_queue", "Queue for Subscription"),
+        ("i", "ignore_item", "Ignore Item"),
         ("l", "show_subscription_queue", "Subscription Queue"),
         ("ctrl+s", "save_filter_for_scraper", "Save Filter"),
         ("ctrl+w", "toggle_translation", "Toggle Translation"),
@@ -3300,6 +3316,44 @@ class ScraperApp(App):
         
         # Scroll to keep highlight visible if needed
         # list_view.scroll_to_widget(item)
+
+    async def action_ignore_item(self) -> None:
+        """Toggle the owner's ignored marker on the highlighted item.
+
+        Modelled on :meth:`action_toggle_subscription_queue`: the same key
+        restores an ignored item, the change reaches the row through the one
+        dispatch point (which redraws its title underline), and the selection
+        then moves to the next row. The row is deliberately **not** dropped --
+        the list is only re-queried by the next search, and the live session has
+        to show the marker the key just set, the same way the web grid keeps the
+        cell until its next query.
+        """
+        list_view = self.query_one("#results-list", ListView)
+        if list_view.index is None:
+            return
+
+        item = list_view.highlighted_child
+        if not item or not hasattr(item, "item_data"):
+            return
+
+        workshop_id = item.item_data.get("workshop_id")
+        if not workshop_id:
+            return
+
+        # The direction lives in the shared toggle, so this key and the web
+        # route cannot disagree about what a second press does.
+        toggle_ignored_item(self.db_path, workshop_id)
+
+        # The change reaches the row (and the pane, if it holds this item)
+        # through the one dispatch point. The full row read carries
+        # `fetch_status`, which is what the row's title underlines from.
+        fresh = get_items_by_ids(self.db_path, [workshop_id])
+        if fresh:
+            self.dispatch_item_update(fresh[0])
+
+        # Move to the next item; the ignored row stays where it is.
+        if list_view.index < len(list_view) - 1:
+            list_view.index += 1
 
     async def action_open_folder(self) -> None:
         """Open the highlighted item's folder, like ``s`` acts on the highlighted item.

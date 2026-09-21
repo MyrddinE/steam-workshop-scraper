@@ -3822,6 +3822,37 @@ def unignore_item(db_path: str, workshop_id: int) -> bool:
         conn.close()
 
 
+def toggle_ignored_item(db_path: str, workshop_id: int) -> bool:
+    """Toggle the owner's ignored marker and report whether it is now ignored.
+
+    Both front ends bind one key to this, so the direction is chosen from the
+    row's own status rather than from the caller: a row already at
+    :data:`IGNORED_FETCH_STATUS` goes through :func:`unignore_item` (the
+    owner's way back), and every other row through :func:`ignore_item`. That is
+    the whole toggle rule, stated once here so the TUI and the web route cannot
+    disagree about what a second press does.
+
+    Returns ``True`` when the row is ignored after the call and ``False`` when it
+    is not -- a restore, or a workshop_id with no row, which is the same answer
+    :func:`ignore_item` gives for a missing row. The caller re-reads the row for
+    the marker it draws; this only reports the direction it took.
+    """
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT fetch_status FROM workshop_items WHERE workshop_id = ?",
+            (workshop_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row is not None and row["fetch_status"] == IGNORED_FETCH_STATUS:
+        unignore_item(db_path, workshop_id)
+        return False
+    ignore_item(db_path, workshop_id)
+    return row is not None
+
+
 # ── Stage-handoff consumer predicates ─────────────────────────────────────────
 #
 # The five stage handoffs are enumerated in docs/data-pipeline.md. Each stage
@@ -4176,6 +4207,12 @@ def search_items(db_path: str, query: str = "", appid: int = None,
                 "w.translate_version, w.is_queued_for_subscription, w.web_scrape_priority, "
                 "w.image_priority, w.translation_priority, w.file_size, w.image_answer, "
                 "w.wilson_subscription_score, w.wilson_favorite_score, "
+                # The settled status travels with the list rows so a front end can
+                # draw an item the search returned as settled -- the ignored
+                # strikethrough and underline key off it rather than off the
+                # action that set it. No UI passes include_settled yet, but the
+                # renderer is keyed correctly when one does.
+                "w.fetch_status, "
                 # Both subscription columns travel with the list rows: the grid
                 # draws its marker from this payload, and a cell that had
                 # own_subscribed without own_first_subscribed_at could not tell

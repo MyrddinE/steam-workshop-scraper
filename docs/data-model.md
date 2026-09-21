@@ -279,11 +279,6 @@ that is not there.
   transient, an all-zero snapshot only means nothing was queued at that moment.
 * **`fetch_status = 206` has never occurred.** The schema and one migration query allow a partial-data
   status, but the production database contains zero rows with it.
-* **`item_counts.dead` still counts dead only.** The `Totals` metric splits the table into `dead`
-  (`fetch_status = -1`) and `alive` (`total - dead`), so an ignored (`-2`) row is counted as alive
-  there. That predates the settled pair and was outside its scope: the two metrics whose *population*
-  is the invariant — `dead_queued` and `dead_items_by_queue` — were generalised to every settled row
-  (their names kept for their consumers), but this display count was not renamed or re-based.
 * **The completion clocks start empty and are never backfilled.** `web_scraped_at`,
   `image_fetched_at` and `translated_at` arrived in v27, so every item that completed its stage
   earlier keeps NULL and no rate can be reconstructed for it. The per-queue throughput metrics
