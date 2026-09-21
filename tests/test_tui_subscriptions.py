@@ -44,24 +44,34 @@ async def test_tui_toggle_subscription_queue(mock_config):
 async def test_tui_show_subscription_queue(mock_config, tmp_path):
     lock_file = tmp_path / ".pauselock"
 
-    app = ScraperApp()
-    app.pause_lock_file = str(lock_file)
-    async with app.run_test() as pilot:
-        await pilot.pause(ASYNC_PAUSE)
+    # `ScraperApp` reads `load_config` itself, so without this patch it took the
+    # checkout's configuration and opened `workshop.db` in the repository root --
+    # a gitignored artefact, not a fixture. The other tests in this file patch it
+    # to a temporary database the same way; `mock_config` was passed in but left
+    # unused here.
+    with patch('src.tui.load_config', return_value=mock_config):
+        app = ScraperApp()
+        # Guard: an app built from the checkout's configuration would not carry
+        # the fixture's path, so dropping the patch fails here rather than
+        # silently reading the repository's database.
+        assert app.config["database"] == mock_config["database"]
+        app.pause_lock_file = str(lock_file)
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
 
-        assert not lock_file.exists()
+            assert not lock_file.exists()
 
-        await pilot.press("l")
-        await pilot.pause(ASYNC_PAUSE)
+            await pilot.press("l")
+            await pilot.pause(ASYNC_PAUSE)
 
-        assert isinstance(app.screen, SubscriptionQueueScreen)
-        assert lock_file.exists()
+            assert isinstance(app.screen, SubscriptionQueueScreen)
+            assert lock_file.exists()
 
-        await pilot.click("#btn-close-subscription-queue")
-        await pilot.pause(ASYNC_PAUSE)
+            await pilot.click("#btn-close-subscription-queue")
+            await pilot.pause(ASYNC_PAUSE)
 
-        assert not isinstance(app.screen, SubscriptionQueueScreen)
-        assert not lock_file.exists()
+            assert not isinstance(app.screen, SubscriptionQueueScreen)
+            assert not lock_file.exists()
 
 @pytest.mark.asyncio
 async def test_queue_lists_items_without_urls(mock_config, tmp_path):
