@@ -15,7 +15,13 @@ the production database on 2026-09-12.
 
 ## Open
 
-Nothing open. The last entries to leave the list were issues 72 and 73, on 2026-09-21.
+### Issue 74
+
+**Three writers can put a dead item back in the API queue, and nothing clears it again** — *Open*, Low
+
+`dead_queued` and `dead_items_by_queue` both read 4, and *measured on the live database* 2026-09-21 the four rows are `fetch_status = -1` with `api_priority` 2, 3, 5 and 5, every other flag 0 — three last attempted 71–118 days ago and one 4 days ago, two with `api_fetched_at` NULL. Nothing hands them out: the fetch poll's predicate is `api_priority > 0 AND (fetch_status IS NULL OR fetch_status != -1)` (`src/database.py:3570`), which measures **0** fetchable rows, so the reading is inert for scraping. It is not inert for the handoff invariant, and it is not legacy: of the paths that raise `api_priority` on an item that already exists, several guard against dead rows and three do not. Guarded: `raise_api_priority_for_detail` (`src/database.py:4486`), `raise_api_priority_for_list` (`src/database.py:4475`), the TUI bulk update (`src/tui.py:3395`, whose comment states the rule) and the web route (`src/webserver.py:747`). Unguarded: the image worker's "the item changed" bump (`src/image_worker.py:225`) and the web worker's (`src/web_worker.py:417`), both `UPDATE ... api_priority = CASE WHEN api_priority < 2 THEN 2 ... WHERE workshop_id = ?`, and discovery, which writes `api_priority = 3` (`src/daemon.py:1633`) and page discovery `= 5` (`src/daemon.py:1781`) through `insert_or_update_item` (`src/database.py:3449`) with no status check at all.
+
+Once set on a dead row nothing clears it, because the API poll skips dead rows, so `_settle_api_failure` — which does clear all four flags (`src/daemon.py:1106`) — never runs for that item again. The priorities match the writers: 3 from cursor discovery, 5 from page discovery, 2 from an image or web "changed" bump. Two halves are needed: guard the three writers, and clear the flags already stranded the way migrations 16→17 and 35→36 did. The screen's sentence for this metric — "These rows can never complete; the queues will not drain" — overstates it for the same reason: no queue will ever select these rows. [data-model.md](data-model.md#queue-priorities), [data-pipeline.md](data-pipeline.md)
 
 ## Recently closed
 
