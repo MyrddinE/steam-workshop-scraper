@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sqlite3
+import types
 from datetime import datetime
 from unittest.mock import patch
 
@@ -419,3 +420,45 @@ def test_the_stale_artifact_report_is_said_once(monkeypatch, db_path, tmp_path, 
         snapshot_database(db_path, dest)
 
     assert caplog.text.count("does not manage") == 1
+
+
+# ── free space: refuse before starting a copy that cannot fit ─────────────────
+
+def _usage_with_free(free: int):
+    """A stand-in for ``shutil.disk_usage``'s named tuple with ``free`` set."""
+    return types.SimpleNamespace(total=free, used=0, free=free)
+
+
+def _needed(db_path) -> int:
+    return os.path.getsize(db_path) + backup._FREE_SPACE_HEADROOM
+
+
+def test_an_unreadable_volume_does_not_block_the_snapshot(monkeypatch, db_path, tmp_path):
+    """No evidence proceeds: an unavailable reading must not refuse a backup."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 10})
+    dest = _dest(tmp_path)
+
+    def _unavailable(_dir):
+        raise OSError("statvfs unavailable")
+
+    monkeypatch.setattr(backup.shutil, "disk_usage", _unavailable)
+
+    meta = snapshot_database(db_path, dest)
+
+    assert meta["rows"] == 1
+    assert os.path.isfile(dest)
+
+
+def test_exactly_enough_free_space_proceeds(monkeypatch, db_path, tmp_path):
+    """The boundary is inclusive: exactly source size + headroom is enough."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 10})
+    dest = _dest(tmp_path)
+    free = _needed(db_path)
+    monkeypatch.setattr(backup.shutil, "disk_usage",
+                        lambda _dir: _usage_with_free(free))
+
+    meta = snapshot_database(db_path, dest)
+
+    assert meta["rows"] == 1
+    assert os.path.isfile(dest)
+
