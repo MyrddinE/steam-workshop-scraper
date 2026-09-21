@@ -23,6 +23,12 @@ The stale artefact this entry was opened for is **gone**: `<outbox>/db/workshop-
 
 What remains is the second half, which the owner has settled: a snapshot is written as a complete second copy in the destination directory before `os.replace` publishes it, so a run needs roughly twice the database's size free, and `_check_free_space` (`src/backup.py:243`) only **warns** when that room is not there — the snapshot then starts and fails partway. It must instead refuse up front: leave the previous snapshot in place, attempt no write, and say why in one line. An *unavailable* reading (an `OSError` from the size or the disk-usage call) must still not block a valid backup — only a positive reading of insufficient room refuses.
 
+### Issue 69
+
+**A failure while logging is being configured reaches only the console** — *Open*, Low
+
+Both entry points install the crash reporter *after* `logging.basicConfig`: `crash.install` is called at `src/tui.py:3548` against the handler built at `src/tui.py:3531`, and at `src/daemon_runner.py:240` against `_log_file_handler` at `src/daemon_runner.py:220`. The order is deliberate and documented — the forced `basicConfig` would drop the reporter's ring-buffer handler, which is why `src/crash.py:166` says to call it after logging is configured. The consequence is that anything raised *during* logging setup is recorded nowhere: no log record, because the handlers are the thing being built; no crash dump, because the hooks are not installed yet; and no outbox entry, because the writer has no destination. *Observed live* on 2026-09-21: a `TypeError` from the log-rotation Windows path killed both front ends at startup, the outbox `crashes/` stayed empty, `scraper.log` was untouched after 09:08, and the only record of the failure was the traceback the operator copied out of the terminal — which is how it was found. [threading.md](threading.md), [failure-capture.md](failure-capture.md)
+
 ## Recently closed
 
 Removed from the list above rather than marked resolved. Each is now documented as current
