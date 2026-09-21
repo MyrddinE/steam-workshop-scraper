@@ -269,7 +269,15 @@ read them. Burn-down and ETA landed on top of them as the `queue_eta` metric —
 
 ## Stage handoffs: prove the next stage can see what the last one left
 
-**Status: Planned.**
+**Status: Landed.** The consumer predicates are one named function each (`api_fetch_queue_predicate`,
+`web_scrape_queue_predicate`, `image_queue_predicate`, `translation_queue_predicate`, and the
+`queued_anywhere_predicate` the invariant needs) in `src/database.py`, and the polls interpolate them,
+so the worker and the test ask the same question; `tests/test_handoff_contract.py` tests all five
+handoffs by the contract rather than by re-writing their SQL. Both detectors are statistics —
+`dead_queued` and `queued_nowhere` — rendered by both front ends. The handoff table is in
+[data-pipeline.md](data-pipeline.md). What the plan predicted is what the counts show: they are cheap,
+they are meant to be zero, and they were measured at 28 and 1 rather than zero, which is the argument
+for having them in the statistics.
 
 Three defects found in quick succession turned out to be one shape. In each, a stage finished with an
 item, wrote the item's new state, and reported success — and the state it wrote was one the next
