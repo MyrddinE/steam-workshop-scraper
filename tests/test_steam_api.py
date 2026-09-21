@@ -6,35 +6,12 @@ import requests
 from src.steam_api import (
     get_workshop_details,
     get_workshop_details_batch,
-    query_workshop_items,
     query_workshop_newest_page,
     get_player_summaries,
     STEAM_API_MAX_IDS_PER_REQUEST,
 )
 
 STEAM_API_URL = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
-QUERY_API_URL = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
-
-@responses.activate
-def test_query_workshop_items_success():
-    """Test successful 200 OK response from Steam Query API using real-world schema."""
-    mock_json = {
-        "response": {
-            "publishedfiledetails": [
-                {"publishedfileid": "1001"},
-                {"publishedfileid": "1002"}
-            ]
-        }
-    }
-    responses.add(
-        responses.GET,
-        QUERY_API_URL,
-        json=mock_json,
-        status=200
-    )
-
-    ids = query_workshop_items(appid=294100, api_key="TEST_KEY")
-    assert ids == [1001, 1002]
 
 @responses.activate
 def test_get_workshop_details_success():
@@ -169,20 +146,6 @@ def test_query_workshop_newest_page_partial_response():
     result = query_workshop_newest_page(4000, cursor="*", api_key="TEST_KEY")
     assert result["total"] == 0
     assert len(result["items"]) == 0
-
-@responses.activate
-def test_query_workshop_items_empty():
-    responses.add(responses.GET, QUERY_API_URL, json={"response": {"publishedfiledetails": []}}, status=200)
-    ids = query_workshop_items(appid=294100, api_key="TEST_KEY")
-    assert ids == []
-
-@responses.activate
-def test_query_workshop_items_error():
-    responses.add(responses.GET, QUERY_API_URL, status=500)
-    ids = query_workshop_items(appid=294100, api_key="TEST_KEY")
-    assert ids == []
-
-
 
 
 # ── Unparsed API bodies ──────────────────────────────────────────────────────

@@ -29,7 +29,6 @@ from src.database import (
 from src.steam_api import (
     get_workshop_details,
     get_workshop_details_batch,
-    query_workshop_items,
     get_player_summaries,
     query_workshop_newest_page,
     set_api_delay,
