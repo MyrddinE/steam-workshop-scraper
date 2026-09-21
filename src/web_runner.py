@@ -14,6 +14,10 @@ from src import crash
 
 
 def main():
+    # Before logging exists: an exception raised while `basicConfig` runs or
+    # while the config is loaded was captured nowhere. The hooks do not depend on
+    # logging; `crash.install` below adds the ring buffer once logging is up.
+    crash.install_hooks("web")
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
     config_path = "config.yaml"

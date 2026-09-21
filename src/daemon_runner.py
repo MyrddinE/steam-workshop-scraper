@@ -163,6 +163,12 @@ def _refuse_existing_pid_file(pid_file: str) -> None:
 
 
 def main():
+    # Before anything can fail: a crash while `load_config` runs or while the
+    # logging below is being configured has no other destination -- the file
+    # handler is the thing being built and this is its only process. The hooks
+    # do not need logging; `crash.install` below adds the ring buffer once
+    # `basicConfig` has run, so a forced configuration cannot drop it.
+    crash.install_hooks("daemon")
     _fix_windows_encoding()
     config_path = "config.yaml"
     args = [a for a in sys.argv[1:] if a != "--daemon"]

@@ -16,7 +16,9 @@ not a read of the log.
 import gzip
 import logging
 import os
+import sys
 import threading
+import types
 
 import pytest
 
@@ -306,3 +308,186 @@ def test_format_size():
     assert log_rotation.format_size(1024) == "1.0 KB"
     assert log_rotation.format_size(594 * 1024 * 1024) == "594.0 MB"
     assert log_rotation.format_size(2 * 1024 ** 3) == "2.0 GB"
+
+
+# ── the Windows open path, simulated ─────────────────────────────────────────
+#
+# The Windows branch cannot execute on this host, which is exactly how the
+# CreateFile typing mistake shipped: `_windows_fd` passed `None` for arguments 4
+# and 7, and CPython's Argument Clinic rejects that before the log is opened. The
+# tests below install fake `_winapi`/`msvcrt` modules and patch `sys.platform` to
+# "win32", so the real `_windows_fd`, `_windows_append_stream`,
+# `_windows_read_text` and `read_generation` code paths run against a fake that
+# enforces the same contract as the real module.
+
+def _described_type(value):
+    """The type name CPython's ``_PyArg_BadArgument`` prints for ``value``.
+
+    CPython special-cases ``None`` to the literal ``None`` (rather than
+    ``NoneType``), which is the exact wording production saw:
+    ``CreateFile() argument 4 must be int, not None``.
+    """
+    return "None" if value is None else type(value).__name__
+
+
+def _install_fake_windows(monkeypatch):
+    """Fake ``_winapi``/``msvcrt`` + ``sys.platform == "win32"``; returns calls.
+
+    The fake ``CreateFile`` enforces the clinic contract that production
+    violated: `Modules/_winapi.c` declares ``create_converter('HANDLE', '" F_HANDLE "')``
+    and ``create_converter('LPSECURITY_ATTRIBUTES', '" F_POINTER "')``, and those
+    format units are the unsigned-integer units ("K" on 64-bit, "k" on 32-bit),
+    so arguments 4 and 7 must be ints. Passing ``None`` raises the same
+    ``TypeError`` the owner saw. Otherwise it hands back a real OS descriptor, so
+    the rest of the Windows opener -- the delete-sharing stream and the marker
+    read -- executes for real.
+    """
+    calls = []
+
+    def create_file(path, access, share_mode, security_attributes,
+                    creation_disposition, flags_and_attributes, template_file):
+        if not isinstance(security_attributes, int):
+            raise TypeError(
+                "CreateFile() argument 4 must be int, not %s"
+                % _described_type(security_attributes))
+        if not isinstance(template_file, int):
+            raise TypeError(
+                "CreateFile() argument 7 must be int, not %s"
+                % _described_type(template_file))
+        calls.append({
+            "path": path, "access": access, "share_mode": share_mode,
+            "security_attributes": security_attributes,
+            "creation_disposition": creation_disposition,
+            "flags_and_attributes": flags_and_attributes,
+            "template_file": template_file,
+        })
+        flags = os.O_RDONLY
+        if access & log_rotation._WINDOWS_GENERIC_WRITE:
+            flags = os.O_WRONLY | os.O_APPEND
+            if creation_disposition == log_rotation._WINDOWS_OPEN_ALWAYS:
+                flags |= os.O_CREAT
+        return os.open(path, flags, 0o666)
+
+    fake_winapi = types.ModuleType("_winapi")
+    fake_winapi.CreateFile = create_file
+    fake_winapi.CloseHandle = os.close
+    fake_msvcrt = types.ModuleType("msvcrt")
+    fake_msvcrt.open_osfhandle = lambda handle, flags: handle
+
+    monkeypatch.setitem(sys.modules, "_winapi", fake_winapi)
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    monkeypatch.setattr(sys, "platform", "win32")
+    return calls
+
+
+def test_windows_createfile_arguments_are_ints_and_the_handler_constructs(
+        tmp_path, monkeypatch):
+    """The production crash: the handler is built on Windows, before any record.
+
+    ``RotationAwareFileHandler.__init__`` reaches ``read_generation`` through
+    ``_windows_fd``; with ``None`` for arguments 4 and 7 the fake raises the same
+    ``TypeError`` the real ``_winapi.CreateFile`` did, so this test fails against
+    the pre-change source. It also insists the handler is the rotation-aware one,
+    not the plain-file fallback that would otherwise hide a broken Windows opener.
+    """
+    log = tmp_path / "daemon.log"
+    calls = _install_fake_windows(monkeypatch)
+
+    handler = log_rotation.log_file_handler(str(log))
+    try:
+        assert isinstance(handler, log_rotation.RotationAwareFileHandler)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger = _logger("test_windows_createfile_contract", handler)
+        logger.info("written-through-shared-handle")
+        handler.flush()
+    finally:
+        handler.close()
+
+    assert calls, "the Windows open path was never exercised"
+    assert all(isinstance(call["security_attributes"], int) for call in calls)
+    assert all(isinstance(call["template_file"], int) for call in calls)
+    # FILE_SHARE_DELETE is the entire reason this opener exists: a handler that
+    # holds the log without it makes the rotation's rename fail on Windows.
+    assert all(call["share_mode"] & log_rotation._WINDOWS_SHARE_DELETE
+               for call in calls)
+    assert log.read_text(encoding="utf-8") == "written-through-shared-handle\n"
+
+
+def test_windows_read_generation_reads_the_marker_through_the_shared_handle(
+        tmp_path, monkeypatch):
+    log = tmp_path / "daemon.log"
+    marker = tmp_path / "daemon.log.generation"
+    marker.write_text("daemon-20260101-000000.log.gz\n", encoding="utf-8")
+    calls = _install_fake_windows(monkeypatch)
+
+    assert log_rotation.read_generation(str(log)) == "daemon-20260101-000000.log.gz"
+    assert len(calls) == 1
+    assert calls[0]["creation_disposition"] == log_rotation._WINDOWS_OPEN_EXISTING
+    assert calls[0]["share_mode"] & log_rotation._WINDOWS_SHARE_DELETE
+
+
+def test_a_marker_read_failure_loses_rotation_awareness_not_logging(
+        tmp_path, monkeypatch, caplog):
+    """A non-``OSError`` marker fault must not kill logging.
+
+    ``read_generation`` absorbs the ordinary ``OSError`` of a missing marker, but
+    anything else used to escape ``__init__`` -- the same shape as the production
+    crash. It now degrades to "no generation recorded" with a warning, and the
+    handler still opens the log.
+    """
+    log = tmp_path / "daemon.log"
+    _install_fake_windows(monkeypatch)
+
+    def explode(path):
+        raise RuntimeError("marker read blew up")
+
+    monkeypatch.setattr(log_rotation, "read_generation", explode)
+
+    with caplog.at_level(logging.WARNING, logger="src.log_rotation"):
+        handler = log_rotation.log_file_handler(str(log))
+    try:
+        assert isinstance(handler, log_rotation.RotationAwareFileHandler)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger = _logger("test_marker_read_failure", handler)
+        logger.info("still-written")
+        handler.flush()
+    finally:
+        handler.close()
+
+    assert log.read_text(encoding="utf-8") == "still-written\n"
+    assert any("rotation awareness" in record.getMessage()
+               for record in caplog.records), \
+        "the operator must be warned that rotation awareness was lost"
+
+
+def test_a_rotation_aware_handler_that_cannot_be_built_falls_back_to_plain_logging(
+        tmp_path, monkeypatch, caplog):
+    """Defence in depth: the shared factory installs a plain FileHandler.
+
+    Both front ends build their file handler through
+    ``log_rotation.log_file_handler``, so this one fallback covers the daemon and
+    the TUI alike: if the rotation-aware handler cannot be built at all, logging
+    still exists and the warning names what was given up.
+    """
+    log = tmp_path / "daemon.log"
+
+    class _Exploding(log_rotation.RotationAwareFileHandler):
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("cannot build the rotation-aware handler")
+
+    monkeypatch.setattr(log_rotation, "RotationAwareFileHandler", _Exploding)
+
+    with caplog.at_level(logging.WARNING, logger="src.log_rotation"):
+        handler = log_rotation.log_file_handler(str(log))
+    try:
+        assert type(handler) is logging.FileHandler
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger = _logger("test_plain_file_handler_fallback", handler)
+        logger.info("plain-but-present")
+        handler.flush()
+    finally:
+        handler.close()
+
+    assert log.read_text(encoding="utf-8") == "plain-but-present\n"
+    assert any("plain file handler" in record.getMessage()
+               for record in caplog.records)

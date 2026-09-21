@@ -18,6 +18,34 @@ def test_tui_main_execution():
         src.tui.main()
         mock_app.return_value.run.assert_called_once()
 
+def test_tui_main_installs_the_crash_hooks_before_reading_the_config():
+    """A crash while logging starts must reach a dump before logging exists.
+
+    The hooks used to be installed only *after* logging was configured, so a
+    failure inside `load_config` or the log-handler setup was captured nowhere:
+    no record (the handlers were being built) and no dump. This makes
+    `load_config` the first thing to fail and pins the sequence.
+    """
+    order = []
+
+    def record_hooks(process_name):
+        order.append(("hooks", process_name))
+
+    def explode(config_path):
+        order.append(("config", config_path))
+        raise FileNotFoundError(config_path)
+
+    with patch('src.tui.crash.install_hooks', record_hooks), \
+         patch('src.tui.load_config', explode), \
+         patch('src.tui.ScraperApp') as mock_app, \
+         patch('sys.argv', ['tui.py']):
+        import src.tui
+        src.tui.main()
+        mock_app.return_value.run.assert_called_once()
+
+    assert order == [("hooks", "tui"), ("config", "config.yaml")]
+
+
 def test_scraperapp_config_not_found():
     from src.tui import ScraperApp
     with patch('src.tui.load_config', side_effect=FileNotFoundError), \

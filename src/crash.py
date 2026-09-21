@@ -59,6 +59,7 @@ import logging
 import os
 import platform
 import re
+import shutil
 import sys
 import threading
 import traceback
@@ -106,6 +107,21 @@ _SENSITIVE_KEY_PARTS = (
 )
 
 _FILENAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+#: The application folder -- this package's parent -- is the last-resort dump
+#: destination. Derived from the module's own location rather than the process
+#: working directory: the daemon under a scheduled task does not run with the app
+#: folder as its cwd, so a cwd dump can land where the operator will never look.
+#: It is also one of the places :func:`_adopt_stranded_dumps` scans.
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+#: A dump filename this module writes:
+#: ``<UTC ISO stamp, ':' replaced by '-'>-<process>-error<N>.txt``. Used to
+#: recognise a stranded dump without sweeping every ``.txt`` in a folder; the
+#: ``.tmp`` an interrupted atomic write leaves beside it does not match.
+_DUMP_FILENAME_RE = re.compile(
+    r"\A\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:\.\d+)?[+-]\d{2}-\d{2}"
+    r"-(?P<process>.+?)-error(?P<occurrence>\d+)\.txt\Z")
 
 # Guards the module state: the installed hooks, the context, the ring-buffer
 # handler and the registered secrets. An RLock because register_secret can be
@@ -163,6 +179,27 @@ class RecentLogHandler(logging.Handler):
         return list(self.records)
 
 
+def install_hooks(process_name):
+    """Install the crash hooks, before logging has been configured.
+
+    The entry points configure logging first and then call :func:`install`, so
+    an exception raised while logging setup itself was running was captured
+    nowhere: no log record (the handlers are the thing being built), no ring
+    buffer, and no dump (these hooks were not installed yet). The operator's
+    terminal was the only copy. The hooks do not depend on logging, so they are
+    installed first thing in ``main()`` -- ahead of ``load_config`` -- and
+    :func:`install` afterwards records the config and attaches the ring buffer.
+    Both are idempotent, so the two calls in sequence leave exactly one handler
+    and one set of hooks.
+    """
+    try:
+        with _STATE_LOCK:
+            _state["process"] = process_name
+            _install_hooks_locked()
+    except Exception:
+        _log_own_failure("Could not install the crash reporter")
+
+
 def install(process_name, config=None, config_path=None):
     """Install the crash hooks and the recent-log ring buffer.
 
@@ -175,7 +212,13 @@ def install(process_name, config=None, config_path=None):
     would dump the same traceback twice. Whatever hook was installed before is
     remembered and still called, so the console output is unchanged. Call this
     *after* the entry point has configured logging, or the ring-buffer handler
-    will be dropped by ``basicConfig(force=True)``.
+    will be dropped by ``basicConfig(force=True)``; the hooks themselves may
+    already have been installed by :func:`install_hooks` before logging existed,
+    and re-installing them here is a no-op.
+
+    Because this is where the outbox first becomes known, it is also where any
+    dump the early fallback stranded is adopted into that outbox (see
+    :func:`_adopt_stranded_dumps`).
     """
     try:
         with _STATE_LOCK:
@@ -185,16 +228,29 @@ def install(process_name, config=None, config_path=None):
             if config_path is not None:
                 _state["config_path"] = config_path
             _attach_handler()
-            if sys.excepthook is not _state["sys_hook"]:
-                _state["prev_sys_hook"] = sys.excepthook
-                _state["sys_hook"] = _sys_excepthook
-                sys.excepthook = _sys_excepthook
-            if threading.excepthook is not _state["threading_hook"]:
-                _state["prev_threading_hook"] = threading.excepthook
-                _state["threading_hook"] = _threading_excepthook
-                threading.excepthook = _threading_excepthook
+            _install_hooks_locked()
     except Exception:
         _log_own_failure("Could not install the crash reporter")
+        return
+    if config is not None:
+        _adopt_stranded_dumps(config)
+
+
+def _install_hooks_locked():
+    """Install both hooks, chaining onto whatever was there.
+
+    The caller holds ``_STATE_LOCK``. Guarded by identity, so calling in again
+    (``install_hooks`` and then ``install``) neither chains the reporter onto
+    itself nor replaces a hook someone installed later.
+    """
+    if sys.excepthook is not _state["sys_hook"]:
+        _state["prev_sys_hook"] = sys.excepthook
+        _state["sys_hook"] = _sys_excepthook
+        sys.excepthook = _sys_excepthook
+    if threading.excepthook is not _state["threading_hook"]:
+        _state["prev_threading_hook"] = threading.excepthook
+        _state["threading_hook"] = _threading_excepthook
+        threading.excepthook = _threading_excepthook
 
 
 def uninstall():
@@ -730,8 +786,10 @@ def _destination(config):
 
     The outbox is the configured ``daemon.outbox_dir`` (or the legacy
     ``backup_dir``). When it cannot be determined the dump goes beside the
-    configured log file, else the working directory, and its path is printed --
-    a dump the user cannot find is not a dump.
+    configured log file, else into the application folder (:data:`APP_DIR`, not
+    the process working directory), and its path is printed -- a dump the user
+    cannot find is not a dump. Once the outbox *is* known,
+    :func:`_adopt_stranded_dumps` moves these local dumps in.
     """
     outbox = _configured_outbox_dir(config)
     if outbox:
@@ -744,7 +802,7 @@ def _destination(config):
     if log_file:
         directory = os.path.dirname(os.path.abspath(log_file))
     else:
-        directory = _safe_cwd(fallback=".")
+        directory = APP_DIR
     return directory, None, True
 
 
@@ -809,6 +867,110 @@ def _register_dump(outbox, path, payload, process, occurrence):
     # manifest entry the sync will not collect it, so say so loudly.
     except Exception:  # noqa: BLE001 - the dump itself is not affected
         _log_own_failure("Crash dump was not registered in the outbox manifest")
+
+
+def _adopt_stranded_dumps(config) -> None:
+    """Move dumps written before the outbox was known into ``<outbox>/crashes/``.
+
+    A crash before ``load_config`` returns cannot know ``daemon.outbox_dir``, so
+    its dump lands in a local fallback (see :func:`_destination`) and its path is
+    printed. Once :func:`install` runs with the config the outbox is known;
+    anything the fallback caught is moved in and registered, so the puller
+    collects it rather than leaving it stranded in the application folder.
+
+    Best-effort and idempotent: it never raises, and a second call finds nothing
+    because the files are gone. Only this module's own filenames are matched, so
+    an unrelated ``.txt`` beside them is never touched.
+    """
+    try:
+        outbox = _configured_outbox_dir(config)
+        if not outbox:
+            return
+        destination = os.path.join(outbox, CRASHES_DIR_NAME)
+        for source in _stranded_directories(config, outbox):
+            try:
+                names = os.listdir(source)
+            except OSError:
+                continue
+            for name in names:
+                match = _DUMP_FILENAME_RE.match(name)
+                if match is None:
+                    continue
+                _adopt_one(os.path.join(source, name), destination, outbox,
+                           match.group("process"), int(match.group("occurrence")))
+    except BaseException:  # noqa: BLE001 - adopting is never worth a crash
+        _log_own_failure("Could not adopt stranded crash dumps")
+
+
+def _stranded_directories(config, outbox):
+    """The local fallbacks to scan, deduplicated, never the outbox itself."""
+    candidates = []
+    if isinstance(config, dict):
+        logging_config = config.get("logging")
+        if isinstance(logging_config, dict) and logging_config.get("file"):
+            candidates.append(
+                os.path.dirname(os.path.abspath(logging_config["file"])))
+    candidates.append(APP_DIR)
+    excluded = {os.path.abspath(outbox),
+                os.path.abspath(os.path.join(outbox, CRASHES_DIR_NAME))}
+    seen = set()
+    directories = []
+    for candidate in candidates:
+        absolute = os.path.abspath(candidate)
+        if absolute in seen or absolute in excluded:
+            continue
+        seen.add(absolute)
+        directories.append(absolute)
+    return directories
+
+
+def _adopt_one(path, destination_dir, outbox, process, occurrence) -> None:
+    """Move one stranded dump in and register it. Never raises.
+
+    Registration happens only after the move: a manifest entry pointing at a
+    file that is not there is the failure the puller cannot recover from, while a
+    file in the outbox without an entry is covered by ``_register_dump``'s own
+    "not registered" warning.
+    """
+    try:
+        os.makedirs(destination_dir, exist_ok=True)
+        final = _unique_destination(destination_dir, os.path.basename(path))
+        _move_file(path, final)
+        with open(final, "rb") as handle:
+            payload = handle.read()
+        _register_dump(outbox, final, payload, process, occurrence)
+        # One line per adopted dump, naming where it ended up: the operator saw
+        # the local path printed at crash time and needs to follow the file.
+        logging.info("Adopted stranded crash dump %s into %s", path, final)
+    except FileNotFoundError:
+        # Another process adopted it between the listing and the move.
+        pass
+    except Exception:  # noqa: BLE001 - one bad file must not stop the rest
+        _log_own_failure(f"Could not adopt the stranded crash dump {path}")
+
+
+def _move_file(source, destination) -> None:
+    """Move ``source`` onto ``destination``, across volumes if it must."""
+    try:
+        os.replace(source, destination)
+    except OSError:
+        # A different volume cannot rename; shutil.move copies then removes.
+        shutil.move(source, destination)
+
+
+def _unique_destination(directory, name):
+    """``directory/name``, or a numbered variant that does not exist yet.
+
+    An adopted dump must never overwrite one already in the outbox, so a name
+    collision gets a ``-1``, ``-2``... suffix.
+    """
+    stem, extension = os.path.splitext(name)
+    candidate = os.path.join(directory, name)
+    suffix = 1
+    while os.path.exists(candidate):
+        candidate = os.path.join(directory, f"{stem}-{suffix}{extension}")
+        suffix += 1
+    return candidate
 
 
 def _recent_log_records():

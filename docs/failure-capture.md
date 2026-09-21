@@ -149,6 +149,42 @@ called, so the console shows exactly what it showed before. The traceback is als
 written to the log with `logging.error(..., exc_info=True)`, because the
 maintainer reads that file too.
 
+Installation is deliberately split in two, because logging is the one thing a
+crash can take down with it. `crash.install_hooks(process_name)` records the
+process name and installs `sys.excepthook` and `threading.excepthook` as the
+first statement of each `main()`, ahead of `load_config` and `basicConfig`; the
+hooks do not need logging, so a failure raised while the config is read or while
+the log handler is being built is still dumped. Before the split, that was the
+one startup failure with no destination at all: no log record (the handlers were
+the thing being built), no ring buffer, and no dump (the hooks were not installed
+yet), leaving the operator's terminal as the only copy. `crash.install(...)` then
+runs after logging is configured: it records the config — the outbox destination
+and the cookie values to elide — and attaches the ring-buffer handler, which the
+entry points' `basicConfig(force=True)` would otherwise drop. Both are
+idempotent and the hooks are guarded by identity, so calling the early hook and
+then `install` installs the hooks once, chains the previous hook once, and leaves
+exactly one ring-buffer handler attached.
+
+Where a dump goes follows the same two-step order. With the outbox known, it is
+written straight to `<outbox_dir>/crashes/` and registered in the manifest. A
+crash before the config is readable cannot know the outbox, so `_destination`
+falls back to the configured log file's directory, and with no log file to the
+**application folder** derived from `src/crash.py`'s own location — never the
+process working directory, because a daemon under a scheduled task does not run
+with the app folder as its cwd — and prints that local path, because a dump the
+operator cannot find is not a dump. When `install(config)` runs later the outbox
+is known, so it adopts what the fallback caught: it scans the log file's
+directory and the application folder (deduplicated, never the outbox itself),
+matches only this module's `<stamp>-<process>-error<N>.txt` filenames — an
+unrelated `.txt`, or the `.tmp` an interrupted atomic write leaves, is left
+alone — moves each one in (`os.replace`, or `shutil.move` across volumes, with a
+numbered name on collision so an existing outbox dump is never overwritten) and
+registers it in the manifest *after* the move, because an entry pointing at a
+file that is not there is the failure the puller cannot recover from. Adoption
+is best-effort and idempotent: it never raises, a second call finds nothing left
+to move, and one log line per adopted dump names its final path so the operator
+can follow the file whose local path was printed at crash time.
+
 One run can report more than one error: Textual calls `_handle_exception` once
 per unhandled error and prints only the first in normal mode, so the second
 traceback used to be discarded at print time. Every error therefore gets its own

@@ -36,12 +36,19 @@ REGISTERED_SECRET = "REGISTERED-SECRET-VALUE-0123456789"
 
 
 @pytest.fixture(autouse=True)
-def _isolate_crash_state():
+def _isolate_crash_state(tmp_path, monkeypatch):
     """No test may leave crash hooks or a ring buffer on the process.
 
     The entry-point tests call ``main()``, which installs process-wide hooks;
-    without this they leak into every later test.
+    without this they leak into every later test. ``APP_DIR`` is pointed at this
+    test's tmp_path too: adoption scans the application folder for stranded
+    dumps, and a real dump left in the checkout must never inflate another test's
+    count or be moved out from under the operator.
     """
+    # `raising=False` keeps the fixture harmless while APP_DIR does not exist yet,
+    # so a new test fails against the old code for its own reason rather than on
+    # the fixture.
+    monkeypatch.setattr(crash, "APP_DIR", str(tmp_path / "app"), raising=False)
     crash.uninstall()
     saved_sys = sys.excepthook
     saved_threading = threading.excepthook
@@ -319,20 +326,35 @@ def test_no_outbox_writes_beside_the_log_file_and_prints_the_path(tmp_path, caps
     assert path in capsys.readouterr().err, "the path must be printed when it cannot be pulled"
 
 
-def test_no_outbox_and_no_log_file_uses_the_working_directory(tmp_path, monkeypatch,
-                                                              capsys):
-    monkeypatch.chdir(tmp_path)
+def test_no_outbox_and_no_log_file_falls_back_to_the_application_folder(
+        tmp_path, monkeypatch, capsys):
+    """The last resort is the app folder, never the process working directory.
+
+    The daemon under a scheduled task does not run with the application folder as
+    its cwd, so a cwd dump can land where the operator will never look. The
+    fallback is derived from this module's own location instead, and its path is
+    still printed so a local dump is findable.
+    """
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    app_folder = tmp_path / "app"
+    # `raising=False` keeps this harmless while APP_DIR does not exist yet, so
+    # the test fails against the old code for the right reason -- the dump lands
+    # in the working directory -- rather than on a missing attribute.
+    monkeypatch.setattr(crash, "APP_DIR", str(app_folder), raising=False)
     config = {"database": {"path": "workshop.db"}}
 
     def explode():
-        raise RuntimeError("cwd probe")
+        raise RuntimeError("app folder probe")
 
     path = crash.record_exception(*_capture(explode), process_name="web", config=config)
 
     assert path is not None
-    assert os.path.dirname(os.path.abspath(path)) == str(tmp_path)
+    assert os.path.dirname(os.path.abspath(path)) == str(app_folder)
     assert os.path.basename(path).endswith("-web-error1.txt")
     assert path in capsys.readouterr().err
+    assert list(elsewhere.iterdir()) == [], "the working directory was used"
 
 
 def test_the_dumper_never_raises_when_the_destination_is_unwritable(tmp_path, caplog):
@@ -414,6 +436,183 @@ def test_installing_twice_does_not_double_dump(tmp_path):
         assert len(calls) == 1, "the second install ate the previous hook"
     finally:
         crash.uninstall()
+
+
+def test_a_failure_before_logging_is_configured_still_writes_a_dump(
+        tmp_path, monkeypatch, capsys):
+    """The hooks go in before logging, so a logging-setup crash is dumped.
+
+    The entry points used to configure logging and only then call
+    ``crash.install``, so an exception raised *inside* the logging setup was
+    captured nowhere: no log record (the handlers were the thing being built),
+    no ring buffer, and no dump, because the hooks were not installed yet. This
+    runs the early entry point with no logging configured at all and asserts both
+    the local dump and the path printed for the operator.
+    """
+    app_folder = tmp_path / "app"
+    monkeypatch.setattr(crash, "APP_DIR", str(app_folder))
+    crash.install_hooks("tui")
+
+    # The early call installs the hooks only. The ring buffer waits for
+    # `install` after `basicConfig`, so a forced configuration cannot drop it.
+    assert not [h for h in logging.getLogger().handlers
+                if isinstance(h, crash.RecentLogHandler)]
+
+    try:
+        raise RuntimeError("crash while configuring logging")
+    except RuntimeError:
+        sys.excepthook(*sys.exc_info())
+
+    dumps = sorted(app_folder.glob("*.txt"))
+    assert len(dumps) == 1, "the startup failure was not dumped"
+    text = dumps[0].read_text(encoding="utf-8")
+    assert "Traceback (most recent call last)" in text
+    assert "crash while configuring logging" in text
+    assert "process: tui" in text
+    # The outbox is unknown yet, so the local path is the operator's only lead.
+    assert str(dumps[0]) in capsys.readouterr().err
+
+
+def test_early_hooks_then_install_leave_exactly_one_ring_buffer(tmp_path, monkeypatch):
+    """The two-step install adds one ring buffer, not two, and chains once.
+
+    ``install_hooks`` runs before logging and ``install`` after it; the forced
+    ``basicConfig`` in between clears the root handlers, so this is the
+    re-attach path in ``_attach_handler`` putting the single handler back.
+    Repeated calls must not attach a second buffer or chain the excepthook onto
+    itself (which would dump the same traceback twice).
+    """
+    monkeypatch.setattr(crash, "APP_DIR", str(tmp_path / "app"))
+    config = _config(tmp_path)
+    crash.install_hooks("tui")
+    crash.install_hooks("tui")
+    logging.basicConfig(level=logging.INFO, force=True)
+    crash.install("tui", config, config_path="config.yaml")
+    crash.install("tui", config, config_path="config.yaml")
+
+    ring = [h for h in logging.getLogger().handlers
+            if isinstance(h, crash.RecentLogHandler)]
+    assert len(ring) == 1, "the ring buffer was attached more than once"
+
+    try:
+        raise RuntimeError("single-dump probe")
+    except RuntimeError:
+        sys.excepthook(*sys.exc_info())
+    assert len(_crash_files(tmp_path)) == 1, "the excepthook was chained twice"
+
+
+# ── adopting what the early fallback caught ──────────────────────────────────
+
+def _strand_a_dump(tmp_path, monkeypatch, message):
+    """Write one dump through the early hook, into an isolated app folder."""
+    app_folder = tmp_path / "app"
+    monkeypatch.setattr(crash, "APP_DIR", str(app_folder))
+    crash.install_hooks("tui")
+
+    def explode():
+        raise RuntimeError(message)
+
+    try:
+        explode()
+    except RuntimeError:
+        sys.excepthook(*sys.exc_info())
+
+    stranded = sorted(app_folder.glob("*.txt"))
+    assert len(stranded) == 1, "the early dump was not written to the fallback"
+    return app_folder, stranded[0]
+
+
+def test_a_stranded_dump_is_adopted_when_the_outbox_becomes_known(
+        tmp_path, monkeypatch):
+    """The dump the early fallback caught is moved in and registered.
+
+    A crash before ``load_config`` returns cannot know ``daemon.outbox_dir``, so
+    its dump lands locally and its path is printed. When ``install(config)`` runs
+    the outbox is known, and the dump is moved into it and registered, so the
+    puller collects it instead of leaving it stranded.
+    """
+    app_folder, stranded = _strand_a_dump(tmp_path, monkeypatch, "stranded probe")
+    config = _config(tmp_path)
+
+    crash.install("tui", config, config_path="config.yaml")
+
+    outbox = tmp_path / "outbox"
+    crashes = outbox / "crashes"
+    adopted = list(crashes.glob("*.txt"))
+    assert len(adopted) == 1
+    assert "stranded probe" in adopted[0].read_text(encoding="utf-8")
+    assert list(app_folder.glob("*.txt")) == [], "the local dump was left behind"
+
+    manifest = json.loads((outbox / "manifest.json").read_text(encoding="utf-8"))
+    entries = [entry for entry in manifest["artifacts"]
+               if entry.get("kind") == "crash"]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["path"] == f"crashes/{adopted[0].name}"
+    payload = adopted[0].read_bytes()
+    assert entry["bytes"] == len(payload)
+    assert entry["sha256"] == hashlib.sha256(payload).hexdigest()
+
+    # Idempotent: a second install finds nothing left to adopt or re-register.
+    crash.install("tui", config, config_path="config.yaml")
+    assert len(list(crashes.glob("*.txt"))) == 1
+    manifest = json.loads((outbox / "manifest.json").read_text(encoding="utf-8"))
+    assert len([entry for entry in manifest["artifacts"]
+                if entry.get("kind") == "crash"]) == 1
+
+
+def test_adoption_leaves_files_it_did_not_write_alone(tmp_path, monkeypatch):
+    """Only this module's dump filenames are adopted, never a broad sweep."""
+    app_folder = tmp_path / "app"
+    app_folder.mkdir()
+    monkeypatch.setattr(crash, "APP_DIR", str(app_folder))
+    unrelated = app_folder / "operator-notes.txt"
+    unrelated.write_text("operator notes\n", encoding="utf-8")
+    # Right suffix, wrong shape: only a real dump has the UTC stamp prefix.
+    near_miss = app_folder / "other-error1.txt"
+    near_miss.write_text("not ours\n", encoding="utf-8")
+    # An interrupted atomic write leaves a .tmp that must not be adopted.
+    leftover = app_folder / (crash._dump_filename("tui", 1) + ".tmp")
+    leftover.write_text("partial", encoding="utf-8")
+
+    crash.install("tui", _config(tmp_path), config_path="config.yaml")
+
+    assert unrelated.read_text(encoding="utf-8") == "operator notes\n"
+    assert near_miss.read_text(encoding="utf-8") == "not ours\n"
+    assert leftover.read_text(encoding="utf-8") == "partial"
+    crashes = tmp_path / "outbox" / "crashes"
+    assert not crashes.exists() or list(crashes.iterdir()) == []
+
+
+def test_adoption_never_overwrites_an_existing_outbox_dump(tmp_path, monkeypatch):
+    app_folder, stranded = _strand_a_dump(tmp_path, monkeypatch, "collision probe")
+    crashes = tmp_path / "outbox" / "crashes"
+    crashes.mkdir(parents=True)
+    existing = crashes / stranded.name
+    existing.write_text("already here\n", encoding="utf-8")
+
+    crash.install("tui", _config(tmp_path), config_path="config.yaml")
+
+    assert existing.read_text(encoding="utf-8") == "already here\n"
+    adopted = [path for path in crashes.iterdir() if path != existing]
+    assert len(adopted) == 1
+    assert "collision probe" in adopted[0].read_text(encoding="utf-8")
+    assert list(app_folder.glob("*.txt")) == []
+
+
+def test_adoption_never_raises_when_the_outbox_is_unwritable(
+        tmp_path, monkeypatch, caplog):
+    app_folder, _ = _strand_a_dump(tmp_path, monkeypatch, "unwritable adoption")
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    config = {"database": {"path": "workshop.db"},
+              "daemon": {"outbox_dir": str(blocker)}}
+
+    # Must not raise: adopting is best-effort, and the dump stays findable where
+    # the printed path says it is.
+    crash.install("tui", config, config_path="config.yaml")
+
+    assert len(list(app_folder.glob("*.txt"))) == 1
 
 
 def test_a_second_error_is_not_suppressed_by_the_first(tmp_path):
