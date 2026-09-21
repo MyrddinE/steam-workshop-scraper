@@ -121,13 +121,13 @@ STALE_SWEEP_INTERVAL_SECONDS = 3600
 # guard threshold -- a pass returns at once while the queue is already at it --
 # and the per-run fill target the cursor loop stops at.
 #
-# It is 200 because the fetch loop drains the queue between discovery passes.
 # The earlier target of 100 was small enough that every pass found the queue
 # already at or above it and skipped, so the refill raced the drain instead of
 # leading it: the buffer was a level the drain kept crossing, not headroom above
-# it. 200 sits clear of that crossing, and at the request page size of 100 it is
-# two pages of fresh items per pass.
-DISCOVERY_FILL_TARGET = 200
+# it. 200 fixed that most of the time, but the fetch loop still drained the queue
+# past it on occasion, so 300 is the headroom above the crossing. At the request
+# page size of 100 it is three pages of fresh items per pass.
+DISCOVERY_FILL_TARGET = 300
 
 # How long the discovery thread waits between passes. It is a check interval, not
 # a rate: `seed_database` returns at once while the fetchable queue is already at

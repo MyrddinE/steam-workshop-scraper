@@ -22,7 +22,7 @@ loop never has to stop.
 It calls `_run_page_discovery` when page mode is worth checking and `seed_database`
 otherwise, then sets `_work_available` so an idling fetch loop wakes now rather
 than at the end of its poll. `seed_database`'s own guard decides whether anything
-is actually needed: it returns at once while at least `DISCOVERY_FILL_TARGET` (200)
+is actually needed: it returns at once while at least `DISCOVERY_FILL_TARGET` (300)
 items are fetchable, which is what keeps this thread cheap. The target sits above
 the level the fetch loop drains it to between passes, so an unskipped pass leads
 the drain rather than racing it.
