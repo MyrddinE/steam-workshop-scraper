@@ -164,3 +164,15 @@ def test_the_current_creator_staleness_key_wins_and_the_retired_key_still_warns(
     assert daemon.creator_staleness_days == 45, "the current key is the one read"
     assert len(_retired_warnings(caplog, "daemon.user_staleness_days")) == 1
 
+
+# --- one warning per key per process ----------------------------------------
+#
+# The daemon log is never rotated, and a key can be read on every scrape or
+# subscribe, so a repeated warning is unbounded noise. The helpers remember the
+# `(section, legacy)` keys they have already named.
+
+def test_a_retired_key_warning_fires_once_per_process(db_path, caplog):
+    with caplog.at_level(logging.WARNING):
+        Daemon(_config(db_path, batch_size=7))
+        Daemon(_config(db_path, batch_size=7))
+    assert len(_retired_warnings(caplog, "daemon.batch_size")) == 1

@@ -74,6 +74,30 @@ def login_secure_value(config: dict) -> str:
 
 
 
+# Config-key warnings name a stale spelling once per process. The daemon log is
+# never rotated and a key can be read on every scrape or subscribe, so a warning
+# repeated per read is unbounded noise; the first read of a `(section, legacy)`
+# key is enough to tell the operator.
+_WARNED_CONFIG_KEYS: set[tuple[str, str]] = set()
+
+
+def reset_warned_keys() -> None:
+    """Forget which config-key warnings have been logged (tests only)."""
+    _WARNED_CONFIG_KEYS.clear()
+
+
+def _is_first_warning(section_name: str, legacy_key: str) -> bool:
+    token = (section_name, legacy_key)
+    if token in _WARNED_CONFIG_KEYS:
+        return False
+    _WARNED_CONFIG_KEYS.add(token)
+    return True
+
+
+def _key_where(section_name: str, key: str) -> str:
+    return f"{section_name}.{key}" if section_name else key
+
+
 def warn_retired_key(section_name: str, legacy_key: str, current_key: str) -> None:
     """Name a config key that is no longer read, and the key that replaced it.
 
@@ -86,10 +110,11 @@ def warn_retired_key(section_name: str, legacy_key: str, current_key: str) -> No
     ``section_name`` is only for the warning, so it can name the key the way the
     operator wrote it (``daemon.batch_size``, not ``batch_size``).
     """
-    where = f"{section_name}." if section_name else ""
+    if not _is_first_warning(section_name, legacy_key):
+        return
     logging.warning(
-        "Config key '%s%s' is no longer used; it was renamed to '%s%s'. Remove the key.",
-        where, legacy_key, where, current_key,
+        "Config key '%s' is no longer used; it was renamed to '%s'. Remove the key.",
+        _key_where(section_name, legacy_key), _key_where(section_name, current_key),
     )
 
 
