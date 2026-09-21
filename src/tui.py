@@ -13,7 +13,7 @@ from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, L
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.worker import Worker, WorkerState
-from src.database import search_items, get_all_creator_ids, SchemaVersionError, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, raise_api_priority_for_list, raise_api_priority_for_detail, get_subscription_states, get_items_by_ids, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES, normalise_subscribed_value
+from src.database import search_items, get_all_creator_ids, SchemaVersionError, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, raise_api_priority_for_list, raise_api_priority_for_detail, get_subscription_states, get_items_by_ids, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES, normalise_subscribed_value, live_fetch_status_predicate
 from src.analysis import view_window_analysis
 from src import metrics
 from src import db_poll
@@ -3391,11 +3391,11 @@ class ScraperApp(App):
             return
         conn = get_connection(self.db_path)
         placeholders = ",".join("?" * len(visible_ids))
-        # Same guard as the web route: an item known to be gone (fetch_status -1) must
-        # not be put back in the API fetch queue by a bulk update.
+        # Same guard as the web route: a settled item -- dead (-1) or ignored (-2)
+        # -- must not be put back in the API fetch queue by a bulk update.
         conn.execute(
             f"UPDATE workshop_items SET api_priority = 10 WHERE workshop_id IN ({placeholders}) "
-            "AND (fetch_status IS NULL OR fetch_status != -1)",
+            f"AND {live_fetch_status_predicate()}",
             visible_ids,
         )
         conn.commit()

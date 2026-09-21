@@ -106,6 +106,7 @@ The main entry point for all searches. Accepts filters as a list of dicts with k
 4. **Percentile thresholds**: For each percentile filter, calls `_compute_percentile_threshold` with the base (non-percentile) filters. The threshold subquery runs NTILE(100) on the filtered dataset and returns the minimum score at the target bucket. Adds `db_col >= threshold` as a literal comparison.
 5. **Sort, Limit, Offset**: Appends `ORDER BY w.{col}`, `LIMIT`, `OFFSET`.
 6. **Overlay**: `search_items` also takes `subscribed_overlay`, the `Subscribed` view control's value. It is ANDed as one extra `AND (...)` *outside* the builder's parenthesised group, so an OR row cannot pull back what the overlay excluded, and it is kept out of the `filters` list so it can never be written by "Save Filter for Scraper". `any` (or no value) adds nothing; an unknown value adds nothing, because a view control must not silently hide the whole library. `compute_wilson_cutoffs` takes it too, so the percentiles describe the same population the grid shows.
+7. **Settled hiding**: `search_items` takes `include_settled`, which defaults to `False`. Unless it is set, the base clause gains `AND live_fetch_status_predicate("w.fetch_status")` — `(w.fetch_status IS NULL OR w.fetch_status NOT IN (-1, -2))` — so dead (`-1`) and ignored (`-2`) items are not returned by any search. It is ANDed into the base clause rather than appended as a filter, so an OR row cannot pull a settled item back in, and it constrains the percentile thresholds with the rest of the population. The parameter is the escape hatch for the later "surface settled items" UI; no UI passes it yet. `compute_wilson_cutoffs` and `get_all_creator_ids` take the same parameter and hide by default, so the colours and the creator picker describe the visible set.
 
 ### `subscribed_overlay_clause` (database)
 
@@ -251,6 +252,8 @@ The result is returned to `search_items` which adds `col >= threshold` as a lite
 ### `compute_wilson_cutoffs` exclusion (database)
 
 When computing Wilson score percentile cutoffs for display coloring, any filter with `op = "percentile"` is skipped. This prevents the circular dependency where a percentile filter would reference cutoffs that are themselves computed from the filtered dataset.
+
+The population is also restricted by `include_settled`, which defaults to hiding: the cutoffs colour the rows the grid shows, so a percentile computed over dead or ignored rows would give a visible item a colour from a distribution the owner cannot see. With `include_settled=False` (the default) the query carries `live_fetch_status_predicate("w.fetch_status")`; the filter group is parenthesised alongside it so an OR row cannot absorb the live clause and leak a settled row into the percentile.
 
 ---
 

@@ -232,6 +232,51 @@ USER_PRIORITY_FLOOR = 5
 # real tables instead of stopping. Raise this value only by adding a migration.
 EXPECTED_VERSION = 38
 
+# The two values `fetch_status` uses for an item that is deliberately out of the
+# pipeline. `-1` is *dead*: the API's permanent answer (the daemon persists the
+# permanent statuses as this). `-2` is *ignored*: the owner's own marker, set
+# through `ignore_item` rather than discovered. The two are the same thing to
+# every reader -- an item that can never complete and belongs to no queue -- so
+# the readers ask one question, "is this row settled", through the predicate
+# builders below rather than naming the values.
+#
+# Both are real column values, not a boolean: `fetch_status` also carries `200`
+# (fetched), `500` (transient failure to retry), `404` (the legacy permanent
+# answer, now persisted as `-1`) and `NULL` (discovered but never fetched). The
+# statuses that settle a row are exactly this tuple; nothing else does.
+DEAD_FETCH_STATUS = -1
+IGNORED_FETCH_STATUS = -2
+SETTLED_FETCH_STATUSES = (DEAD_FETCH_STATUS, IGNORED_FETCH_STATUS)
+
+
+def live_fetch_status_predicate(column: str = "fetch_status") -> str:
+    """The WHERE fragment selecting rows that are *not* settled.
+
+    ``column IS NULL OR column NOT IN (-1, -2)``. A NULL status is live: it is
+    a discovered row that has never been fetched. The ``IS NULL`` term is
+    explicit because ``NULL NOT IN (...)`` is NULL, not true, so a bare
+    ``NOT IN`` would drop every never-fetched row.
+
+    ``column`` is a parameter because a caller may alias the table (``w.``) or
+    name the historical column (migrations that run before the 30->31 rename
+    see ``status``). This is a string fragment for interpolation into SQL, the
+    same contract as the queue predicates below.
+    """
+    values = ", ".join(str(status) for status in SETTLED_FETCH_STATUSES)
+    return f"({column} IS NULL OR {column} NOT IN ({values}))"
+
+
+def settled_fetch_status_predicate(column: str = "fetch_status") -> str:
+    """The negation of :func:`live_fetch_status_predicate`: the settled rows.
+
+    ``NOT (column IS NULL OR column NOT IN (-1, -2))`` simplifies to
+    ``column IN (-1, -2)`` in SQL's three-valued logic: a NULL row can never be
+    settled, and every non-NULL status is either settled or live. Stated as the
+    ``IN`` list so the pair is the one source rather than a second truth table.
+    """
+    values = ", ".join(str(status) for status in SETTLED_FETCH_STATUSES)
+    return f"({column} IN ({values}))"
+
 
 class SchemaVersionError(Exception):
     """A database whose recorded schema version is newer than this build.
@@ -2187,10 +2232,15 @@ def _migration_16_to_17(cursor, conn, db_path):
     # production database. api_priority is deliberately not touched here:
     # the 404 path already zeroes it, and a dead row still holding an API
     # priority is a separate defect.
+    #
+    # The predicate is the shared settled set even though no ignored row can
+    # exist at this version: the rule it repairs -- a settled item holds no
+    # queue flag -- is the same one ``ignore_item`` relies on, and stating it
+    # once is what keeps the two from drifting.
     cursor.execute(
         "UPDATE workshop_items "
         "SET needs_web_scrape = 0, needs_image = 0, translation_priority = 0 "
-        "WHERE status = -1"
+        f"WHERE {settled_fetch_status_predicate('status')}"
     )
     dequeued_dead = cursor.rowcount
 
@@ -2215,8 +2265,8 @@ def _migration_17_to_18(cursor, conn, db_path):
     # Priority 1 is the backlog level migration 15->16 used for the rows a
     # transient failure had stranded: high enough that the item is retried,
     # but below the 3/5/10 of new and current work, so it cannot jump ahead
-    # of the live queue. Dead items (status -1) are excluded because they can
-    # never complete and issue 17 keeps them out of every queue.
+    # of the live queue. Settled items (status -1 dead, -2 ignored) are excluded
+    # because they can never complete and issue 17 keeps them out of every queue.
     #
     # SQLite's cursor.rowcount counts the rows the UPDATE *matched*, not the
     # rows whose value actually changed. That cannot inflate this count: every
@@ -2226,7 +2276,7 @@ def _migration_17_to_18(cursor, conn, db_path):
         "UPDATE workshop_items SET needs_web_scrape = 1 "
         "WHERE needs_web_scrape = 0 "
         "AND COALESCE(extended_description, '') = '' "
-        "AND (status IS NULL OR status <> -1)"
+        f"AND {live_fetch_status_predicate('status')}"
     )
     stranded_descriptionless = cursor.rowcount
 
@@ -2284,7 +2334,7 @@ def _migration_19_to_20(cursor, conn, db_path):
     # status is what makes an item dead in the first place.
     cursor.execute(
         "UPDATE workshop_items SET api_priority = 0 "
-        "WHERE status = -1 AND api_priority > 0"
+        f"WHERE {settled_fetch_status_predicate('status')} AND api_priority > 0"
     )
     dead_priority_cleared = cursor.rowcount
 
@@ -2942,7 +2992,8 @@ def _migration_35_to_36(cursor, conn, db_path):
     cursor.execute(
         "DELETE FROM translation_queue "
         "WHERE entity_type = 'item' "
-        "AND entity_id IN (SELECT workshop_id FROM workshop_items WHERE fetch_status = -1)"
+        "AND entity_id IN (SELECT workshop_id FROM workshop_items "
+        f"WHERE {settled_fetch_status_predicate()})"
     )
     dead_rows = cursor.rowcount
 
@@ -3057,7 +3108,7 @@ def _migration_37_to_38(cursor, conn, db_path):
         f"UPDATE workshop_items "
         f"SET api_priority = 0, {web_col} = 0, {image_col} = 0, "
         f"translation_priority = 0 "
-        f"WHERE {status_col} = -1 "
+        f"WHERE {settled_fetch_status_predicate(status_col)} "
         f"AND (api_priority > 0 OR {web_col} > 0 OR {image_col} > 0 "
         f"OR translation_priority > 0)"
     )
@@ -3069,7 +3120,8 @@ def _migration_37_to_38(cursor, conn, db_path):
         f"DELETE FROM translation_queue "
         f"WHERE {queue_type} = 'item' "
         f"AND {queue_id} IN "
-        f"(SELECT workshop_id FROM workshop_items WHERE {status_col} = -1)"
+        f"(SELECT workshop_id FROM workshop_items "
+        f"WHERE {settled_fetch_status_predicate(status_col)})"
     )
     dead_rows = cursor.rowcount
 
@@ -3540,11 +3592,12 @@ def insert_or_update_item(db_path: str, item_data: dict, *,
     rows are touched -- a creator row is a different entity.
 
     ``preserve_dead_api_priority`` makes the conflict update leave ``api_priority``
-    alone when the row that already exists is dead (``fetch_status = -1``). It is
-    for the two discovery call sites: discovery re-encounters items the API has
-    already answered ``-1`` for, and a dead item is deliberately final and in no
-    queue, so re-seeing it must not write a new discovery priority onto it. It is
-    opt-in because this is a generic upsert -- ``_settle_api_failure`` also writes
+    alone when the row that already exists is settled (dead ``-1`` or ignored
+    ``-2``). It is for the two discovery call sites: discovery re-encounters
+    items the API has already answered ``-1`` for and items the owner has
+    ignored, and a settled item is deliberately final and in no queue, so
+    re-seeing it must not write a new discovery priority onto it. It is opt-in
+    because this is a generic upsert -- ``_settle_api_failure`` also writes
     ``api_priority`` through it, including the ``0`` that marks the item dead --
     so the guard belongs to the callers that need it, not to the function's
     ordinary contract (issue 74).
@@ -3623,7 +3676,8 @@ def insert_or_update_item(db_path: str, item_data: dict, *,
         # past it: the UPDATE and the test are the same statement.
         updates = ",".join(
             (
-                "api_priority=CASE WHEN workshop_items.fetch_status = -1 "
+                "api_priority=CASE WHEN "
+                f"{settled_fetch_status_predicate('workshop_items.fetch_status')} "
                 "THEN workshop_items.api_priority ELSE excluded.api_priority END"
                 if preserve_dead_api_priority and col == "api_priority"
                 else f"{col}=excluded.{col}"
@@ -3652,6 +3706,122 @@ def insert_or_update_item(db_path: str, item_data: dict, *,
     conn.close()
     return is_new
 
+
+def ignore_item(db_path: str, workshop_id: int) -> bool:
+    """Settle an item at the owner's request: ``fetch_status = -2``.
+
+    Ignoring means the same thing to the pipeline as death: the item can never
+    complete and belongs to no queue. The write is therefore the permanent branch
+    of ``_settle_api_failure`` (``src/daemon.py:1100``) with the status set by a
+    person rather than discovered -- ``fetch_status = IGNORED_FETCH_STATUS``, all
+    four queue priorities ``0``, and the item's ``translation_queue`` rows deleted
+    -- in ONE transaction on ONE connection, so a drain can never see the status
+    without the queue clear or the other way round.
+
+    Idempotent: returns True only when this call changed something. A row already
+    at ``-2`` with no flag and no queue row is left untouched and reports False,
+    which is what makes the toggle safe to press twice. A missing row reports
+    False too; this never inserts one.
+
+    The prior status is deliberately not recorded anywhere. ``unignore_item``
+    reconstructs it from the row's own data instead.
+    """
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT fetch_status, api_priority, web_scrape_priority, "
+            "image_priority, translation_priority FROM workshop_items "
+            "WHERE workshop_id = ?",
+            (workshop_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        has_queue_row = conn.execute(
+            "SELECT 1 FROM translation_queue "
+            "WHERE entity_type = 'item' AND entity_id = ? LIMIT 1",
+            (workshop_id,),
+        ).fetchone() is not None
+        # SQLite reports matched rows, not changed ones, so the change test is
+        # made here in Python -- the same reason `mark_own_subscribed` reads the
+        # timestamp before it writes.
+        changed = (
+            row["fetch_status"] != IGNORED_FETCH_STATUS
+            or has_queue_row
+            or any((row[col] or 0) > 0 for col in (
+                "api_priority", "web_scrape_priority",
+                "image_priority", "translation_priority",
+            ))
+        )
+        if not changed:
+            return False
+        conn.execute(
+            "UPDATE workshop_items SET fetch_status = ?, api_priority = 0, "
+            "web_scrape_priority = 0, image_priority = 0, translation_priority = 0 "
+            "WHERE workshop_id = ?",
+            (IGNORED_FETCH_STATUS, workshop_id),
+        )
+        # The translation poll's real predicate is the queue row, not the mirror:
+        # it hands out every row of `translation_queue` with no settled-item
+        # guard, so the rows go in the same transaction as the status write.
+        conn.execute(
+            "DELETE FROM translation_queue "
+            "WHERE entity_type = 'item' AND entity_id = ?",
+            (workshop_id,),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def unignore_item(db_path: str, workshop_id: int) -> bool:
+    """Restore an ignored item -- the toggle back from :func:`ignore_item`.
+
+    The prior status is not stored, so it is reconstructed from the row's own
+    data, in one statement and one transaction:
+
+    * a row that had been successfully fetched (``api_fetched_at`` set) returns
+      to ``fetch_status = 200``; ``api_priority`` is left at the ``0`` ignoring
+      wrote, which is the unqueued state a fetched item holds;
+    * a row that had not (``api_fetched_at`` NULL) returns to
+      ``fetch_status = NULL`` -- discovered, not yet fetched -- and is queued for
+      an API fetch at ``api_priority = 1``, the backlog priority. That is what
+      keeps it out of ``queued_nowhere``: a NULL status with no fetch priority is
+      exactly the stranded shape that metric reports;
+    * because ignoring cleared the web-scrape flag, a restored row whose
+      ``extended_description`` is empty also gets ``web_scrape_priority = 3`` --
+      the priority a fresh API merge gives a new item, and the one its own data
+      says it still needs. A row that already has a description gets no scrape
+      flag.
+
+    ``image_priority`` and ``translation_priority`` are deliberately not
+    reconstructed: nothing on the row says whether work was outstanding before
+    ignoring, and the API fetch this queues will re-raise them if it still is.
+
+    Idempotent: the WHERE requires the row to be at ``-2``, so a second call
+    matches nothing and reports False. A missing row or a live one also reports
+    False.
+    """
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute(
+            "UPDATE workshop_items SET "
+            "fetch_status = CASE WHEN api_fetched_at IS NOT NULL "
+            "THEN 200 ELSE NULL END, "
+            "api_priority = CASE WHEN api_fetched_at IS NULL "
+            "THEN 1 ELSE api_priority END, "
+            "web_scrape_priority = CASE WHEN COALESCE(extended_description, '') = '' "
+            "THEN MAX(COALESCE(web_scrape_priority, 0), 3) ELSE web_scrape_priority END "
+            "WHERE workshop_id = ? AND fetch_status = ?",
+            (workshop_id, IGNORED_FETCH_STATUS),
+        )
+        changed = cursor.rowcount > 0
+        conn.commit()
+        return changed
+    finally:
+        conn.close()
+
+
 # ── Stage-handoff consumer predicates ─────────────────────────────────────────
 #
 # The five stage handoffs are enumerated in docs/data-pipeline.md. Each stage
@@ -3670,11 +3840,12 @@ def insert_or_update_item(db_path: str, item_data: dict, *,
 def api_fetch_queue_predicate() -> str:
     """Discovery → API fetch: the fetch queue's entry condition.
 
-    Queued at a positive priority and not dead. A discovered row whose
+    Queued at a positive priority and live. A discovered row whose
     ``api_priority`` was left at the column default is issue 20: in no queue at
-    all.
+    all. The live test is ``live_fetch_status_predicate()``, so a dead *or
+    ignored* row -- both settled -- is in no fetch queue.
     """
-    return "api_priority > 0 AND (fetch_status IS NULL OR fetch_status != -1)"
+    return f"api_priority > 0 AND {live_fetch_status_predicate()}"
 
 
 def web_scrape_queue_predicate() -> str:
@@ -3721,13 +3892,14 @@ def translation_priority_predicate() -> str:
 
 
 def queued_anywhere_predicate() -> str:
-    """Any stage → dead: the union a dead item has to fail.
+    """Any stage → settled: the union a dead or ignored item has to fail.
 
     ``_settle_api_failure`` clears all four flags and deletes the item's
-    ``translation_queue`` rows when it writes ``fetch_status = -1``; the web, image
-    and translation polls have no dead-item guard of their own, so this union is
-    how "in no queue" is stated at the item level. It is built from the named queue
-    predicates so a change to one of them moves this with it.
+    ``translation_queue`` rows when it writes ``fetch_status = -1``;
+    ``ignore_item`` does the same when it writes ``-2``; the web, image and
+    translation polls have no settled-item guard of their own, so this union is
+    how "in no queue" is stated at the item level. It is built from the named
+    queue predicates so a change to one of them moves this with it.
 
     It asks the translation *consumer's* question -- is there a ``translation_queue``
     row -- rather than the item-level mirror alone. The mirror is a summary the
@@ -3816,9 +3988,10 @@ def count_stranded_never_fetched_items(db_path: str) -> int:
     queue. Each excluded class is excluded because the pipeline has already
     answered the item or because another stage is carrying it:
 
-    * dead (``fetch_status = -1``) is settled: ``_settle_api_failure``
-      (``src/daemon.py:1077``) recorded the API's permanent refusal and cleared
-      the item's queues, so it is not work;
+    * settled -- dead (``fetch_status = -1``) or ignored (``-2``) -- is out of
+      the pipeline: ``_settle_api_failure`` (``src/daemon.py:1077``) recorded the
+      API's permanent refusal and cleared the item's queues, and ``ignore_item``
+      did the same at the owner's request, so neither is work;
     * ``fetch_status = 404`` is the API's permanent answer -- the status named by
       ``PERMANENT_API_STATUSES`` (``src/daemon.py:65``), which the same method now
       persists as ``-1``; the legacy rows that still carry ``404`` are settled and
@@ -3855,7 +4028,8 @@ def count_stranded_never_fetched_items(db_path: str) -> int:
     cursor = conn.execute(
         "SELECT COUNT(workshop_id) as count FROM workshop_items "
         "WHERE api_fetched_at IS NULL "
-        "AND (fetch_status IS NULL OR (fetch_status != -1 AND fetch_status != 404)) "
+        f"AND {live_fetch_status_predicate()} "
+        "AND fetch_status IS NOT 404 "
         f"AND NOT ({queued_anywhere_predicate()})"
     )
     row = cursor.fetchone()
@@ -3972,7 +4146,8 @@ def search_items(db_path: str, query: str = "", appid: int = None,
                  summary_only: bool = False, 
                  sort_by: str = None, sort_order: str = "ASC",
                  limit: int = None, offset: int = None,
-                 subscribed_overlay: str = None) -> list[dict]:
+                 subscribed_overlay: str = None,
+                 include_settled: bool = False) -> list[dict]:
     """
     Searches the database for items matching the criteria.
     Joins with the creators table to provide names.
@@ -3983,6 +4158,16 @@ def search_items(db_path: str, query: str = "", appid: int = None,
     filter on purpose: it must sit outside the builder's parenthesised group, so
     an OR row cannot absorb it, and it must never be mistaken for a row the
     "Save Filter for Scraper" action writes.
+
+    ``include_settled`` is the escape hatch for the two statuses that settle an
+    item -- dead (``-1``) and ignored (``-2``). By default the search hides them:
+    a settled item is unusable, and the grid hides it so it cannot be found and
+    clicked. The clause is ``live_fetch_status_predicate("w.fetch_status")`` ANDed
+    into the base ``WHERE 1=1``, so it applies to every branch below. No UI passes
+    ``include_settled=True`` yet; the later "surface settled items" feature is a
+    UI change, not a query rewrite. The by-id lookups
+    (:func:`get_item_details`, :func:`get_items_by_ids`) stay unfiltered on
+    purpose: the detail pane and the item-update poll must resolve a row by id.
     """
     conn = get_connection(db_path)
     
@@ -4006,6 +4191,13 @@ def search_items(db_path: str, query: str = "", appid: int = None,
         
     sql = f"SELECT {cols} FROM workshop_items w LEFT JOIN creators u ON w.creator_steamid = u.steamid WHERE 1=1"
     params = []
+
+    # Settled items are hidden from the searchable library by default. The
+    # predicate is ANDed into the base clause so every filter branch below --
+    # text, tags, AppID, numeric, filter rows, percentile and the overlay -- is
+    # constrained by it, and an OR inside a filter row cannot pull one back in.
+    if not include_settled:
+        sql += f" AND {live_fetch_status_predicate('w.fetch_status')}"
 
     if query:
         sql, params = _build_text_search_clauses(sql, params, query, ["title", "short_description", "extended_description"])
@@ -4075,10 +4267,24 @@ def search_items(db_path: str, query: str = "", appid: int = None,
     conn.close()
     return results
 
-def get_all_creator_ids(db_path: str) -> list[str]:
-    """Returns a list of all unique creator IDs currently in the database."""
+def get_all_creator_ids(db_path: str, include_settled: bool = False) -> list[str]:
+    """Returns a list of all unique creator IDs currently in the database.
+
+    Settled items -- dead (``-1``) and ignored (``-2``) -- are excluded by
+    default, deliberately: this feeds the creator picker, and a creator whose
+    only items are hidden should not be offered, because choosing them would
+    filter the grid to nothing. This is the same population
+    :func:`search_items` presents, so the two cannot disagree about who is
+    visible. ``include_settled=True`` is the escape hatch the later surfacing
+    feature needs; no UI passes it yet.
+    """
     conn = get_connection(db_path)
-    cursor = conn.execute("SELECT DISTINCT creator_steamid FROM workshop_items WHERE creator_steamid IS NOT NULL ORDER BY creator_steamid")
+    sql = ("SELECT DISTINCT creator_steamid FROM workshop_items "
+           "WHERE creator_steamid IS NOT NULL")
+    if not include_settled:
+        sql += f" AND {live_fetch_status_predicate()}"
+    sql += " ORDER BY creator_steamid"
+    cursor = conn.execute(sql)
     results = [row["creator_steamid"] for row in cursor.fetchall()]
     conn.close()
     return results
@@ -4130,7 +4336,8 @@ def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
 
 
 def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None,
-                           subscribed_overlay: str = None) -> dict:
+                           subscribed_overlay: str = None,
+                           include_settled: bool = False) -> dict:
     """Returns percentile cutoff scores for Wilson metrics across items matching filters.
     Uses NTILE(100) — returns p99, p90, p50 thresholds for both scores.
     Returns empty dict if fewer than 10 items in the filtered set.
@@ -4138,10 +4345,20 @@ def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None,
     ``subscribed_overlay`` follows :func:`search_items`: the overlay constrains
     the same population the grid shows, so the percentiles must be computed over
     it too or the colours would describe a different set of rows.
+
+    ``include_settled`` follows :func:`search_items` and defaults to hiding. The
+    percentiles colour the *visible* rows, so computing them over hidden ones
+    would place a visible item's colour against a distribution the owner cannot
+    see -- which is exactly the wrong reading. The population here therefore
+    matches the search's by default; the escape hatch exists for the later
+    surfacing feature, not for the grid.
     """
     conn = get_connection(db_path)
-    sql = "SELECT w.workshop_id, w.wilson_favorite_score, w.wilson_subscription_score FROM workshop_items w"
+    sql = ("SELECT w.workshop_id, w.wilson_favorite_score, w.wilson_subscription_score "
+           "FROM workshop_items w WHERE 1=1")
     params = []
+    if not include_settled:
+        sql += f" AND {live_fetch_status_predicate('w.fetch_status')}"
     if filters:
         filter_clauses = []
         for f in filters:
@@ -4165,14 +4382,18 @@ def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None,
                 params.extend(clause_params)
                 filter_clauses.append((f.get("logic", "AND").upper(), clause))
         if filter_clauses:
-            sql += " WHERE "
+            # The group is parenthesised so the live clause above cannot be
+            # absorbed by an OR row inside it: without the parentheses
+            # ``live AND a OR b`` lets ``b`` pull a settled row back in.
+            group_sql = ""
             for idx, (logic, clause) in enumerate(filter_clauses):
-                sql += f" {logic} " if idx > 0 else ""
-                sql += clause
+                group_sql += f" {logic} " if idx > 0 else ""
+                group_sql += clause
+            sql += f" AND ({group_sql})"
 
     overlay_clause, overlay_params = subscribed_overlay_clause(subscribed_overlay)
     if overlay_clause:
-        sql += (" AND " if " WHERE " in sql else " WHERE ") + f"({overlay_clause})"
+        sql += f" AND ({overlay_clause})"
         params.extend(overlay_params)
 
     cutoff_sql = f"""
@@ -4571,7 +4792,7 @@ def raise_api_priority_for_list(db_path: str, workshop_id: int):
     conn = get_connection(db_path)
     conn.execute(
         "UPDATE workshop_items SET api_priority = 5 "
-        "WHERE workshop_id = ? AND api_priority < 5 AND (fetch_status IS NULL OR fetch_status != -1)",
+        f"WHERE workshop_id = ? AND api_priority < 5 AND {live_fetch_status_predicate()}",
         (workshop_id,)
     )
     conn.commit()
@@ -4583,7 +4804,7 @@ def raise_api_priority_for_detail(db_path: str, workshop_id: int):
     conn = get_connection(db_path)
     conn.execute(
         "UPDATE workshop_items SET api_priority = 10 "
-        "WHERE workshop_id = ? AND api_priority < 10 AND (fetch_status IS NULL OR fetch_status != -1)",
+        f"WHERE workshop_id = ? AND api_priority < 10 AND {live_fetch_status_predicate()}",
         (workshop_id,)
     )
     conn.commit()

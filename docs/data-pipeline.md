@@ -111,16 +111,16 @@ This is called when `get_next_items_to_fetch` returns empty — meaning the proc
 
 Discovery is skipped while the daemon already has enough outstanding work: for each target AppID,
 `seed_database` returns early when at least `DISCOVERY_FILL_TARGET` (300) items are fetchable — queued
-and not dead, the population `get_next_items_to_fetch` selects. The same value is the per-run fill
+and live, the population `get_next_items_to_fetch` selects. The same value is the per-run fill
 target, so a pass that does run refills to 300. The guard exists so that a healthy backlog is not
 re-crawled. The target was raised from 100 to 200 because the fetch loop drains the queue between
 discovery passes: at 100 every pass found the queue already at or above the threshold and skipped it,
 so the refill raced the drain instead of leading it; 200 still crossed it on occasion, so 300 is the
 headroom above the crossing — three pages at the request page size of 100. It does not treat
-`api_fetched_at IS NULL` alone as outstanding work: a never-fetched row may be dead
-(`fetch_status = -1`), may already be queued, or may carry the settled `404` the API gives an item it
-does not have, so the never-fetched total is not a measure of the fetch queue, and reading it as one
-once suppressed discovery permanently while the fetch queue held a single item. The skip's log line
+`api_fetched_at IS NULL` alone as outstanding work: a never-fetched row may be settled — dead
+(`fetch_status = -1`) or ignored (`-2`) — may already be queued, or may carry the settled `404` the
+API gives an item it does not have, so the never-fetched total is not a measure of the fetch queue,
+and reading it as one once suppressed discovery permanently while the fetch queue held a single item. The skip's log line
 reports `count_stranded_never_fetched_items` (`src/database.py:3711`) — the never-fetched, live rows
 outside `queued_anywhere_predicate()` — rather than `count_never_fetched_items`
 (`src/database.py:3678`), which the measured live run put at 336 with a large settled and queued
@@ -136,8 +136,9 @@ claimed or cleared on read: `get_next_items_to_fetch` (`src/database.py:3657`) i
 `get_next_image_item` (`src/database.py:4188`) `image_queue_predicate`
 (`src/database.py:3590`), and `get_next_batch_for_translation` (`src/database.py:4356`) the
 `translation_queue` rows. A queue is emptied only by the stage that finished or refused the work —
-the translator deletes the row it stored (`src/translator.py:752`), and `_settle_api_failure`
-(`src/daemon.py:1077`) clears a refused item's flags and queue rows (`src/daemon.py:1112`) — and no
+the translator deletes the row it stored (`src/translator.py:752`), `_settle_api_failure`
+(`src/daemon.py:1077`) clears a refused item's flags and queue rows (`src/daemon.py:1112`), and
+`ignore_item` (`src/database.py`) does the same when the owner settles an item — and no
 queue exists only as an in-memory list.
 
 ### `_run_page_discovery` (daemon)
@@ -567,6 +568,20 @@ granularity of the only version stamp that exists.
 
 Items become visible in search once they have `fetch_status = 200` (API details fetched) and their metadata is in the database. The TUI and Web UI both call `search_items` with structured filters.
 
+**Settled items are hidden by default.** `search_items` ANDs `live_fetch_status_predicate()`
+(`fetch_status IS NULL OR fetch_status NOT IN (-1, -2)`) into its base `WHERE 1=1`, so a dead or
+ignored row is not returned by any search the owner can run. The rule is the same one that owns the
+queues: a settled item is unusable — there is nothing to subscribe to or view — so surfacing it only
+offers a row that cannot be acted on. `include_settled=True` is the escape hatch, and no UI passes it
+yet; making settled items reachable again is a UI change (see
+[future-plans.md](future-plans.md#surfacing-dead-and-ignored-items)), not a query rewrite. The two
+queries that must agree with the visible set do: `compute_wilson_cutoffs` computes its percentiles
+over the same population (a percentile taken over hidden rows would colour the visible ones wrongly)
+and `get_all_creator_ids` omits a creator whose only items are hidden (offering them would filter the
+grid to nothing). Both take the same `include_settled` parameter. The by-id lookups
+(`get_item_details`, `get_items_by_ids`) stay unfiltered, because the detail pane and the
+item-update poll must resolve a row by id.
+
 ### Summary fields
 
 The `summary_only` SELECT returns: `workshop_id, title, title_en, creator_steamid, consumer_appid, translate_version, is_queued_for_subscription, web_scrape_priority, image_priority, translation_priority, file_size, image_answer, wilson_subscription_score, wilson_favorite_score, personaname, personaname_en`. Tags are returned via a subquery joining `workshop_tags` and `tags` as a comma-separated string.
@@ -587,7 +602,8 @@ Every item is, at all times, in exactly one state:
 * queued for translation (a `translation_queue` row exists; `translation_priority > 0` is the
   item-level mirror of it), or
 * complete for the stage that owns it, or
-* deliberately dead (`fetch_status = -1`) and therefore in **no** queue.
+* settled — dead (`fetch_status = -1`, the API's permanent answer) or ignored (`-2`, the owner's
+  marker) — and therefore in **no** queue.
 
 Each stage hands an item to the next by writing the column the next stage's own query selects on. The
 contract is enumerated here because it is otherwise written down only in the two functions that happen
@@ -595,11 +611,11 @@ to implement it — the producer that writes the column and the consumer that re
 
 | Handoff | Producer writes | Consumer selects on | Predicate function (`src/database.py`) |
 |---|---|---|---|
-| Discovery → API fetch | `api_priority = 3` for a cursor-discovered item, `5` for a page-discovered new or changed one, with `fetch_status` and `api_fetched_at` left NULL (`seed_database`, `_run_page_discovery`) | `get_next_items_to_fetch`: `api_priority > 0 AND (fetch_status IS NULL OR fetch_status != -1)` | `api_fetch_queue_predicate()` |
+| Discovery → API fetch | `api_priority = 3` for a cursor-discovered item, `5` for a page-discovered new or changed one, with `fetch_status` and `api_fetched_at` left NULL (`seed_database`, `_run_page_discovery`) | `get_next_items_to_fetch`: `api_priority > 0 AND live_fetch_status_predicate()` — `fetch_status IS NULL OR fetch_status NOT IN (-1, -2)` | `api_fetch_queue_predicate()` |
 | API fetch → web scrape | `fetch_status = 200`, `api_fetched_at = now`, then `raise_web_scrape_priority(max(3, requested))` — or `max(1, requested)` for an item the enrichment filters exclude (`_raise_scrape_and_image_priorities`) | `get_next_web_scrape_item`: `web_scrape_priority > 0`. The worker's own success test is that it stored a description, not merely that the flag is clear | `web_scrape_queue_predicate()` |
 | API fetch → image | `raise_image_priority(max(3, requested))`, or `max(1, requested)` when the filters exclude, whenever `preview_url` is present (`_raise_scrape_and_image_priorities`) | `get_next_image_item`: `image_priority > 0`; `image_answer` records the answer, so a permanent `404` or a non-image type also settles the stage | `image_queue_predicate()` |
 | API fetch and web scrape → translation | `queue_field_for_translation` raises the item's `translation_priority` with `MAX` and inserts a `translation_queue` row for each non-ASCII `title`/`short_description` (`_queue_translations`) or `extended_description` (`WebScraperThread`) | `get_next_batch_for_translation`: any `translation_queue` row; the translator clears the mirror to `0` when the item has no queue entries left | `translation_queue_predicate()` (the poll's; `translation_priority_predicate()` is the item-level mirror, and the invariant asks the queue row as well) |
-| any stage → dead | `_settle_api_failure` on a permanent `404`: `fetch_status = -1`, `api_priority`, `web_scrape_priority`, `image_priority` and `translation_priority` all cleared, and every `translation_queue` row for the item (`entity_type = 'item'`) deleted in the same transaction | every queue predicate. The web and image polls select on their flag alone and the translation poll on the row, all with **no** dead-item guard, so the producer's clear is what keeps a dead item out; the fetch queue also tests `fetch_status != -1` on its own | `queued_anywhere_predicate()` (the four flags **or** a `translation_queue` row) |
+| any stage → settled | `_settle_api_failure` on a permanent `404`: `fetch_status = -1`, `api_priority`, `web_scrape_priority`, `image_priority` and `translation_priority` all cleared, and every `translation_queue` row for the item (`entity_type = 'item'`) deleted in the same transaction. `ignore_item` writes the same settle at the owner's request, with `fetch_status = -2`, in one transaction | every queue predicate. The web and image polls select on their flag alone and the translation poll on the row, all with **no** settled-item guard, so the producer's clear is what keeps a settled item out; the fetch queue also tests `live_fetch_status_predicate()` on its own | `queued_anywhere_predicate()` (the four flags **or** a `translation_queue` row) |
 
 Each predicate is a named function, not a copy of its SQL: the worker poll
 interpolates the fragment into its statement and the tests in
@@ -623,11 +639,12 @@ Two statistics watch the invariant, each meant to read zero:
   issue 19 (dequeued as scraped with no description stored) and issue 20 (discovered with no fetch
   priority). A live item with a `translation_queue` row is queued, so it is not in this population
   even when its `translation_priority` mirror reads zero.
-* `dead_queued` — dead items a work queue would still select: a queue flag left set (issue 17) or a
-  `translation_queue` row the poll still holds (issue 66). The API column of this population is a
-  flag no poll would actually hand out — the fetch queue's predicate excludes dead rows — but it is
-  still a broken invariant, and the writers and migration 37→38 that keep it at zero are described
-  below.
+* `dead_queued` — settled items a work queue would still select: a queue flag left set (issue 17) or a
+  `translation_queue` row the poll still holds (issue 66). Its name is historical and its population
+  is dead (`-1`) **or ignored** (`-2`), because both settle the item and both must leave it in no
+  queue. The API column of this population is a flag no poll would actually hand out — the fetch
+  queue's predicate excludes settled rows — but it is still a broken invariant, and the writers and
+  migration 37→38 that keep it at zero are described below.
 
 `dead_queued` and `dead_items_by_queue` are one question at two resolutions, and both are wanted:
 `dead_queued` is the scalar that must read zero, and `dead_items_by_queue` is the per-queue breakdown that says
@@ -640,22 +657,24 @@ Both count; neither repairs. The consumer's predicates are named functions share
 with the handoff contract tests, so a divergence between a predicate and the
 producer's write is now caught at the handoff rather than inferred from these two
 numbers; the counters remain how the same divergence is noticed in the field,
-where no test is running. The producers that mark an item dead clear its
+where no test is running. The producers that settle an item — `_settle_api_failure`
+for a dead one, `ignore_item` for an ignored one — clear its
 `translation_queue` rows in the same transaction as the status write, and
 migration 35→36 removed the rows already stranded at the time of the fix (910
 dead items held 1,016 rows on the v35 snapshot, each with its mirror already
-cleared), so no dead item's fields are translated or paid for.
+cleared), so no settled item's fields are translated or paid for.
 
-**A dead item is final, so no writer may re-queue one.** The four writers that raise a priority on
-an item that already exists — the image worker's and the web worker's "the item changed" bump, and
-the two discovery call sites — carry the `fetch_status IS NULL OR fetch_status != -1` rule (the
-discovery call sites through `insert_or_update_item`'s `preserve_dead_api_priority`), because the
-fetch poll excludes dead rows: a priority written onto a dead row could never be handed out, and
-`_settle_api_failure` would never run for it again to clear it. Migration 37→38 cleared the rows
+**A settled item is final, so no writer may re-queue one.** The writers that raise a priority on
+an item that already exists — the image worker's and the web worker's "the item changed" bump, the
+TUI and web bulk updates, and the two discovery call sites — carry the
+`live_fetch_status_predicate()` rule (the discovery call sites through
+`insert_or_update_item`'s `preserve_dead_api_priority`), because the
+fetch poll excludes settled rows: a priority written onto a settled row could never be handed out,
+and nothing would run for it again to clear it. Migration 37→38 cleared the rows
 the unguarded writers had already stranded, so both counters read zero (issue 74).
 
 The rendered explanation of these counters is careful for the same reason. The API fetch poll
-excludes dead rows, so the API queue still drains even when a dead row holds its flag; it is the
+excludes settled rows, so the API queue still drains even when a settled row holds its flag; it is the
 web, image and translation polls — which select on their flag alone — that would keep spending
 requests on a page that no longer exists. Both front ends print that sentence from
 `metrics.DEAD_QUEUED_MEANING`, defined once rather than retyped.
@@ -666,11 +685,11 @@ requests on a page that no longer exists. Both front ends print that sentence fr
 
 The `coverage` statistic (`src/metrics.py`, `_coverage`) answers one question per stage: how much of
 the live library the stage has reached, at two scopes. It is drawn as seven bars in pipeline order.
-Dead items are excluded, because they can never be covered and counting them would make coverage fall
-as the library is cleaned up. Each bar's **maximum** is its reachable population and its **fill** is
-the share whose output is stored and current; the two are drawn on the bar's own track, and drawing
-the fill against the track rather than against the population is what stops a bar promising work that
-cannot exist.
+Settled items — dead (`-1`) and ignored (`-2`) — are excluded, because they can never be covered and
+counting them would make coverage fall as the library is cleaned up. Each bar's **maximum** is its
+reachable population and its **fill** is the share whose output is stored and current; the two are
+drawn on the bar's own track, and drawing the fill against the track rather than against the
+population is what stops a bar promising work that cannot exist.
 
 A bar's track is 100% of the unit its stage works in, which is not always the item. The item-scale
 bars (API Data, Extended Web, Images) count live items. The three **translation bars** are drawn in

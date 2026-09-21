@@ -78,7 +78,7 @@ Tags are not a column on `workshop_items`. They live in `tags(tag_id, tag_name)`
 |---|---|---|
 | `wilson_favorite_score` | DERIVED | `wilson_lower(favorited, lifetime_subscriptions)`. |
 | `wilson_subscription_score` | DERIVED | `wilson_lower(subscriptions, lifetime_subscriptions)`. |
-| `fetch_status` | STATE | Fetch outcome. `200` = fetched, `206` = partial (see gaps below), `-1` = dead, `500` = transient failure to retry, `NULL` = discovered but never fetched. Synthetic, not an actual HTTP response code. |
+| `fetch_status` | STATE | Fetch outcome. `200` = fetched, `206` = partial (see gaps below), `-1` = dead, `-2` = ignored, `500` = transient failure to retry, `NULL` = discovered but never fetched. Synthetic, not an actual HTTP response code. `-1` and `-2` are the **settled** pair: an item that can never complete and belongs to no queue, set by the API's permanent answer and by the owner respectively. |
 | `first_seen_at` | STATE (ours) | Set when the row is first inserted. |
 | `api_fetched_at` | STATE (ours) | Set only when the API returned content (see [timestamps.md](timestamps.md)). |
 | `last_fetch_attempted_at` | STATE (ours) | Set on every API attempt, success or failure. |
@@ -187,17 +187,35 @@ download-failure path (`src/image_worker.py:237`) and the web worker's request-f
 re-evaluates it happens soon — above the backlog, below an item someone is looking at. See
 [live-data-profile.md](live-data-profile.md) for the measured distribution of each queue.
 
-**A dead item is final and takes no queue flag.** `fetch_status = -1` is the API's permanent
-answer and `_promote_stale_items` promotes only `fetch_status = 200`, so a dead row can never
-complete and belongs to no queue. Every writer that raises a priority on a row that already
-exists therefore has to refuse one, and a dead item is in no queue for the reader too: the
-handoff metrics `dead_queued` and `dead_items_by_queue` must read zero. The image and web
-"the item changed" bumps carry the `fetch_status IS NULL OR fetch_status != -1` predicate, and
-the two discovery call sites pass `preserve_dead_api_priority=True` to
-`insert_or_update_item`, so re-seeing an item the API already answered `-1` for cannot revive
-it. Migration 37→38 cleared the flags those writers had already stranded (issue 74). This
-matters because the API fetch poll excludes dead rows, so `_settle_api_failure` — which clears
-all four flags — never runs for such a row again and nothing else would clear them.
+**A settled item is final and takes no queue flag.** `fetch_status` is *settled* when it is `-1`
+(dead: the API's permanent answer) or `-2` (ignored: the owner's marker, set by `ignore_item`).
+`_promote_stale_items` promotes only `fetch_status = 200`, so a settled row can never complete and
+belongs to no queue. Every writer that raises a priority on a row that already exists therefore has
+to refuse one, and a settled item is in no queue for the reader too: the handoff metrics
+`dead_queued` and `dead_items_by_queue` must read zero — their names are historical, and their
+population is every settled item, because a flagged ignored row is the same violation. The image and
+web "the item changed" bumps, the TUI and web bulk updates and the two `raise_api_priority_*`
+helpers carry `live_fetch_status_predicate()` — `fetch_status IS NULL OR fetch_status NOT IN
+(-1, -2)` — and the two discovery call sites pass `preserve_dead_api_priority=True` to
+`insert_or_update_item`, so re-seeing an item the API already answered `-1` for, or the owner
+ignored, cannot revive it. Migration 37→38 cleared the flags those writers had already stranded
+(issue 74). This matters because the API fetch poll excludes settled rows, so `_settle_api_failure`
+and `ignore_item` — which clear all four flags and delete the item's `translation_queue` rows —
+never run for such a row again and nothing else would clear them.
+
+**The two statuses are one question, and the pair is stated once.** `DEAD_FETCH_STATUS = -1`,
+`IGNORED_FETCH_STATUS = -2` and `SETTLED_FETCH_STATUSES = (-1, -2)` in `src/database.py` are the
+only place the values are named, and `live_fetch_status_predicate()` /
+`settled_fetch_status_predicate()` are the only place the live-versus-settled test is written.
+Every reader — the fetch poll, the priority writers, the worker guards, the search, the Wilson
+cutoffs, the creator list and the metrics — asks through that pair, so a third settled status would
+move all of them together. `search_items` **hides settled items by default** (its `include_settled`
+parameter is the escape hatch no UI exposes yet), and the search's companions agree with it:
+`compute_wilson_cutoffs` computes its percentiles over the visible rows only — a percentile taken
+over hidden rows would colour the visible ones wrongly — and `get_all_creator_ids` omits a creator
+whose only items are hidden, because offering them would filter the grid to nothing. The by-id
+lookups (`get_item_details`, `get_items_by_ids`) are deliberately unfiltered: the detail pane and
+the item-update poll must resolve a row by id.
 
 **The translation queue demotes a missed row as a retry policy.** When the model's reply leaves a
 field out, `_translate_batch` lowers that row's `priority` by one and leaves it queued: the row
@@ -261,6 +279,11 @@ that is not there.
   transient, an all-zero snapshot only means nothing was queued at that moment.
 * **`fetch_status = 206` has never occurred.** The schema and one migration query allow a partial-data
   status, but the production database contains zero rows with it.
+* **`item_counts.dead` still counts dead only.** The `Totals` metric splits the table into `dead`
+  (`fetch_status = -1`) and `alive` (`total - dead`), so an ignored (`-2`) row is counted as alive
+  there. That predates the settled pair and was outside its scope: the two metrics whose *population*
+  is the invariant — `dead_queued` and `dead_items_by_queue` — were generalised to every settled row
+  (their names kept for their consumers), but this display count was not renamed or re-based.
 * **The completion clocks start empty and are never backfilled.** `web_scraped_at`,
   `image_fetched_at` and `translated_at` arrived in v27, so every item that completed its stage
   earlier keeps NULL and no rate can be reconstructed for it. The per-queue throughput metrics

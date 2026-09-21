@@ -38,7 +38,9 @@ from src.database import (
     get_enrichment_filters,
     get_connection,
     image_queue_predicate,
+    live_fetch_status_predicate,
     queued_anywhere_predicate,
+    settled_fetch_status_predicate,
     translation_priority_predicate,
     web_scrape_queue_predicate,
 )
@@ -321,7 +323,7 @@ _DRAIN_QUEUES = (
     ("translation", "translated_at", translation_priority_predicate(), False, False),
 )
 
-_LIVE_ITEM_UNALIASED = "(fetch_status IS NULL OR fetch_status <> -1)"
+_LIVE_ITEM_UNALIASED = live_fetch_status_predicate()
 
 
 def _drain_estimate(outstanding: int, completed: int, active_seconds: float) -> dict:
@@ -450,11 +452,18 @@ def _status_counts(conn, params) -> list[dict]:
     ]
 
 
-@metric("dead_items_by_queue", 60, "Dead items still sitting in a work queue.")
+@metric("dead_items_by_queue", 60, "Settled (dead or ignored) items still sitting in a work queue.")
 def _dead_items_by_queue(conn, params) -> dict:
-    """Work queued against items that are already known to be gone.
+    """Work queued against items that are already settled.
 
-    An item marked dead should be in no queue, so this is expected to read zero.
+    **The name is historical.** The population is every settled item --
+    ``fetch_status`` in :data:`SETTLED_FETCH_STATUSES`, that is dead (``-1``) or
+    ignored (``-2``). An ignored item holding a queue flag is the same violation
+    as a dead one: the owner's marker settles the item exactly as death does, so
+    it belongs to no queue. The name is kept because the metric is consumed by
+    name in both front ends and renaming it is a separate concern.
+
+    A settled item should be in no queue, so this is expected to read zero.
     It is kept because the queues used to strand these rows, in two shapes. The
     first is a queue flag: the daemon used to clear only `api_priority` when it
     marked an item dead, and migration 16->17 cleared the `web_scrape_priority`,
@@ -466,16 +475,16 @@ def _dead_items_by_queue(conn, params) -> dict:
 
     This is the other resolution of the question `dead_queued` answers: that metric
     is the scalar that must read zero, and this one breaks the same population
-    down so the reading says which queue still holds the dead rows. The
+    down so the reading says which queue still holds the settled rows. The
     translation column therefore counts the mirror *or* a `translation_queue` row,
-    exactly as the scalar's union does -- a dead item held only by a row has no
+    exactly as the scalar's union does -- a settled item held only by a row has no
     flag column to name it, and a breakdown that read flags alone would put the
     item in the scalar and leave this diagnostic reading zero, which is the
     disagreement the breakdown exists to prevent. They are one question at two
     resolutions, not two findings.
     """
     row = conn.execute(
-        """
+        f"""
         SELECT COALESCE(SUM(CASE WHEN web_scrape_priority > 0 THEN 1 ELSE 0 END), 0) AS web,
                COALESCE(SUM(CASE WHEN image_priority > 0 THEN 1 ELSE 0 END), 0) AS image,
                COALESCE(SUM(CASE
@@ -486,29 +495,36 @@ def _dead_items_by_queue(conn, params) -> dict:
                               THEN 1 ELSE 0 END), 0) AS translation,
                COALESCE(SUM(CASE WHEN api_priority > 0 THEN 1 ELSE 0 END), 0) AS api
         FROM workshop_items
-        WHERE fetch_status = -1
+        WHERE {settled_fetch_status_predicate()}
         """
     ).fetchone()
     return {k: row[k] for k in ("web", "image", "translation", "api")}
 
 
-@metric("dead_queued", 58, "Dead items a work queue would still select.")
+@metric("dead_queued", 58, "Settled (dead or ignored) items a work queue would still select.")
 def _dead_queued(conn, params) -> int:
-    """Dead items a work queue would still select -- the shape of issues 17 and 66.
+    """Settled items a work queue would still select -- the shape of issues 17 and 66.
+
+    **The name is historical.** The population is every settled item --
+    ``fetch_status`` in :data:`SETTLED_FETCH_STATUSES`, dead (``-1``) or ignored
+    (``-2``). An ignored item a queue would still select is the same violation as
+    a dead one: both markers settle the item, both clear the four flags and the
+    translation rows, and both must leave the item in no queue. The name is kept
+    because the metric is consumed by name in both front ends.
 
     The handoff invariant is that every item is in exactly one state: queued for
     the API fetch (``api_priority > 0``), a web scrape (``web_scrape_priority > 0``),
     an image (``image_priority > 0``) or a translation (a ``translation_queue`` row
-    exists); complete for the stage that owns it; or deliberately dead
-    (``fetch_status = -1``) and therefore in **no** queue.
+    exists); complete for the stage that owns it; or deliberately settled
+    (``fetch_status`` in ``-1``/``-2``) and therefore in **no** queue.
 
-    A dead item a queue would still select is the second kind of violation: the
-    stage that marked it dead wrote ``fetch_status = -1`` but left work behind. It
+    A settled item a queue would still select is the second kind of violation: the
+    stage that settled it wrote the status but left work behind. It
     can be a flag -- the web, image and translation polls each select on their flag
-    alone, with no dead-item guard -- or, for translation, the queue row itself,
+    alone, with no settled-item guard -- or, for translation, the queue row itself,
     which is the consumer's real predicate and outlives a cleared mirror.
 
-    Zero is the healthy reading. A non-zero value is the number of dead items
+    Zero is the healthy reading. A non-zero value is the number of settled items
     still encumbered by a queue, each item counted once however many flags it
     holds. `dead_items_by_queue` answers the same question at the other
     resolution: this is the scalar that must read zero, and that metric is the
@@ -520,11 +536,11 @@ def _dead_queued(conn, params) -> int:
     # The union comes from the named queue predicates, so a change to one of them
     # moves this with it. ``api_priority`` is then added on its own, because the
     # API fetch predicate guards on fetch_status -- it reads ``api_priority > 0 AND
-    # (fetch_status IS NULL OR fetch_status != -1)`` -- and this metric's population is
-    # ``fetch_status = -1`` by definition, so that guarded term can never be true here.
-    # Without the extra term a dead row whose only leftover flag is the fetch
-    # priority would stop being counted, and it is the same violation:
-    # `_settle_api_failure` clears all four flags when it writes ``fetch_status = -1``.
+    # live_fetch_status_predicate()`` -- and this metric's population is
+    # ``settled_fetch_status_predicate()`` by definition, so that guarded term can
+    # never be true here. Without the extra term a settled row whose only leftover
+    # flag is the fetch priority would stop being counted, and it is the same
+    # violation: `_settle_api_failure` and `ignore_item` clear all four flags.
     #
     # Measured against the 2026-09-18 backup, before the queue-row term below
     # existed: the hand-written union and this one both counted 4, all 4 dead
@@ -535,7 +551,7 @@ def _dead_queued(conn, params) -> int:
         f"""
         SELECT COUNT(*) AS n
         FROM workshop_items
-        WHERE fetch_status = -1
+        WHERE {settled_fetch_status_predicate()}
           AND (({queued_anywhere_predicate()}) OR api_priority > 0)
         """
     ).fetchone()["n"]
@@ -548,9 +564,9 @@ def _queued_nowhere(conn, params) -> int:
     The handoff invariant is that every item is in exactly one state: queued for
     the API fetch (``api_priority > 0``), a web scrape (``web_scrape_priority > 0``),
     an image (``image_priority > 0``) or a translation (a ``translation_queue`` row
-    exists); complete for the stage that owns it; or deliberately dead
-    (``fetch_status = -1``) in no queue. This counts the first kind of violation --
-    an item that fell out of the pipeline without being finished:
+    exists); complete for the stage that owns it; or deliberately settled
+    (``fetch_status`` in ``-1``/``-2``) in no queue. This counts the first kind of
+    violation -- an item that fell out of the pipeline without being finished:
 
     * discovered but never fetched (``fetch_status IS NULL``) with no fetch priority,
       which is issue 20; or
@@ -646,8 +662,9 @@ def _fetch_recency(conn, params) -> dict:
 #: a permanent 0.0%.
 NOTHING_TO_TRANSLATE = "Nothing to translate"
 
-#: Live items only: dead items can never be covered.
-_LIVE_ITEM_ALIASED = "(w.fetch_status IS NULL OR w.fetch_status <> -1)"
+#: Live items only: settled items -- dead (``-1``) and ignored (``-2``) -- can
+#: never be covered.
+_LIVE_ITEM_ALIASED = live_fetch_status_predicate("w.fetch_status")
 
 
 def _ascii_sql(column: str) -> str:
@@ -1144,7 +1161,7 @@ def _priority_breakdowns(conn, params) -> dict:
             dict(r)
             for r in conn.execute(
                 f"SELECT {column} AS prio, COUNT(*) AS cnt FROM workshop_items "
-                f"WHERE {column} > 0 AND (fetch_status IS NULL OR fetch_status <> -1) "
+                f"WHERE {column} > 0 AND {live_fetch_status_predicate()} "
                 f"GROUP BY {column} ORDER BY prio DESC"
             )
         ]

@@ -256,7 +256,7 @@ def test_api_breakdown_shape_has_no_shipped_caller_but_is_served(db_path):
     _seed(db_path)
     sql = (
         "SELECT api_priority AS prio, COUNT(*) AS cnt FROM workshop_items "
-        "WHERE api_priority > 0 AND (fetch_status IS NULL OR fetch_status <> -1) "
+        f"WHERE api_priority > 0 AND {database.live_fetch_status_predicate()} "
         "GROUP BY api_priority ORDER BY prio DESC"
     )
     _assert_served_by(db_path, sql, API_INDEX, why="API queue breakdown shape")

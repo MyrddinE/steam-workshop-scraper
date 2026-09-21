@@ -8,7 +8,7 @@ import threading
 import requests
 from datetime import datetime, timezone
 from src import capture, images, pacing
-from src.database import get_next_image_item, insert_or_update_item, get_image_path
+from src.database import get_next_image_item, insert_or_update_item, get_image_path, live_fetch_status_predicate
 
 # Re-exported so this module still reads as the place the downloader's formats
 # are defined; the definitions live in src/images.py because the reader (the URL
@@ -235,7 +235,8 @@ class ImageDownloadThread(threading.Thread):
                         # state the dead-item rule wants gone (issue 74).
                         conn.execute(
                             "UPDATE workshop_items SET image_priority=?, "
-                            "api_priority = CASE WHEN (fetch_status IS NULL OR fetch_status != -1) "
+                            "api_priority = CASE WHEN "
+                            f"{live_fetch_status_predicate()} "
                             "AND api_priority < 2 THEN 2 ELSE api_priority END "
                             "WHERE workshop_id=?",
                             (new_pri, wid)
