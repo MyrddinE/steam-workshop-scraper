@@ -629,3 +629,23 @@ and any new writer of an existing one — because the fix is defined by the inva
 enumerating the paths.
 
 
+
+## Un-subscribing through the subscription queue
+
+**Status: Planned** — owner request, 2026-09-21. Not started; scheduled after the ignored-item work,
+because all three changes touch both front ends.
+
+`s` on a fully subscribed item should queue it for **removal**, so the subscription queue processes
+both additions and removals rather than additions alone. Two things make that more than a marker
+change. The queue's flag is a boolean today (`is_queued_for_subscription`, `toggle_subscription_queue`,
+`subscription_state`), so a queue that means two directions needs a value that says which — a new
+column with a migration (`EXPECTED_VERSION` is 38) or a re-derived flag, with the subscribe-only rows
+migrating cleanly either way. And `src/subscribe_engine.py` deliberately never sends an unsubscribe:
+an already-subscribed item returns before any request is made, so the removal direction is new work
+there — the endpoint, the credential and CSRF path it already owns, and the outcome vocabulary, since
+a removal can be refused or throttled exactly as an addition can. The queue screen and the web drain
+both need the direction per row, and the marker gains a queued-for-removal state drawn as an **empty
+red star outline** in both front ends, from one shared source the way the other marker states are.
+What `s` does for each existing marker state (`never`, `queued`, `subscribed`, `downloaded`) — and
+what it does when the item is already queued — is to be settled from that state machine before the
+work starts, not guessed. [tui.md](tui.md), [web-ui.md](web-ui.md), [data-pipeline.md](data-pipeline.md)
