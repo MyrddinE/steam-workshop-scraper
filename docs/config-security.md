@@ -101,7 +101,16 @@ read, the feature is off and every item stays without a `downloaded` marker.
 | Key | Type | Default | Purpose |
 |---|---|---|---|
 | `logging.level` | string | `"INFO"` | Log level (DEBUG, INFO, WARNING, ERROR). |
-| `logging.file` | string | None | Log file path. If set, logs are written to this file in addition to console (daemon) or instead of console (TUI). |
+| `logging.file` | string | None | Log file path. If set, logs are written to this file in addition to console (daemon) or instead of console (TUI). The file grows without bound and is **never rotated automatically**: a manual **Rotate Log** control on the daemon page of both front ends renames the live file to `<same folder>/logs/<stem>-<UTC stamp>.log.gz` and leaves a fresh empty file at the original path. **There is no retention policy** — archives accumulate — because deciding when to delete the owner's log history is not this program's call. |
+
+#### Manual rotation, and why it is manual
+
+The log grows about 115 MB a day (measured 2026-09-18: 594 MB across 5.63 M lines), so it needs a bound. It does not get an automatic one because the owner keeps a persistent `tail` open in another window: a rotation the daemon chose on its own would disrupt that view without warning. Rotation is therefore operator-initiated only — nothing runs on a timer, on a size threshold, or at startup — and the operator accepts that pressing the button disrupts the tail they are watching.
+
+Two processes hold the file open — the daemon and the TUI — so the rotation also has to make each of them reopen it. The rotator writes the archive's name to `<log file>.generation` beside the log, and every handler built by `src/log_rotation.log_file_handler` caches that marker and reopens when it changes. A rename alone would leave a handler writing into the renamed inode, and those records would disappear into the compressed archive silently. `logging.handlers.WatchedFileHandler` was rejected because it does not reopen on Windows, which is where this runs.
+
+The rename is done before the button's request answers, so the live path is new immediately; the gzip runs on a background thread and the daemon page shows `Rotating… (<size>)` until it finishes, then `Rotated: logs/<name> (<size>)`. A compression failure leaves the renamed file uncompressed and names it, rather than deleting the log. Concurrent presses are serialised by a lock file beside the archives, so two rotations cannot archive the same content twice.
+
 
 ### `session`
 

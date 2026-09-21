@@ -7,6 +7,7 @@ from src.daemon import Daemon
 from src.config import ConfigError, load_config
 from src.database import initialize_database, SchemaVersionError
 from src import crash
+from src import log_rotation
 
 
 class _SafeStreamHandler(logging.StreamHandler):
@@ -32,18 +33,24 @@ class _SafeStreamHandler(logging.StreamHandler):
 
 
 def _log_file_handler(log_file: str) -> logging.FileHandler:
-    """A log file handler that pins UTF-8 rather than the platform default.
+    """A log file handler that pins UTF-8 and follows a manual rotation.
 
-    Without this the file is written in the locale encoding, which on Windows is
-    cp1252. That corrupts every non-ASCII character the moment the file is read
-    back as UTF-8 -- the em dash in the "enriching" marker became a lone 0x97
-    byte, read back as the replacement character -- and, worse, a log record the
-    encoding cannot represent at all is *dropped*: cp1252 has no CJK, and
-    `logging.raiseExceptions = False` below means `handleError` discards the
+    Without the UTF-8 pin the file is written in the locale encoding, which on
+    Windows is cp1252. That corrupts every non-ASCII character the moment the
+    file is read back as UTF-8 -- the em dash in the "enriching" marker became a
+    lone 0x97 byte, read back as the replacement character -- and, worse, a log
+    record the encoding cannot represent at all is *dropped*: cp1252 has no CJK,
+    and `logging.raiseExceptions = False` below means `handleError` discards the
     record in silence, so every line naming a Japanese or Chinese item was never
     written. Pinning UTF-8 removes both problems at the writer.
+
+    The rotation half is the other invisible failure: the daemon's own handler is
+    one of the two that hold the log open, so when the operator rotates it the
+    handler must reopen the fresh file rather than keep writing to the renamed
+    inode. ``RotationAwareFileHandler`` watches the generation marker the rotator
+    publishes and reopens; see ``src/log_rotation.py``.
     """
-    return logging.FileHandler(log_file, encoding="utf-8")
+    return log_rotation.log_file_handler(log_file)
 
 
 def _fix_windows_encoding():
