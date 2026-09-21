@@ -9,11 +9,11 @@ The database uses SQLite with WAL mode. Schema evolution follows a `PRAGMA user_
 
 A **pending** migration is DDL that rewrites tables — 34→35's `DROP COLUMN` rewrote `workshop_items` and took *measured live* **283 s** in production — and the daemon is a detached process that may still be writing to them. So the two UI entry points do not call `initialize_database` directly. They call `initialize_database_with_daemon_stopped` (`src/daemon_control.py`), which reads the recorded `user_version` read-only first, stops a running daemon through `DaemonController.stop()` when — and only when — a migration is pending, refuses to migrate when that stop did not succeed, migrates, and restarts the daemon afterwards. A database already at `EXPECTED_VERSION` leaves a running daemon untouched: that is the ordinary relaunch. The daemon's own startup still calls `initialize_database` directly, because a daemon performs its own pending migrations before it begins writing; see [threading.md](threading.md#a-pending-migration-and-a-running-daemon).
 
-The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v39) for what that means when you add one.
+The two endpoints must be identical. `tests/test_fresh_schema_path.py::test_schema_equivalence` builds one database each way and fails the moment they diverge; see [Adding the next migration](#adding-the-next-migration-target-v40) for what that means when you add one.
 
 ---
 
-## Current Schema (v38)
+## Current Schema (v39)
 
 The application-level reference for every table and column is
 [data-model.md](data-model.md); the timestamp conventions are in
@@ -51,7 +51,7 @@ Primary key: `workshop_id INTEGER PRIMARY KEY` (aliased from rowid). Columns:
 | own_first_subscribed_at | INTEGER | When we first *saw* the owner subscribed; sticky, and the only source of the `previously` state |
 | steam_download_seen_at | INTEGER | One-way local latch: when this app first saw Steam's downloaded copy of a subscribed item on disk (v26). Set only by `src/workshop_folders`, cleared only beside `own_subscribed` when the item leaves the subscription list. NULL means not confirmed on disk. Renamed from `downloaded_at` in v33: it is a sighting latch, not a completion clock |
 
-The columns above are what the database holds at v38, and they are reached two ways.
+The columns above are what the database holds at v39, and they are reached two ways.
 `_create_current_schema` creates them directly, so a fresh database starts at `EXPECTED_VERSION`
 with these names. `_create_legacy_schema`'s `CREATE TABLE` instead declares the historical names
 (`dt_found`, `dt_updated`, `dt_attempted`, `dt_translated`, `time_created`, `time_updated`) and a
@@ -68,6 +68,7 @@ drops `tags`. The two endpoints must agree, which
 | personaname, personaname_en | TEXT | Display name and translation |
 | api_fetched_at, translated_at | INTEGER | Our clocks: profile refresh and translation time |
 | translation_priority | INTEGER | Priority for name translation |
+| ignored_at | INTEGER | Our clock: when the owner flagged the creator as ignored, or NULL (v39) |
 
 ### `translation_queue` — batched translation work items
 
@@ -207,15 +208,15 @@ independently, allowing crash recovery on a per-migration basis.
 from 1 to `EXPECTED_VERSION`, that each entry names the function for its own
 version, and that a fresh database reaches `EXPECTED_VERSION`.
 
-### Adding the next migration (target v39)
+### Adding the next migration (target v40)
 
-1. bump `EXPECTED_VERSION` in `src/database.py` to `39`;
-2. append `def _migration_38_to_39(cursor, conn, db_path): ...` immediately
-   after `_migration_37_to_38`, keeping the body self-contained and preserving
-   what the step meant at v38 (no tidying an older step, no changing a
+1. bump `EXPECTED_VERSION` in `src/database.py` to `40`;
+2. append `def _migration_39_to_40(cursor, conn, db_path): ...` immediately
+   after `_migration_38_to_39`, keeping the body self-contained and preserving
+   what the step meant at v39 (no tidying an older step, no changing a
    `PRAGMA user_version = N` target);
-3. append `(39, _migration_38_to_39)` as the last entry of `MIGRATIONS`;
-4. add a `### v38 → v39: ...` entry below, in the same shape as the others;
+3. append `(40, _migration_39_to_40)` as the last entry of `MIGRATIONS`;
+4. add a `### v39 → v40: ...` entry below, in the same shape as the others;
 5. **mirror the step in `_create_current_schema`.** It is the shape a fresh
    database is created at now, so a schema change that lands only in the chain
    moves the legacy endpoint and not the fresh one. Update the table, index or
@@ -1330,6 +1331,33 @@ writer dead-and-live, `tests/test_dead_requeue_migration.py` pins the step, its 
 names and the two metrics reading zero, and the two front-end text tests pin the shared
 sentence.
 
+### v38 → v39: the owner's creator-ignore flag
+
+Adds `creators.ignored_at`, the owner's creator-scoped ignore flag. Flagging a creator makes every
+one of their items ignored (the item marker, `fetch_status = -2`), and new items from that creator
+are ignored as they are scraped; un-ignoring restores them. The column is a **timestamp rather than
+a boolean** so the decision's clock is recorded, the same shape as the other owner-set stamps
+(`own_first_subscribed_at`, `steam_download_seen_at`); the ignore test everywhere is
+`ignored_at IS NOT NULL`. It is a genuine DDL step:
+
+```sql
+ALTER TABLE creators ADD COLUMN ignored_at INTEGER DEFAULT NULL;
+```
+
+The table is resolved with `_current_table_name(cursor, "creators", "users")` and the `ALTER` is
+guarded on `PRAGMA table_info`, for the same reasons 36→37 and 38→39's neighbours are: a marker
+rewound over an older shape may still present `users`, a crash between the DDL and the version bump
+leaves the column present under the old marker, and a direct call to the step must be a no-op
+rather than raise "duplicate column name".
+
+Unlike 35→36, 36→37 and 37→38, this step changes the schema, so **`_create_current_schema` mirrors
+it**: the `creators` `CREATE TABLE` there declares `ignored_at INTEGER DEFAULT NULL`, which is what
+keeps the fresh and legacy endpoints identical — `tests/test_fresh_schema_path.py::test_schema_equivalence`
+builds one database each way and fails while they disagree. `CREATOR_COLUMNS` moves with the column,
+because it is the `insert_or_update_creator` upsert whitelist. `EXPECTED_VERSION` moves to 39, and
+the version pin in each older migration's slice test moves with it. `tests/test_creator_ignore.py`
+pins the fresh declaration, the upgrade, the idempotent step, the two cascades and the one toggle.
+
 ---
 
 ## Database Utility Functions
@@ -1358,7 +1386,7 @@ The exception exists rather than a bare `ValueError` because the three entry poi
 
 ### `_create_current_schema`, `_create_legacy_schema`, `_ensure_indexes`, `MIGRATIONS` (database)
 
-`_create_current_schema(cursor, conn)` creates a brand-new database directly at `EXPECTED_VERSION`. Every table, index and trigger definition it holds was dumped from `sqlite_master` of a database the migration chain itself produced at v35 — not written from reading the migrations — so the index SQL it creates is the exact text SQLite stores. v36 was data-only, so the dump stayed the terminal shape for that step; v37 adds `app_discovery.cursor_walk_finished`, which is now declared in the `app_discovery` `CREATE TABLE` here as the migration leaves it. It deliberately does **not** repeat the query indexes `_ensure_indexes` owns, because that runs after it on both paths; those are the ones with historical names such as `idx_time_created`, whose definitions a `RENAME COLUMN` rewrote. It does create the indexes a *migration* owns, because no migration runs on this path. It does not carry the three columns 34→35 dropped. v38 is data-only, so the dump stayed the terminal shape for that step too.
+`_create_current_schema(cursor, conn)` creates a brand-new database directly at `EXPECTED_VERSION`. Every table, index and trigger definition it holds was dumped from `sqlite_master` of a database the migration chain itself produced at v35 — not written from reading the migrations — so the index SQL it creates is the exact text SQLite stores. v36 was data-only, so the dump stayed the terminal shape for that step; v37 adds `app_discovery.cursor_walk_finished`, which is now declared in the `app_discovery` `CREATE TABLE` here as the migration leaves it. It deliberately does **not** repeat the query indexes `_ensure_indexes` owns, because that runs after it on both paths; those are the ones with historical names such as `idx_time_created`, whose definitions a `RENAME COLUMN` rewrote. It does create the indexes a *migration* owns, because no migration runs on this path. It does not carry the three columns 34→35 dropped. v38 is data-only, so the dump stayed the terminal shape for that step too; v39 adds `creators.ignored_at`, which is now declared in the `creators` `CREATE TABLE` here. Because 38→39 is DDL, `test_schema_equivalence` is what holds this declaration and the step together.
 
 `_create_legacy_schema(cursor, conn)` creates the tables (`IF NOT EXISTS`) and the baseline columns in their historical form, and runs the legacy data conversions every database history shares. It is the unversioned part of the schema, run before the versioned steps. Because it runs on every startup for an existing database, it also runs on both sides of migration 29→30: it resolves the creator and discovery table names once with `_current_table_name` (new name if it exists, else the historical one, else the historical one for a brand-new file) and routes its `CREATE TABLE`, `_safe_add_columns`, populate step and legacy-filter conversion through the resolved name.
 
@@ -1376,7 +1404,7 @@ Upserts an item row using `INSERT ... ON CONFLICT(workshop_id) DO UPDATE SET`. F
 
 ### `insert_or_update_creator` (database)
 
-Same upsert pattern for the `creators` table, using `CREATOR_COLUMNS` frozenset for filtering.
+Same upsert pattern for the `creators` table, using `CREATOR_COLUMNS` frozenset for filtering. The conflict update only touches the keys the record holds, so a profile refresh (`_build_user_record` carries `steamid`, `personaname` and `api_fetched_at`) never clears the owner's `ignored_at` flag even though the column is in the whitelist (v39).
 
 ### `get_item_details` (database)
 

@@ -112,7 +112,7 @@ def _regress_to_v30(db_path) -> None:
 
 
 def test_a_fresh_database_names_the_column_fetch_status(db_path):
-    assert EXPECTED_VERSION == 38
+    assert EXPECTED_VERSION == 39
     assert _version(db_path) == EXPECTED_VERSION
     assert "fetch_status" in _columns(db_path)
     assert "status" not in _columns(db_path)

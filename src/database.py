@@ -35,6 +35,15 @@ WORKSHOP_ITEM_COLUMNS = frozenset({
 CREATOR_COLUMNS = frozenset({
     "steamid", "personaname", "personaname_en",
     "api_fetched_at", "translated_at", "translation_priority",
+    # The owner's creator-ignore flag (v39). A timestamp rather than a boolean
+    # so it records *when* the owner made the decision, the same shape as the
+    # other owner-set stamps (`own_first_subscribed_at`,
+    # `steam_download_seen_at`); NULL means not ignored. It is in this set so
+    # the upsert whitelist knows the column, not so the API ever writes it --
+    # `_build_user_record` carries no `ignored_at` key, and the conflict update
+    # only touches the keys the record holds, so a persona refresh cannot clear
+    # the flag.
+    "ignored_at",
 })
 
 def get_connection(db_path: str):
@@ -230,7 +239,7 @@ USER_PRIORITY_FLOOR = 5
 # that is older than its database cannot know what the newer schema means, and
 # reading it as though it did is how an older build ends up writing beside the
 # real tables instead of stopping. Raise this value only by adding a migration.
-EXPECTED_VERSION = 38
+EXPECTED_VERSION = 39
 
 # The two values `fetch_status` uses for an item that is deliberately out of the
 # pipeline. `-1` is *dead*: the API's permanent answer (the daemon persists the
@@ -1330,6 +1339,12 @@ def _create_current_schema(cursor, conn):
     legacy builder declares it too and migration 36->37 adds it to a database
     that reaches the step without it.
 
+    Migration 38->39 adds ``creators.ignored_at``, the owner's creator-ignore
+    flag. It is declared below in the ``creators`` CREATE TABLE, so a fresh
+    database carries it; migration 38->39 adds it to a database that reaches the
+    step without it. Unlike 37->38 this step is DDL and must be mirrored here,
+    which :func:`tests.test_fresh_schema_path.test_schema_equivalence` checks.
+
     **Forward rule:** when a migration changes the schema, mirror it here as
     well -- update the definition below and bump :data:`EXPECTED_VERSION` --
     so both paths still end at the same shape.
@@ -1401,7 +1416,8 @@ def _create_current_schema(cursor, conn):
         personaname_en TEXT,
         api_fetched_at INTEGER,
         translated_at INTEGER,
-        translation_priority INTEGER DEFAULT 0
+        translation_priority INTEGER DEFAULT 0,
+        ignored_at INTEGER DEFAULT NULL
     )
     """)
 
@@ -3134,6 +3150,42 @@ def _migration_37_to_38(cursor, conn, db_path):
         cleared, dead_rows,
     )
 
+def _migration_38_to_39(cursor, conn, db_path):
+    logging.info("Running migration 38->39: adding creators.ignored_at...")
+
+    # The owner's creator-ignore flag: flagging a creator makes every one of
+    # their items ignored, and new items from that creator are ignored as they
+    # are scraped. It is a timestamp rather than a boolean so the decision's
+    # clock is recorded, the same shape as the other owner-set stamps; the
+    # ignore test everywhere is ``ignored_at IS NOT NULL``.
+    #
+    # DDL, so `_create_current_schema` mirrors it in the `creators` CREATE TABLE
+    # and this step is what carries an existing database to that shape. The
+    # table is resolved rather than hard-coded for the same reason as 36->37:
+    # a marker rewound over an older shape may still present `users`. The
+    # guarded ALTER makes a rewound marker or a direct call to this step
+    # self-contained, and a re-run a no-op.
+    creators_table = _current_table_name(cursor, "creators", "users")
+    creator_columns = {
+        row[1] for row in cursor.execute(
+            f"PRAGMA table_info({creators_table})").fetchall()
+    }
+    if "ignored_at" in creator_columns:
+        logging.info("  %s.ignored_at already present; nothing to add", creators_table)
+    else:
+        cursor.execute(
+            f"ALTER TABLE {creators_table} "
+            "ADD COLUMN ignored_at INTEGER DEFAULT NULL"
+        )
+        logging.info("  added %s.ignored_at", creators_table)
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 39")
+    conn.commit()
+    logging.info(
+        "Migration 38->39 complete. Every existing creator is not ignored."
+    )
+
 def _ensure_indexes(cursor):
     """Create the query indexes, after the column renames migrations perform.
 
@@ -3226,6 +3278,7 @@ MIGRATIONS = [
     (36, _migration_35_to_36),
     (37, _migration_36_to_37),
     (38, _migration_37_to_38),
+    (39, _migration_38_to_39),
 ]
 
 def read_schema_version(db_path: str) -> int:
@@ -3707,6 +3760,36 @@ def insert_or_update_item(db_path: str, item_data: dict, *,
     return is_new
 
 
+# The restore rule :func:`unignore_item` implements, as an assignment list so
+# :func:`unignore_creator` can apply the *same* rule to every item of a creator
+# instead of keeping a second copy of it. See `unignore_item`'s docstring for
+# why each term is what it is. Callers own the WHERE clause -- the row's id for
+# one item, `creator_steamid` for a creator -- and it always requires the row to
+# be at :data:`IGNORED_FETCH_STATUS`, which is what makes both idempotent.
+_RESTORE_IGNORED_ITEM_ASSIGNMENTS = (
+    "fetch_status = CASE WHEN api_fetched_at IS NOT NULL THEN 200 ELSE NULL END, "
+    "api_priority = CASE WHEN api_fetched_at IS NULL THEN 1 ELSE api_priority END, "
+    "web_scrape_priority = CASE WHEN COALESCE(extended_description, '') = '' "
+    "THEN MAX(COALESCE(web_scrape_priority, 0), 3) ELSE web_scrape_priority END"
+)
+
+# What the next press of the creator-ignore control will do, keyed by the
+# creator's current state. One source for both front ends, injected into the web
+# page and imported by the TUI, so the two cannot use different words for the
+# same direction.
+CREATOR_IGNORE_LABELS = {False: "Ignore creator", True: "Un-ignore creator"}
+
+
+def creator_ignore_label(ignored) -> str:
+    """The creator-ignore control's wording for the state it is currently in.
+
+    A true-ish ``ignored`` means the next press moves the other way, so the
+    label names that move ("Un-ignore creator"); anything else names "Ignore
+    creator". Shared by the web route and the TUI action.
+    """
+    return CREATOR_IGNORE_LABELS[bool(ignored)]
+
+
 def ignore_item(db_path: str, workshop_id: int) -> bool:
     """Settle an item at the owner's request: ``fetch_status = -2``.
 
@@ -3798,6 +3881,10 @@ def unignore_item(db_path: str, workshop_id: int) -> bool:
     reconstructed: nothing on the row says whether work was outstanding before
     ignoring, and the API fetch this queues will re-raise them if it still is.
 
+    The assignment list is :data:`_RESTORE_IGNORED_ITEM_ASSIGNMENTS`, shared
+    verbatim with :func:`unignore_creator`: a creator's items are restored by
+    the same rule as one item, so the two cannot drift.
+
     Idempotent: the WHERE requires the row to be at ``-2``, so a second call
     matches nothing and reports False. A missing row or a live one also reports
     False.
@@ -3805,13 +3892,7 @@ def unignore_item(db_path: str, workshop_id: int) -> bool:
     conn = get_connection(db_path)
     try:
         cursor = conn.execute(
-            "UPDATE workshop_items SET "
-            "fetch_status = CASE WHEN api_fetched_at IS NOT NULL "
-            "THEN 200 ELSE NULL END, "
-            "api_priority = CASE WHEN api_fetched_at IS NULL "
-            "THEN 1 ELSE api_priority END, "
-            "web_scrape_priority = CASE WHEN COALESCE(extended_description, '') = '' "
-            "THEN MAX(COALESCE(web_scrape_priority, 0), 3) ELSE web_scrape_priority END "
+            f"UPDATE workshop_items SET {_RESTORE_IGNORED_ITEM_ASSIGNMENTS} "
             "WHERE workshop_id = ? AND fetch_status = ?",
             (workshop_id, IGNORED_FETCH_STATUS),
         )
@@ -3851,6 +3932,143 @@ def toggle_ignored_item(db_path: str, workshop_id: int) -> bool:
         return False
     ignore_item(db_path, workshop_id)
     return row is not None
+
+
+def creator_is_ignored(db_path: str, creator_steamid) -> bool:
+    """Whether the owner has flagged this creator (``creators.ignored_at`` set).
+
+    A missing creator row reads False: no flag was ever recorded for it. The
+    read is what the front ends draw the control's label from and what the
+    daemon's merge asks before it settles a new item.
+    """
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT ignored_at FROM creators WHERE steamid = ?",
+            (creator_steamid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return bool(row is not None and row["ignored_at"] is not None)
+
+
+def ignore_creator(db_path: str, creator_steamid) -> bool:
+    """Ignore a creator and every one of their items that is not dead.
+
+    One transaction, and set operations over ``creator_steamid`` rather than a
+    Python loop over the creator's items:
+
+    * the creator's own flag is set. The write is an upsert because a creator
+      whose profile was never fetched has no ``creators`` row, and inserting a
+      minimal one is what makes the flag persist -- and therefore what makes new
+      items from that creator ignored as they are scraped. An existing row with
+      the flag already set is left alone, which is what makes a second press
+      report no change;
+    * every item of the creator that is **not dead** is settled at
+      :data:`IGNORED_FETCH_STATUS` with all four queue priorities zeroed. The
+      live predicate is the shared one, so a row already at ``-2`` is outside
+      the update rather than counted as changed, and a row at ``-1`` is outside
+      it too: dead stays dead;
+    * the translation queue rows of those non-dead items are deleted on the same
+      connection, because the translation poll selects `translation_queue` rows
+      with no settled-item guard (issue 66's shape, and the same reason
+      :func:`ignore_item` deletes them). A dead item's rows are *not* touched:
+      this direction has no business moving a dead row.
+
+    Idempotent: returns True only when this call changed something -- the flag,
+    a live row, or a stranded queue row. A second call on a cleanly ignored
+    creator reports False.
+    """
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute(
+            "INSERT INTO creators (steamid, ignored_at) VALUES (?, ?) "
+            "ON CONFLICT(steamid) DO UPDATE SET ignored_at = excluded.ignored_at "
+            "WHERE creators.ignored_at IS NULL",
+            (creator_steamid, int(time.time())),
+        )
+        changed = cursor.rowcount > 0
+
+        cursor = conn.execute(
+            "UPDATE workshop_items SET fetch_status = ?, api_priority = 0, "
+            "web_scrape_priority = 0, image_priority = 0, translation_priority = 0 "
+            f"WHERE creator_steamid = ? AND {live_fetch_status_predicate()}",
+            (IGNORED_FETCH_STATUS, creator_steamid),
+        )
+        changed = changed or cursor.rowcount > 0
+
+        cursor = conn.execute(
+            "DELETE FROM translation_queue "
+            "WHERE entity_type = 'item' AND entity_id IN ("
+            "SELECT workshop_id FROM workshop_items "
+            f"WHERE creator_steamid = ? AND fetch_status IS NOT {DEAD_FETCH_STATUS})",
+            (creator_steamid,),
+        )
+        changed = changed or cursor.rowcount > 0
+
+        conn.commit()
+        return changed
+    finally:
+        conn.close()
+
+
+def unignore_creator(db_path: str, creator_steamid) -> bool:
+    """Restore a creator's ignored items and clear the creator's flag.
+
+    The reverse of :func:`ignore_creator`, in one transaction: the flag is
+    cleared, and every item of the creator currently at
+    :data:`IGNORED_FETCH_STATUS` is restored by
+    :data:`_RESTORE_IGNORED_ITEM_ASSIGNMENTS` -- the **same rule**
+    :func:`unignore_item` applies to one item, so an item that had been fetched
+    returns to ``200``, one that never was returns to NULL and is queued for an
+    API fetch, and one with no description gets its web-scrape priority back.
+    There is deliberately no second copy of that rule here.
+
+    Items the API settled as dead are outside the update: dead stays dead. So is
+    an item already restored, which is what makes a second call report False --
+    as does a creator with no flag set and no ignored items.
+    """
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute(
+            "UPDATE creators SET ignored_at = NULL "
+            "WHERE steamid = ? AND ignored_at IS NOT NULL",
+            (creator_steamid,),
+        )
+        changed = cursor.rowcount > 0
+
+        cursor = conn.execute(
+            f"UPDATE workshop_items SET {_RESTORE_IGNORED_ITEM_ASSIGNMENTS} "
+            "WHERE creator_steamid = ? AND fetch_status = ?",
+            (creator_steamid, IGNORED_FETCH_STATUS),
+        )
+        changed = changed or cursor.rowcount > 0
+
+        conn.commit()
+        return changed
+    finally:
+        conn.close()
+
+
+def toggle_creator_ignored(db_path: str, creator_steamid) -> bool:
+    """Toggle the owner's creator-ignore flag and report the new state.
+
+    Both front ends call this one function, so the direction is chosen from the
+    creator's own flag rather than from the caller: a creator already flagged
+    goes through :func:`unignore_creator` (the owner's way back), every other
+    one through :func:`ignore_creator`. That is the whole toggle rule, stated
+    once here so the TUI action and the web route cannot disagree about what a
+    second press does.
+
+    Returns True when the creator is ignored after the call and False when it is
+    not -- a reverse. A creator with no ``creators`` row is not ignored, so the
+    first press flags it (inserting the row, as :func:`ignore_creator` does).
+    """
+    if creator_is_ignored(db_path, creator_steamid):
+        unignore_creator(db_path, creator_steamid)
+        return False
+    ignore_creator(db_path, creator_steamid)
+    return True
 
 
 # ── Stage-handoff consumer predicates ─────────────────────────────────────────
