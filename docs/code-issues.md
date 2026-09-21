@@ -132,7 +132,7 @@ Script and style bodies are removed before the cap, so the byte budget is spent 
 
 ### `request_delay_seconds` was accepted without deprecation
 
-Honoured, but logs a warning naming the replacement — [config-security.md](config-security.md)
+Retired: the old spelling is no longer read, and one warning per process names the replacement — [config-security.md](config-security.md)
 
 ### The userscript version had to be kept in step by hand
 
@@ -356,7 +356,7 @@ production has already paid, kept here as the evidence that the index is used. [
 
 ### A stop that arrived before the daemon's first PID-file check was ignored
 
-**Was issue 59.** The daemon took the disappearance of `.daemon.pid` as its stop signal but only acted on an absence it had already seen a presence for, so a stop landing before the first check was discarded for the life of the process and the controller killed it mid-call. `daemon_runner` now tells the daemon a PID file is *expected*, which makes a missing file a stop from the first check, while a directly-constructed daemon keeps the old guard. Around it, every worker is signalled before any join is attempted and the joins share one five-second budget, naming any survivor; the duplicate per-worker stop lines are gone and the idle waits wake for a stop. *Measured*: the removed-before-first-check case now exits in **1.04 s** where it previously ran past 20 s; two daemons sharing one file stop in **2.0 s** instead of 9.97 s. The controller's grace is now derived rather than guessed — 15 s for the longest main-thread block, plus the 5 s join budget, plus 5 s of margin — and a test pins the budget coupling so the two numbers cannot drift apart. [threading.md](threading.md), [tui.md](tui.md), [cross-platform.md](cross-platform.md)
+**Was issue 59.** The daemon took the disappearance of `.daemon.pid` as its stop signal but only acted on an absence it had already seen a presence for, so a stop landing before the first check was discarded for the life of the process and the controller killed it mid-call. `daemon_runner` now tells the daemon a PID file is *expected*, which makes a missing file a stop from the first check, while a directly-constructed daemon keeps the old guard. Around it, every worker is signalled before any join is attempted and the joins share one budget, naming any survivor; the duplicate per-worker stop lines are gone and the idle waits wake for a stop. *Measured*: the removed-before-first-check case now exits in **1.04 s** where it previously ran past 20 s; two daemons sharing one file stop in **2.0 s** instead of 9.97 s. The controller's grace is now derived rather than guessed — 15 s for the longest main-thread block, plus the join budget, plus 5 s of margin, which is **40 s** at the 20 s budget the joins now share — and a test pins the budget coupling so the two numbers cannot drift apart. [threading.md](threading.md), [tui.md](tui.md), [cross-platform.md](cross-platform.md)
 
 ### A stale PID file made the controller kill an unrelated process
 
