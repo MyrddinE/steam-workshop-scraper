@@ -261,7 +261,7 @@ metrics and what each section renders:
 | `dead_queued` | the dead-items-still-queued counter, with an all-clear at zero |
 | `dead_items_by_queue` | the dead-items-by-queue callout |
 | `queued_nowhere` | the items-in-no-queue counter, with an all-clear at zero |
-| `fetch_recency` | fresh / stale / never-attempted counts |
+| `fetch_recency` | fresh / stale / never-attempted counts over the window `daemon.item_staleness_days` (the sweep's own threshold, default 30), which the metric reports as `window_days`; the label names that number and carries the shared caveat that this is the age of our last attempt — not the queue — and includes settled rows (dead and legacy `404`s) that will never be re-fetched |
 | `coverage` | seven coverage bars (API Data, Translations, Extended Web, Extended Web Translation, Images, Creator, Creator Translation) over live items — items, translation slots or authors, per stage — at two scopes: the whole library, and the target AppIDs' enrichment filters |
 | `translation_status` | the translation classification |
 | `tag_counts` | the tag table |

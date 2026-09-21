@@ -172,6 +172,10 @@ def index():
     # differently.
     return render_template('index.html',
                            translation_notice=pending.TRANSLATION_REQUESTED_NOTICE,
+                           # The fetch-recency caveat is the metric module's
+                           # sentence, shared with the TUI, so the two panels
+                           # cannot describe the figure differently (issue 73).
+                           fetch_recency_meaning=metrics.FETCH_RECENCY_MEANING,
                            filter_schema_json=json.dumps(SEARCH_FILTER_SCHEMA),
                            # The rotation button's wording is the TUI's constant,
                            # retyped nowhere, so the two daemon pages cannot say
@@ -500,7 +504,14 @@ def api_metric(name):
     # The configured target AppIDs travel with the request so the coverage
     # metric can restrict its second figure to what the owner cares about; a
     # config with none lets the metric fall back to every `app_discovery` row.
-    params = {"target_appids": (_config.get("daemon", {}) or {}).get("target_appids")}
+    # The item re-fetch window comes from the same key the daemon's staleness
+    # sweep uses, read through the shared helper, so the panel's "stale" and the
+    # rule the pipeline follows are one number (issue 73).
+    daemon_config = _config.get("daemon", {}) or {}
+    params = {
+        "target_appids": daemon_config.get("target_appids"),
+        "staleness_days": metrics.item_staleness_days(daemon_config),
+    }
     entry = metrics.compute(_db_path, [name], params)[name]
     return jsonify({
         "name": name,

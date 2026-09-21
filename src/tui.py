@@ -250,13 +250,22 @@ class StatsScreen(Screen):
         "queue_eta": "queue-eta-content",
     }
 
-    def __init__(self, db_path: str, target_appids: list | None = None):
+    def __init__(self, db_path: str, target_appids: list | None = None,
+                 staleness_days: int | None = None):
         super().__init__()
         self.db_path = db_path
         #: The configured target AppIDs, when the caller has them. The coverage
         #: metric restricts its second figure to these apps' enrichment filters;
         #: when this is None the metric falls back to every `app_discovery` row.
         self.target_appids = target_appids
+        #: The item re-fetch window (`daemon.item_staleness_days`), read through
+        #: `metrics.item_staleness_days` by the caller so the recency figure and
+        #: the daemon's sweep use one number. A caller that has no config (tests
+        #: constructing the screen directly) gets the daemon's own default.
+        self.staleness_days = (
+            metrics.DEFAULT_STALENESS_DAYS if staleness_days is None
+            else int(staleness_days)
+        )
         #: Last measured duration per metric, and when it finished, both kept for
         #: the session so the request order and the intervals adapt to the data.
         self._measured_ms: dict[str, float] = {}
@@ -384,7 +393,9 @@ class StatsScreen(Screen):
         from src.database import compact_tag_ids
 
         for name, entry in metrics.iter_metrics(
-                self.db_path, names, {"target_appids": self.target_appids}):
+                self.db_path, names,
+                {"target_appids": self.target_appids,
+                 "staleness_days": self.staleness_days}):
             if name == "tag_counts":
                 # The tag-frequency write stays off the UI thread, exactly as the
                 # old slow-tier worker did, and runs once per tag metric arrival.
@@ -488,12 +499,16 @@ class StatsScreen(Screen):
                 "item(s) are in no queue and not complete",
             ))
         elif name == "fetch_recency":
+            # The window is the metric's own answer, not a constant here, so a
+            # label can never name a different window than the query looked at.
+            window = int(value.get("window_days", metrics.DEFAULT_STALENESS_DAYS))
             self._set_text(
                 name,
                 "[b]Record count by fetch recency[/b]\n"
-                f"  Fresh (last {metrics.DEFAULT_STALENESS_DAYS}d): {value.get('fresh', 0):,}\n"
-                f"  Stale: {value.get('stale', 0):,}\n"
-                f"  Never attempted: {value.get('unknown', 0):,}",
+                f"  Fresh (last {window}d): {value.get('fresh', 0):,}\n"
+                f"  Stale (over {window}d): {value.get('stale', 0):,}\n"
+                f"  Never attempted: {value.get('unknown', 0):,}\n"
+                f"[dim]{metrics.FETCH_RECENCY_MEANING}[/dim]",
             )
         elif name == "coverage":
             self._set_text(name, self._format_coverage(value))
@@ -3338,9 +3353,11 @@ class ScraperApp(App):
 
     def action_show_stats(self) -> None:
         """Shows the database statistics screen."""
+        daemon_config = self.config.get("daemon", {}) or {}
         self.push_screen(StatsScreen(
             self.db_path,
-            (self.config.get("daemon", {}) or {}).get("target_appids"),
+            daemon_config.get("target_appids"),
+            staleness_days=metrics.item_staleness_days(daemon_config),
         ))
         
     async def action_update_visible(self) -> None:

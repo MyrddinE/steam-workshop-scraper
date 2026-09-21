@@ -48,6 +48,7 @@ from src.daemon_state import StateStore, state_path_for
 from src import pacing
 from src import images
 from src import activity
+from src import metrics
 from src import capture
 from src import crash
 from src import session_health
@@ -404,7 +405,10 @@ class Daemon:
         stored_api_delay = pacing.load_delay(self.state_store, pacing.API_DELAY_SECTION)
         self.api_delay = (stored_api_delay if stored_api_delay is not None
                           else API_DELAY_DEFAULT)
-        self.item_staleness_days = int(daemon_config.get("item_staleness_days") or 30)
+        # The one reader of `daemon.item_staleness_days`: the statistics metric
+        # takes its window from the same helper, so the panel's "stale" and the
+        # sweep's threshold cannot drift apart (issue 73).
+        self.item_staleness_days = metrics.item_staleness_days(daemon_config)
         if "user_staleness_days" in daemon_config:
             warn_retired_key("daemon", "user_staleness_days", "creator_staleness_days")
         self.creator_staleness_days = int(

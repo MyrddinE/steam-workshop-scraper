@@ -46,6 +46,30 @@ from src.database import (
 #: Used when a caller wants every metric and has no measurements of its own.
 DEFAULT_STALENESS_DAYS = 30
 
+#: What the ``fetch_recency`` counts are, in one sentence both front ends print.
+#: Defined here rather than written once in the TUI and retyped in the template,
+#: so the two panels cannot describe the same figure differently -- the same
+#: reason ``pending.TRANSLATION_REQUESTED_NOTICE`` exists.
+FETCH_RECENCY_MEANING = (
+    "Our last fetch attempt, not a backlog: it includes settled rows "
+    "(dead and legacy 404s), and a stale row may not be due yet at the "
+    "configured threshold."
+)
+
+
+def item_staleness_days(daemon_config: dict | None) -> int:
+    """The item re-fetch window, read from the one key that configures it.
+
+    ``daemon.item_staleness_days`` is the window ``_promote_stale_items``
+    promotes at, so it must also be the window ``fetch_recency`` buckets by, or
+    the statistics would label rows stale that the sweep does not consider due.
+    The daemon's sweep and both statistics front ends read the key through this
+    function, so there is one default (the daemon's own 30 days) and one answer
+    rather than each caller deriving its own.
+    """
+    return int((daemon_config or {}).get("item_staleness_days")
+               or DEFAULT_STALENESS_DAYS)
+
 #: One reporter for all metrics, keyed by metric name. The stats screen retries
 #: a failed metric on its next scheduler tick; this keeps a persistent failure
 #: from writing a warning every tick, while still reporting the first one.
@@ -546,11 +570,38 @@ def _queued_nowhere(conn, params) -> int:
     ).fetchone()["n"]
 
 
-@metric("fetch_recency", 79, "Our fetch recency, by last_fetch_attempted_at.")
+@metric(
+    "fetch_recency",
+    79,
+    "Age of our last fetch attempt per row (last_fetch_attempted_at), at "
+    "daemon.item_staleness_days. Not the fetch queue: settled rows (dead and "
+    "legacy 404s) are counted, and a stale row is only a re-fetch candidate.",
+)
 def _fetch_recency(conn, params) -> dict:
+    """Row counts by the age of **our last fetch attempt**, not of Steam's data.
+
+    The window is ``staleness_days`` when the caller supplies it -- both front
+    ends pass ``daemon.item_staleness_days`` through :func:`item_staleness_days`,
+    so the boundary is the one ``_promote_stale_items`` promotes at -- and
+    ``DEFAULT_STALENESS_DAYS`` otherwise. The window used travels back in the
+    value as ``window_days`` so the label has a single owner and the two panels
+    cannot disagree with the query that produced the counts.
+
+    Read the counts as attempt recency, not as work outstanding:
+
+    * it measures ``last_fetch_attempted_at``, which a *failed* attempt also
+      stamps, so it is not the clock the API queue's time-to-drain uses;
+    * it counts every row, so dead items (``fetch_status = -1``) and the legacy
+      ``404`` rows are inside ``fresh``/``stale`` even though neither will ever
+      be fetched again;
+    * a ``stale`` row is only older than the window. The sweep's criterion is
+      narrower -- live, successful, unqueued, and ``api_fetched_at`` older than
+      the same window -- and it runs hourly, so the stale band is a candidate
+      list, not the queue, and a stale row may simply not be due yet.
+    """
     staleness_days = int(params.get("staleness_days", DEFAULT_STALENESS_DAYS))
     threshold = int(time.time()) - staleness_days * 86400
-    counts = {"fresh": 0, "stale": 0, "unknown": 0}
+    counts = {"fresh": 0, "stale": 0, "unknown": 0, "window_days": staleness_days}
     rows = conn.execute(
         """
         SELECT CASE
