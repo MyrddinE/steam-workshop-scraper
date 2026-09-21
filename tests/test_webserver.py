@@ -2862,6 +2862,8 @@ def test_entering_author_mode_from_an_item_overrides_filters_and_keeps_the_sort(
     assert jump["saveVisible"] == "none", "Save Filter is hidden in single-creator mode"
     assert jump["rowsVisible"] == "none", "the old rows are replaced, not merely overlaid"
     assert jump["searchResets"] == [True], "the jump re-runs the search once"
+    assert jump["creatorRefreshes"] == 1, \
+        "entering the mode reads the creator's ignore state once, to label the toggle"
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
