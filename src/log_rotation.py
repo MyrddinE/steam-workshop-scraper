@@ -423,7 +423,12 @@ def _finish_rotation(key: str, raw: str, archive: str, lock: str) -> None:
         }
     except Exception as exc:
         # The rename already happened, so the bytes are in `raw`; naming it is
-        # what lets the operator recover them rather than lose the log.
+        # what lets the operator recover them rather than lose the log. A
+        # half-written gzip would look like a good archive, so it is removed.
+        try:
+            os.remove(archive)
+        except OSError:
+            pass
         result = {
             "ok": False,
             "started": False,

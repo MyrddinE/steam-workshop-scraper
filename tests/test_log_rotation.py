@@ -274,6 +274,32 @@ def test_the_handler_opens_the_log_with_delete_sharing_on_windows():
     assert "_WINDOWS_SHARE_DELETE" in windows_source
 
 
+def test_a_compression_failure_keeps_the_log_and_reports_where(tmp_path, monkeypatch):
+    log = tmp_path / "daemon.log"
+    log.write_text("content\n", encoding="utf-8")
+
+    def explode(source, destination):
+        # A half-written gzip must not be mistaken for a good archive.
+        with open(destination, "wb") as fh:
+            fh.write(b"not really gzip")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(log_rotation, "_gzip_into", explode)
+    result = log_rotation.rotate_log(str(log))
+    assert result["started"] is True
+    assert log_rotation.wait_for_rotation(str(log), timeout=10)
+
+    final = log_rotation.rotation_status(str(log))["result"]
+    assert final["ok"] is False
+    assert "No space left on device" in final["message"]
+    assert ".log" in final["message"]
+    raw = list((tmp_path / "logs").glob("*.log"))
+    assert len(raw) == 1, "the renamed log must survive a failed compression"
+    assert raw[0].read_text(encoding="utf-8") == "content\n"
+    assert list((tmp_path / "logs").glob("*.log.gz")) == [], \
+        "the partial archive must be removed"
+
+
 def test_format_size():
     assert log_rotation.format_size(0) == "0 B"
     assert log_rotation.format_size(1023) == "1023 B"
