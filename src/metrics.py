@@ -440,7 +440,7 @@ def _dead_items_by_queue(conn, params) -> dict:
     return {k: row[k] for k in ("web", "image", "translation", "api")}
 
 
-@metric("dead_queued", 58, "Dead items still sitting in a work queue.")
+@metric("dead_queued", 58, "Dead items a work queue would still select.")
 def _dead_queued(conn, params) -> int:
     """Dead items a work queue would still select -- the shape of issues 17 and 66.
 
