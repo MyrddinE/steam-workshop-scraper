@@ -15,6 +15,12 @@ the production database on 2026-09-12.
 
 ## Open
 
+### Issue 75
+
+**The infinite-scroll sentinel consumes a result cell** — *Open*, Low
+
+`#results-grid` is a CSS grid (`templates/index.html:14`) and `_placeSentinel` (`templates/index.html:717`) inserts a bare `<div id="scroll-sentinel">` into it as a grid item. There is no CSS rule for `#scroll-sentinel` anywhere — grep confirms it — and a grid item occupies a cell however small its content, so the sentinel draws as a blank square and shifts every later cell one column right. When the next batch lands, `_placeSentinel` removes the sentinel and inserts a new one before the new batch's first cell, so all the earlier cells jump back one column at once: the owner's "blank entry" and "jumps to the left one square all at once". The batch's first cell already carries `data-batch-first` (`templates/index.html:673`) and the sentinel is placed immediately *before* it, so observing that cell directly is the same trigger position with no extra element, no consumed cell and no reflow. The owner is open to a floating canary, but direct observation is strictly better if it holds. [web-ui.md](web-ui.md)
+
 ### Issue 74
 
 **Three writers can put a dead item back in the API queue, and nothing clears it again** — *Open*, Low
