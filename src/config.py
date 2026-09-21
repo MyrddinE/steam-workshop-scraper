@@ -100,6 +100,25 @@ def config_value_with_legacy(section: dict, current_key: str, legacy_key: str,
     return value
 
 
+def warn_retired_key(section_name: str, legacy_key: str, current_key: str) -> None:
+    """Name a config key that is no longer read, and the key that replaced it.
+
+    A renamed key is retired once its old value stops being read. A config file
+    already on disk is still a contract we do not control, so the operator gets
+    one line saying the spelling they wrote no longer does anything -- silence
+    would leave a dead key in place forever. The shape matches the retired
+    ``openai.batch_items`` warning in :mod:`src.translator`.
+
+    ``section_name`` is only for the warning, so it can name the key the way the
+    operator wrote it (``daemon.batch_size``, not ``batch_size``).
+    """
+    where = f"{section_name}." if section_name else ""
+    logging.warning(
+        "Config key '%s%s' is no longer used; it was renamed to '%s%s'. Remove the key.",
+        where, legacy_key, where, current_key,
+    )
+
+
 def save_config(path: str, config: dict):
     """
     Saves the configuration to a YAML file. To avoid writing secrets to disk, 
