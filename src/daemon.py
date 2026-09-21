@@ -188,6 +188,13 @@ SUBSCRIPTION_RECONCILE_INTERVAL_SECONDS = 86400
 # walk as soon as it is not, which is the first one that can succeed.
 SUBSCRIPTION_RECONCILE_RETRY_SECONDS = 900
 
+# Debug captures age out on a daily sweep. It is housekeeping on the per-batch
+# path -- the sweep is a `scandir` of three flat directories when there is
+# nothing to prune -- so it runs on the first batch and is guarded by a monotonic
+# interval afterwards. The retention itself (a week) lives in `capture`, beside
+# the constants that name the trees.
+DEBUG_CAPTURE_PRUNE_INTERVAL_SECONDS = 86400
+
 
 def user_requested_priority(inherited_priority: int) -> int:
     """The part of a pre-fetch ``api_priority`` a person asked for, else 0.
@@ -414,11 +421,12 @@ class Daemon:
         # the still-honoured `backup_dir` spelling, shared with the web and crash
         # readers.
         self.outbox_dir = configured_outbox_dir(daemon_config)
-        # Debugging switches, not permanent ones: on means keep everything. The
-        # image switch is separate because the web switch keeps whole bodies
-        # unbounded, and an owner reviewing image metadata should not have to
-        # collect pages to do it. Image *failures* need neither switch — the
-        # outbox alone is enough, like every other failure capture. The web
+        # Debugging switches, not permanent ones: while on, every capture is kept
+        # whole, and a capture older than the retention is pruned by the daily
+        # housekeeping sweep. The image switch is separate because the web switch
+        # keeps whole bodies, and an owner reviewing image metadata should not
+        # have to collect pages to do it. Image *failures* need neither switch —
+        # the outbox alone is enough, like every other failure capture. The web
         # switch is resolved by `capture.web_download_switch` because the web
         # server process reads the same key for the subscribe route. The image
         # switch has no renamed predecessor, so it is read straight from config.
@@ -495,6 +503,11 @@ class Daemon:
         self.workshop_folders = WorkshopFolders(self.db_path, self.config)
         self.workshop_folders.log_status()
         self._last_download_scan = None
+
+        # Monotonic timestamp of the last debug-capture prune; None means "never",
+        # so the first batch after startup prunes. See
+        # DEBUG_CAPTURE_PRUNE_INTERVAL_SECONDS.
+        self._last_debug_prune = None
         
         # Setup graceful shutdown
         signal.signal(signal.SIGINT, self.handle_shutdown)
@@ -670,6 +683,7 @@ class Daemon:
         self._maybe_promote_stale_items()
         self._maybe_reconcile_subscriptions()
         self._maybe_scan_downloaded_items()
+        self._maybe_prune_debug_captures()
 
         items_to_fetch = self._read_batch()
         if items_to_fetch is None:
@@ -850,6 +864,36 @@ class Daemon:
         except Exception as exc:
             logging.warning(
                 "Downloaded-item scan failed; housekeeping skipped this pass: %s", exc)
+
+    def _maybe_prune_debug_captures(self) -> None:
+        """Prune the debug capture trees, at most once a day.
+
+        The debug trees grow only while a debug switch is on, but a switch is
+        easy to leave on and a capture older than a week has served its purpose.
+        Guarded by a monotonic interval for the same reason the staleness sweep
+        is: the per-batch path runs every few seconds and the answer changes at
+        most once a day. ``failures/`` and ``crashes/`` are deliberately out of
+        scope -- a failure is the evidence a regression test is built from and is
+        removed when it is pulled for review, not when it gets old.
+
+        A failure is a log line, never an exception: this is housekeeping on the
+        fetch loop, and a capture that cannot be pruned is only a disk cost.
+        """
+        now = time.monotonic()
+        if (self._last_debug_prune is not None
+                and now - self._last_debug_prune < DEBUG_CAPTURE_PRUNE_INTERVAL_SECONDS):
+            return
+        self._last_debug_prune = now
+        try:
+            removed = capture.prune_debug_captures(self.outbox_dir)
+        except Exception as exc:
+            logging.warning(
+                "Debug-capture prune failed; housekeeping skipped this pass: %s", exc)
+            return
+        if removed:
+            logging.info(
+                "Pruned %d debug capture file(s) older than %d days",
+                len(removed), capture.DEBUG_CAPTURE_RETENTION_DAYS)
 
     def _promote_stale_items(self) -> None:
         """Periodic sweep: promote stale items from API priority 0 to 1.

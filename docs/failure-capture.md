@@ -61,8 +61,8 @@ web capture in one place, because the artefact already exists:
   switch** — the same metadata, plus the number of bytes written and the path of
   the saved file, so a good result can be correlated with the image on disk. It
   is a separate switch from `daemon.capture_web_downloads`: that one keeps whole
-  bodies unbounded, and an owner reviewing images should not have to collect
-  pages to do it.
+  bodies, and an owner reviewing images should not have to collect pages to do
+  it.
 * **The bytes are never captured.** A successful download already wrote the image
   into its `images/` bucket and that file is the artefact; copying it into the
   outbox would store every image twice. `capture.record_image_download` has no
@@ -115,11 +115,13 @@ replacing every `0` would leave a capture that describes nothing. The elider
 never raises: capture is diagnostic, and a diagnostic that can break the request
 it describes is worse than no diagnostic.
 
-It is deliberately unbounded — no cap, no dedup, no thinning — for the same
+It is deliberately not thinned while it is on — no cap, no dedup — for the same
 reason the item-page capture always was: a sample trimmed before anyone has
-looked at it just means collecting the evidence twice. The directory therefore
-grows for as long as the switch is left on; there is no retention anywhere in
-the outbox.
+looked at it just means collecting the evidence twice. What bounds the directory
+is **age, not volume**: housekeeping prunes a debug capture once it is
+`DEBUG_CAPTURE_RETENTION_DAYS` old (see *Retention* below). The failure capture
+is the opposite case: a failure is evidence, so its caps stay and it is never
+pruned by age.
 
 Two surfaces are **not** covered by this switch:
 
@@ -267,6 +269,37 @@ State is reloaded from disk at startup, so the caps survive a restart. The group
 state file is rewritten on every miss rather than throttled: a throttled counter
 under-reports after a restart and can move backwards, and what has to stay bounded
 is the file count, not the write count.
+
+## Retention
+
+The outbox holds two kinds of thing, and they are cleaned differently.
+
+* **Debug captures** — `<outbox_dir>/web_downloads/`,
+  `<outbox_dir>/image_downloads/` and the legacy `<outbox_dir>/scrapes/` tree an
+  earlier build wrote before the rename — are a session instrument, not a record.
+  A capture older than **`DEBUG_CAPTURE_RETENTION_DAYS`** (7) is removed by the
+  daemon's housekeeping sweep, at most once a day
+  (`capture.prune_debug_captures`). The legacy tree is included on purpose: it is
+  debug data like the other two, and no current code writes it, so nothing else
+  would ever clear it.
+* **Failures and crash dumps** are the evidence a regression test is built from.
+  They are **never pruned by age**: `failures/` and `crashes/` stay until the
+  owner's pull tool fetches them for review, and that fetch is a *move* — it
+  removes the file once the transfer is verified. A failure that has not been
+  reviewed is never removed, however old it gets.
+* `<outbox_dir>/db/` is the database backup, replaced in place by the backup
+  thread. It is not a capture and this sweep does not touch it.
+
+Removing a capture also drops its `manifest.json` entry in the same operation
+(`backup.remove_manifest_entries`), and the pull tool does the same when it moves
+a file. The puller transfers one file per entry, so an entry left behind would
+make the next pull fail on a path that no longer exists; whichever side removes
+the file removes the entry with it.
+
+**What is deliberately left open** is the failure tree's own growth, and the
+rotated log archives. Neither has a retention rule: how long to keep unreviewed
+failures, and when to delete the owner's log history, are the owner's decisions,
+not this module's.
 
 ## Storage layout
 

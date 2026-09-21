@@ -780,3 +780,56 @@ def test_stale_sweep_runs_on_the_first_batch_after_startup(mock_items, mock_prom
     daemon.process_batch()
     mock_promote.assert_called_once()
 
+
+# --- debug-capture pruning ---------------------------------------------------
+
+def _old_debug_capture(outbox):
+    import datetime
+    import os
+    from src import capture
+
+    directory = os.path.join(outbox, capture.WEB_DOWNLOADS_DIR_NAME)
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, "old-item_page-1.json")
+    with open(path, "wb") as handle:
+        handle.write(b"capture")
+    when = (datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(days=capture.DEBUG_CAPTURE_RETENTION_DAYS + 1)).timestamp()
+    os.utime(path, (when, when))
+    return path
+
+
+def test_debug_capture_prune_runs_at_most_once_per_interval(tmp_path, mock_config):
+    from src.daemon import DEBUG_CAPTURE_PRUNE_INTERVAL_SECONDS
+
+    daemon = Daemon(mock_config)
+    daemon.outbox_dir = str(tmp_path / "outbox")
+    daemon._last_debug_prune = None
+
+    first = _old_debug_capture(daemon.outbox_dir)
+    daemon._maybe_prune_debug_captures()
+    assert not __import__("os").path.exists(first), "the first batch prunes"
+
+    second = _old_debug_capture(daemon.outbox_dir)
+    daemon._maybe_prune_debug_captures()
+    assert __import__("os").path.exists(second), "a second batch inside the interval must not"
+
+    daemon._last_debug_prune = time.monotonic() - DEBUG_CAPTURE_PRUNE_INTERVAL_SECONDS - 1
+    daemon._maybe_prune_debug_captures()
+    assert not __import__("os").path.exists(second), "it runs again once the interval has elapsed"
+
+
+def test_process_batch_runs_the_debug_prune(mock_config, monkeypatch):
+    daemon = Daemon(mock_config)
+    called = []
+    monkeypatch.setattr(daemon, "_maybe_promote_stale_items", lambda: None)
+    monkeypatch.setattr(daemon, "_maybe_reconcile_subscriptions", lambda: None)
+    monkeypatch.setattr(daemon, "_maybe_scan_downloaded_items", lambda: None)
+    monkeypatch.setattr(daemon, "_maybe_prune_debug_captures", lambda: called.append(True))
+    monkeypatch.setattr(daemon, "_read_batch", lambda: None)
+
+    daemon.process_batch()
+
+    assert called == [True]
+
+

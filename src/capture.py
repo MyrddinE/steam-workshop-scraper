@@ -7,7 +7,7 @@ built from it. This module writes that evidence to ``<outbox_dir>/failures/`` an
 registers it in the same manifest the database snapshots use, so the existing
 pull tooling collects it without changes.
 
-Three design points carry the weight:
+Four design points carry the weight:
 
 * **Bounded.** A persistent break must cost a bounded number of files. Captures
   are grouped by ``(kind, selector)`` and, within a group, by the page's shape
@@ -16,6 +16,14 @@ Three design points carry the weight:
   shapes, so a digest that flaps (rotating page content) cannot defeat the cap.
   After that the group keeps counting misses and stops writing files. The
   counters, not the samples, are what convey scale — a sample cannot.
+* **Debug trees age out; failure evidence does not.** The debug captures --
+  ``<outbox>/web_downloads/``, ``<outbox>/image_downloads/`` and the legacy
+  ``<outbox>/scrapes/`` tree an earlier build wrote -- are housekeeping's to
+  prune once a file is :data:`DEBUG_CAPTURE_RETENTION_DAYS` old; see
+  :func:`prune_debug_captures`. ``failures/`` and ``crashes/`` are never pruned
+  by age: a failure is the evidence a regression test is built from, so it stays
+  until it is pulled for review. That is why the "unbounded on purpose" claim
+  below is now true only of the failure tree.
 * **Additive.** Capturing never changes control flow. It is called from failure
   sites that return or raise exactly as before.
 * **Off unless configured.** With no outbox directory every call is a no-op, so
@@ -58,7 +66,7 @@ import re
 import threading
 from datetime import datetime, timezone
 
-from src.backup import update_manifest
+from src.backup import remove_manifest_entries, update_manifest
 from src.config import warn_retired_key
 
 # How many samples of one shape are kept.
@@ -86,22 +94,46 @@ _app_version_cache = None
 # failures: this is evidence about what a *working* exchange looks like, both
 # the request that went out and the answer that came back.
 #
-# Unbounded, and the body is kept whole. This is a debugging switch that is on
-# for a session or two, so the cost is accepted in exchange for not having to
-# collect the evidence twice because a sample was thinned before anyone looked
-# at it. The failure capture above is the opposite case: it runs for weeks, so
-# its caps and its size limits stay.
+# Kept whole and not thinned while the switch is on: it is a debugging switch
+# that is on for a session or two, and a sample thinned before anyone looked at
+# it just means collecting the evidence twice. What bounds it is age rather than
+# volume -- `prune_debug_captures` removes a debug capture once it is
+# DEBUG_CAPTURE_RETENTION_DAYS old. The failure capture above is the opposite
+# case: it runs for weeks, so its caps and its size limits stay, and it is never
+# pruned by age.
 _capture_web_downloads = False
 
 # Every image download saved while `capture_image_downloads` is set, one
 # metadata-only record each. Separate from `capture_web_downloads` because that
-# switch keeps whole bodies unbounded; an owner reviewing images should not have
-# to collect pages to do it.
+# switch keeps whole bodies whole; an owner reviewing images should not have to
+# collect pages to do it. `image_downloads/` is a debug tree, so it ages out on
+# the same clock as the web captures.
 _capture_image_downloads = False
 
 FAILURES_DIR_NAME = "failures"
 WEB_DOWNLOADS_DIR_NAME = "web_downloads"
 IMAGE_DOWNLOADS_DIR_NAME = "image_downloads"
+
+# The tree an earlier build wrote before `web_downloads/` replaced it. No code
+# writes it any more, but an outbox written by that build still holds the
+# directory and its manifest entries, so housekeeping prunes it too: to the
+# owner it is debug data like the other two, and leaving it behind would leave
+# the manifest pointing at files nothing will ever refresh.
+LEGACY_SCRAPES_DIR_NAME = "scrapes"
+
+# How long a debug capture is kept. A debug capture is a session instrument, not
+# a record: a week is long enough to review one and short enough that a switch
+# left on cannot fill the disk. Failures and crash dumps are never pruned by age
+# (only by a pull for review), so this applies to the debug trees only.
+DEBUG_CAPTURE_RETENTION_DAYS = 7
+
+# The debug trees housekeeping prunes. `failures/` and `crashes/` are
+# deliberately absent: they are the evidence, not the instrument.
+DEBUG_CAPTURE_DIR_NAMES = (
+    WEB_DOWNLOADS_DIR_NAME,
+    IMAGE_DOWNLOADS_DIR_NAME,
+    LEGACY_SCRAPES_DIR_NAME,
+)
 
 # The pulls the one switch covers, named so a reviewer can filter the captures
 # by which request produced them.
@@ -252,6 +284,90 @@ def web_downloads_dir(outbox_dir) -> str:
 
 def image_downloads_dir(outbox_dir) -> str:
     return os.path.join(outbox_dir, IMAGE_DOWNLOADS_DIR_NAME)
+
+
+def debug_capture_dirs(outbox_dir) -> list:
+    """The debug trees housekeeping prunes, as absolute paths."""
+    return [os.path.join(outbox_dir, name) for name in DEBUG_CAPTURE_DIR_NAMES]
+
+
+def prune_debug_captures(outbox_dir=None, *, now=None,
+                         max_age_days=DEBUG_CAPTURE_RETENTION_DAYS) -> list:
+    """Remove debug captures older than ``max_age_days`` and their manifest entries.
+
+    The three debug trees -- ``web_downloads/``, ``image_downloads/`` and the
+    legacy ``scrapes/`` -- hold session instruments, not records: a capture older
+    than a week has served whatever purpose it had, and a debug switch left on
+    must not fill the disk. ``failures/`` and ``crashes/`` are deliberately not
+    touched: a failure is the evidence a regression test is built from and is
+    removed when it is pulled for review, not when it gets old. ``db/`` belongs
+    to the backup thread and is not this step's business.
+
+    Removing a file also drops its ``manifest.json`` entry, in the same
+    operation. The puller transfers one file per manifest entry, so an entry left
+    behind by a prune would make the next pull fail on a file that no longer
+    exists -- the mirror of the puller's own move-on-fetch rule.
+
+    ``outbox_dir`` defaults to the configured outbox. Returns the relative paths
+    removed, so a caller can report them. Never raises: housekeeping must not
+    stop the scrape loop, and a capture that could not be pruned is only a disk
+    cost, not a failure of the run.
+
+    The entry is dropped *before* the file is deleted, and the deletion is
+    abandoned if the manifest could not be written: a crash between the two then
+    leaves a stray file rather than a manifest entry pointing at a missing one,
+    which is the failure mode the puller cannot recover from.
+    """
+    root = outbox_dir or _outbox_dir
+    if not root:
+        return []
+    cutoff = _retention_cutoff(now, max_age_days)
+
+    expired = []
+    for directory in debug_capture_dirs(root):
+        try:
+            entries = list(os.scandir(directory))
+        except FileNotFoundError:
+            # A debug switch that was never on leaves no directory behind.
+            continue
+        except OSError as exc:
+            logging.warning("Could not list debug capture directory %s: %s", directory, exc)
+            continue
+        for entry in entries:
+            try:
+                if entry.is_file() and entry.stat().st_mtime < cutoff:
+                    expired.append(entry.path)
+            except OSError as exc:
+                logging.warning("Could not inspect debug capture %s: %s", entry.path, exc)
+    if not expired:
+        return []
+
+    rel_paths = [_relative(root, path) for path in expired]
+    try:
+        remove_manifest_entries(root, rel_paths)
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logging.warning(
+            "Could not drop the manifest entries for %d expired debug capture(s); "
+            "leaving them in place: %s", len(expired), exc)
+        return []
+
+    removed = []
+    for path, rel in zip(expired, rel_paths):
+        try:
+            os.remove(path)
+        except OSError as exc:
+            # The entry is already gone, so the file is now unmanaged and will be
+            # retried (and reported as stale nowhere) on the next sweep.
+            logging.warning("Could not prune debug capture %s: %s", path, exc)
+            continue
+        removed.append(rel)
+    return removed
+
+
+def _retention_cutoff(now, max_age_days) -> float:
+    """Unix timestamp before which a capture is expired."""
+    moment = now or datetime.now(timezone.utc)
+    return moment.timestamp() - max_age_days * 86400
 
 
 def web_download_capture_active() -> bool:
@@ -446,10 +562,10 @@ def record_web_download(kind, workshop_id, url, exchange, *, appid=None, page=No
     *working* exchange looks like, and one sample of that is worth more than
     several of the same failure: a sample trimmed before anyone has looked at it
     just means collecting the evidence twice. That makes this a *session* switch
-    rather than a resident one. There is no budget here and no retention
-    anywhere in the outbox, so the directory grows for as long as the switch is
-    left on. The failure capture is the opposite case: it runs for weeks, so its
-    caps stay.
+    rather than a resident one. What keeps the directory from growing forever is
+    age, not volume: :func:`prune_debug_captures` removes a capture once it is
+    :data:`DEBUG_CAPTURE_RETENTION_DAYS` old. The failure capture is the opposite
+    case: it runs for weeks, so its caps stay, and it is never pruned by age.
 
     Never raises: capture is diagnostic, and a diagnostic that can break the
     request it is describing is worse than no diagnostic.
