@@ -29,6 +29,7 @@ from src.database import (
     insert_or_update_item,
     update_app_tracking_cursor,
 )
+from tests.conftest import seed_pacing_delay
 
 APPID = 431960
 KNOWN_IDS = list(range(1, 101))       # every one already in the database
@@ -39,11 +40,13 @@ STALL_PAGES = 5
 
 
 def _config(db_path):
+    # The low API delay is daemon state now, not a config key: seed it so the
+    # walk's per-page pacing wait does not busy-wait the test.
+    seed_pacing_delay(db_path, "api", 0.01)
     return {
         "database": {"path": db_path},
         "api": {"key": "test_key"},
-        "daemon": {"target_appids": [APPID], "api_batch_size": 10,
-                   "api_delay_seconds": 0.01},
+        "daemon": {"target_appids": [APPID], "api_batch_size": 10},
     }
 
 

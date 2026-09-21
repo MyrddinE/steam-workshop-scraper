@@ -48,11 +48,14 @@ def test_search_and_details_pipeline(db_path):
 @pytest.mark.integration
 def test_daemon_pipeline_mocked(db_path):
     from src.daemon import Daemon
+    from tests.conftest import seed_pacing_delay
 
+    # The inter-request delay is daemon state now, not a config key.
+    seed_pacing_delay(db_path, "api", 0.01)
     config = {
         "database": {"path": db_path},
         "api": {"key": "TEST_KEY"},
-        "daemon": {"api_batch_size": 1, "api_delay_seconds": 0.01, "target_appids": [294100]}
+        "daemon": {"api_batch_size": 1, "target_appids": [294100]}
     }
 
     insert_or_update_item(db_path, {"workshop_id": 555})

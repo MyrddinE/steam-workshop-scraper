@@ -46,7 +46,7 @@ PROFILE_COOKIES = {
 
 
 # The scraper applies no pacing of its own: the interval belongs to the caller,
-# owned by the configured `web_delay_seconds` (see tests/test_web_scraper.py,
+# owned by the persisted web delay (see tests/test_web_scraper.py,
 # `test_the_fixed_web_delay_gate_is_gone`). There is no fixed delay to stub out.
 
 

@@ -28,14 +28,33 @@ refused, throttled or cancelled after this was drawn.
 import math
 import time
 
-from src import subscribe_engine
+from src import pacing, subscribe_engine
+from src.daemon_state import StateStore, state_path_for
 from src.tui import SubscriptionQueueScreen
 from src.web_worker import configured_web_delay
 
 
+def _delay_config(tmp_path, seconds: float) -> dict:
+    """A config whose database carries a persisted web delay.
+
+    The delay is daemon state now: `configured_web_delay`, and so the screen's
+    estimate, reads it from `.daemon_state.yaml` beside the database the config
+    names rather than from a config key.
+    """
+    db_path = str(tmp_path / "queue.db")
+    StateStore(state_path_for(db_path)).save({pacing.WEB_DELAY_SECTION: seconds})
+    return {"database": {"path": db_path}}
+
+
+def _set_delay(config: dict, seconds: float) -> None:
+    """Change the persisted delay mid-test, as a throttle's doubling would."""
+    StateStore(state_path_for(config["database"]["path"])).save(
+        {pacing.WEB_DELAY_SECTION: seconds})
+
+
 def _screen(tmp_path, config: dict) -> SubscriptionQueueScreen:
     return SubscriptionQueueScreen(
-        str(tmp_path / "queue.db"), str(tmp_path / "pause.lock"), config,
+        config["database"]["path"], str(tmp_path / "pause.lock"), config,
     )
 
 
@@ -57,7 +76,7 @@ def _finished(screen: SubscriptionQueueScreen, *seconds: float) -> None:
 
 def test_the_step_is_one_gated_page_read_of_the_shared_delay(tmp_path):
     """The default path reads the page once per item; the POST is exempt."""
-    config = {"daemon": {"web_delay_seconds": 12.0}}
+    config = _delay_config(tmp_path, 12.0)
     screen = _screen(tmp_path, config)
 
     assert screen._seed_item_seconds() == configured_web_delay(config)
@@ -71,7 +90,7 @@ def test_the_step_is_one_gated_page_read_of_the_shared_delay(tmp_path):
 def test_the_step_is_two_gated_page_reads_when_the_confirmation_is_on(
         tmp_path, monkeypatch):
     """The retired read still prices an item while `VERIFY_AFTER_SUBSCRIBE` is on."""
-    config = {"daemon": {"web_delay_seconds": 12.0}}
+    config = _delay_config(tmp_path, 12.0)
     screen = _screen(tmp_path, config)
     monkeypatch.setattr(subscribe_engine, "VERIFY_AFTER_SUBSCRIBE", True)
 
@@ -81,7 +100,7 @@ def test_the_step_is_two_gated_page_reads_when_the_confirmation_is_on(
 
 def test_the_initial_estimate_is_the_configured_delay_once(tmp_path):
     """Before any item finishes the running mean is exactly the seed."""
-    config = {"daemon": {"web_delay_seconds": 6.0}}
+    config = _delay_config(tmp_path, 6.0)
     screen = _screen(tmp_path, config)
 
     assert screen._estimate_remaining(3, 0.0) == 18
@@ -90,7 +109,7 @@ def test_the_initial_estimate_is_the_configured_delay_once(tmp_path):
 
 def test_a_slow_item_lengthens_the_waiting_rows_countdowns(tmp_path):
     """An item that overran the guess prices the rest of the queue higher."""
-    config = {"daemon": {"web_delay_seconds": 6.0}}
+    config = _delay_config(tmp_path, 6.0)
     screen = _screen(tmp_path, config)
     # The first item took 18 s, not the 6 s the configured delay predicted.
     _finished(screen, 18.0)
@@ -105,7 +124,7 @@ def test_a_slow_item_lengthens_the_waiting_rows_countdowns(tmp_path):
 
 def test_a_fast_item_shortens_the_waiting_rows_countdowns(tmp_path):
     """An item that came in under the guess prices the rest lower."""
-    config = {"daemon": {"web_delay_seconds": 6.0}}
+    config = _delay_config(tmp_path, 6.0)
     screen = _screen(tmp_path, config)
     # This item took 2 s, well under the guess.
     _finished(screen, 2.0)
@@ -119,7 +138,7 @@ def test_a_fast_item_shortens_the_waiting_rows_countdowns(tmp_path):
 
 def test_the_correction_uses_the_observed_duration_not_the_item_count(tmp_path):
     """One finished item is not one fixed correction: its cost is the input."""
-    config = {"daemon": {"web_delay_seconds": 6.0}}
+    config = _delay_config(tmp_path, 6.0)
     slow = _screen(tmp_path, config)
     fast = _screen(tmp_path, config)
     _finished(slow, 30.0)
@@ -136,7 +155,7 @@ def test_the_correction_uses_the_observed_duration_not_the_item_count(tmp_path):
 
 def test_the_seeded_mean_moves_less_with_each_later_item(tmp_path):
     """The configured guess is one virtual observation, so it decays."""
-    config = {"daemon": {"web_delay_seconds": 6.0}}
+    config = _delay_config(tmp_path, 6.0)
     screen = _screen(tmp_path, config)
 
     assert screen._estimate_remaining(2, 0.0) == 12  # still the bare seed
@@ -153,7 +172,7 @@ def test_the_seeded_mean_moves_less_with_each_later_item(tmp_path):
 
 def test_each_items_duration_is_timed_between_the_passes_results(tmp_path):
     """The pass calls `on_result` after each item; the gap is that item's cost."""
-    config = {"daemon": {"web_delay_seconds": 6.0}}
+    config = _delay_config(tmp_path, 6.0)
     screen = _screen(tmp_path, config)
     screen._pass_started_at = 100.0
 
@@ -166,13 +185,13 @@ def test_each_items_duration_is_timed_between_the_passes_results(tmp_path):
 
 def test_a_changed_configured_delay_changes_the_estimate(tmp_path):
     """A throttle doubles the shared delay mid-pass; the estimate follows."""
-    config = {"daemon": {"web_delay_seconds": 12.0}}
+    config = _delay_config(tmp_path, 12.0)
     screen = _screen(tmp_path, config)
     before = screen._estimate_remaining(1, 0.0)
 
-    # What `WebInterval._set` writes back through the same config dict the
-    # screen handed the engine, after a throttle page doubles the delay.
-    config["daemon"]["web_delay_seconds"] = 24.0
+    # What `WebInterval._set` writes back into the shared state section the
+    # screen's estimate reads, after a throttle page doubles the delay.
+    _set_delay(config, 24.0)
 
     assert before == 12
     assert screen._estimate_remaining(1, 0.0) == 24
@@ -181,13 +200,13 @@ def test_a_changed_configured_delay_changes_the_estimate(tmp_path):
     # seed is re-read every tick, so it moves the mean with it.
     _finished(screen, 18.0)
     throttled = screen._estimate_remaining(2, 18.0)
-    config["daemon"]["web_delay_seconds"] = 12.0
+    _set_delay(config, 12.0)
     assert screen._estimate_remaining(2, 18.0) < throttled
 
 
 def test_the_countdown_never_goes_negative(tmp_path):
     """An item that overruns the mean leaves the waiting row at zero, not below."""
-    config = {"daemon": {"web_delay_seconds": 6.0}}
+    config = _delay_config(tmp_path, 6.0)
     screen = _screen(tmp_path, config)
     _finished(screen, 40.0)
 
@@ -197,7 +216,7 @@ def test_the_countdown_never_goes_negative(tmp_path):
 
 def test_the_current_item_is_distinct_and_has_no_countdown(tmp_path):
     """One row is being processed; the rest still show an estimate."""
-    config = {"daemon": {"web_delay_seconds": 12.0}}
+    config = _delay_config(tmp_path, 12.0)
     screen = _screen(tmp_path, config)
     screen._items = [
         {"workshop_id": 1, "title": "One"},

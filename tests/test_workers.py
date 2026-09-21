@@ -69,17 +69,22 @@ def test_web_worker_failure_sets_api_priority(db_path):
 # shared with the owner's own browsing: when scrapes fail, the worker has to
 # back off far enough that the Workshop is still usable by hand.
 
-def test_the_default_web_delay_is_not_below_the_floor():
+def test_the_default_web_delay_is_not_below_the_floor(tmp_path):
     """A default under the floor is a delay the decay rule considers too fast."""
+    from src import pacing
+    from src.daemon_state import StateStore, state_path_for
     from src.web_worker import WEB_DELAY_FLOOR, WebScraperThread
 
-    worker = WebScraperThread("test.db", ".pauselock")
+    db_path = str(tmp_path / "worker.db")
+    worker = WebScraperThread(db_path, ".pauselock")
     assert worker.web_delay == WEB_DELAY_DEFAULT
     assert worker.web_delay >= WEB_DELAY_FLOOR
 
     # An explicit persisted value above the floor is still honoured: the floor
     # only binds while decaying, it must not reset a slow installation.
-    configured = WebScraperThread("test.db", ".pauselock", {"web_delay_seconds": 20})
+    store = StateStore(state_path_for(db_path))
+    store.save({pacing.WEB_DELAY_SECTION: 20.0})
+    configured = WebScraperThread(db_path, ".pauselock", state_store=store)
     assert configured.web_delay == 20.0
 
 
@@ -773,7 +778,7 @@ def test_a_gated_attempt_makes_exactly_one_request_and_keeps_the_item_queued(db_
     insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
 
     refreshed = []
-    worker = WebScraperThread(db_path, ".pauselock", {}, None,
+    worker = WebScraperThread(db_path, ".pauselock", None,
                               lambda: refreshed.append(1) or True)
     gated = dict(MISS, body='<title>Steam Community :: Error</title>'
                             '<div id="AgeCheck">age check</div>')

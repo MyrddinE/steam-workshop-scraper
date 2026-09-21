@@ -21,10 +21,10 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-import yaml
 
 from src import capture, pacing, session_health, subscribe_engine as engine, web_scraper
 from src import web_worker
+from src.daemon_state import StateStore, state_path_for
 from src.database import (
     get_connection,
     get_subscription_queue_items,
@@ -227,6 +227,20 @@ def engine_env(tmp_path, monkeypatch):
     # with a recorder.
     monkeypatch.setattr(pacing, "wait", lambda seconds, keep_running=None: True)
     return db_path, config
+
+
+def _seed_web_delay(db_path, seconds):
+    """Persist the shared web delay into its daemon-state section.
+
+    The delay is state, not configuration, so a test that wants a particular
+    starting interval writes it beside the database rather than into the config
+    dict the engine is handed.
+    """
+    StateStore(state_path_for(db_path)).save({pacing.WEB_DELAY_SECTION: seconds})
+
+
+def _stored_web_delay(db_path):
+    return StateStore(state_path_for(db_path)).load().get(pacing.WEB_DELAY_SECTION)
 
 
 def _row(db_path, wid=7):
@@ -715,14 +729,22 @@ def test_the_pass_releases_the_pause_and_reports_each_result(tmp_path, monkeypat
 
 # --- the shared web interval -------------------------------------------------
 
-def test_the_interval_is_read_fresh_from_the_config_and_floored():
-    assert web_worker.configured_web_delay({"daemon": {"web_delay_seconds": 9.5}}) == 9.5
-    assert web_worker.configured_web_delay({"web_delay_seconds": 7.0}) == 7.0
+def test_the_interval_is_read_fresh_from_the_state_file_and_floored(tmp_path):
+    db_path = str(tmp_path / "state.db")
+
+    _seed_web_delay(db_path, 9.5)
+    assert web_worker.configured_web_delay({"database": {"path": db_path}}) == 9.5
+
+    # A value under the floor is lifted to it; the floor is what the decay uses.
+    _seed_web_delay(db_path, 0.1)
+    assert web_worker.configured_web_delay(
+        {"database": {"path": db_path}}) == web_worker.WEB_DELAY_FLOOR
+
+    # No state at all is the default, and so is a value that is not a number.
     assert web_worker.configured_web_delay({}) == web_worker.WEB_DELAY_DEFAULT
+    StateStore(state_path_for(db_path)).save({pacing.WEB_DELAY_SECTION: "nonsense"})
     assert web_worker.configured_web_delay(
-        {"daemon": {"web_delay_seconds": 0.1}}) == web_worker.WEB_DELAY_FLOOR
-    assert web_worker.configured_web_delay(
-        {"daemon": {"web_delay_seconds": "nonsense"}}) == web_worker.WEB_DELAY_DEFAULT
+        {"database": {"path": db_path}}) == web_worker.WEB_DELAY_DEFAULT
 
 
 def test_every_page_read_waits_the_interval_and_the_post_does_not(engine_env, monkeypatch):
@@ -731,7 +753,7 @@ def test_every_page_read_waits_the_interval_and_the_post_does_not(engine_env, mo
     # This test pins the wait for both gated reads, so the confirmation read is
     # switched back on explicitly.
     monkeypatch.setattr(engine, "VERIFY_AFTER_SUBSCRIBE", True)
-    config["daemon"] = {"web_delay_seconds": 12.0}
+    _seed_web_delay(db_path, 12.0)
     events = []
     monkeypatch.setattr(
         pacing, "wait",
@@ -772,23 +794,18 @@ def test_every_page_read_waits_the_interval_and_the_post_does_not(engine_env, mo
 def test_a_wall_grows_and_persists_the_shared_interval(engine_env, monkeypatch, tmp_path):
     """A throttle backs the shared delay off and writes it where the daemon reads."""
     db_path, config = engine_env
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.safe_dump({"daemon": {"web_delay_seconds": 6.0}}),
-                           encoding="utf-8")
-    config["daemon"] = {"web_delay_seconds": 6.0}
+    _seed_web_delay(db_path, 6.0)
     monkeypatch.setattr(pacing, "wait", lambda seconds, keep_running=None: True)
     monkeypatch.setattr(web_scraper, "scrape_extended_details",
                         _Fetcher(["<html>You have made too many requests</html>"]))
     session = _Session(payload={"success": 1})
     monkeypatch.setattr(web_scraper, "_get_session", lambda: session)
 
-    outcome = engine.subscribe_item(7, config=config, db_path=db_path,
-                                    config_path=str(config_path))
+    outcome = engine.subscribe_item(7, config=config, db_path=db_path)
 
     assert outcome.status == engine.THROTTLED
-    assert config["daemon"]["web_delay_seconds"] == 12.0
-    assert yaml.safe_load(config_path.read_text(encoding="utf-8"))["daemon"][
-        "web_delay_seconds"] == 12.0
+    assert _stored_web_delay(db_path) == 12.0, \
+        "the doubling is written to the state file the daemon reads"
 
 
 def test_the_pass_spaces_every_item(tmp_path, monkeypatch):
@@ -802,10 +819,11 @@ def test_the_pass_spaces_every_item(tmp_path, monkeypatch):
     # pass needs the schema; the items themselves are not required for spacing.
     db_path = str(tmp_path / "x.db")
     initialize_database(db_path)
+    _seed_web_delay(db_path, 8.0)
 
     outcomes = engine.run_subscription_pass(
         [{"workshop_id": 1}, {"workshop_id": 2}],
-        config={"daemon": {"web_delay_seconds": 8.0}},
+        config={"database": {"path": db_path}},
         db_path=db_path,
         pause_lock_file=str(tmp_path / ".pauselock"))
 

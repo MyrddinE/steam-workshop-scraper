@@ -286,7 +286,7 @@ def test_a_throttled_page_is_not_mistaken_for_a_stale_cookie():
     throttled = {"description": None, "body": "<h1>Too many requests</h1>"}
     called = []
     with patch("src.web_worker.scrape_extended_details") as scrape:
-        WebScraperThread("test.db", "nope.lock", {}, None,
+        WebScraperThread("test.db", "nope.lock", None,
                          lambda: called.append(1) or True)._refresh_login_cookie_if_gated_or_signed_out(item, throttled)
         assert scrape.call_count == 0, "the request is never repeated"
         assert called == [1], "but the cookie is still re-read: a local read costs no budget"
@@ -299,7 +299,7 @@ def test_a_definitive_404_is_not_treated_as_a_gate():
             "body": "<title>Steam Community :: Error</title>"}
     called = []
     with patch("src.web_worker.scrape_extended_details") as scrape:
-        WebScraperThread("test.db", "nope.lock", {}, None,
+        WebScraperThread("test.db", "nope.lock", None,
                          lambda: called.append(1) or True)._refresh_login_cookie_if_gated_or_signed_out(
                              {"workshop_id": 1}, page)
     assert scrape.call_count == 0, "a gone item is never worth a request"
@@ -343,7 +343,7 @@ def test_a_throttled_page_does_not_shadow_the_auth_check():
     calls = []
     throttled = {"description": None, "body": "<h1>Too many requests</h1>"}
     with patch("src.web_worker.scrape_extended_details") as scrape:
-        WebScraperThread("test.db", "nope.lock", {}, None,
+        WebScraperThread("test.db", "nope.lock", None,
                          lambda: calls.append("refresh") or True)._refresh_login_cookie_if_gated_or_signed_out(
                              {"workshop_id": 1}, throttled)
     assert calls == ["refresh"], "the auth reaction still fires"
@@ -356,7 +356,7 @@ def test_a_signed_out_page_refreshes_the_cookie_without_a_second_request():
     page = {"description": None, "body": "<html>no account dropdown here</html>"}
     refreshed = []
     with patch("src.web_worker.scrape_extended_details") as scrape:
-        WebScraperThread("test.db", "nope.lock", {}, None,
+        WebScraperThread("test.db", "nope.lock", None,
                          lambda: refreshed.append(1) or True)._refresh_login_cookie_if_gated_or_signed_out(
                              {"workshop_id": 1}, page)
     assert refreshed == [1]
@@ -382,7 +382,7 @@ def test_a_signed_out_scrape_records_the_problem_for_the_ui():
     miss = {"description": None, "body": "<html>no account dropdown here</html>"}
 
     with patch("src.web_worker.scrape_extended_details", return_value=miss):
-        WebScraperThread("test.db", "nope.lock", {}, None,
+        WebScraperThread("test.db", "nope.lock", None,
                          lambda: False)._refresh_login_cookie_if_gated_or_signed_out({"workshop_id": 1}, miss)
 
     problem = session_health.read("test.db")
@@ -397,7 +397,7 @@ def test_a_later_signed_in_scrape_clears_the_problem():
     session_health.record_rejected("test.db", "the login cookie expired", now=1000)
     good = {"description": None, "body": "<div class='account_pulldown'>me</div>"}
 
-    WebScraperThread("test.db", "nope.lock", {}, None,
+    WebScraperThread("test.db", "nope.lock", None,
                      lambda: True)._refresh_login_cookie_if_gated_or_signed_out({"workshop_id": 1}, good)
 
     assert session_health.read("test.db") is None
@@ -409,7 +409,7 @@ def test_a_signed_in_page_leaves_a_healthy_session_alone():
     miss = {"description": None, "body": "<div class='account_pulldown'>me</div>"}
 
     with patch("src.web_worker.scrape_extended_details", return_value=miss):
-        WebScraperThread("test.db", "nope.lock", {}, None,
+        WebScraperThread("test.db", "nope.lock", None,
                          lambda: True)._refresh_login_cookie_if_gated_or_signed_out({"workshop_id": 1}, miss)
 
     assert session_health.read("test.db") is None
@@ -423,7 +423,7 @@ def test_a_throttled_page_makes_no_claim_about_the_cookie():
     session_health.record_rejected("test.db", "the login cookie expired", now=1000)
     throttled = {"description": None, "body": "<h1>Too many requests</h1>"}
 
-    WebScraperThread("test.db", "nope.lock", {}, None,
+    WebScraperThread("test.db", "nope.lock", None,
                      lambda: True)._refresh_login_cookie_if_gated_or_signed_out({"workshop_id": 1}, throttled)
 
     assert session_health.read("test.db") == {
