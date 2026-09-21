@@ -462,3 +462,79 @@ def test_exactly_enough_free_space_proceeds(monkeypatch, db_path, tmp_path):
     assert meta["rows"] == 1
     assert os.path.isfile(dest)
 
+
+def test_a_snapshot_the_volume_cannot_hold_is_refused(monkeypatch, db_path, tmp_path):
+    """Positive evidence of no room refuses; the previous snapshot survives.
+
+    A snapshot is written as a complete second copy in the destination directory
+    before ``os.replace`` publishes it, so one run needs room for roughly two
+    copies. Starting the write anyway spends the run and then fails partway; the
+    owner's answer is to refuse up front and leave the last good copy in place.
+    """
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 10})
+    dest = _dest(tmp_path)
+    snapshot_database(db_path, dest)  # the previous, known-good snapshot
+
+    before = open(dest, "rb").read()
+    before_mtime = os.path.getmtime(dest)
+    source_size = os.path.getsize(db_path)
+    free = source_size + backup._FREE_SPACE_HEADROOM - 1  # one byte short
+    monkeypatch.setattr(backup.shutil, "disk_usage",
+                        lambda _dir: _usage_with_free(free))
+
+    with pytest.raises(BackupError) as excinfo:
+        snapshot_database(db_path, dest)
+
+    message = str(excinfo.value)
+    assert str(free) in message           # the free bytes
+    assert str(source_size) in message    # the source size
+    assert str(source_size + backup._FREE_SPACE_HEADROOM) in message  # the total
+    # The previous snapshot is byte-identical, its mtime untouched, and nothing
+    # in the destination directory was added, removed or replaced.
+    assert open(dest, "rb").read() == before
+    assert os.path.getmtime(dest) == before_mtime
+    assert os.listdir(os.path.dirname(dest)) == [os.path.basename(dest)]
+
+
+def test_one_byte_short_of_the_boundary_refuses(monkeypatch, db_path, tmp_path):
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 10})
+    dest = _dest(tmp_path)
+    monkeypatch.setattr(backup.shutil, "disk_usage",
+                        lambda _dir: _usage_with_free(_needed(db_path) - 1))
+
+    with pytest.raises(BackupError, match="refusing to snapshot"):
+        snapshot_database(db_path, dest)
+
+
+def test_a_refusal_leaves_a_stale_temp_file_untouched(monkeypatch, db_path, tmp_path):
+    """The guard runs before the stale-temp cleanup, so a refusal changes nothing."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 10})
+    dest = _dest(tmp_path)
+    snapshot_database(db_path, dest)
+    stale = dest + ".tmp"
+    with open(stale, "wb") as handle:
+        handle.write(b"stale garbage from a previous crash")
+
+    monkeypatch.setattr(backup.shutil, "disk_usage",
+                        lambda _dir: _usage_with_free(_needed(db_path) - 1))
+    with pytest.raises(BackupError):
+        snapshot_database(db_path, dest)
+
+    assert os.path.isfile(stale), "a refusal must not tidy the destination"
+    assert open(stale, "rb").read() == b"stale garbage from a previous crash"
+
+
+def test_snapshot_now_refusal_returns_none_and_logs_once(monkeypatch, db_path, tmp_path, caplog):
+    """One line, from ``snapshot_now``; the guard itself must not also warn."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "api_fetched_at": 10})
+    outbox = str(tmp_path / "outbox")
+    worker = BackupThread(db_path, outbox, 60)
+    monkeypatch.setattr(backup.shutil, "disk_usage",
+                        lambda _dir: _usage_with_free(_needed(db_path) - 1))
+
+    with caplog.at_level(logging.ERROR):
+        assert worker.snapshot_now() is None
+
+    assert caplog.text.count("Database backup failed (scrape loop unaffected)") == 1
+    assert not os.path.exists(worker.dest_path)
+
