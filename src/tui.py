@@ -476,8 +476,8 @@ class StatsScreen(Screen):
         elif name == "dead_queued":
             self._set_text(name, self._format_handoff_metric(
                 value,
-                "No dead item is holding a queue flag.",
-                "dead item(s) still hold a queue flag",
+                "No dead item is still in a work queue.",
+                "dead item(s) are still in a work queue",
             ))
         elif name == "queued_nowhere":
             self._set_text(name, self._format_handoff_metric(

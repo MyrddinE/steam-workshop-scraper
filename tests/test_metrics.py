@@ -406,6 +406,24 @@ def test_dead_items_by_queue_surfaces_dead_items_still_queued(db_path):
     assert stuck == {"web": 1, "image": 1, "translation": 1, "api": 0}
 
 
+def _queue_translation_row(db_path, workshop_id: int, field: str = "title_en") -> None:
+    """Put one row in the translation poll's queue without raising the mirror.
+
+    `queue_field_for_translation` writes the row and the item-level mirror in
+    one transaction. These metric tests need the two halves apart: the defect's
+    shape is a row whose mirror has been cleared, which the poll still selects.
+    """
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT INTO translation_queue "
+        "(entity_type, entity_id, field, original_text, priority, queued_at) "
+        "VALUES ('item', ?, ?, 'テスト', 3, 1)",
+        (workshop_id, field),
+    )
+    conn.commit()
+    conn.close()
+
+
 def test_queued_nowhere_finds_a_discovered_item_with_no_queue(db_path):
     """Issue 20: a discovered row whose api_priority was left at 0.
 
@@ -441,6 +459,46 @@ def test_dead_queued_counts_a_dead_item_holding_a_flag(db_path):
     values = metrics.values(metrics.compute(db_path, ["dead_queued", "queued_nowhere"]))
     assert values["dead_queued"] == 1
     assert values["queued_nowhere"] == 0
+
+
+def test_dead_queued_counts_a_dead_item_with_a_queued_translation(db_path):
+    """Issue 66: the mirror is clear but the poll still holds the item's work.
+
+    The handoff table names the translation consumer's predicate as "any
+    ``translation_queue`` row", so an item is queued for translation while the
+    row exists even when ``translation_priority`` has been cleared. The detector
+    has to ask the consumer's question, not the item-level mirror.
+    """
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "title": "gone", "fetch_status": -1, "api_priority": 0,
+        "translation_priority": 0,
+    })
+    _queue_translation_row(db_path, 1)
+
+    values = metrics.values(metrics.compute(db_path, ["dead_queued", "queued_nowhere"]))
+    assert values["dead_queued"] == 1, (
+        "a dead item whose translation row still exists is queued for translation"
+    )
+    assert values["queued_nowhere"] == 0
+
+
+def test_queued_nowhere_leaves_an_item_with_a_queue_row_queued(db_path):
+    """A queue row is a queue: a cleared mirror does not strand the item.
+
+    The item is in the ``queued_nowhere`` population by description (fetched
+    with nothing stored), but the translation poll has its work, so it is not
+    in no queue.
+    """
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "title": "fetched", "fetch_status": 200,
+        "api_fetched_at": 1000, "api_priority": 0, "web_scrape_priority": 0,
+        "translation_priority": 0,
+    })
+    _queue_translation_row(db_path, 1)
+
+    assert metrics.values(metrics.compute(db_path, ["queued_nowhere"]))["queued_nowhere"] == 0, (
+        "a translation row is outstanding work, so the item is not queued nowhere"
+    )
 
 
 def test_handoff_counters_read_zero_on_a_healthy_database(db_path):

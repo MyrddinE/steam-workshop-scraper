@@ -364,8 +364,21 @@ def _assert_dead_handoff(db_path, workshop_id: int) -> None:
     assert _row_value(db_path, workshop_id, "fetch_status") == -1, "the producer marked it dead"
     assert not _selected(db_path, database.queued_anywhere_predicate(), workshop_id), (
         "any stage -> dead: the item is dead and the union of the queue "
-        "predicates still selects it (issue 17's shape)"
+        "predicates still selects it (issue 17's shape, or issue 66's row)"
     )
+
+
+def _queue_translation_row(db_path, workshop_id: int, field: str = "title_en") -> None:
+    """Put a row in the translation poll's queue, mirror left clear."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT INTO translation_queue "
+        "(entity_type, entity_id, field, original_text, priority, queued_at) "
+        "VALUES ('item', ?, ?, 'テスト', 3, 1)",
+        (workshop_id, field),
+    )
+    conn.commit()
+    conn.close()
 
 
 def test_a_missing_item_is_settled_dead_and_in_no_queue(db_path, tmp_path):
@@ -388,6 +401,42 @@ def test_the_dead_contract_catches_issue_17s_shape(db_path):
 
     with pytest.raises(AssertionError, match="any stage -> dead"):
         _assert_dead_handoff(db_path, 1)
+
+
+def test_the_dead_contract_catches_a_dead_item_with_a_queued_translation(db_path):
+    """Issue 66's shape: dead, no flag set, and a translation row the poll holds.
+
+    The consumer's real predicate for translation is the queue row, not the
+    item-level mirror, so a dead item with a row is still queued even though
+    every flag reads zero.
+    """
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "title": "gone", "fetch_status": -1, "api_priority": 0,
+        "translation_priority": 0,
+    })
+    _queue_translation_row(db_path, 1)
+
+    with pytest.raises(AssertionError, match="any stage -> dead"):
+        _assert_dead_handoff(db_path, 1)
+
+
+def test_the_producer_settles_a_queued_dead_item_into_no_queue(db_path, tmp_path):
+    """The real producer clears the row, so the row's shape is the fix, not the test."""
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "title": "gone", "fetch_status": 200, "api_priority": 5,
+    })
+    _queue_translation_row(db_path, 1)
+
+    _settle_dead(db_path, tmp_path)
+
+    assert _row_value(db_path, 1, "translation_priority") == 0
+    conn = get_connection(db_path)
+    remaining = conn.execute(
+        "SELECT COUNT(*) FROM translation_queue WHERE entity_type = 'item' AND entity_id = 1"
+    ).fetchone()[0]
+    conn.close()
+    assert remaining == 0, "the producer must delete the dead item's translation rows"
+    _assert_dead_handoff(db_path, 1)
 
 
 def test_a_flipped_dead_predicate_is_caught(db_path):

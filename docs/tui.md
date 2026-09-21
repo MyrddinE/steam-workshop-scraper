@@ -335,11 +335,13 @@ own the active-time and net/gross detail.
 (`_format_dead_items_by_queue`, `src/tui.py:720`) names any dead items still flagged in a queue and says
 the queues will not drain until they are cleared; a zero value shows an all-clear. The two
 handoff counters share `_format_handoff_metric`: `dead_queued` names any dead items still
-holding a flag, and `queued_nowhere` any live items in no queue the pipeline never completed,
+sitting in a work queue — a flag left set, or a `translation_queue` row the poll still holds — and
+`queued_nowhere` any live items in no queue the pipeline never completed,
 each drawn as a green sentence when it reads the healthy zero. `dead_items_by_queue` and `dead_queued`
 are not duplicates: the scalar `dead_queued` is the invariant that must read zero, and the
-`dead_items_by_queue` breakdown says which queue still holds the dead rows, so a non-zero scalar sends
-the reader to the breakdown for the diagnosis. The
+`dead_items_by_queue` breakdown says which flag still holds the dead rows, so a non-zero scalar sends
+the reader to the breakdown for the diagnosis; a dead item held only by a queue row has no flag for the
+breakdown to name, so it appears in the scalar alone. The
 priority section (`_format_priority`, `src/tui.py:753`) reads as queue state — "Translation
 queue: N waiting" followed by the priority mix — rather than a raw column dump. `high_water`
 is the one metric whose `None` is a real answer ("never"), not a failure.

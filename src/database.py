@@ -3344,12 +3344,21 @@ def get_subscription_states(db_path: str, workshop_ids) -> dict[int, dict]:
         conn.close()
     return {row["workshop_id"]: dict(row) for row in rows}
 
-def insert_or_update_item(db_path: str, item_data: dict) -> bool:
+def insert_or_update_item(db_path: str, item_data: dict, *,
+                          clear_translation_queue: bool = False) -> bool:
     """
     Inserts a new item or updates an existing item.
     Returns True if a new item was discovered (inserted), False if it was updated.
     Tags are processed into the workshop_tags junction table and removed from
     the workshop_items column list (the JSON column no longer exists).
+
+    ``clear_translation_queue`` deletes the item's ``translation_queue`` rows in the
+    same transaction as the status write. The caller that marks an item dead
+    passes it: the translation poll hands out every row of that table with no
+    dead-item guard, so the producer's clear is what keeps a dead item out of the
+    queue (issue 66). It is opt-in rather than inferred from ``fetch_status = -1``
+    so every writer states its exit, and only the item's own ``entity_type = 'item'``
+    rows are touched -- a creator row is a different entity.
     """
     conn = get_connection(db_path)
 
@@ -3426,6 +3435,17 @@ def insert_or_update_item(db_path: str, item_data: dict) -> bool:
         """
 
     conn.execute(sql, values)
+
+    if clear_translation_queue:
+        # Same connection, before the single commit below: the status write and
+        # the queue clear are one transaction, so a translator drain can never
+        # see a dead item whose rows survived, nor a cleared queue on a live one.
+        conn.execute(
+            "DELETE FROM translation_queue "
+            "WHERE entity_type = 'item' AND entity_id = ?",
+            (item_data["workshop_id"],),
+        )
+
     conn.commit()
     conn.close()
     return is_new
@@ -3501,10 +3521,22 @@ def translation_priority_predicate() -> str:
 def queued_anywhere_predicate() -> str:
     """Any stage → dead: the union a dead item has to fail.
 
-    ``_settle_api_failure`` clears all four flags when it writes ``fetch_status = -1``;
-    the web, image and translation polls have no dead-item guard of their own, so
-    this union is how "in no queue" is stated at the item level. It is built from
-    the named queue predicates so a change to one of them moves this with it.
+    ``_settle_api_failure`` clears all four flags and deletes the item's
+    ``translation_queue`` rows when it writes ``fetch_status = -1``; the web, image
+    and translation polls have no dead-item guard of their own, so this union is
+    how "in no queue" is stated at the item level. It is built from the named queue
+    predicates so a change to one of them moves this with it.
+
+    It asks the translation *consumer's* question -- is there a ``translation_queue``
+    row -- rather than the item-level mirror alone. The mirror is a summary the
+    translator maintains; the poll hands out the rows, so a row whose mirror has
+    been cleared is still queued work (issue 66). Reading only the mirror made
+    ``dead_queued`` report zero while 910 dead items held 1,016 rows, and made
+    ``queued_nowhere`` call an item with outstanding translation work stranded.
+
+    The correlated subquery is written for the bare ``workshop_items`` relation,
+    which is what every caller interpolates it into; a caller that aliased the
+    table would have to qualify the four flag terms as well.
     """
     return " OR ".join(
         f"({predicate})"
@@ -3514,6 +3546,9 @@ def queued_anywhere_predicate() -> str:
             image_queue_predicate(),
             translation_priority_predicate(),
         )
+    ) + (
+        " OR (EXISTS (SELECT 1 FROM translation_queue q "
+        "WHERE q.entity_type = 'item' AND q.entity_id = workshop_items.workshop_id))"
     )
 
 

@@ -279,6 +279,19 @@ handoffs by the contract rather than by re-writing their SQL. Both detectors are
 they are meant to be zero, and they were measured at 28 and 1 rather than zero, which is the argument
 for having them in the statistics.
 
+The detectors were only as good as the predicate they asked, and the translation half was asking the
+wrong one. `queued_anywhere_predicate` was built from `translation_priority_predicate` — the item-level
+mirror — while the translation poll hands out *rows* of `translation_queue`; the mirror and the row are
+cleared together only on the success path, not when an item is marked dead. *Measured* on the v35
+snapshot (`real-copy.db`, 1,725,544 items, 68,323 dead): `dead_queued` read **0** while **910 dead items
+held 1,016 `translation_queue` rows**, every one with the mirror already cleared — the same population
+the paragraph above measured as "1 dead item is still queued for translation", grown. The producer
+(`_settle_api_failure`) now deletes the item's rows in the same transaction as `fetch_status = -1`, the
+predicate asks the queue row as well as the flags, and migration 35→36 removed the rows already
+stranded, so the detector reads zero and no dead item's fields are translated or paid for. The tests
+that pin it are `tests/test_dead_translation_rows_migration.py`,
+`tests/test_handoff_contract.py` and `tests/test_metrics.py`.
+
 Three defects found in quick succession turned out to be one shape. In each, a stage finished with an
 item, wrote the item's new state, and reported success — and the state it wrote was one the next
 stage's query could not see. Nothing errored, nothing logged a failure, and the loss showed up only
@@ -289,6 +302,7 @@ much later as work that mysteriously never happened.
 | 17 | `fetch_status = -1` and `api_priority = 0` | `web_scrape_priority` and `image_priority` were left set, so the worker polls kept selecting a dead item forever |
 | 19 | `extended_description = NULL`, `web_scrape_priority = 0` | The consumer requires a description; the item was recorded as done and never retried |
 | 20 | `api_priority` left to the column default | On a migrated database that default is `0` and the fetch queue requires `> 0`, so a discovered item was queued nowhere |
+| 66 | `fetch_status = -1` with the four flags cleared | `translation_queue` rows were left behind, and the poll selects rows while `queued_anywhere_predicate` asked only the item-level mirror — so the dead item's fields were still translated, and `dead_queued` read zero |
 
 The common cause is that each stage's exit condition is written down only in the stage that performs
 it, while the next stage's entry condition lives in a different function. Nothing states the contract
@@ -301,13 +315,14 @@ Every item is, at all times, in **exactly one** of these states:
 * queued for the API fetch (`api_priority > 0`), or
 * queued for a web scrape (`web_scrape_priority > 0`), or
 * queued for an image (`image_priority > 0`), or
-* queued for translation (`translation_priority > 0`), or
+* queued for translation (a `translation_queue` row exists; `translation_priority > 0` is its
+  item-level mirror), or
 * complete for the stage that owns it, or
 * deliberately dead (`fetch_status = -1`) and therefore in **no** queue.
 
 Never in none of them by accident, and never in a queue the owning stage has finished with. Issue 19
 violates the first kind — recorded as complete while storing nothing; issue 20 is the same violation;
-issue 17 is the second — dead, yet still queued.
+issues 17 and 66 are the second — dead, yet still queued, once by a flag and once by a queue row.
 
 ### Approach
 
