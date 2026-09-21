@@ -3739,11 +3739,11 @@ def count_stranded_never_fetched_items(db_path: str) -> int:
     own columns plus its ``translation_queue`` rows:
     ``get_next_items_to_fetch`` (``src/database.py:3657``) interpolates
     ``api_fetch_queue_predicate`` (``src/database.py:3570``),
-    ``get_next_web_scrape_item`` (``src/database.py:4137``)
+    ``get_next_web_scrape_item`` (``src/database.py:4139``)
     ``web_scrape_queue_predicate`` (``src/database.py:3580``),
-    ``get_next_image_item`` (``src/database.py:4186``)
+    ``get_next_image_item`` (``src/database.py:4188``)
     ``image_queue_predicate`` (``src/database.py:3590``), and
-    ``get_next_batch_for_translation`` (``src/database.py:4354``) selects
+    ``get_next_batch_for_translation`` (``src/database.py:4356``) selects
     ``translation_queue`` rows. None of them clears a flag, deletes a row or
     claims work as it reads. A queue is emptied only by the stage that finished or
     refused the work -- the translator deletes the row it stored

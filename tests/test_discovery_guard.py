@@ -11,6 +11,8 @@ counts the never-fetched rows no queue holds (`count_stranded_never_fetched_item
 
 from unittest.mock import patch
 
+import logging
+
 from src.daemon import Daemon
 from src.database import (
     get_connection,
@@ -150,6 +152,37 @@ def test_guard_skips_discovery_when_fetchable_queue_is_deep(mock_sleep, mock_que
     Daemon(_config(db_path)).seed_database(fill_target=100)
 
     assert not mock_query.called, "discovery should be skipped when the queue is genuinely full"
+
+
+@patch("src.daemon.query_workshop_newest_page")
+@patch("src.daemon.time.sleep")
+def test_guard_log_line_reports_the_stranded_count(mock_sleep, mock_query, db_path, caplog):
+    """The parenthetical must print the stranded count, not the never-fetched total.
+
+    The measured live shape once more: 4 dead, 4 queued and 6 settled-``404`` rows
+    all carry ``api_fetched_at IS NULL``, so the old line printed 16 while the rows
+    outside every queue the pipeline has no answer for are the 2 stranded ones.
+    """
+    _insert(db_path, [
+        *[(i, -1, 5, None) for i in range(1, 5)],
+        *[(i, None, 3, None) for i in range(10, 14)],
+        *[(i, 404, 0, None) for i in range(20, 26)],
+        (30, None, 0, None),
+        (31, 500, 0, None),
+    ])
+    assert count_never_fetched_items(db_path) == 16
+    assert count_stranded_never_fetched_items(db_path) == 2
+
+    mock_query.return_value = {"total": 10, "items": [{"publishedfileid": "999"}], "next_cursor": ""}
+
+    with caplog.at_level(logging.INFO):
+        Daemon(_config(db_path)).seed_database(fill_target=4)
+
+    assert not mock_query.called, "4 fetchable rows already satisfy the guard"
+    skip_lines = [r.getMessage() for r in caplog.records if "Skipping discovery" in r.getMessage()]
+    assert len(skip_lines) == 1, skip_lines
+    assert "2 live never-fetched items are in no queue" in skip_lines[0]
+    assert "16" not in skip_lines[0], "the never-fetched total must not be what the line prints"
 
 
 @patch("src.daemon.query_workshop_newest_page")

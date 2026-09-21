@@ -116,9 +116,29 @@ target, so a pass that does run refills to 300. The guard exists so that a healt
 re-crawled. The target was raised from 100 to 200 because the fetch loop drains the queue between
 discovery passes: at 100 every pass found the queue already at or above the threshold and skipped it,
 so the refill raced the drain instead of leading it; 200 still crossed it on occasion, so 300 is the
-headroom above the crossing — three pages at the request page size of 100. It deliberately does not
-count items that have never been fetched: those may not be queued at all, and reading them as
-outstanding work once suppressed discovery permanently while the fetch queue held a single item.
+headroom above the crossing — three pages at the request page size of 100. It does not treat
+`api_fetched_at IS NULL` alone as outstanding work: a never-fetched row may be dead
+(`fetch_status = -1`), may already be queued, or may carry the settled `404` the API gives an item it
+does not have, so the never-fetched total is not a measure of the fetch queue, and reading it as one
+once suppressed discovery permanently while the fetch queue held a single item. The skip's log line
+reports `count_stranded_never_fetched_items` (`src/database.py:3711`) — the never-fetched, live rows
+outside `queued_anywhere_predicate()` — rather than `count_never_fetched_items`
+(`src/database.py:3678`), which the measured live run put at 336 with a large settled and queued
+remainder. The counts are not a partition: they overlap, and items move between them as
+`_promote_stale_items` re-ingests a settled row, discovery re-queues, or a later API revision
+settles or revives a row (`count_fetchable_items`'s docstring, `src/database.py:3687`).
+
+Queue membership is entirely persisted, which is what makes that count authoritative. Every queue
+poll is a pure `SELECT` over the item's own columns plus its `translation_queue` rows, and nothing is
+claimed or cleared on read: `get_next_items_to_fetch` (`src/database.py:3657`) interpolates
+`api_fetch_queue_predicate` (`src/database.py:3570`), `get_next_web_scrape_item`
+(`src/database.py:4139`) `web_scrape_queue_predicate` (`src/database.py:3580`),
+`get_next_image_item` (`src/database.py:4188`) `image_queue_predicate`
+(`src/database.py:3590`), and `get_next_batch_for_translation` (`src/database.py:4356`) the
+`translation_queue` rows. A queue is emptied only by the stage that finished or refused the work —
+the translator deletes the row it stored (`src/translator.py:752`), and `_settle_api_failure`
+(`src/daemon.py:1077`) clears a refused item's flags and queue rows (`src/daemon.py:1112`) — and no
+queue exists only as an in-memory list.
 
 ### `_run_page_discovery` (daemon)
 
