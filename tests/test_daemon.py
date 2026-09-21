@@ -12,7 +12,7 @@ def mock_config(db_path):
     return {
         "database": {"path": db_path},
         "api": {"key": "TEST_KEY"},
-        "daemon": {"api_batch_size": 2, "request_delay_seconds": 0.01, "target_appids": [123]}
+        "daemon": {"api_batch_size": 2, "api_delay_seconds": 0.01, "target_appids": [123]}
     }
 
 def test_daemon_init_defaults(tmp_path, monkeypatch):

@@ -420,6 +420,21 @@ def test_the_configured_token_is_the_fallback_when_the_page_has_none(engine_env,
     assert session.calls[0]["data"]["sessionid"] == "TOK"
 
 
+def test_the_retired_session_key_is_not_a_credential_fallback(monkeypatch, caplog):
+    """`session.id` is retired: it must not supply the configured token fallback."""
+    monkeypatch.setattr(web_scraper, "_build_workshop_cookies", lambda config: {})
+    with caplog.at_level(logging.WARNING):
+        _cookies, token, _login = engine.resolve_subscribe_credentials(
+            {"session": {"id": "LEGACY"}}
+        )
+    assert token == "", "the retired value must not be read"
+    warnings = [record.getMessage() for record in caplog.records
+                if "no longer used" in record.getMessage()
+                and "session.id" in record.getMessage()]
+    assert len(warnings) == 1
+    assert "session.csrf_token" in warnings[0]
+
+
 @pytest.mark.parametrize("payload,status", [({"success": 2}, 200),
                                             ({"success": 15}, 200),
                                             ({"success": 2}, 401)])

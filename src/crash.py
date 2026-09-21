@@ -67,6 +67,7 @@ from datetime import datetime, timezone
 
 from src import capture
 from src.backup import update_manifest
+from src.config import configured_outbox_dir
 from src.session_cookie import ENCODED_SEPARATOR
 
 # The directory inside the outbox, and the manifest kind the puller filters on.
@@ -754,7 +755,7 @@ def _configured_outbox_dir(config):
     daemon_config = config.get("daemon")
     if not isinstance(daemon_config, dict):
         return None
-    return daemon_config.get("outbox_dir") or daemon_config.get("backup_dir") or None
+    return configured_outbox_dir(daemon_config)
 
 
 def _dump_filename(process, occurrence):

@@ -36,7 +36,7 @@ from src.steam_api import (
     STEAM_API_MAX_IDS_PER_REQUEST,
 )
 from src.translator import TranslatorThread, is_ascii
-from src.config import config_value_with_legacy, login_secure_value, save_config
+from src.config import configured_outbox_dir, login_secure_value, save_config, warn_retired_key
 from src.database import raise_web_scrape_priority, queue_field_for_translation, raise_image_priority, translation_is_current
 from src.firefox_cookies import steam_login_secure
 from src.web_worker import WebScraperThread
@@ -351,21 +351,24 @@ class Daemon:
         self.db_path = config.get("database", {}).get("path", "workshop.db")
         self.api_key = config.get("api", {}).get("key", "")
         daemon_config = config.get("daemon", {})
-        self.api_batch_size = config_value_with_legacy(
-            daemon_config, "api_batch_size", "batch_size", 10, section_name="daemon"
-        )
-        if daemon_config.get("api_delay_seconds") is None and daemon_config.get("request_delay_seconds") is not None:
-            logging.warning(
-                "Config key 'request_delay_seconds' is deprecated and still honoured; "
-                "rename it to 'api_delay_seconds'."
-            )
-        self.api_delay = daemon_config.get("api_delay_seconds") or daemon_config.get("request_delay_seconds", 1.5)
+        # `daemon.batch_size`, `daemon.user_staleness_days` and
+        # `daemon.request_delay_seconds` are retired: their values are no longer
+        # read, so a config that carries only the old spelling gets the current
+        # setting's default, with one warning naming the dead key. The current
+        # spelling is read directly.
+        if "batch_size" in daemon_config:
+            warn_retired_key("daemon", "batch_size", "api_batch_size")
+        self.api_batch_size = daemon_config.get("api_batch_size")
+        if self.api_batch_size is None:
+            self.api_batch_size = 10
+        if "request_delay_seconds" in daemon_config:
+            warn_retired_key("daemon", "request_delay_seconds", "api_delay_seconds")
+        self.api_delay = daemon_config.get("api_delay_seconds") or 1.5
         self.item_staleness_days = int(daemon_config.get("item_staleness_days") or 30)
+        if "user_staleness_days" in daemon_config:
+            warn_retired_key("daemon", "user_staleness_days", "creator_staleness_days")
         self.creator_staleness_days = int(
-            config_value_with_legacy(
-                daemon_config, "creator_staleness_days", "user_staleness_days",
-                section_name="daemon",
-            ) or 90
+            daemon_config.get("creator_staleness_days") or 90
         )
         set_api_delay(self.api_delay)
         logging.info(f"API delay={self.api_delay}s, Staleness: item={self.item_staleness_days}d, creator={self.creator_staleness_days}d")
@@ -391,18 +394,20 @@ class Daemon:
         )
 
         # Optional database backup into a pull-outbox. The feature defaults to
-        # OFF: it is only enabled when both `outbox_dir` (or `backup_dir`) and a
-        # positive `backup_interval_seconds` are configured, so turning it on for
-        # the live instance is a deliberate switch.
-        self.outbox_dir = daemon_config.get("outbox_dir") or daemon_config.get("backup_dir")
+        # OFF: it is only enabled when both `outbox_dir` and a positive
+        # `backup_interval_seconds` are configured, so turning it on for the live
+        # instance is a deliberate switch. `configured_outbox_dir` also resolves
+        # the still-honoured `backup_dir` spelling, shared with the web and crash
+        # readers.
+        self.outbox_dir = configured_outbox_dir(daemon_config)
         # Debugging switches, not permanent ones: on means keep everything. The
         # image switch is separate because the web switch keeps whole bodies
         # unbounded, and an owner reviewing image metadata should not have to
         # collect pages to do it. Image *failures* need neither switch — the
         # outbox alone is enough, like every other failure capture. The web
         # switch is resolved by `capture.web_download_switch` because the web
-        # server process reads the same key for the subscribe route, and the
-        # deprecated `capture_web_scrapes` name has to be honoured in both.
+        # server process reads the same key for the subscribe route. The image
+        # switch has no renamed predecessor, so it is read straight from config.
         self.capture_web_downloads = capture.web_download_switch(daemon_config)
         self.capture_image_downloads = bool(daemon_config.get("capture_image_downloads", False))
         self.backup_interval_seconds = float(daemon_config.get("backup_interval_seconds") or 0)

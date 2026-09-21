@@ -227,7 +227,7 @@ def _daemon_for(db_path, appid=294100):
     return Daemon({
         "database": {"path": db_path},
         "api": {"key": "TEST_KEY"},
-        "daemon": {"target_appids": [appid], "api_batch_size": 1, "request_delay_seconds": 0},
+        "daemon": {"target_appids": [appid], "api_batch_size": 1, "api_delay_seconds": 0.01},
     })
 
 

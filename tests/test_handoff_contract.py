@@ -51,7 +51,7 @@ def _daemon(db_path, tmp_path) -> Daemon:
     config = {
         "database": {"path": db_path},
         "api": {"key": "TEST"},
-        "daemon": {"api_batch_size": 1, "target_appids": [1], "request_delay_seconds": 0},
+        "daemon": {"api_batch_size": 1, "target_appids": [1], "api_delay_seconds": 0.01},
     }
     return Daemon(config, config_path=str(tmp_path / "config.yaml"))
 

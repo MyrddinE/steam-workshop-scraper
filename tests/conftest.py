@@ -255,7 +255,7 @@ def mock_config_with_api(db_path):
     return {
         "database": {"path": db_path},
         "api": {"key": "TEST_KEY"},
-        "daemon": {"api_batch_size": 2, "request_delay_seconds": 0.01, "target_appids": [123]}
+        "daemon": {"api_batch_size": 2, "api_delay_seconds": 0.01, "target_appids": [123]}
     }
 
 @pytest.fixture
@@ -294,3 +294,17 @@ def cleanup_crash_hooks():
     yield
     from src import crash
     crash.uninstall()
+
+
+@pytest.fixture(autouse=True)
+def reset_config_warning_dedupe():
+    """Config-key warnings fire once per process by design.
+
+    A test that asserts "one warning" for a key needs a fresh process view of
+    the seen-set, or the first test to read that key would silence every later
+    one.
+    """
+    from src import config
+    config.reset_warned_keys()
+    yield
+    config.reset_warned_keys()

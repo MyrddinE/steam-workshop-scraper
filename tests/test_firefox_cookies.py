@@ -249,31 +249,43 @@ def test_the_session_id_falls_back_to_the_config():
         assert _csrf_token({"session": {"csrf_token": "CONFIG_SID", "read_firefox_cookies": True}}) == "CONFIG_SID"
 
 
-# --- the renamed session CSRF-token key -------------------------------------
+# --- the retired session CSRF-token key -------------------------------------
 #
 # `session.id` held the `sessionid` CSRF token, not a session identity, beside
 # `session.login_secure`, the real credential. `_csrf_token` is where the alias
-# is exercised; the scraper's other readers go through the same helper.
+# was exercised; the scraper's other readers go through the same helper. The old
+# spelling is retired -- the value is no longer read, and the key is named in one
+# warning so the operator knows to rename it.
 
-def test_the_legacy_session_token_key_is_honoured_and_warns(caplog):
+def _retired_warnings(caplog, legacy_key):
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if "no longer used" in record.getMessage() and legacy_key in record.getMessage()
+    ]
+
+
+def test_the_retired_session_token_key_is_not_honoured_and_warns(caplog):
     with caplog.at_level(logging.WARNING):
         token = _csrf_token({"session": {"id": "TOKEN"}})
-    assert token == "TOKEN"
-    assert any("deprecated" in record.message for record in caplog.records)
+    assert token == "", "the retired value must not be read"
+    warnings = _retired_warnings(caplog, "session.id")
+    assert len(warnings) == 1
+    assert "session.csrf_token" in warnings[0]
 
 
 def test_the_current_session_token_key_does_not_warn(caplog):
     with caplog.at_level(logging.WARNING):
         token = _csrf_token({"session": {"csrf_token": "TOKEN"}})
     assert token == "TOKEN"
-    assert not any("deprecated" in record.message for record in caplog.records)
+    assert not _retired_warnings(caplog, "session.id")
 
 
-def test_the_current_session_token_key_wins_when_both_are_present(caplog):
+def test_the_current_session_token_key_wins_and_the_retired_key_still_warns(caplog):
     with caplog.at_level(logging.WARNING):
         token = _csrf_token({"session": {"csrf_token": "CURRENT", "id": "LEGACY"}})
-    assert token == "CURRENT"
-    assert not any("deprecated" in record.message for record in caplog.records)
+    assert token == "CURRENT", "the current key is the one read"
+    assert len(_retired_warnings(caplog, "session.id")) == 1
 
 
 @pytest.mark.parametrize("body,expected", [
