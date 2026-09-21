@@ -476,7 +476,7 @@ The "Jump to Author" button replaces the current filter set with a single `Autho
 
 Before replacing the rows, the app saves state to disk and snapshots the current filters in memory. `is_author_mode` is then set, which hides "Save Filter for Scraper" and makes `save_state` a no-op so the author filter is not persisted.
 
-The `btn-return` button leaves single-creator mode: it clears the flag, shows the save button again, restores the in-memory filter snapshot (replacing the author row and re-running the search), and lets state saving apply once more. The snapshot is in memory rather than re-read from `.tui_state.yaml` so that a state write between the jump and the Return cannot lose the filters the jump replaced.
+The `btn-return` button leaves single-creator mode: it clears the flag, shows the save button again, restores the in-memory filter snapshot (replacing the author row and re-running the search), and lets state saving apply once more. The snapshot is in memory rather than re-read from `.tui_state.yaml` so that a state write between the jump and the Return cannot lose the filters the jump replaced. The same branch also shows the creator-ignore button and labels it from the creator's stored flag, and Return hides it again — see [Ignoring a creator](#ignoring-a-creator-creator-filtered-view).
 
 The Web UI now has the same mode (`jumpToAuthor`, `returnFromAuthor`, `#author-mode-bar`,
 `#btn-return-author`), and its Return additionally re-opens the item and scroll position the jump
@@ -557,3 +557,35 @@ the row's underline appears or clears at once, and then moves the selection to t
 is not dropped.** The list is only re-queried by the next search, so a search that already returned
 the row keeps it on screen with its new underline — the TUI counterpart of the web grid keeping the
 struck-through cell until its next query.
+
+### Ignoring a creator (creator-filtered view)
+
+The creator-scoped view is the `btn-jump-author` filtered result list, and it carries an **Ignore
+creator / Un-ignore creator** button (`#btn-ignore-creator`). The button sits in the search-buttons
+row at the far end from `btn-return`, with `Search` between them, so it is near Return but not beside
+it — a press meant for Return cannot land on it. It is hidden outside single-creator mode, like the
+Return button. (It is a button rather than a footer binding because its label has to change with the
+creator's state, and a footer binding's description is fixed at class definition; a key next to
+`ctrl+q` was also the misclick the owner asked to avoid.)
+
+**How the view knows its creator.** `on_button_pressed`'s `btn-jump-author` branch sets
+`self.author_mode_creator` from the highlighted row's `creator_steamid`, and
+`action_return_from_author_mode` clears it. `action_toggle_creator_ignored` reads that attribute
+rather than `current_item_creator`: the highlighted row is not stable here, because the first press
+settles every one of the creator's items and the re-query leaves the list empty, so there may be no
+row left to read a creator from while the button must still reverse the change. It is also the
+owner's rule — the trigger acts on the creator being viewed, not on the selected item.
+
+The action calls `database.toggle_creator_ignored`, the one toggle rule the web route also calls, and
+labels the button from `database.creator_ignore_label`, the one wording the web route also returns.
+Flagging a creator settles every non-dead item of theirs (`fetch_status = -2`, all four priorities
+zero, their `translation_queue` rows deleted), and un-flagging restores every item of theirs at `-2`
+by `unignore_item`'s rule; a dead item is untouched in both directions, and because there is no
+provenance column an un-ignore also restores items that were ignored individually. The jump labels
+the button from the stored flag (`creator_is_ignored`), so a creator who is already ignored offers
+the reverse straight away. Unlike the `i` key, the toggle is a **whole-view** change: after it the
+results are re-queried (`execute_search`) so the settled items leave the view and an un-ignore brings
+them back, rather than one row being patched in place. The live behaviour is described in
+[data-model.md](data-model.md#creators); the web counterpart is
+[web-ui.md](web-ui.md#the-creator-ignore-toggle).
+
