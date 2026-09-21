@@ -8,11 +8,13 @@ from src.daemon import Daemon, STALE_SWEEP_INTERVAL_SECONDS, API_DELAY_FLOOR
 from src.database import get_app_tracking, initialize_database
 
 @pytest.fixture
-def mock_config(db_path):
+def mock_config(db_path, seed_delay):
+    # The low API delay is daemon state now, not a config key.
+    seed_delay(db_path, "api", 0.01)
     return {
         "database": {"path": db_path},
         "api": {"key": "TEST_KEY"},
-        "daemon": {"api_batch_size": 2, "api_delay_seconds": 0.01, "target_appids": [123]}
+        "daemon": {"api_batch_size": 2, "target_appids": [123]}
     }
 
 def test_daemon_init_defaults(tmp_path, monkeypatch):

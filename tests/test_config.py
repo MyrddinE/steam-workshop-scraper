@@ -146,11 +146,13 @@ def test_example_config_has_the_documented_sections():
         assert section in parsed, f"config.yaml.example is missing the '{section}' section"
 
 
-def test_example_config_uses_the_current_delay_key():
-    """The canonical key is api_delay_seconds; `request_delay_seconds` is
-    retired, so the example must not advertise it either."""
+def test_example_config_does_not_advertise_the_retired_delay_keys():
+    """The pacing delays are daemon state now, so the example must not offer a
+    key for them; `api_delay_seconds` and `request_delay_seconds` are retired."""
     with open(EXAMPLE_CONFIG) as f:
         parsed = yaml.safe_load(f)
-    assert "api_delay_seconds" in parsed["daemon"]
-    assert "request_delay_seconds" not in parsed["daemon"]
+    for key in ("api_delay_seconds", "request_delay_seconds",
+                "web_delay_seconds", "image_delay_seconds"):
+        assert key not in parsed["daemon"], \
+            f"config.yaml.example must not advertise the retired '{key}'"
 

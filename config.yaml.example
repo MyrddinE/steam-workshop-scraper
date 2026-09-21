@@ -8,7 +8,6 @@ database:
 
 daemon:
   api_batch_size: 10
-  api_delay_seconds: 1.5
   target_appids:
     - 294100 # RimWorld
   # Database backups are OFF unless both keys below are set.

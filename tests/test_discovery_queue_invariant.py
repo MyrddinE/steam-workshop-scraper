@@ -22,13 +22,17 @@ from src.database import (
     get_next_items_to_fetch,
     initialize_database,
 )
+from tests.conftest import seed_pacing_delay
 
 
 def _config(db_path: str) -> dict:
+    # The low API delay is daemon state now, not a config key: seed it so the
+    # walk's pacing waits do not slow the test down.
+    seed_pacing_delay(db_path, "api", 0.01)
     return {
         "database": {"path": db_path},
         "api": {"key": "test_key"},
-        "daemon": {"target_appids": [1062090], "api_batch_size": 10, "api_delay_seconds": 0.01},
+        "daemon": {"target_appids": [1062090], "api_batch_size": 10},
     }
 
 

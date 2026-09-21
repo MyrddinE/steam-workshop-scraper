@@ -224,10 +224,13 @@ def test_an_unknown_sort_is_still_rejected(subscribed_db):
 
 def _daemon_for(db_path, appid=294100):
     from src.daemon import Daemon
+    from tests.conftest import seed_pacing_delay
+    # The low API delay is daemon state now, not a config key.
+    seed_pacing_delay(db_path, "api", 0.01)
     return Daemon({
         "database": {"path": db_path},
         "api": {"key": "TEST_KEY"},
-        "daemon": {"target_appids": [appid], "api_batch_size": 1, "api_delay_seconds": 0.01},
+        "daemon": {"target_appids": [appid], "api_batch_size": 1},
     })
 
 

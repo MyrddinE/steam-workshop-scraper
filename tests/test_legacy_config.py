@@ -41,11 +41,13 @@ def _still_honoured_warnings(caplog, legacy_key):
     ]
 
 
-# --- the retired delay key --------------------------------------------------
+# --- the retired delay keys -------------------------------------------------
 #
 # `daemon.request_delay_seconds` was the original name of the per-request pause,
-# renamed once the delay was understood as an API rate control. The live log
-# never shows the deprecated warning, so the old value is retired.
+# renamed once the delay was understood as an API rate control. Both spellings
+# are now retired outright: the delay is daemon state (`.daemon_state.yaml`), not
+# configuration, so there is no current key to rename to and the warning says the
+# value is no longer read.
 
 def test_the_retired_delay_key_is_not_honoured_and_warns(db_path, caplog):
     with caplog.at_level(logging.WARNING):
@@ -53,21 +55,34 @@ def test_the_retired_delay_key_is_not_honoured_and_warns(db_path, caplog):
     assert daemon.api_delay == 1.5, "the retired value must not be read"
     warnings = _retired_warnings(caplog, "daemon.request_delay_seconds")
     assert len(warnings) == 1
-    assert "daemon.api_delay_seconds" in warnings[0]
+    assert "no longer read" in warnings[0]
+    assert "renamed to" not in warnings[0], "there is no current key to move it to"
 
 
-def test_the_current_delay_key_works_and_does_not_warn(db_path, caplog):
+def test_the_removed_delay_key_is_not_honoured_and_warns(db_path, caplog):
     with caplog.at_level(logging.WARNING):
         daemon = Daemon(_config(db_path, api_delay_seconds=2.0))
-    assert daemon.api_delay == 2.0
-    assert not _retired_warnings(caplog, "daemon.request_delay_seconds")
+    assert daemon.api_delay == 1.5, "the removed value must not be read"
+    warnings = _retired_warnings(caplog, "daemon.api_delay_seconds")
+    assert len(warnings) == 1
+    assert "no longer read" in warnings[0]
+    assert "renamed to" not in warnings[0]
 
 
-def test_the_current_delay_key_wins_and_the_retired_key_still_warns(db_path, caplog):
+def test_both_delay_spellings_are_retired_and_warn(db_path, caplog):
     with caplog.at_level(logging.WARNING):
-        daemon = Daemon(_config(db_path, api_delay_seconds=2.0, request_delay_seconds=9.0))
-    assert daemon.api_delay == 2.0, "the current key is the one read"
+        daemon = Daemon(_config(db_path, api_delay_seconds=2.0,
+                                request_delay_seconds=9.0))
+    assert daemon.api_delay == 1.5, "neither dead spelling is read"
     assert len(_retired_warnings(caplog, "daemon.request_delay_seconds")) == 1
+    assert len(_retired_warnings(caplog, "daemon.api_delay_seconds")) == 1
+
+
+def test_the_web_and_image_delay_keys_are_retired_and_warn(db_path, caplog):
+    with caplog.at_level(logging.WARNING):
+        Daemon(_config(db_path, web_delay_seconds=3.0, image_delay_seconds=4.0))
+    assert len(_retired_warnings(caplog, "daemon.web_delay_seconds")) == 1
+    assert len(_retired_warnings(caplog, "daemon.image_delay_seconds")) == 1
 
 
 # --- the retired capture switch ---------------------------------------------

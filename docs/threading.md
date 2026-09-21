@@ -104,8 +104,15 @@ allowance that resets every 24 hours, not a rate: asking more slowly buys nothin
 slowly costs nothing except on the day the allowance runs out. The horizon is the reset, so backing off
 to an hour and re-probing about twenty-four times a day is the right shape, and an uncapped or
 rate-seeking delay would be worse than useless — it would answer a question nobody asked. This is also
-why it keeps its ceilings while the other three lost theirs, and why it is the one worker that was
-never given a config key: it has never needed an escape hatch.
+why it keeps its ceilings while the other three lost theirs. Storage is the one place it no longer
+differs: its backoff has always lived in the daemon state file, and the other three's delays now live
+there too, one section per worker, rather than in `config.yaml`.
+
+**The four delays all live in the state file.** Each rate-seeking worker reads its starting delay from
+its own `.daemon_state.yaml` section and writes it back as it moves — bounded by
+`pacing.PERSIST_STEP_SECONDS`, so the file is not rewritten on every request — exactly as the
+translator's backoff is recorded below. None of them is read from `config.yaml` any more, and a config
+that still carries one of the retired keys gets one warning and is otherwise ignored.
 
 **The backoff outlives the process.** The streak and the moment its next attempt falls due are written
 to the daemon state file beside the database, `.daemon_state.yaml`, so restarting the daemon resumes
@@ -121,16 +128,17 @@ behind. The store is *injected*, so a thread constructed without one — in a te
 exactly as it did before. The file itself is owned by `src/daemon_state.py`, which is best-effort: an
 unreadable or unwritable state file costs one extra attempt, never a crash.
 
-**Resetting it.** The three rate-seeking delays are reset by editing their key in `config.yaml` and
-restarting, because they are not trusted yet and an operator needs to pull one back down when it
-over-reacts. The translator's has no config key, so the equivalent is to delete the `translation_backoff`
-section from `.daemon_state.yaml` — or the file, which only ever holds daemon-owned state — and restart.
-It is the trusted one of the four: it has never backed off when it should not, nor failed to when it
-should, which is exactly why it was never given a config key, and why its differing from the other three
-is not a gap to close. Its ceilings are not the same device as theirs either: they bound how long a
-condition that waiting cannot fix is left alone, so a raised spend limit is picked up within the hour
-without a restart. See issue 21 in [code-issues.md](code-issues.md), where the config storage and the
-ceilings on the other three are recorded as one change, to be made together and not before.
+**Resetting one.** Every worker's delay is reset the same cheap way: delete its section from
+`.daemon_state.yaml` — or the file, which only ever holds daemon-owned state — and restart. The
+sections are `translation_backoff` here, and `api_delay`, `web_delay` and `image_delay` for the three
+rate-seeking workers; one section per worker, so clearing one leaves the rest alone. The three used to
+be reset by editing their key in `config.yaml`, and moving them to the state file keeps that escape
+hatch rather than losing it: an operator can still pull a misbehaving delay back down without touching a
+Python file. [config-security.md](config-security.md#pacing-delays-are-state-not-config) states the same
+path for the operator. The translator is still the trusted one of the four: it has never backed off
+when it should not, nor failed to when it should. Its ceilings are not the same device as theirs either:
+they bound how long a condition that waiting cannot fix is left alone, so a raised spend limit is picked
+up within the hour without a restart. See issue 21 in [code-issues.md](code-issues.md) for the history.
 
 ---
 

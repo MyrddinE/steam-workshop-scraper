@@ -950,11 +950,14 @@ def test_subscribe_token_comes_from_the_page_when_it_carries_one(subscribe_env):
 def test_the_route_gates_its_page_read_on_the_shared_interval(subscribe_env, monkeypatch):
     """(i) Sourcing the token must not read pages off the shared rate.
 
-    The read goes through the same `WebInterval`, the same
-    `daemon.web_delay_seconds` and the same `pacing.wait` as the engine.
+    The read goes through the same `WebInterval`, the same persisted web delay
+    and the same `pacing.wait` as the engine.
     """
     _, state = subscribe_env
-    webserver._config.setdefault("daemon", {})["web_delay_seconds"] = 11.0
+    from src.daemon_state import StateStore, state_path_for
+
+    db_path = webserver._config["database"]["path"]
+    StateStore(state_path_for(db_path)).save({pacing.WEB_DELAY_SECTION: 11.0})
     waits = []
     monkeypatch.setattr(
         pacing, "wait",

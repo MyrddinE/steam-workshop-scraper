@@ -10,9 +10,11 @@ from src.tui import ScraperApp
 from textual.widgets import Input, ListView, Static
 
 @pytest.fixture
-def system_config(tmp_path):
+def system_config(tmp_path, seed_delay):
     db_path = str(tmp_path / "system_e2e.db")
     initialize_database(db_path)
+    # The inter-request delay is daemon state now, not a config key.
+    seed_delay(db_path, "api", 0.5)
     
     # We must seed an initial item for the daemon to pick up
     # Using a real RimWorld item ID for live verification
@@ -28,7 +30,6 @@ def system_config(tmp_path):
         "api": {"key": os.environ.get("STEAM_API_KEY")},
         "daemon": {
             "api_batch_size": 1, 
-            "api_delay_seconds": 0.5,
             "target_appids": [294100]
         }
     }

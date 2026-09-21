@@ -3,6 +3,22 @@ import json
 from unittest.mock import patch, MagicMock
 from src.daemon import Daemon
 from src.database import initialize_database, count_never_fetched_items, update_app_tracking_cursor
+from tests.conftest import seed_pacing_delay
+
+
+def _config(db_path):
+    """A daemon config with a fast API delay.
+
+    The delay is daemon state now, not a config key, so the low value that keeps
+    the cursor walk quick is seeded into the state file beside the database.
+    """
+    seed_pacing_delay(db_path, "api", 0.01)
+    return {
+        "database": {"path": db_path},
+        "api": {"key": "test_key"},
+        "daemon": {"target_appids": [1062090], "api_batch_size": 10},
+    }
+
 
 @patch('src.daemon.query_workshop_newest_page')
 @patch('src.daemon.time.sleep')
@@ -11,12 +27,7 @@ def test_seed_database_fetches_multiple_cursors(mock_sleep, mock_query, tmp_path
     db_path = str(tmp_path / "multi_cursor.db")
     initialize_database(db_path)
 
-    config = {
-        "database": {"path": db_path},
-        "api": {"key": "test_key"},
-        "daemon": {"target_appids": [1062090], "api_batch_size": 10, "api_delay_seconds": 0.01}
-    }
-    daemon = Daemon(config)
+    daemon = Daemon(_config(db_path))
 
     mock_query.side_effect = [
         {"total": 200, "items": [{"publishedfileid": str(i)} for i in range(1, 61)],
@@ -38,12 +49,7 @@ def test_seed_database_stops_after_enough_items(mock_sleep, mock_query, tmp_path
     db_path = str(tmp_path / "enough.db")
     initialize_database(db_path)
 
-    config = {
-        "database": {"path": db_path},
-        "api": {"key": "test_key"},
-        "daemon": {"target_appids": [1062090], "api_batch_size": 10, "api_delay_seconds": 0.01}
-    }
-    daemon = Daemon(config)
+    daemon = Daemon(_config(db_path))
 
     mock_query.return_value = {
         "total": 500,
@@ -66,12 +72,7 @@ def test_seed_database_resumes_from_cursor(mock_sleep, mock_query, tmp_path):
 
     update_app_tracking_cursor(db_path, 1062090, "saved_cursor")
 
-    config = {
-        "database": {"path": db_path},
-        "api": {"key": "test_key"},
-        "daemon": {"target_appids": [1062090], "api_batch_size": 10, "api_delay_seconds": 0.01}
-    }
-    daemon = Daemon(config)
+    daemon = Daemon(_config(db_path))
 
     mock_query.return_value = {
         "total": 500,
@@ -93,12 +94,7 @@ def test_seed_database_starts_from_star(mock_sleep, mock_query, tmp_path):
     db_path = str(tmp_path / "fresh.db")
     initialize_database(db_path)
 
-    config = {
-        "database": {"path": db_path},
-        "api": {"key": "test_key"},
-        "daemon": {"target_appids": [1062090], "api_batch_size": 10, "api_delay_seconds": 0.01}
-    }
-    daemon = Daemon(config)
+    daemon = Daemon(_config(db_path))
 
     mock_query.return_value = {
         "total": 10,

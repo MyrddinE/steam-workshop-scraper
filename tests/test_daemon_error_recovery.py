@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import patch
 from src.daemon import Daemon
 from src.database import initialize_database, insert_or_update_item, get_connection
+from tests.conftest import seed_pacing_delay
 
 
 @pytest.fixture(autouse=True)
@@ -18,10 +19,12 @@ def _no_discovery_side_effects():
 
 
 def _daemon(db_path, **overrides):
+    # The low API delay is daemon state now, not a config key.
+    seed_pacing_delay(db_path, "api", 0.01)
     config = {
         "database": {"path": db_path},
         "api": {"key": "TEST_KEY"},
-        "daemon": {"target_appids": [1], "api_batch_size": 1, "api_delay_seconds": 0.01},
+        "daemon": {"target_appids": [1], "api_batch_size": 1},
     }
     config["daemon"].update(overrides)
     return Daemon(config)

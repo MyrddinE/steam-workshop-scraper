@@ -215,8 +215,8 @@ def test_scrape_missing_dom_returns_none():
 # The scraper used to enforce a fixed `_WEB_DELAY = 5.0` through `_rate_limit()`
 # on every call, and the only way to move it, `set_web_delay()`, had no callers
 # anywhere -- so the value could never be configured, and the worker's adaptive
-# `web_delay_seconds` (floor 6.0) paid it again underneath every item. The gate
-# is removed rather than left as a second, unconfigurable interval.
+# web delay (floor 6.0) paid it again underneath every item. The gate is removed
+# rather than left as a second, unconfigurable interval.
 
 
 def test_the_fixed_web_delay_gate_is_gone():
@@ -228,7 +228,7 @@ def test_the_fixed_web_delay_gate_is_gone():
     for name in names:
         assert not hasattr(web_scraper, name), (
             f"{name} is a second interval owner; spacing belongs to the "
-            "configured web_delay_seconds that the caller gates on")
+            "persisted web delay that the caller gates on")
 
     source = pathlib.Path("src/web_scraper.py").read_text(encoding="utf-8")
     for name in names:
@@ -258,7 +258,7 @@ def test_the_scraper_applies_no_delay_of_its_own():
 
     This pins the property rather than the symbols: the removed gate slept
     until five seconds had elapsed, so a second call straight after the first
-    was delayed. Pacing is the caller's, owned by `web_delay_seconds`.
+    was delayed. Pacing is the caller's, owned by the persisted web delay.
     """
     import src.web_scraper as web_scraper
 

@@ -42,16 +42,19 @@ from src.database import (
     get_connection,
     insert_or_update_item,
 )
+from tests.conftest import seed_pacing_delay
 
 
 # ── driving the real producers ────────────────────────────────────────────────
 
 
 def _daemon(db_path, tmp_path) -> Daemon:
+    # The low API delay is daemon state now, not a config key.
+    seed_pacing_delay(db_path, "api", 0.01)
     config = {
         "database": {"path": db_path},
         "api": {"key": "TEST"},
-        "daemon": {"api_batch_size": 1, "target_appids": [1], "api_delay_seconds": 0.01},
+        "daemon": {"api_batch_size": 1, "target_appids": [1]},
     }
     return Daemon(config, config_path=str(tmp_path / "config.yaml"))
 

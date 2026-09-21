@@ -437,8 +437,8 @@ def scrape_extended_details(item_url: str, keep_body: bool = False) -> dict | No
     handed to the session, so the two cannot drift apart.
 
     It applies no pacing of its own: the request goes out as soon as it is
-    called, and spacing between requests is the caller's, owned by the
-    configured ``web_delay_seconds`` (see ``src/web_worker.py``).
+    called, and spacing between requests is the caller's, owned by the persisted
+    web delay (see ``src/web_worker.py``).
     """
     session = _get_session()
     cookies = _workshop_cookies_or_empty()

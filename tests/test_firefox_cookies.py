@@ -444,7 +444,7 @@ def test_a_description_marker_without_the_template_is_not_a_genuine_absence():
 
 def _worker_with(refresh):
     from src.web_worker import WebScraperThread
-    thread = WebScraperThread("test.db", "nope.lock", {}, None, refresh)
+    thread = WebScraperThread("test.db", "nope.lock", None, refresh)
     return thread
 
 

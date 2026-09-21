@@ -572,11 +572,12 @@ def api_subscribe(workshop_id):
     current one; the page's own ``g_sessionID`` is the token that belongs to the
     credential that authenticated that read. A ``sessionid`` in the built cookie
     set and ``session.csrf_token`` are only fallbacks for a page that carries no
-    token. The read is gated on the shared web interval -- ``daemon.web_delay_seconds``
-    through ``configured_web_delay`` and ``pacing.wait`` -- so it honours the same
-    rate the daemon's worker and the engine keep. **Nothing else this route decides
-    changed**: the same refusal branches, the same status codes, the same
-    response bodies. (What a refusal *records* did change; see the block below.)
+    token. The read is gated on the shared web interval -- the persisted web
+    delay in the daemon state file, through ``configured_web_delay`` and
+    ``pacing.wait`` -- so it honours the same rate the daemon's worker and the
+    engine keep. **Nothing else this route decides changed**: the same refusal
+    branches, the same status codes, the same response bodies. (What a refusal
+    *records* did change; see the block below.)
     """
     cookies, fallback_token, login = subscribe_engine.resolve_subscribe_credentials(
         _config)
@@ -610,7 +611,7 @@ def api_subscribe(workshop_id):
     # The token source: read the item page this request is about to act on, on
     # the shared interval. The same attempt's read also decides what a Steam
     # refusal means below -- an authenticated page proves the login is good.
-    interval = subscribe_engine.WebInterval(_config, config_path=_config_path)
+    interval = subscribe_engine.WebInterval(_config)
     page = subscribe_engine.fetch_item_page(workshop_id, interval=interval)
     page_html = subscribe_engine.page_body(page)
     page_authenticated = subscribe_engine.page_read_authenticated(page_html)

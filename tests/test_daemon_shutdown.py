@@ -31,7 +31,6 @@ def _daemon(tmp_path, expect_pid_file=False) -> Daemon:
             "daemon": {
                 "target_appids": [1],
                 "api_batch_size": 1,
-                "api_delay_seconds": 0.01,
             },
         },
         config_path=str(tmp_path / "config.yaml"),

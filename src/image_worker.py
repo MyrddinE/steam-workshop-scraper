@@ -20,6 +20,11 @@ from src.images import MIME_MAP, MAGIC_EXT_MAP  # noqa: F401
 # it can probe far harder than the web scraper's shared Steam budget allows.
 IMAGE_DELAY_FLOOR = 0.5
 
+# The starting delay when no value has been persisted yet. The delay is state,
+# not configuration, so this is the only place it comes from besides the state
+# file -- see `src/pacing.py`.
+IMAGE_DELAY_DEFAULT = 2.0
+
 
 def _response_metadata(resp) -> dict:
     """The response facts a capture records. Never includes the body.
@@ -43,13 +48,18 @@ def _response_metadata(resp) -> dict:
 
 
 class ImageDownloadThread(threading.Thread):
-    def __init__(self, db_path: str, pause_lock_file: str, daemon_config: dict = None, save_callback = None):
+    def __init__(self, db_path: str, pause_lock_file: str, state_store=None):
         super().__init__(daemon=True)
         self.db_path = db_path
         self.pause_lock_file = pause_lock_file
-        self._save_callback = save_callback
+        # Where this worker's delay is persisted. None means "no state file" --
+        # a test or an embedded construction -- and it then moves in memory only.
+        self._state_store = state_store
         self.running = True
-        self.image_delay = float((daemon_config or {}).get("image_delay_seconds") or 2.0)
+        # The starting delay is the persisted one, so a restart resumes where
+        # the downloader left off; the default applies only with no state.
+        stored = pacing.load_delay(state_store, pacing.IMAGE_DELAY_SECTION)
+        self.image_delay = stored if stored is not None else IMAGE_DELAY_DEFAULT
         self.image_successes = 0
         self.image_failures = 0
         self.image_had_success_streak = False
@@ -267,18 +277,17 @@ class ImageDownloadThread(threading.Thread):
             self._persist_delay()
 
     def _persist_delay(self, force: bool = False) -> None:
-        """Write the delay back when it has moved far enough to be worth it.
+        """Write the delay into its state section when it has moved far enough.
 
         Without a step the decay -- which now runs on every success -- would
-        rewrite config.yaml per download.
+        rewrite the state file per download. The state file is the home the
+        config file used to provide, and the step bound is unchanged.
         """
-        if not self._save_callback:
-            return
         if not force and not pacing.needs_persist(
                 self.image_delay, self._persisted_image_delay):
             return
         self._persisted_image_delay = self.image_delay
-        self._save_callback("image_delay_seconds", pacing.persistable(self.image_delay))
+        pacing.save_delay(self._state_store, pacing.IMAGE_DELAY_SECTION, self.image_delay)
 
     def _get_conn(self):
         from src.database import get_connection

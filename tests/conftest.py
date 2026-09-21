@@ -250,13 +250,49 @@ def mock_config(db_path):
     }
 
 @pytest.fixture
-def mock_config_with_api(db_path):
-    """Config with API key for daemon tests."""
+def mock_config_with_api(db_path, seed_delay):
+    """Config with API key for daemon tests.
+
+    The API delay is daemon state now, so the low value that keeps a test's
+    pacing waits short is seeded into the state file rather than written into
+    the config. The key is gone from this dict for the same reason: a config
+    that still carries it is ignored (and warns), which is what
+    `tests/test_delay_state.py` pins.
+    """
+    seed_delay(db_path, "api", 0.01)
     return {
         "database": {"path": db_path},
         "api": {"key": "TEST_KEY"},
-        "daemon": {"api_batch_size": 2, "api_delay_seconds": 0.01, "target_appids": [123]}
+        "daemon": {"api_batch_size": 2, "target_appids": [123]}
     }
+
+@pytest.fixture
+def seed_delay():
+    """Write a pacing delay into its daemon-state section beside a database.
+
+    The three pacing delays are state, not configuration, so a test that used to
+    put `daemon.web_delay_seconds` in a config dict writes the value here
+    instead. ``section`` is ``"api"``, ``"web"`` or ``"image"``.
+    """
+    return seed_pacing_delay
+
+
+def seed_pacing_delay(db_path, section, seconds):
+    """The module-level form of :func:`seed_delay`, for test-module helpers.
+
+    Some tests build their config dict in a plain helper function rather than a
+    fixture, so they cannot take the fixture; they import this instead, the same
+    way `tests/test_discovery_guard.py` imports its table-name helper.
+    """
+    from src import pacing
+    from src.daemon_state import StateStore, state_path_for
+
+    sections = {
+        "api": pacing.API_DELAY_SECTION,
+        "web": pacing.WEB_DELAY_SECTION,
+        "image": pacing.IMAGE_DELAY_SECTION,
+    }
+    StateStore(state_path_for(db_path)).save({sections[section]: seconds})
 
 @pytest.fixture
 def db_path(tmp_path):

@@ -21,6 +21,7 @@ import logging
 import pytest
 
 from src import session_health, subscription_sync
+from src.daemon_state import StateStore, state_path_for
 from src.database import (
     apply_own_subscriptions, get_connection, initialize_database,
     insert_or_update_item, mark_own_subscribed,
@@ -187,18 +188,21 @@ def test_a_single_page_account_is_one_request(sync_env):
 
 
 def test_the_subscriptions_walk_waits_the_shared_interval(sync_env, monkeypatch):
-    """Each page is a page load: it honours `daemon.web_delay_seconds`."""
+    """Each page is a page load: it honours the persisted web delay."""
     db_path, configure = sync_env
     ids = list(range(2000, 2005))
     _items(db_path, *ids)
     configure({1: _page(ids, 5)})
+    # The delay is daemon state now; the walk reads this section fresh.
+    StateStore(state_path_for(db_path)).save(
+        {subscription_sync.pacing.WEB_DELAY_SECTION: 9.0})
     waits = []
     monkeypatch.setattr(
         subscription_sync.pacing, "wait",
         lambda seconds, keep_running=None: waits.append(seconds) or True)
 
     subscription_sync.reconcile_own_subscriptions(
-        db_path, 294100, {"daemon": {"web_delay_seconds": 9.0}})
+        db_path, 294100, {"database": {"path": db_path}})
 
     assert waits == [9.0]
 
