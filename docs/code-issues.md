@@ -15,7 +15,15 @@ the production database on 2026-09-12.
 
 ## Open
 
-Nothing open. The last entry to leave the list was issue 74, on 2026-09-21.
+### Issue 76
+
+**The closing backup is the only unbounded step in shutdown, and the force-kill can land inside it** — *Open*, Low
+
+`docs/threading.md:275` already states it plainly: the closing snapshot "runs after the joins and is bounded by the size of the database rather than by the budget, so it is not covered by this figure". The 20 s `SHUTDOWN_BUDGET_SECONDS` governs only the worker joins (`src/daemon.py:1471`); the snapshot is then taken synchronously and unbounded (`src/daemon.py:1525`). The controller's `STOP_TIMEOUT_SECONDS` — 40 s, derived as a 15 s main-thread block plus the 20 s join budget plus a 5 s margin (`src/daemon_control.py:41-59`) — is the only thing that can interrupt it, and the closing snapshot is not a term in that arithmetic.
+
+The production database is 4.3 GB and the owner measures the snapshot at over 30 s, so the outcome depends on how much of the 40 s the joins leave. A prompt unwind leaves roughly 39 s and the snapshot finishes; a main thread inside its 15 s blocking call plus a slow join leaves only about 24 s and the controller **force-kills the daemon inside `VACUUM INTO`** (only against the process it started). The cost of that: the published snapshot survives untouched, because publishing is `os.replace` and the previous file is never written in place, and the manifest keeps the older entry — but the closing backup silently does not happen, `<outbox>/db/workshop-backup.db.tmp` is left for the next run to clear, and nothing says the closing snapshot was abandoned; the operator sees only that the daemon died. A *periodic* snapshot in flight at shutdown has the same shape one step earlier: the Backup worker is joined under the same 20 s budget, so it can be the survivor that causes the closing snapshot to be skipped, and its own temp is abandoned with the process.
+
+*Measured live*: the closing snapshot was skipped outright on at least one stop — `Shutdown budget of 20s expired with threads still running: Discovery, Image download` followed by `Skipping final database snapshot` — and the configured backup interval is 3600 s, so what the closing snapshot adds over the periodic one is at most an hour of freshness. [threading.md](threading.md), [failure-capture.md](failure-capture.md)
 
 ## Recently closed
 
