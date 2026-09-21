@@ -21,6 +21,14 @@ the production database on 2026-09-12.
 
 `seed_database` logs at INFO, on every pass, that an AppID's cursor walk is recorded as finished and skipped (`src/daemon.py:1545`), and the discovery thread runs every `DISCOVERY_IDLE_SECONDS` (30 s, `src/daemon.py:156`), so a permanent state is reported as news forever. *Measured live* on 2026-09-21: the line appeared **25 times in the 13 minutes** from 15:38:00 to 15:51:20 for AppID 431960 — once per pass — in a log that already grows about 115 MB a day. The skip itself is correct and deliberate (issue 68's latch), and nothing else in the discovery path repeats this way: the page-mode and fetchable-guard lines fire only when those decisions change or those passes actually run. A one-time fact wants to be said once per process per AppID, at INFO, and afterwards at DEBUG — the shape the config-key and stale-artefact warnings already use. [threading.md](threading.md)
 
+### Issue 73
+
+**The fetch-recency window is hardcoded at 30 days while the daemon re-fetches at 60** — *Open*, Low
+
+`_fetch_recency` buckets every row by `last_fetch_attempted_at` against `params.get("staleness_days", DEFAULT_STALENESS_DAYS)` (`src/metrics.py:551`), and both front ends pass only `target_appids`, so the window is always the hardcoded `DEFAULT_STALENESS_DAYS = 30` (`src/metrics.py:47`) — while the daemon re-queues a stale item at the **configured** `daemon.item_staleness_days`, which is 60 in production (`src/daemon.py:930`). The TUI labels the figure "Fresh (last 30d)" (`src/tui.py:494`) and the web panel shows a bare "Fresh/Stale" with no window at all (`templates/index.html:2496`). The split therefore calls 840,685 rows "Stale" when the rule the pipeline follows makes only 23,705 of them even candidates, and it counts settled rows as stale without saying so: of the 840,685, **778,934** are successful fetches 30–60 days old and simply not due yet, **61,521** are dead (`-1`) and will never be re-fetched, and **230** are the legacy `404`s.
+
+*Measured on the outbox snapshot* 2026-09-21, whose counts match the screen within a few hundred rows (fresh 2,277,472 vs 2,277,634; stale 840,685 vs 840,680): of 3,118,157 rows, **zero** matched the sweep's criterion (`fetch_status = 200 AND api_priority = 0 AND api_fetched_at < now - 60d`), the oldest successful fetches were the 778,934 in the 30–60 day band, and the entire queue held **4** items — two at priority 5, one at 3, one at 2, all owner-requested. So the API was correctly idle: there was no work to miss, and nothing for discovery to find. [data-pipeline.md](data-pipeline.md#queue-state-outstanding-rate-and-time-to-drain)
+
 ## Recently closed
 
 Removed from the list above rather than marked resolved. Each is now documented as current
