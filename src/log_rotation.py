@@ -146,10 +146,18 @@ def _windows_fd(path: str, access: int, creation: int, flags: int) -> int:
     import _winapi
     import msvcrt
 
+    # Arguments 4 (`security_attributes`) and 7 (`template_file`) must be ints.
+    # CPython's Argument Clinic declares them through
+    # `create_converter('LPSECURITY_ATTRIBUTES', '" F_POINTER "')` and
+    # `create_converter('HANDLE', '" F_HANDLE "')` in `Modules/_winapi.c`, and
+    # F_POINTER/F_HANDLE are the unsigned-integer format units ("K" on 64-bit,
+    # "k" on 32-bit) -- so `None` raises `TypeError: CreateFile() argument 4
+    # must be int, not None` before the log is ever opened. `0` is the NULL
+    # pointer for each: the default security attributes and no template file.
     handle = _winapi.CreateFile(
         path, access,
         _WINDOWS_SHARE_READ | _WINDOWS_SHARE_WRITE | _WINDOWS_SHARE_DELETE,
-        None, creation, _WINDOWS_ATTRIBUTE_NORMAL, None)
+        0, creation, _WINDOWS_ATTRIBUTE_NORMAL, 0)
     try:
         return msvcrt.open_osfhandle(handle, flags)
     except BaseException:
@@ -279,16 +287,36 @@ class RotationAwareFileHandler(logging.FileHandler):
                     "refused by the OS", exc_info=True)
         return super()._open()
 
+    def _read_generation_safely(self) -> str:
+        """The marker's value, or ``""`` -- never an exception.
+
+        Rotation awareness is an enhancement, not a precondition for logging.
+        :func:`read_generation` absorbs the ordinary ``OSError`` of a missing or
+        unreadable marker, but any other fault would otherwise escape from the
+        constructor and kill the process before a single record is written --
+        which is what a Windows ``CreateFile`` typing mistake did in production.
+        Any failure therefore degrades to "no generation recorded" and warns:
+        the handler still opens the log, and the warning is the operator's
+        signal that it will not follow a manual rotation.
+        """
+        try:
+            return read_generation(self._log_path)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Could not read the rotation marker for %s; logging continues "
+                "without rotation awareness", self._log_path, exc_info=True)
+            return ""
+
     def _remember_generation(self) -> None:
         self._marker_identity = _generation_identity(self._marker_path)
-        self._generation = read_generation(self._log_path)
+        self._generation = self._read_generation_safely()
 
     def _rotation_happened(self) -> bool:
         identity = _generation_identity(self._marker_path)
         if identity == self._marker_identity:
             return False
         self._marker_identity = identity
-        generation = read_generation(self._log_path)
+        generation = self._read_generation_safely()
         if generation == self._generation:
             return False
         self._generation = generation
@@ -311,9 +339,24 @@ class RotationAwareFileHandler(logging.FileHandler):
         self._remember_generation()
 
 
-def log_file_handler(log_file: str) -> RotationAwareFileHandler:
-    """The handler both front ends install; UTF-8 pinned, rotation-aware."""
-    return RotationAwareFileHandler(log_file, encoding="utf-8")
+def log_file_handler(log_file: str) -> logging.FileHandler:
+    """The handler both front ends install; UTF-8 pinned, rotation-aware.
+
+    This is the single place the TUI and the daemon build their file handler, so
+    the fallback below cannot drift between them. Rotation awareness must never
+    be able to prevent logging from existing: if the rotation-aware handler
+    cannot be built at all, an ordinary :class:`logging.FileHandler` is installed
+    instead and a warning names what was lost. Logging keeps working; only
+    following a manual rotation is given up.
+    """
+    try:
+        return RotationAwareFileHandler(log_file, encoding="utf-8")
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Could not set up rotation-aware logging for %s; falling back to a "
+            "plain file handler, so the log will not follow a manual rotation",
+            log_file, exc_info=True)
+        return logging.FileHandler(log_file, encoding="utf-8")
 
 
 # ── the rotation ─────────────────────────────────────────────────────────────
