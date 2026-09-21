@@ -2075,7 +2075,8 @@ def test_restore_pages_to_the_saved_position_and_scroll_wins_at_the_end(web_clie
 
     The saved position may sit past the first 50-item batch, so `_restoreView`
     keeps calling `doSearch(false)` — the function that owns `currentOffset`
-    and the sentinel — until the grid is tall enough, re-opens the selected
+    and the infinite-scroll observation — until the grid is tall enough, re-opens
+    the selected
     item, and then applies the saved scroll last because focusing that item
     moves the grid. The paging is bounded so a deleted selection cannot walk the
     whole result set.
@@ -2097,6 +2098,199 @@ def test_restore_pages_to_the_saved_position_and_scroll_wins_at_the_end(web_clie
     assert max_batches == 40
     assert out["cap"]["batches"] == max_batches, \
         "restoring an unreachable position must stop at the batch cap"
+
+# ── infinite scroll: the placeholder that was a grid cell ────────────────────
+#
+# `#results-grid` is a CSS grid, so the old bare `#scroll-sentinel` placeholder
+# was itself a grid item: a blank square that pushed every later cell one column
+# right until the next batch removed it and everything jumped back. Infinite
+# scroll now observes the batch's own first cell, which already sits at the
+# trigger position and consumes no cell. These drivers run the served function in
+# node against a fake DOM and a recording observer, so the assertions are on what
+# it observes and what it leaves in the grid, not on words in the source.
+
+OBSERVE_DRIVER = """
+const fn = (__FN__);
+const observerCalls = [];
+global._scrollObserver = {
+  observe: (el) => observerCalls.push(['observe', el.id]),
+  unobserve: (el) => observerCalls.push(['unobserve', el.id]),
+};
+
+// The grid is a list of child cells. `insertBefore` and the `document` stub
+// below model just enough DOM for the pre-change `_placeSentinel` as well, so
+// the same driver reproduces the old items + 1 result.
+const grid = {children: []};
+grid.appendChild = function(node) { node.parentNode = this; this.children.push(node); };
+grid.insertBefore = function(node, ref) {
+  const i = this.children.indexOf(ref);
+  node.parentNode = this;
+  this.children.splice(i === -1 ? this.children.length : i, 0, node);
+};
+
+function makeCell(id, top) {
+  return {
+    id: id, parentNode: grid, attrs: {},
+    getBoundingClientRect: () => ({top: top}),
+    setAttribute: function(k, v) { this.attrs[k] = v; },
+    removeAttribute: function(k) { delete this.attrs[k]; },
+  };
+}
+
+const ITEM_COUNT = __ITEM_COUNT__;
+let firstCell = null;
+for (let i = 0; i < ITEM_COUNT; i++) {
+  const cell = makeCell('cell-' + i, i === 0 ? __FIRST_TOP__ : 10 * i);
+  if (i === 0) firstCell = cell;
+  grid.appendChild(cell);
+}
+
+const prevCell = makeCell('prev-cell', 0);
+let _observedCell = __PREV_OBSERVED__ ? prevCell : null;
+
+global.loading = __LOADING__;
+global.hasMore = true;
+global.window = {innerHeight: __INNER_HEIGHT__};
+const scheduled = [];
+global.setTimeout = (cb, ms) => { scheduled.push({cb: cb, ms: ms}); };
+const searches = [];
+global.doSearch = (reset) => { searches.push(reset); };
+
+// Only the old sentinel implementation reads these; the current one never does.
+let sentinel = null;
+global.document = {
+  createElement: () => ({id: null, remove: function() { sentinel = null; }}),
+  getElementById: (id) => (id === 'scroll-sentinel' ? sentinel : null),
+  querySelector: (sel) => (sel === '.grid-cell[data-batch-first]' ? firstCell : null),
+};
+
+__CALL__;
+scheduled.forEach((s) => s.cb());
+console.log(JSON.stringify({
+  observerCalls: observerCalls,
+  observed: _observedCell === null ? null : _observedCell.id,
+  timeouts: scheduled.map((s) => s.ms),
+  searches: searches,
+  gridChildren: grid.children.length,
+  gridIds: grid.children.map((c) => c.id),
+  hasSentinel: grid.children.some((c) => c.id === 'scroll-sentinel'),
+}));
+"""
+
+
+def _observe_driver(script, *, call, prev_observed=False, loading=False,
+                    first_top=5000, inner_height=800, item_count=4):
+    """Driver for the served `_observeNextBatch`, with the scenario's inputs.
+
+    The batch's first cell sits below `inner_height` by default (the observer
+    path); `first_top` below it exercises the already-visible shortcut, and
+    `call` chooses the entry point (`fn(firstCell)`, `fn(null)` on reset, or
+    `fn()` to measure the old no-argument sentinel function).
+    """
+    return (OBSERVE_DRIVER
+            .replace("__FN__", _extract_function(script, "_observeNextBatch"))
+            .replace("__CALL__", call)
+            .replace("__PREV_OBSERVED__", "true" if prev_observed else "false")
+            .replace("__LOADING__", "true" if loading else "false")
+            .replace("__FIRST_TOP__", str(first_top))
+            .replace("__INNER_HEIGHT__", str(inner_height))
+            .replace("__ITEM_COUNT__", str(item_count)))
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_infinite_scroll_observes_the_batch_first_cell_without_inserting_an_element(web_client, tmp_path):
+    """Infinite scroll consumes no grid cell: the first cell is observed.
+
+    `#results-grid` is `display: grid`, so the old `<div id="scroll-sentinel">`
+    was itself a grid item -- a blank square that shifted every later cell one
+    column right until the next batch removed it. The batch's first cell already
+    sits where the next page is wanted, so it is observed directly.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    assert "scroll-sentinel" not in script, \
+        "the placeholder element must be gone, not merely unused"
+    out = _run_node(_observe_driver(script, call="fn(firstCell)"), tmp_path)
+
+    assert out["hasSentinel"] is False, \
+        "arming infinite scroll must not add an element to the grid"
+    assert out["gridChildren"] == 4, \
+        "the grid must hold exactly the batch's items, with no placeholder cell"
+    assert out["gridIds"] == ["cell-0", "cell-1", "cell-2", "cell-3"]
+    assert out["observerCalls"] == [["observe", "cell-0"]], \
+        "the observer must watch the batch's own first cell"
+    assert out["observed"] == "cell-0"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_infinite_scroll_unobserves_the_previous_batch_cell(web_client, tmp_path):
+    """Each batch releases the cell the previous batch armed.
+
+    An earlier batch's cell stays in the DOM, so an observation left on it fires
+    again when it scrolls back into view and loads a duplicate page.
+    """
+    client, _ = web_client
+    out = _run_node(
+        _observe_driver(_served_inline_script(client), call="fn(firstCell)",
+                        prev_observed=True),
+        tmp_path,
+    )
+
+    assert out["observerCalls"] == [["unobserve", "prev-cell"], ["observe", "cell-0"]], \
+        "the previous cell must be released before the new one is watched"
+    assert out["observed"] == "cell-0"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_infinite_scroll_already_visible_cell_still_loads_the_next_batch(web_client, tmp_path):
+    """A first batch that does not fill the viewport keeps loading, placing nothing.
+
+    The shortcut is unchanged: when the batch's first cell is already on screen
+    it asks for the next page on the next tick instead of observing a cell the
+    observer would not fire on.
+    """
+    client, _ = web_client
+    out = _run_node(
+        _observe_driver(_served_inline_script(client), call="fn(firstCell)",
+                        first_top=100),
+        tmp_path,
+    )
+
+    assert out["timeouts"] == [0], "the next batch must be scheduled on the next tick"
+    assert out["searches"] == [False], "the shortcut must call doSearch(false)"
+    assert out["observerCalls"] == [], "an already-visible cell needs no observation"
+    assert out["observed"] is None
+    assert out["hasSentinel"] is False
+    assert out["gridChildren"] == 4, "the shortcut must place nothing either"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_infinite_scroll_reset_releases_the_previous_observation(web_client, tmp_path):
+    """The reset path empties the grid, so the watched cell must be dropped.
+
+    `doSearch(reset=true)` clears `#results-grid` with `innerHTML = ''`, which
+    detaches the observed cell; the reset path calls `_observeNextBatch(null)` so
+    a detached node cannot trigger a load. The fresh batch arms its own cell at
+    the end of `doSearch`.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    out = _run_node(
+        _observe_driver(script, call="fn(null)", prev_observed=True, loading=True),
+        tmp_path,
+    )
+
+    assert out["observerCalls"] == [["unobserve", "prev-cell"]]
+    assert out["observed"] is None
+    assert out["timeouts"] == []
+    assert out["searches"] == []
+
+    # The reset branch must actually make that call, after it clears the grid.
+    assert "_observeNextBatch(null);" in script, \
+        "the reset path must release the observation"
+    assert script.index("innerHTML = '';") < script.index("_observeNextBatch(null);"), \
+        "the release must come after the grid is cleared"
+
 
 # ── author mode ──────────────────────────────────────────────────────────────
 #

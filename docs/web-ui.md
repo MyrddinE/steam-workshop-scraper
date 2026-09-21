@@ -10,7 +10,7 @@ A flex-based layout with three zones:
 
 - **Header**: title and the embedded server's port. `#port-display` is filled from `location.port` on load, so it shows where the panel is actually bound — including an ephemeral or reconfigured port — without asking the server. A default port renders nothing rather than a misleading `:80`.
 - **Session warning** (`#session-warning`): a strip between the header and the panes, hidden until the daemon reports that its Steam login has stopped working. It is not dismissible; see [The Session Warning](#the-session-warning).
-- **Left pane** (`#results-pane`): a CSS Grid of result cards (`#results-grid`) with `repeat(auto-fill, minmax(200px, 1fr))` for responsive columns. A `#scroll-sentinel` element inside the grid drives infinite scroll.
+- **Left pane** (`#results-pane`): a CSS Grid of result cards (`#results-grid`) with `repeat(auto-fill, minmax(200px, 1fr))` for responsive columns. Infinite scroll observes the newest batch's first cell directly, so no extra element sits in the grid.
 - **Right pane** (`#right-pane`): fixed 360px width containing the search builder at top and detail pane below, separated by a left border
 
 On viewports < 768px, the layout stacks vertically with the right pane below.
@@ -58,7 +58,7 @@ Two layers of validation: a capture-phase `blur` event listener on the document 
 2. Results are rendered as `.grid-cell` divs inside `#results-grid`
 3. Each cell shows: preview image, or "pending"/"no image" when nothing has been recorded, or — when the server has already answered for that preview — the answer itself drawn in red at half the cell's height (a `404`, a `410`, or the content type it served instead). Plus title (2-line clamp), file size (color-coded via `sizeClass`), and Wilson subscriber/favorite scores (color-coded via `wClass`)
 4. A pending marker in the corner names the stage the item is waiting on, by speed, colour and — on hover — a `title`: image rotates at 1x and is vivid green, translation 4x slower and mid green, the web scrape 16x slower and grey. `_pendingStage` picks the **fastest** stage that is pending, so a marker about to clear is never hidden behind a slower one, and the slow grey marker — which may stay for hours — is the quietest thing on the cell. `_applyPending` sets one `pending-<stage>` class, clearing the others, and writes the stage's wording onto the marker's `title`. The durations, colours and wording are mirrored from `src/pending.py`, and `tests/test_pending.py` fails if any of them disagree — the wording is kept in the shared table rather than the template, because the TUI draws the same state and a page-local description could drift from it. `api_priority` is deliberately not a stage: a list only shows items the API has already returned, so a pending refresh is not content anyone is waiting on.
-4. `_placeSentinel()` handles infinite scroll by checking whether the first item of the batch is visible and placing or removing the scroll sentinel accordingly
+4. `_observeNextBatch()` handles infinite scroll: it releases the previous batch's observation, then watches the first cell of the batch just rendered — or, when that cell is already on screen, asks for the next page at once
 
 Every number the grid and the detail pane show is formatted in the browser: `fmtCount` (three
 significant digits with a K/M suffix) for views and subscription counts, `fmtExact` (grouped exact
@@ -74,7 +74,7 @@ The entry is versioned and shape-checked like the statistics panel's ordering en
 
 **Precedence is one-sided.** A browser that has been to the page before has its own record of what the user was doing, so local state wins outright and `/api/state` is not even fetched. Only when there is no usable entry — a first visit, cleared storage, or a rejected shape — does the page seed from the TUI's saved state.
 
-**Restoring a deep view.** After the first search, `_restoreView` keeps calling `doSearch(false)` — the function that owns `currentOffset` and the sentinel — until the grid is tall enough for the saved scroll position and the selected item is present, re-opens that item, then applies the scroll last: `showDetail` focuses the cell and focus can move the grid, so the saved position has to be the final word. Paging is capped at `MAX_RESTORE_BATCHES` so a selection that no longer matches the filters cannot walk the whole result set, and a reset `doSearch` clears the selection because a new result set may not contain it. Writes are suppressed while a restore runs (`_restoringView`), so the page cannot overwrite the state it is reading. Saves happen on a throttled `#results-grid` `scroll` listener, at the end of a reset `doSearch`, when a detail pane opens (`showDetail`), and on `pagehide`.
+**Restoring a deep view.** After the first search, `_restoreView` keeps calling `doSearch(false)` — the function that owns `currentOffset` and the infinite-scroll observation — until the grid is tall enough for the saved scroll position and the selected item is present, re-opens that item, then applies the scroll last: `showDetail` focuses the cell and focus can move the grid, so the saved position has to be the final word. Paging is capped at `MAX_RESTORE_BATCHES` so a selection that no longer matches the filters cannot walk the whole result set, and a reset `doSearch` clears the selection because a new result set may not contain it. Writes are suppressed while a restore runs (`_restoringView`), so the page cannot overwrite the state it is reading. Saves happen on a throttled `#results-grid` `scroll` listener, at the end of a reset `doSearch`, when a detail pane opens (`showDetail`), and on `pagehide`.
 
 ### Wilson Cutoffs
 
@@ -84,20 +84,22 @@ The entry is versioned and shape-checked like the statistics panel's ordering en
 
 ## Infinite Scroll
 
-### `_placeSentinel`
+### `_observeNextBatch`
 
-After each `doSearch` batch, marks the first item with `data-batch-first` and runs `_placeSentinel`:
-- Gets the bounding rect of the first batch item
-- If it's already within the viewport → triggers `doSearch(false)` immediately (no sentinel placed)
-- If it's below the viewport → inserts `<div id="scroll-sentinel">` before it
+After each `doSearch` batch, `doSearch` passes the batch's first cell — the cell it built for index 0 — to `_observeNextBatch`:
+- It releases whatever cell the observer was watching before, so an older batch's cell, still in the DOM, cannot fire a second time when it scrolls back into view
+- If the first cell is already within the viewport → triggers `doSearch(false)` immediately (nothing is observed)
+- If it is below the viewport → `_scrollObserver.observe(firstCell)`
+
+Nothing is inserted into the grid, so infinite scroll consumes no grid cell and no later cell shifts column.
 
 ### `IntersectionObserver`
 
-A single observer watches `#scroll-sentinel`. When the sentinel enters the viewport, it fires `doSearch(false)`. No `rootMargin` — the sentinel sits before the first unseen item, so the observer fires exactly when that item scrolls into view.
+A single observer watches the newest batch's first cell. When that cell enters the viewport, it fires `doSearch(false)`. No `rootMargin` — the cell is the first unseen item, so the observer fires exactly when it scrolls into view.
 
-The observer is created once at page load. `_placeSentinel` calls `_scrollObserver.observe(sentinel)` each time a new sentinel is placed (since the sentinel is dynamically created and destroyed). The observer guards `currentOffset > 0` to prevent firing before the initial search.
+The observer is created once at page load. `_observeNextBatch` `unobserve`s the previous batch's cell and then `_scrollObserver.observe(firstCell)` each time a batch renders. The observer guards `currentOffset > 0` to prevent firing before the initial search.
 
-When `doSearch(reset=true)` clears the grid (`innerHTML = ''`), the old sentinel is destroyed with the grid content. `_placeSentinel` creates a new one after the fresh batch renders.
+When `doSearch(reset=true)` clears the grid (`innerHTML = ''`), the observed cell detaches with the grid content, so the reset path calls `_observeNextBatch(null)` to drop the observation; the fresh batch's first cell is observed by the `_observeNextBatch` call at the end of `doSearch`.
 
 ---
 
