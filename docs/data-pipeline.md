@@ -351,12 +351,16 @@ So one run is:
    page read that is a refused CSRF token and is reported as `token_refused` with **no session
    problem recorded**, because the credential just fetched the page; beside an **anonymous** page read
    the refusal is recorded as a session problem with the route's own sentence, as before.
-4. **Confirm** (`confirm_subscription`): read the page again and decide from the button. `toggled`
-   present means subscribed — `record_confirmed_subscription` calls `mark_own_subscribed` (which also
-   clears `is_queued_for_subscription`) and clears the recorded session problem. `toggled` absent with
-   `success: 1` is a **disagreement**: nothing is recorded and the item stays queued, because the page
-   is the authority and the JSON is corroboration only. A throttle page on the confirmation read stays
-   queued; any other button-less page reports that the result cannot be told.
+4. **Record** (`record_confirmed_subscription`): on the default path
+   (`VERIFY_AFTER_SUBSCRIBE = False`) the POST's own `success: 1` is the record — the subscription is
+   marked and the recorded session problem cleared, exactly as `/api/subscribe/<id>` records it; any
+   other answer is a `failed` worded by `_steam_failure_message`. The engine does **not** read the page
+   a second time. With the switch set `True` the engine instead **confirms**
+   (`confirm_subscription`): read the page again and decide from the button. `toggled` present means
+   subscribed — the same `record_confirmed_subscription` write. `toggled` absent with `success: 1` is a
+   **disagreement**: nothing is recorded and the item stays queued, because the page is the authority
+   and the JSON is corroboration only. A throttle page on the confirmation read stays queued; any other
+   button-less page reports that the result cannot be told.
 
 **Outcome vocabulary.** Each run ends in one status, and the TUI's queue row renders its phrase from
 `subscribe_engine._OUTCOME_LABELS`:
@@ -364,8 +368,8 @@ So one run is:
 | Status | Phrase | Meaning |
 |---|---|---|
 | `already_subscribed` | already subscribed | the pre-read's `toggled` said so; no request was sent |
-| `subscribed` | subscribed | the confirmation read said so; `mark_own_subscribed` was recorded |
-| `disagreement` | unverified (sources disagree) | Steam said success but the page did not; nothing recorded |
+| `subscribed` | subscribed | the POST answered `success: 1` (or, with the switch on, the confirmation read said so); `mark_own_subscribed` was recorded |
+| `disagreement` | unverified (sources disagree) | with `VERIFY_AFTER_SUBSCRIBE` on, Steam said success but the page did not; nothing recorded |
 | `throttled` | left queued (throttled) | Steam's throttle shell; the item stays queued |
 | `session_problem` | session problem | a refusal beside an anonymous page read; a session problem is recorded |
 | `token_refused` | refused (stale CSRF token) | a refusal beside an authenticated page read: the login works, the token was stale |
@@ -376,24 +380,27 @@ So one run is:
 item cannot be subscribed or its button could not be read — and only the cause varied. It is kept
 distinct from `token_refused`, whose phrase names the one cause, the stale CSRF token.
 
-**The confirmation read is evidence-gathering, not the design.** It doubles each item's page reads,
-so it is isolated in `confirm_subscription` behind the module-level `VERIFY_AFTER_SUBSCRIBE` switch;
-retiring it is one call site and one flag. The production run measured why it can eventually go — the
-endpoint is safe on an already-subscribed item, and the body cannot distinguish the two cases — while
-the pre-read keeps both of its jobs until idempotency is trusted beyond a single observation. The
-retirement order, and the cheap middle ground of letting the daily reconcile be the confirmer, are
-recorded in
+**The confirmation read is retired by default.** It doubled each item's page reads, so it is isolated
+in `confirm_subscription` behind the module-level `VERIFY_AFTER_SUBSCRIBE` switch — now `False`, which
+is what makes a queue of N items cost N interval-paced reads rather than 2N. The production run
+measured why it can go: the endpoint is safe on an already-subscribed item, and the body cannot
+distinguish "newly subscribed" from "already subscribed". Setting the switch back to `True` restores
+the read unchanged. The **pre-read is not next**: it keeps both of its jobs — the guard against the
+endpoint ever turning out to be a toggle, and the skip that makes re-running a queue cheap — until
+idempotency is trusted beyond a single observation. The retirement order, and the cheap middle ground
+of letting the daily reconcile be the confirmer, are recorded in
 [future-plans.md](future-plans.md#retiring-the-subscribe-confirmation-read).
 
-**Pacing.** Both page reads are page loads, so `WebInterval` gates them on the web scraper's shared
+**Pacing.** Every page read is a page load, so `WebInterval` gates it on the web scraper's shared
 adaptive interval — the persisted `daemon.web_delay_seconds`, read fresh through
 `src.web_worker.configured_web_delay` rather than snapshotted, decayed with `pacing.decay` on a read
 that carried a button and doubled with `pacing.backoff` on a throttle page, then written back through
-the config the way the daemon's `_save_config_value` writes it. A pass builds one interval and threads
-it through every item, so the items are spaced. **The subscribe POST is exempt**: it is the button
-click, a browser-initiated XHR rather than a page load, so it never waits. The subscriptions walk in
-`src/subscription_sync.py` uses the same gate, and it only waits — a reconcile is not a rate-seeking
-queue and does not move the shared delay.
+the config the way the daemon's `_save_config_value` writes it. On the default path an item pays that
+once; the confirmation read, when the switch re-enables it, honours the same gate. A pass builds one
+interval and threads it through every item, so the items are spaced. **The subscribe POST is exempt**:
+it is the button click, a browser-initiated XHR rather than a page load, so it never waits. The
+subscriptions walk in `src/subscription_sync.py` uses the same gate, and it only waits — a reconcile is
+not a rate-seeking queue and does not move the shared delay.
 
 **Capture.** Every page read and the POST go through
 `capture.record_web_download` under the `item_page` and `subscribe` kinds, covered by the existing
