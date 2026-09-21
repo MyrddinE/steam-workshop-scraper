@@ -210,7 +210,7 @@ by clearing `self.running` and the worker flags. On **Windows**, and as a
 fallback everywhere, the controller deletes `.daemon.pid`, and the daemon
 notices the file is gone at its next stop checkpoint. The checkpoints are the
 top of `process_batch` (before the housekeeping), `_wait_for_work` (every
-second), after `_acquire_batch`, per item, per details chunk, before the
+second), after `_read_batch`, per item, per details chunk, before the
 creator refresh, and per discovery or subscription page.
 
 Whether the file's absence is a stop request at all is a property of how the

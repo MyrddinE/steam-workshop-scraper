@@ -164,14 +164,14 @@ def test_a_stop_that_lands_before_the_first_check_is_not_lost(tmp_path, monkeypa
     with patch.object(Daemon, "_maybe_promote_stale_items") as sweep, \
          patch.object(Daemon, "_maybe_reconcile_subscriptions") as reconcile, \
          patch.object(Daemon, "_maybe_scan_downloaded_items") as scan, \
-         patch.object(Daemon, "_acquire_batch") as acquire:
+         patch.object(Daemon, "_read_batch") as read_batch:
         daemon.run()
 
     assert daemon.running is False
     sweep.assert_not_called()
     reconcile.assert_not_called()
     scan.assert_not_called()
-    acquire.assert_not_called()
+    read_batch.assert_not_called()
 
 
 # --- ordering: every flag before any join ------------------------------------
