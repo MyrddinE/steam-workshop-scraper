@@ -268,6 +268,67 @@ def test_final_snapshot_runs_when_every_writer_stopped(tmp_path):
     assert workers["Backup"].snapshots == 1
 
 
+def test_the_closing_snapshot_announces_itself_before_it_starts(tmp_path, caplog):
+    """A slow stop must be distinguishable from a stuck one.
+
+    The published/failed lines come *after* the snapshot; without a line before
+    it the operator sees the daemon go quiet for as long as the closing snapshot
+    takes (up to the controller's 180 s allowance) and cannot tell a long
+    ``VACUUM INTO`` apart from a hang. The line has to be out before the call
+    blocks, so this asserts it is already in the log at the moment
+    ``snapshot_now`` runs -- not merely somewhere in the captured text.
+    """
+    daemon = _daemon(tmp_path)
+    events = []
+
+    class _AnnouncingWorker(_RecordingWorker):
+        def __init__(self, name, events):
+            super().__init__(name, events)
+            self.starting_line_seen = False
+
+        def snapshot_now(self):
+            super().snapshot_now()
+            self.starting_line_seen = any(
+                "Starting the closing database snapshot" in record.getMessage()
+                for record in caplog.records
+            )
+
+    workers = {name: _RecordingWorker(name, events) for name in WORKER_NAMES}
+    backup = _AnnouncingWorker("Backup", events)
+    workers["Backup"] = backup
+    _attach(daemon, workers)
+
+    with caplog.at_level(logging.INFO):
+        daemon._shutdown_workers()
+
+    assert backup.snapshots == 1
+    assert backup.starting_line_seen, (
+        "the daemon must say the closing snapshot is starting before it blocks "
+        "inside it")
+
+
+def test_the_closing_snapshot_is_not_announced_when_it_is_skipped(
+        tmp_path, monkeypatch, caplog):
+    """The announcement belongs to the snapshot, not to shutdown.
+
+    A surviving writer skips the closing snapshot; claiming one is starting
+    would send the operator looking for a wait that is not happening.
+    """
+    monkeypatch.setattr("src.daemon.SHUTDOWN_BUDGET_SECONDS", 0.25)
+    daemon = _daemon(tmp_path)
+    events = []
+    workers = {name: _RecordingWorker(name, events) for name in WORKER_NAMES}
+    workers["Image download"] = _RecordingWorker("Image download", events,
+                                                 stubborn=True)
+    _attach(daemon, workers)
+
+    with caplog.at_level(logging.INFO):
+        daemon._shutdown_workers()
+
+    assert "Starting the closing database snapshot" not in caplog.text
+    assert "Skipping final database snapshot" in caplog.text
+
+
 # --- the chunk loop is a stop point too --------------------------------------
 
 

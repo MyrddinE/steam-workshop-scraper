@@ -263,18 +263,39 @@ with a line naming the thread that outlived the budget. The daemon then exits,
 and `atexit` removes the PID file.
 
 The controller's side is derived so that it covers that worst case rather than
-fitting it by luck: `STOP_TIMEOUT_SECONDS` (40 s in `src/daemon_control.py`) is
+fitting it by luck: `STOP_TIMEOUT_SECONDS` (220 s in `src/daemon_control.py`) is
 the longest single blocking call the daemon's main thread can be inside when the
 stop arrives (15 s: the SQLite busy timeout in `src/database.py`, and the
 subscriptions page fetch in `src/subscription_sync._fetch_page`; the Steam calls
 on that path are 10 s and the 15 s workers run on their own threads), plus the
-daemon's 20 s join budget (`SHUTDOWN_BUDGET_SECONDS`) plus a 5 s margin for the
-up-to-a-second PID-file tick in `_wait_for_work`, the failure-capture flush, the
-controller's own half-second poll and process teardown. Only after that grace
-does the controller escalate to terminate/kill, and only against a process it
-started. The closing snapshot, when a backup outbox is configured, runs after
-the joins and is bounded by the size of the database rather than by the budget,
-so it is not covered by this figure.
+daemon's 20 s join budget (`SHUTDOWN_BUDGET_SECONDS`), plus a 180 s allowance for
+the closing database snapshot, plus a 5 s margin for the up-to-a-second PID-file
+tick in `_wait_for_work`, the failure-capture flush, the controller's own
+half-second poll and process teardown. Only after that grace does the controller
+escalate to terminate/kill, and only against a process it started.
+
+The closing snapshot, when a backup outbox is configured, runs after the joins,
+synchronously and outside `SHUTDOWN_BUDGET_SECONDS`, so it is a separate named
+term in that arithmetic rather than slack in the margin. It was measured, not
+guessed: against the pulled 2.83 GB production snapshot on 2026-09-21, the
+components `snapshot_database` pays for were `VACUUM INTO` a temp copy 11.4-12.8 s,
+`verify_snapshot` 29-104 s (almost all of it `PRAGMA quick_check` over the whole
+file), the SHA-256 pass 2.9-5.0 s and `os.replace` under 0.01 s -- 43-119 s end to
+end across runs. The live database is 3.44 GB (1.22x the copy), so that worst case
+scales to about 145 s, and to about 181 s at the owner's 4.3 GB production size.
+That 181 s is *this lab's* number scaled up, not the owner's: the owner's own
+production observation is over 30 s end to end, so the real machine is several
+times quicker than the lab, and the 180 s allowance is deliberately sized on the
+slower lab numbers as a conservative bound — under-sizing silently loses the
+closing backup, while over-sizing only delays the escalation of a genuinely stuck
+stop. **Residual risk**: a database larger than the 3.44 GB this is sized on still
+outruns the grace, and the consequence is the one the term exists to remove — the
+controller force-kills the daemon inside `VACUUM INTO`, the published snapshot
+survives (`os.replace` publishes atomically, so a kill before it leaves the
+previous file untouched) but the closing backup does not happen and
+`<outbox>/db/workshop-backup.db.tmp` is left for the next run. The daemon logs
+`Starting the closing database snapshot` before it begins, so a slow stop can at
+least be told apart from a stuck one.
 
 ---
 

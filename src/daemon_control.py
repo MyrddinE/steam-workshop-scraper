@@ -39,24 +39,61 @@ from src import log_rotation
 #        15 s workers (image download, web scrape, page discovery) run on their
 #        own threads, so the largest single main-thread block is 15 s.
 #   + the daemon's own join budget               20 s  (SHUTDOWN_BUDGET_SECONDS in src/daemon.py)
+#   + the closing database snapshot             180 s  (see below)
 #   + margin                                      5 s  (the up-to-1 s PID-file
 #        tick in Daemon._wait_for_work, the failure-capture flush, this
 #        controller's own half-second poll and process teardown)
-#   = 40 s
+#   = 220 s
 #
-# The request/DB block and the daemon's join budget are therefore tied to this
-# number: raising either without raising STOP_TIMEOUT_SECONDS means the
-# controller force-kills a daemon that is still unwinding. The join budget is
-# written out rather than imported so this module does not drag the daemon's
-# whole import graph into the TUI and web processes; a test pins the two
-# together.
+# The closing snapshot is the one shutdown step the daemon's own budget does
+# *not* bound: after the joins, ``Daemon._maybe_final_snapshot`` calls
+# ``BackupThread.snapshot_now()`` synchronously, and that runs for as long as a
+# full copy of the database plus its verification takes. It is a named term
+# here, not slack in the margin, because this grace is the only thing that can
+# interrupt it -- and interrupting it is the defect the term removes: the
+# published snapshot survives (publishing is ``os.replace``, which never writes
+# the previous file in place) but the closing backup silently does not happen
+# and its ``.tmp`` file is left behind.
+#
+# How 180 s was measured, rather than guessed (this machine, 2026-09-21, against
+# the pulled 2.83 GB production snapshot): replicating the steps
+# ``snapshot_database`` pays for, ``VACUUM INTO`` a temp copy took 11.4-12.8 s,
+# ``verify_snapshot`` 29-104 s, the SHA-256 pass 2.9-5.0 s and ``os.replace``
+# under 0.01 s -- 43-119 s end to end across runs. ``verify_snapshot`` dominates
+# and is almost entirely ``PRAGMA quick_check`` reading the whole file. The live
+# database is 3.44 GB (1.22x the copy), so the worst measured pipeline scales to
+# about 145 s, and to about 181 s at the owner's 4.3 GB production size. That
+# 181 s is *this container's* number scaled up, not the owner's: the owner's own
+# production observation is over 30 s end to end, so the real machine is several
+# times quicker than this lab. The allowance is deliberately sized on the slower
+# lab numbers as a conservative bound, because under-sizing silently loses the
+# closing backup while over-sizing only delays the escalation of a genuinely
+# stuck stop.
+#
+# Residual risk: the allowance is sized on a 3.44 GB live database, so a larger
+# database, or a colder or slower output volume, still outruns it. The
+# consequence is the one this term exists to remove -- the controller
+# force-kills the daemon inside ``VACUUM INTO``, the previously published
+# snapshot survives untouched, the closing backup does not happen and
+# ``<outbox>/db/workshop-backup.db.tmp`` is left for the next run to clear. The
+# daemon now logs "Starting the closing database snapshot" before it begins, so
+# at least a slow stop can be told apart from a stuck one.
+#
+# The request/DB block, the daemon's join budget and the snapshot allowance are
+# therefore tied to this number: raising any of them without raising
+# STOP_TIMEOUT_SECONDS means the controller force-kills a daemon that is still
+# unwinding. The join budget is written out rather than imported so this module
+# does not drag the daemon's whole import graph into the TUI and web processes;
+# a test pins the two together.
 _LONGEST_MAIN_THREAD_BLOCK_SECONDS = 15.0
 _DAEMON_JOIN_BUDGET_SECONDS = 20.0
+_CLOSING_SNAPSHOT_ALLOWANCE_SECONDS = 180.0
 _SHUTDOWN_MARGIN_SECONDS = 5.0
 
 STOP_TIMEOUT_SECONDS = (
     _LONGEST_MAIN_THREAD_BLOCK_SECONDS
     + _DAEMON_JOIN_BUDGET_SECONDS
+    + _CLOSING_SNAPSHOT_ALLOWANCE_SECONDS
     + _SHUTDOWN_MARGIN_SECONDS
 )
 
