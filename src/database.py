@@ -230,7 +230,7 @@ USER_PRIORITY_FLOOR = 5
 # that is older than its database cannot know what the newer schema means, and
 # reading it as though it did is how an older build ends up writing beside the
 # real tables instead of stopping. Raise this value only by adding a migration.
-EXPECTED_VERSION = 35
+EXPECTED_VERSION = 36
 
 
 class SchemaVersionError(Exception):
@@ -1251,7 +1251,7 @@ def _create_current_schema(cursor, conn):
     owned by :func:`_ensure_indexes` and are not repeated below).
 
     A fresh database takes this path by default, so it never replays the
-    thirty-five migrations. An existing database always takes the legacy path,
+    thirty-six migrations. An existing database always takes the legacy path,
     because only the chain can carry it forward. The two endpoints must be
     identical. ``_ensure_indexes`` still runs after this function, exactly as
     it does after the chain, so the query indexes it owns are deliberately not
@@ -1265,6 +1265,12 @@ def _create_current_schema(cursor, conn):
     :func:`_ensure_indexes` used to run -- are gone. Those two indexes were
     owned by ``_ensure_indexes`` rather than by this function, so the forward
     rule for them is that removal.
+
+    Migration 35->36 (issue 66) is data-only: it deletes dead items' rows from
+    ``translation_queue`` and changes no table, column or index. The statements
+    below therefore need no change for it, but :data:`EXPECTED_VERSION` moved to
+    36, and this function reports the constant it is told to, so both paths still
+    leave the same version marker.
 
     **Forward rule:** when a migration changes the schema, mirror it here as
     well -- update the definition below and bump :data:`EXPECTED_VERSION` --
@@ -2896,6 +2902,44 @@ def _migration_34_to_35(cursor, conn, db_path):
     conn.commit()
     logging.info("Migration 34->35 complete.")
 
+def _migration_35_to_36(cursor, conn, db_path):
+    logging.info("Running migration 35->36: deleting dead items' translation queue rows...")
+
+    # Issue 66: the permanent-failure path cleared the four item-level queue
+    # flags but left the item's rows in `translation_queue`, and the translation
+    # poll hands out every row of that table with no dead-item guard, so a dead
+    # item's fields were still translated and paid for. The producer now deletes
+    # those rows in the same transaction as the status write; this step removes
+    # the rows that were already stranded when it did not.
+    #
+    # Measured on the v35 snapshot (/root/work/validate-demote/real-copy.db,
+    # 1,725,544 items and 68,323 dead): `dead_queued` read 0 while 910 dead items
+    # held 1,016 rows, every one of them with the mirror cleared. The detector
+    # must be able to read zero and no dead item's work may be paid for, so the
+    # rows are removed rather than left to drain.
+    #
+    # Data-only: no table, column or index changes, so `_create_current_schema`
+    # needs no mirror. `EXPECTED_VERSION` still moves to 36, because the
+    # fresh-schema equivalence test compares the version marker both paths leave.
+    #
+    # Only `entity_type = 'item'` rows keyed to a dead `workshop_id`. A creator
+    # row (`entity_type = 'user'`) is a different entity whose numeric id may
+    # collide with a dead item's id; it is not the dead item's work.
+    cursor.execute(
+        "DELETE FROM translation_queue "
+        "WHERE entity_type = 'item' "
+        "AND entity_id IN (SELECT workshop_id FROM workshop_items WHERE fetch_status = -1)"
+    )
+    dead_rows = cursor.rowcount
+
+    conn.commit()
+    cursor.execute("PRAGMA user_version = 36")
+    conn.commit()
+    logging.info(
+        "Migration 35->36 complete. Removed %d translation queue rows of dead items.",
+        dead_rows,
+    )
+
 def _ensure_indexes(cursor):
     """Create the query indexes, after the column renames migrations perform.
 
@@ -2985,6 +3029,7 @@ MIGRATIONS = [
     (33, _migration_32_to_33),
     (34, _migration_33_to_34),
     (35, _migration_34_to_35),
+    (36, _migration_35_to_36),
 ]
 
 def read_schema_version(db_path: str) -> int:

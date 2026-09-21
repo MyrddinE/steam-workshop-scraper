@@ -134,7 +134,7 @@ def _regress_to_v34(db_path) -> None:
 
 
 def test_a_fresh_database_has_no_dropped_column_or_index(db_path):
-    assert EXPECTED_VERSION == 35
+    assert EXPECTED_VERSION == 36
     assert _version(db_path) == EXPECTED_VERSION
     assert len(_columns(db_path, "workshop_items")) == WORKSHOP_COLUMNS_AFTER
     assert _columns(db_path, "app_discovery") == DISCOVERY_COLUMNS
