@@ -5,7 +5,6 @@ import re
 import threading
 from datetime import datetime, timezone
 from openai import OpenAI
-from src.config import config_value_with_legacy
 from src.database import get_connection, get_next_batch_for_translation
 from src.wordlist import WORDS
 
@@ -46,24 +45,28 @@ STATE_SECTION = "translation_backoff"
 # interval between polls.
 BATCH_FILL_WAIT_SECONDS = 30.0
 
-# Safety ceiling on items per request. The character cap below bounds a request's
-# size; this one bounds how many rows a single bad reply can cost, which is what
-# the fixed batch of 20 was doing before.
-DEFAULT_BATCH_ITEMS = 20
+# The boundary scaffolding one field costs a request, as a deliberate estimate
+# rather than a computation: the request's phrase of four ordinary words, the
+# entity id, the field label and the newline that closes the boundary line. A
+# phrase of four words is 12-30 characters, an id up to 10, a label up to 4, plus
+# separators -- so 50 over-estimates on purpose. It is a module constant and not a
+# config key because it describes the wire format, not a choice the operator makes.
+PER_FIELD_OVERHEAD_CHARS = 50
 
-# Upper bound on the source characters in one request, chosen from the queue's own
-# distribution rather than guessed. *Measured* in the 2026-09-18 backup (127,385
-# rows): median 19 characters, p90 69, p99 996, max 7,725; per field, `title_en`
-# median 18, `short_description_en` median 29 (max 7,725) and
-# `extended_description_en` median 42 (p99 4,072, max 7,157).
+# Upper bound on the estimated *cost* of one request: each field's source text plus
+# PER_FIELD_OVERHEAD_CHARS of scaffolding. Chosen from the queue's own distribution
+# rather than guessed. *Measured* in the 2026-09-18 backup (127,385 rows): median 19
+# characters, p90 69, p99 996, max 7,725; per field, `title_en` median 18,
+# `short_description_en` median 29 (max 7,725) and `extended_description_en` median
+# 42 (p99 4,072, max 7,157).
 #
-# 4,000 is about one p99 extended description. A batch of the short fields is
-# therefore bounded by the item ceiling rather than this cap -- twenty titles at
-# the median is ~360 characters -- while a long field is sent more or less alone.
-# The longest field in the queue still fits in one request on its own, since the
-# cap is only consulted from the second item onwards, but the 192 KB reply that a
-# full batch of long descriptions produced cannot recur: the worst case becomes a
-# single over-cap field, around 8 KB.
+# 4,000 is about one p99 extended description. Because every field also pays the
+# scaffolding, a request of short fields is bounded by this cap rather than by an
+# item count: the count that fits follows from the fields' own lengths, so there is
+# no separate ceiling. The longest field in the queue still fits in one request on
+# its own, since the cap is only consulted from the second item onwards, but the
+# 192 KB reply that a full batch of long descriptions produced cannot recur: the
+# worst case becomes a single over-cap field, around 8 KB.
 DEFAULT_BATCH_CHAR_CAP = 4000
 
 # Translation is not a creative task, so sampling only adds variance to it.
@@ -399,29 +402,28 @@ def match_translations(content: str, batch: list[dict], phrase: str) -> dict[int
     return _aligned(blocks, batch)
 
 
-def pack_batch(rows: list[dict], char_cap: int, item_ceiling: int) -> tuple[list[dict], bool]:
+def pack_batch(rows: list[dict], char_cap: int) -> tuple[list[dict], bool]:
     """Take candidates, in queue order, into one request.
 
-    The first candidate is taken **before** the cap is consulted, so a field larger
-    than the cap is sent on its own rather than never being sent at all; from the
-    second onwards the cap is checked **before** the candidate is taken, so no
-    other batch exceeds it. The item ceiling applies throughout.
+    Each field is charged its source text plus ``PER_FIELD_OVERHEAD_CHARS`` of
+    boundary scaffolding, so the running total estimates what the request costs
+    rather than counting fields. The first candidate is taken **before** the cap is
+    consulted, so a field larger than the cap is sent on its own rather than never
+    being sent at all; from the second onwards the cap is checked **before** the
+    candidate is taken, so no other batch exceeds it.
 
     Returns the batch and whether a candidate was left behind. That flag is what
-    tells a full request from a starved one: it is set both when the cap refused
-    the next candidate and when the ceiling stopped us, and clear only when the
-    candidates ran out.
+    tells a full request from a starved one: it is set when the cap refused the next
+    candidate and clear only when the candidates ran out.
     """
     batch: list[dict] = []
     used = 0
     for row in rows:
-        if len(batch) >= item_ceiling:
-            return batch, True
-        length = len(row.get("original_text") or "")
-        if batch and used + length > char_cap:
+        cost = len(row.get("original_text") or "") + PER_FIELD_OVERHEAD_CHARS
+        if batch and used + cost > char_cap:
             return batch, True
         batch.append(row)
-        used += length
+        used += cost
     return batch, False
 
 
@@ -449,20 +451,15 @@ class TranslatorThread(threading.Thread):
         self.config = config
         self.db_path = config.get("database", {}).get("path", "workshop.db")
         openai_config = config.get("openai", {}) or {}
-        # `batch_items` is the item ceiling and `batch_char_cap` the size cap; a
-        # request is packed by both, so the smaller one binds. They are separate
-        # because they bound different costs: the cap bounds what the model must
-        # emit in one reply, the ceiling bounds how many rows one bad reply can
-        # strand.
-        self.batch_size = _positive_int(
-            config_value_with_legacy(
-                openai_config, "batch_items", "batch", section_name="openai"
-            ),
-            DEFAULT_BATCH_ITEMS,
-        )
         self.batch_char_cap = _positive_int(
             openai_config.get("batch_char_cap"), DEFAULT_BATCH_CHAR_CAP
         )
+        # Enough candidates for the cap to be reachable, plus one. Each field costs
+        # at least the overhead, so the cap can hold no more than
+        # `batch_char_cap // PER_FIELD_OVERHEAD_CHARS` of them; the extra row is what
+        # makes "the next candidate would exceed the cap" detectable, which is what
+        # tells a full request from a queue that ran dry.
+        self.candidate_window = self.batch_char_cap // PER_FIELD_OVERHEAD_CHARS + 1
         self.temperature = _temperature(openai_config.get("temperature"))
         self.running = True
         self._failure_streak = 0
@@ -496,8 +493,8 @@ class TranslatorThread(threading.Thread):
                 self._sleep(30)
                 continue
 
-            batch, had_more = pack_batch(candidates, self.batch_char_cap, self.batch_size)
-            full = had_more or len(batch) >= self.batch_size
+            batch, had_more = pack_batch(candidates, self.batch_char_cap)
+            full = had_more
             urgent = any(row.get("priority", 0) >= 5 for row in batch)
 
             if not full and not urgent:
@@ -512,7 +509,7 @@ class TranslatorThread(threading.Thread):
                     # Whatever the queue holds now is what gets sent: the deadline
                     # has passed, so the re-pack feeds the send rather than another
                     # decision about whether to wait.
-                    batch = pack_batch(refreshed, self.batch_char_cap, self.batch_size)[0]
+                    batch = pack_batch(refreshed, self.batch_char_cap)[0]
 
             # A failed batch keeps its translation_queue rows, so backing off
             # costs nothing but time and the work is picked up again later.
@@ -532,14 +529,18 @@ class TranslatorThread(threading.Thread):
     def _read_candidates(self) -> list[dict] | None:
         """One fetch of a full request's worth of candidates, plus one.
 
-        The extra row is what makes "the next candidate would exceed the cap"
-        detectable at all: without it a full batch and a queue that has run dry
-        look the same, and the loop could not tell whether waiting would help.
-        Returns ``None`` when the read itself failed, which is not the same as an
-        empty queue.
+        The window is derived from the cap and the per-field overhead, so the cap is
+        actually reachable: it holds as many fields as the cap can pay for, plus the
+        extra row that makes "the next candidate would exceed the cap" detectable.
+        Without that extra row a full batch and a queue that has run dry look the
+        same, and the loop could not tell whether waiting would help. Returns
+        ``None`` when the read itself failed, which is not the same as an empty
+        queue.
         """
         try:
-            return get_next_batch_for_translation(self.db_path, limit=self.batch_size + 1)
+            return get_next_batch_for_translation(
+                self.db_path, limit=self.candidate_window
+            )
         except Exception as e:
             logging.error(f"Translator thread error: {e}")
             return None

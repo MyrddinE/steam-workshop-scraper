@@ -45,9 +45,12 @@ def _status_error(code: int) -> openai.APIStatusError:
 
 
 def _full_batch(size: int = 20) -> list[dict]:
+    # A request is bounded by cost now, not by item count, so twenty one-character
+    # titles no longer fill one. The text is long enough that the candidates
+    # overflow `DEFAULT_BATCH_CHAR_CAP`, which is what the loop reads as "full".
     return [
         {"entity_type": "item", "entity_id": i, "field": "title_en",
-         "original_text": "x", "priority": 3}
+         "original_text": "x" * 300, "priority": 3}
         for i in range(size)
     ]
 
