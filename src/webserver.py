@@ -942,11 +942,13 @@ def api_search_diagnostic():
     answers 404 before opening the database, so a diagnostic the operator did not
     ask for cannot run against the live file. With it on, `src.sort_diagnostic`
     opens the file `mode=ro` -- no write, no journal-mode switch, no file
-    creation -- and reports which query indexes are present, the `EXPLAIN QUERY
-    PLAN` for the real summary query under each sort column, each score column's
-    non-NULL coverage, whether `sqlite_stat1` exists, and the first-page and
-    deep-page wall-clock time per sort column. Safe beside a running daemon, so
-    the owner can answer "is it indexed?" from a URL and paste the answer back.
+    creation -- and reports each query index's actual definition against the
+    expected one (`present`, `missing` or `wrong_definition`), the `EXPLAIN QUERY
+    PLAN` for the real summary query under each sort column beside a derived
+    `uses_index` boolean, each score column's non-NULL coverage, whether
+    `sqlite_stat1` exists, and the first-page and deep-page wall-clock time per
+    sort column. Safe beside a running daemon, so the owner can answer "is it
+    indexed?" from a URL and paste the answer back.
     """
     if not capture.ui_trace_capture_active():
         return jsonify({"ok": False, "error": "Sort diagnostics are not enabled"}), 404
