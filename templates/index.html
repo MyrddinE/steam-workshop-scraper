@@ -2758,6 +2758,20 @@ async function _startAutoSubscribe() {
 
   await fetch('/api/pause', {method:'POST'});
 
+  // The pass owns its timers, so a predecessor's handles never outlive it into
+  // this one. `_subPollIv` is the one that is actually live here: Cancel
+  // deliberately leaves the cancelled pass's poll running while the overlay
+  // stays open -- that is what updates its rows -- and `l` starts a new pass
+  // from the grid cell that still holds focus, so the new handle would
+  // otherwise overwrite a live one. `_subScheduleIv` is live here only when a
+  // pass is re-entered *mid-drain* (a second `l` before the previous loop has
+  // run its `finally`), because Cancel and the loop's own `finally` clear it on
+  // every pass that has ended; it is cleared here anyway, so neither a
+  // cancelled poll nor a still-draining pass's schedule can be inherited, and a
+  // predecessor's completion branch can never clear a successor's handle.
+  if (_subPollIv) { clearInterval(_subPollIv); _subPollIv = null; }
+  if (_subScheduleIv) { clearInterval(_subScheduleIv); _subScheduleIv = null; }
+
   _subCanceled = false;
   // Per-pass like `_subCanceled`: the throttle stop sets it so *this* pass's
   // Close keeps its unverified rows queued, and it must not outlive the pass or

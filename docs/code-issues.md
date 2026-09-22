@@ -15,22 +15,27 @@ the production database on 2026-09-12.
 
 ## Open
 
-### A re-entered autosubscribe pass leaks the previous pass's verification poll (issue 83)
-
-`_startAutoSubscribe` arms `_subPollIv = setInterval(...)` without clearing a live handle. The first
-Cancel click deliberately leaves that poll running — only Close clears it — so starting a new pass while a
-cancelled pass's poll is still alive overwrites the handle and the old interval keeps running. Its own
-completion branch calls `clearInterval(_subPollIv)` on what is now the **new** handle, so it can stop the
-new pass's poll, and it keeps re-reading the queue on behalf of its own stale `items` list while doing so.
-
-Found 2026-09-22 during the issue-81 state audit, and deliberately left alone there: it is a re-entrancy
-leak, not stale state changing what a later Close does, so it is a separate entry rather than part of that
-fix. See [web-ui.md](web-ui.md) for the overlay's poll and cancel behaviour.
-
 ## Recently closed
 
 Removed from the list above rather than marked resolved. Each is now documented as current
 behaviour, or covered by a test:
+
+### A re-entered autosubscribe pass leaked the previous pass's verification poll (issue 83)
+
+`_startAutoSubscribe` now clears `_subPollIv` and `_subScheduleIv` before arming the pass's own timers,
+so a new pass can neither inherit a predecessor's handle nor be stopped by its completion branch. The
+handle that is actually live there is the **poll**: the first Cancel deliberately leaves the cancelled
+pass's 1 s poll running while the overlay stays open — it is what updates the rows — and only Close clears
+it, so a new pass started from the grid cell that still holds focus (the `l` shortcut) used to arm its own
+poll over that live handle. The old interval kept firing, re-reading the queue for its own stale `items`
+list, and its completion branch's `clearInterval(_subPollIv)` then cleared the **new** pass's handle.
+`_subScheduleIv` is live at a new pass's start only when a pass is re-entered mid-drain — Cancel and the
+loop's own `finally` clear it on every pass that has ended — and it is cleared here anyway for the same
+class of re-entry. Cancel's own behaviour is unchanged: its poll still runs until Close. Pinned by
+`tests/test_subscribe_throttle.py`: three node-driven cases run the real `_startAutoSubscribe` and
+`sub-cancel` handler against the served page — after a cancelled pass's poll is left live, a new pass
+leaves exactly one live poll, the old interval no longer fires, and the stale completion no longer clears
+the new pass's handle. All three fail against the pre-change page. [web-ui.md](web-ui.md#subscribe-flow)
 
 ### The overlay's throttle flag outlived its pass (issue 81)
 
