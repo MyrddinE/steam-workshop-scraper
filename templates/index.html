@@ -390,6 +390,10 @@ const ENUM_FIELDS = {};
 SEARCH_FILTER_SCHEMA.forEach(f => { if (f.type === 'enum') ENUM_FIELDS[f.field] = f.values || []; });
 
 let currentOffset = 0, hasMore = true, loading = false, cutoffs = {};
+// Bumped by every search. A reset search supersedes an older one instead of
+// being dropped at the `loading` guard; the older one sees the bumped value and
+// discards its result rather than rendering over the newer one.
+let _searchGeneration = 0;
 let _cutoffsCache = null, _cutoffsFilterKey = '';
 let _subTitleText = 'No cutoff data', _favTitleText = 'No cutoff data';
 let _listPollTimer = null;
@@ -652,13 +656,16 @@ function _installUiTrace() {
           sort_by: sortBy, sort_order: sortOrder, overlay: overlay});
     loadsSinceScroll += 1;
     if (loading) {
-      push({event: 'do_search', phase: 'dropped', reason: 'loading',
-            reset: isReset, offset: before});
+      // A reset supersedes the search in flight; a page request is dropped,
+      // because two of them would append the same offset.
+      push({event: 'do_search', phase: isReset ? 'superseded' : 'dropped',
+            reason: 'loading', reset: isReset, offset: before});
     }
     const promise = originalDoSearch.apply(this, arguments);
     if (promise && typeof promise.then === 'function') {
-      promise.then(function() {
+      promise.then(function(applied) {
         push({event: 'do_search', phase: 'done', reset: isReset,
+              applied: applied !== false,
               batch: currentOffset - (isReset ? 0 : before),
               offset: currentOffset, has_more: hasMore, loading: loading});
       }, function() {});
@@ -1079,21 +1086,32 @@ function sizeClass(bytes) {
 }
 
 async function doSearch(reset = true) {
-  if (loading) return;
+  // Two page requests must not overlap: both would append the same offset. A
+  // *reset* (a new result set: search, sort, overlay, author jump) supersedes
+  // whatever is in flight instead of being dropped -- a user action has to win
+  // over a restore that is only rebuilding a scroll position, and silently
+  // dropping it is why a creator jump could do nothing while the restore held
+  // `loading`. This is defence in depth beside the restore bound, not the fix
+  // for the runaway itself.
+  if (loading && !reset) return false;
+  const generation = ++_searchGeneration;
+  if (loading) {
+    console.debug('doSearch: search ' + generation + ' supersedes an in-flight search');
+  }
   loading = true;
-  // Every exit path clears `loading`: it is the guard every later action --
-  // search, sort, pagination, author jump -- passes through, so a rejected
-  // fetch or the route's JSON error body must not leave it set (issue 79).
+  // Every exit path clears `loading`, and only the newest search clears it: a
+  // superseded one must not release the flag its replacement still holds.
   try {
-    await _doSearchBody(reset);
+    return await _doSearchBody(reset, generation);
   } catch (e) {
     console.warn('search failed', e);
+    return false;
   } finally {
-    loading = false;
+    if (generation === _searchGeneration) loading = false;
   }
 }
 
-async function _doSearchBody(reset) {
+async function _doSearchBody(reset, generation) {
   // A reset search starts a new result set, so an item selected in the old one
   // is not a selection any more; keeping it would send restore hunting for a
   // row that is no longer there.
@@ -1124,6 +1142,9 @@ async function _doSearchBody(reset) {
     body: JSON.stringify({filters, subscribed: _overlayValue(), sort_by: document.getElementById('sort-by').value, sort_order: document.getElementById('sort-order').value, offset: currentOffset, limit: 50})
   });
   const items = await resp.json();
+  // A newer search owns the grid now, so this result set is stale: discard it
+  // rather than draw it over the newer one.
+  if (generation !== _searchGeneration) return false;
   // The route answers an exception with a JSON object at status 500. A body
   // that is not an array is an error, not a batch of zero rows: iterating it
   // throws, and before this guard that throw left `loading` set.
@@ -1191,6 +1212,7 @@ async function _doSearchBody(reset) {
   // A reset re-establishes the committed filter/sort view; save it once the
   // result set it describes is on screen.
   if (reset) _saveViewState();
+  return true;
 }
 
 // Arm infinite scroll on the batch just rendered by watching its first cell.
@@ -1725,7 +1747,7 @@ function _setAuthorModeUi(on, creator) {
 // The item jump and the author list both enter the mode through here. It is the
 // TUI's `btn-jump-author` handler: snapshot what the jump is about to replace,
 // replace it, and re-run the search.
-function jumpToAuthor(creator) {
+async function jumpToAuthor(creator) {
   if (creator == null || creator === '') return;
   if (!_authorMode) {
     _preJumpView = _viewSnapshot();
@@ -1741,10 +1763,17 @@ function jumpToAuthor(creator) {
   addRow(undefined, {field: 'Author ID', op: 'is', value: String(creator)});
   _syncSubscribedOverlay();
   // Fire-and-forget: the label is the creator's stored flag, which only the
-  // route knows. The jump itself stays synchronous so the view is complete
-  // before anything awaits; a failed read leaves the default wording in place.
+  // route knows. A failed read leaves the default wording in place.
   _refreshCreatorIgnoreControl();
-  doSearch(true);
+  const applied = await doSearch(true);
+  if (!applied) {
+    // The jump's own result set never arrived -- a newer action superseded it,
+    // or the search failed. Author mode would then be drawn over a grid that is
+    // not the creator's (or over the empty grid its reset cleared), so the
+    // snapshot comes back through the same path Return uses. `doSearch` has
+    // already named the supersede in `console.debug`.
+    await returnFromAuthor();
+  }
 }
 
 // ── the creator-ignore toggle ─────────────────────────────────────────────
@@ -1816,8 +1845,10 @@ async function returnFromAuthor() {
     _applySubscribedOverlay(state.subscribed);
   }
   _syncSubscribedOverlay();
-  await doSearch(true);
-  if (state) await _restoreView(state);
+  // Only rebuild the old view when this search owns the grid; a user action
+  // during it supersedes the return too.
+  const applied = await doSearch(true);
+  if (state && applied) await _restoreView(state);
 }
 
 // ── the creator list ──────────────────────────────────────────────────────
@@ -2320,13 +2351,15 @@ function _applyFilters(filters) {
 // Ask doSearch for the next page until `done` holds, exactly as scrolling to
 // the bottom would. doSearch owns currentOffset and the observed cell, so this
 // never touches either; a page that moves no offset means there is nothing
-// left, and `hasMore` false ends the walk however unsatisfied `done` is.
+// left, `hasMore` false ends the walk however unsatisfied `done` is, and a
+// search that did not apply -- dropped because one is already in flight, or
+// superseded by a user action -- stops the walk rather than fighting it.
 async function _loadUntil(done, maxBatches) {
   let batches = 0;
   while (hasMore && !done() && batches < maxBatches) {
     const before = currentOffset;
-    await doSearch(false);
-    if (currentOffset === before) break;
+    const applied = await doSearch(false);
+    if (!applied || currentOffset === before) break;
     batches += 1;
   }
 }
@@ -2339,9 +2372,13 @@ async function _loadUntil(done, maxBatches) {
 // paging after it was what issued forty searches with no user action (issue 78).
 async function _restoreView(state) {
   const grid = document.getElementById('results-grid');
+  const generation = _searchGeneration;
   await _loadUntil(function() {
     return state.scroll <= 0 || grid.scrollHeight >= state.scroll + grid.clientHeight;
   }, MAX_RESTORE_SCROLL_BATCHES);
+  // A user action during the pass owns the grid; re-opening the old item or
+  // jumping the old scroll over it would fight the thing that superseded it.
+  if (generation !== _searchGeneration) return;
   if (state.selected != null) {
     if (grid.querySelector('.grid-cell[data-wid="' + state.selected + '"]')) {
       await showDetail(state.selected);
@@ -2382,8 +2419,11 @@ async function loadState() {
   _syncSubscribedOverlay();
   _restoringView = true;
   try {
-    await doSearch(true);
-    if (local) await _restoreView(local);
+    // Only restore when this load's own search owns the grid. A user action
+    // during the initial fetch supersedes it, and the view it would rebuild is
+    // not the view that action asked for.
+    const applied = await doSearch(true);
+    if (applied && local) await _restoreView(local);
   } finally {
     _restoringView = false;
   }

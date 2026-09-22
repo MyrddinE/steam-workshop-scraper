@@ -2260,7 +2260,7 @@ const sortOrder = {value: ''};
 global._loadViewState = () => local;
 global._applyFilters = (f) => { out.applied = f; filterRows.children.length = f.length; };
 global.addRow = () => { out.addedRow = (out.addedRow || 0) + 1; };
-global.doSearch = async () => { out.searches = (out.searches || 0) + 1; };
+global.doSearch = async () => { out.searches = (out.searches || 0) + 1; return true; };
 global._restoreView = async (s) => { out.restored = s; };
 // The overlay control is DOM-backed; loadState only hands it a value and then
 // syncs its greyed-out state once the builder rows are drawn.
@@ -2362,6 +2362,7 @@ const restoreFn = (__FN__);
 global._loadUntil = (__LOADUNTIL__);
 globalThis.MAX_RESTORE_BATCHES = __MAX__;
 globalThis.MAX_RESTORE_SCROLL_BATCHES = __MAX__;
+let _searchGeneration = 0;
 // Diagnostics must not pollute the JSON on stdout.
 const report = console.log;
 global.console = {debug: () => {}, warn: () => {}, error: () => {}, log: report};
@@ -2381,12 +2382,13 @@ async function scenario(name, grid, perBatch, stopAfter, state) {
   globalThis.currentOffset = 0;
   let batches = 0;
   globalThis.doSearch = async function() {
-    if (!globalThis.hasMore) return;
+    if (!globalThis.hasMore) return false;
     batches += 1;
     globalThis.currentOffset += 50;
     grid.scrollHeight += perBatch;
     if (grid.cellOnHeight != null && grid.scrollHeight >= grid.cellOnHeight) grid.cell = true;
     if (stopAfter != null && batches >= stopAfter) globalThis.hasMore = false;
+    return true;
   };
   globalThis.document = {getElementById: function() { return grid; }};
   let showDetailCalls = 0;
@@ -2498,6 +2500,7 @@ global._saveViewState = () => {};
 global.loading = false;
 global.hasMore = true;
 global.currentOffset = 0;
+let _searchGeneration = 0;
 const grid = {innerHTML: '', appendChild: () => {}};
 global.document = {
   getElementById: (id) => (id === 'results-grid' ? grid : {value: ''}),
@@ -2565,6 +2568,189 @@ def test_the_route_error_body_does_not_wedge_the_page(web_client, tmp_path):
 
     assert out["fetches"] == 2, "the error body must not stop the next search"
     assert out["loading"] is False, "loading must be clear after a 500 body"
+
+
+# ── a user action supersedes an in-flight search ─────────────────────────────
+#
+# Defence in depth beside the restore bound, not the fix for the runaway: a
+# reset search used to be dropped at the `loading` guard, so a creator jump
+# issued while a restore held `loading` did nothing. A reset now supersedes the
+# older search, and the older search discards its result instead of drawing it
+# over the newer one. Two page requests still cannot overlap.
+
+SUPERSEDE_DRIVER = """
+const fn = (__FN__);
+const _doSearchBody = (__BODY__);
+const out = {debug: []};
+const report = console.log;
+global.console = {debug: (m) => out.debug.push(String(m)), warn: () => {},
+                 error: () => {}, log: report};
+global.getFilters = () => [];
+global._overlayValue = () => 'any';
+global._observeNextBatch = () => {};
+global._startItemUpdatePoll = () => {};
+global._listNeedsPoll = () => false;
+global._saveViewState = () => {};
+global._stopListPoll = () => {};
+global._unsubscribeItem = () => {};
+global._refreshCutoffs = () => {};
+global._applyPending = () => {};
+global._applySub = () => {};
+global._subscribeItem = () => {};
+global._imageCellHtml = () => '';
+global.fmtSize = () => '0 B';
+global.sizeClass = () => '';
+global.wClass = () => '';
+global.showDetail = () => {};
+let _searchGeneration = 0;
+global.loading = false;
+global.hasMore = true;
+global.currentOffset = 0;
+const grid = {scrollTop: 0, children: []};
+Object.defineProperty(grid, 'innerHTML', {
+  get() { return ''; },
+  set(v) { if (v === '') this.children.length = 0; },
+});
+grid.appendChild = function(node) { this.children.push(node); };
+grid.querySelectorAll = () => [];
+global.document = {
+  getElementById: (id) => (id === 'results-grid' ? grid : {value: ''}),
+  querySelectorAll: () => [],
+  createElement: () => ({
+    attrs: {}, innerHTML: '', className: '', onclick: null,
+    setAttribute: function(k, v) { this.attrs[k] = String(v); },
+    querySelector: () => null,
+  }),
+};
+const pending = [];
+global.fetch = () => new Promise((resolve) => { pending.push(resolve); });
+function body(items) {
+  return {ok: true, status: 200, statusText: 'OK', json: async () => items};
+}
+function item(wid) { return {workshop_id: wid, title: 't', file_size: 0}; }
+function wids() { return grid.children.map((c) => c.attrs['data-wid']); }
+(async () => {
+  const p1 = fn(false);           // a page request, in flight
+  const p2 = fn(true);            // a user reset supersedes it
+  out.fetches = pending.length;
+  // The superseded page resolves first; its batch must be discarded.
+  pending[0](body([item(111)]));
+  out.first = await p1;
+  out.widsAfterFirst = wids();
+  // The reset resolves second; this result set is the grid's.
+  if (pending[1]) pending[1](body([item(222)]));
+  out.second = await p2;
+  out.widsAfterSecond = wids();
+  out.loading = global.loading;
+  out.supersededMessage = out.debug.some((m) => m.indexOf('supersedes') !== -1);
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_a_reset_search_supersedes_an_in_flight_search(web_client, tmp_path):
+    """A user action wins; the superseded search's result is discarded.
+
+    Pre-change the reset returned at `if (loading) return` without a request --
+    the dropped creator jump. Now both requests go out, the older generation
+    sees the newer one and does not render, and a `console.debug` names it.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = (SUPERSEDE_DRIVER
+              .replace("__FN__", _extract_function(script, "doSearch"))
+              .replace("__BODY__", _extract_function(script, "_doSearchBody")))
+    out = _run_node(driver, tmp_path)
+
+    assert out["fetches"] == 2, "a reset must not be dropped behind a page request"
+    assert out["first"] is False, "the superseded search reports that it did not apply"
+    assert out["second"] is True, "the newer search owns the grid"
+    assert out["widsAfterFirst"] == [], \
+        "the superseded batch must not be drawn over the newer search"
+    assert out["widsAfterSecond"] == ["222"], "the newer search's batch is the grid's"
+    assert out["loading"] is False
+    assert out["supersededMessage"], "the supersede is named in console.debug"
+
+
+JUMP_SUPERSEDE_DRIVER = """
+const jump = (__JUMP__);
+const returnFn = (__RETURN__);
+global.returnFromAuthor = returnFn;
+const out = {uiCalls: [], restoreViews: [], searches: 0};
+const report = console.log;
+global.console = {debug: () => {}, warn: () => {}, error: () => {}, log: report};
+let _authorMode = false;
+let _preJumpView = null;
+let _selectedWid = null;
+const snapshot = {filters: [{field: 'Title', op: 'is', value: 'x'}],
+                  sort_by: 'views', sort_order: 'DESC', subscribed: 'any',
+                  selected: null, scroll: 0};
+global._viewSnapshot = () => snapshot;
+global._setAuthorModeUi = (on, creator) => out.uiCalls.push([on, creator]);
+global.addRow = () => {};
+global._syncSubscribedOverlay = () => {};
+global._refreshCreatorIgnoreControl = () => {};
+global._applyFilters = (f) => { out.appliedFilters = f; };
+global._applySubscribedOverlay = () => {};
+global._restoreView = async (s) => { out.restoreViews.push(s); };
+const filterRows = {innerHTML: ''};
+global.document = {getElementById: (id) => (id === 'filter-rows' ? filterRows : {value: ''})};
+const answers = [false, true, true];   // superseded jump, then its return, then an applied jump
+global.doSearch = async () => { out.searches += 1; return answers.shift(); };
+(async () => {
+  await jump('creator-1');
+  out.superseded = {
+    authorMode: _authorMode,
+    lastUi: out.uiCalls[out.uiCalls.length - 1],
+    appliedFilters: out.appliedFilters,
+    restoreViews: out.restoreViews.slice(),
+  };
+  _authorMode = false; _preJumpView = null;
+  out.uiCalls.length = 0; out.restoreViews.length = 0;
+  out.appliedFilters = null; out.searches = 0;
+  await jump('creator-2');
+  out.applied = {
+    authorMode: _authorMode,
+    lastUi: out.uiCalls[out.uiCalls.length - 1],
+    restoreViews: out.restoreViews.slice(),
+  };
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JS")
+def test_jump_to_author_restores_the_pre_jump_view_when_superseded(web_client, tmp_path):
+    """A jump whose search never applies must not leave author mode drawn.
+
+    If a newer action supersedes the jump's search, the grid belongs to that
+    action, so the jump puts the `_preJumpView` snapshot back through the same
+    path Return uses -- and an applied jump leaves author mode on.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = (JUMP_SUPERSEDE_DRIVER
+              .replace("__JUMP__", _extract_function(script, "jumpToAuthor"))
+              .replace("__RETURN__", _extract_function(script, "returnFromAuthor")))
+    out = _run_node(driver, tmp_path)
+
+    assert out["superseded"]["authorMode"] is False, \
+        "author mode must not stay on over the newer action's grid"
+    assert out["superseded"]["lastUi"] == [False, ""], \
+        "the author-mode chrome is taken down"
+    assert out["superseded"]["appliedFilters"] == [{"field": "Title", "op": "is", "value": "x"}], \
+        "the pre-jump filters come back"
+    assert len(out["superseded"]["restoreViews"]) == 1, \
+        "the pre-jump view is restored through the same path Return uses"
+    assert out["superseded"]["restoreViews"][0]["sort_by"] == "views"
+
+    assert out["applied"]["authorMode"] is True, \
+        "an applied jump leaves author mode on"
+    assert out["applied"]["lastUi"] == [True, "creator-2"]
+    assert out["applied"]["restoreViews"] == [], \
+        "an applied jump has nothing to restore"
+
 
 # ── infinite scroll: the placeholder that was a grid cell ────────────────────
 #
@@ -3198,7 +3384,7 @@ function _applyFilters(filters) { _appliedFilters = filters; _setRowsFromFilters
 function _overlayValue() { return _snapshotSubscribed; }
 function _applySubscribedOverlay(value) { _appliedOverlay = value; }
 function _syncSubscribedOverlay() { _syncs += 1; }
-function doSearch(reset) { _searches.push(reset); return Promise.resolve(); }
+function doSearch(reset) { _searches.push(reset); return Promise.resolve(true); }
 function _restoreView(state) { _restoreViewState = state; return Promise.resolve(); }
 function showDetail(wid) { _detailOpened.push(wid); return Promise.resolve(); }
 // The creator-ignore label read, stubbed: it is exercised on its own in the
@@ -4044,8 +4230,11 @@ global._overlayValue = () => elements['subscribed-overlay'].value;
 global._applySubscribedOverlay = () => {};
 global._restoreView = () => Promise.resolve();
 let searched = 0;
-global.doSearch = () => { searched += 1; return Promise.resolve(); };
+global.doSearch = () => { searched += 1; return Promise.resolve(true); };
 global.addRow = (logic, initial) => added.push({hasLogic: logic !== undefined, initial: initial});
+// `jumpToAuthor` falls back to the real Return when its search does not apply;
+// this driver gives it the page's own function under the global name it calls.
+global.returnFromAuthor = returnFn;
 
 jumpFn('76561198765432109');
 const first = {
