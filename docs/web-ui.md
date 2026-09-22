@@ -574,6 +574,58 @@ The TUI screen's own description is in [tui.md](tui.md#subscription-queue-sl-key
 
 ---
 
+## Reading a UI trace
+
+The page's JavaScript is otherwise only observable through tests that drive
+extracted functions, and the person diagnosing a web bug cannot open a browser.
+`daemon.capture_web_ui_trace` turns the page into its own recorder: while the
+debug switch is on the server injects `UI_TRACE_ENABLED = true`, the page
+installs its instrument once and posts ordered batches to `/api/ui_trace`, and
+the server writes one JSON file per batch under `<outbox_dir>/web_ui_trace/`.
+With the switch off the page installs nothing at all. The switch, the bounds and
+the tree's retention are in
+[failure-capture.md](failure-capture.md#web-ui-trace) and
+[config-security.md](config-security.md#daemon).
+
+A file is one batch. Its envelope names the `session`, the `batch` (sequence)
+number, whether the page marked it `page_final`, the `app_version`, and the
+truncation fields: `events_dropped`, `events_truncated`, `bytes_truncated`,
+`buffer_dropped` (what the page's ring buffer discarded) and
+`truncation_reason` (`event_cap`, `byte_cap`, `session_file_cap` or
+`page_ring_buffer`). `events` is the ordered timeline. Every event carries a
+monotonic `t` (milliseconds since the page installed the trace) and
+`loads_since_scroll`.
+
+| `event` | Fields, and what they mean |
+|---|---|
+| `session` | `loaded_at`, `inner_width`/`inner_height`, `grid_client_height`/`grid_scroll_top`, `app_version` — the header that makes a trace read later interpretable |
+| `keydown` | `key`, `id`/`wid` of the focused element, `consumed` (whether a handler called `preventDefault`) |
+| `click` | `id`, `wid`, `label` of the clicked control |
+| `scroll` | `scroll_top`, `scroll_height`, `client_height`, throttled to one record per settle window |
+| `sort_change`, `overlay_change` | `id` and the new `value` |
+| `do_search` | `phase` is `enter`, `dropped` or `done`; entry holds `reset`, `offset`, `filters` (count), `sort_by`, `sort_order`, `overlay`; `dropped` names the `loading` guard that swallowed it; `done` holds `batch`, `offset`, `has_more`, `loading` |
+| `fetch` | `method`, `path`, `body` (a summary: `{kind: "search", filters, subscribed, sort_by, offset}`, `{kind: "ids", ids}`, or a key list — never the whole payload), `ms`, `status`, and `items` (the response array's length) where cheap |
+| `observe_next_batch` | `branch` (`already_visible`, `observe`, `skip` or `reset`), `rect_top` beside `inner_height`, `scroll_top`/`client_height`, and the cell `released`/`armed` |
+| `intersection` | `is_intersecting`, the entry's `target`, whether it `matched_observed` (`_observedCell`), and `entry_count` |
+| `list_poll`, `item_poll` | each list-poll arming and tick, and each item-update tick, so an endless poll cannot hide among the calls |
+| `jump_to_author` | the `creator` the jump pinned the view to |
+| `pane_open` | the `wid` the detail pane was opened on |
+| `view_restore` | `phase` is `saved_view` (`found`), `load_state`, `enter` (the saved view's `scroll`, `selected`), `load_until_enter`, `done_check` (the value the `done` predicate returned, and the pass number), `load_until_done`, `load_state_done` |
+
+**The question it was built to answer**: "is the page loading on its own, or is
+the user scrolling?" Every record carries `loads_since_scroll`; the page resets
+it on a user scroll. So a rising `loads_since_scroll` across `do_search` or
+`fetch` records with **no `scroll` event between them** is the runaway in one
+line, and the `view_restore` events show the loop that runs on every page load
+with no user action — each `done_check` value and every batch it requests —
+rather than leaving those searches to look like they arrived from nowhere.
+
+The trace is additive: a trace POST that fails, throws or is refused leaves the
+action it describes behaving exactly as it did, and a refused POST is only how
+the page learns to stop buffering at the session cap.
+
+---
+
 ## Server Endpoints
 
 ### `/api/search` — POST
@@ -598,6 +650,17 @@ Both list routes attach the image classification the grid branches on before ser
 (from `images.image_state`) and `image_resolved`, which is `images.is_resolved(stored)` itself rather
 than the server spelling out which states are settled. `src/images.py` is the one decider, so a change
 to the predicate moves the page and the TUI together instead of leaving the page quietly disagreeing.
+
+### `/api/ui_trace` — POST
+
+Accepts one batch of the page's own trace: `{session, seq, final, reason, dropped, events}`. The
+route is **inert unless `daemon.capture_web_ui_trace` is on** — with the switch off it answers 404
+before touching anything, so the page cannot write a trace the operator did not ask for. With it on,
+`capture.record_ui_trace` bounds the batch (events per batch, bytes per record, files per session),
+writes it atomically into `<outbox_dir>/web_ui_trace/` and registers it with `kind: "ui_trace"`. A
+session that has reached its file cap answers 429 with `refused: "session_cap"`, and the page treats
+any non-2xx answer as "stop buffering" — so a refused trace stops the instrument, never the action it
+was describing. See [Reading a UI trace](#reading-a-ui-trace).
 
 ### `/api/cutoffs` — POST
 

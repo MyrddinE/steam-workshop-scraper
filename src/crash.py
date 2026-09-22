@@ -672,6 +672,17 @@ def _sensitive_key(name):
 
 # ── secrets ──────────────────────────────────────────────────────────────────
 
+def secrets_for_scrubbing(config) -> list:
+    """Every literal credential value the process currently knows about.
+
+    The public form of the collector a crash dump uses, exposed so another
+    writer of diagnostic text -- the UI trace in :mod:`src.capture` -- removes
+    the same values rather than growing a second rule about what is secret.
+    Longest first, ready for :func:`capture.scrub_text`.
+    """
+    return _gather_secrets(config)
+
+
 def _gather_secrets(config):
     """Every literal credential value the process currently knows about."""
     values = []

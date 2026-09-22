@@ -83,6 +83,16 @@ def test_the_legacy_scrapes_tree_is_pruned_too(tmp_path):
     assert not os.path.exists(path)
 
 
+def test_a_web_ui_trace_is_pruned_like_the_other_debug_captures(tmp_path):
+    """The trace is an instrument, not evidence: it ages out with the rest."""
+    outbox = str(tmp_path)
+    path = _write(outbox, "web_ui_trace/old-page-1.json", age_days=RETENTION_DAYS + 2)
+
+    assert "web_ui_trace" in [os.path.basename(d) for d in capture.debug_capture_dirs(outbox)]
+    assert capture.prune_debug_captures(outbox) == ["web_ui_trace/old-page-1.json"]
+    assert not os.path.exists(path)
+
+
 def test_a_failure_capture_of_any_age_stays(tmp_path):
     outbox = str(tmp_path)
     body = _write(outbox, "failures/web_unknown--x/abc-1.body", age_days=90)

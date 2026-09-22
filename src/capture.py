@@ -17,13 +17,14 @@ Four design points carry the weight:
   After that the group keeps counting misses and stops writing files. The
   counters, not the samples, are what convey scale — a sample cannot.
 * **Debug trees age out; failure evidence does not.** The debug captures --
-  ``<outbox>/web_downloads/``, ``<outbox>/image_downloads/`` and the legacy
-  ``<outbox>/scrapes/`` tree an earlier build wrote -- are housekeeping's to
-  prune once a file is :data:`DEBUG_CAPTURE_RETENTION_DAYS` old; see
-  :func:`prune_debug_captures`. ``failures/`` and ``crashes/`` are never pruned
-  by age: a failure is the evidence a regression test is built from, so it stays
-  until it is pulled for review. That is why the "unbounded on purpose" claim
-  below is now true only of the failure tree.
+  ``<outbox>/web_downloads/``, ``<outbox>/image_downloads/``,
+  ``<outbox>/web_ui_trace/`` and the legacy ``<outbox>/scrapes/`` tree an
+  earlier build wrote -- are housekeeping's to prune once a file is
+  :data:`DEBUG_CAPTURE_RETENTION_DAYS` old; see :func:`prune_debug_captures`.
+  ``failures/`` and ``crashes/`` are never pruned by age: a failure is the
+  evidence a regression test is built from, so it stays until it is pulled for
+  review. That is why the "unbounded on purpose" claim below is now true only of
+  the failure tree.
 * **Additive.** Capturing never changes control flow. It is called from failure
   sites that return or raise exactly as before.
 * **Off unless configured.** With no outbox directory every call is a no-op, so
@@ -56,6 +57,16 @@ page and server-side subscribe through :func:`record_web_download` into
 Those records are not failures; they are the instrument for seeing what a
 *working* exchange looks like, and nothing in them may carry a credential. See
 :func:`elide_secrets`.
+
+A third debug switch turns the instrument on the page itself:
+``daemon.capture_web_ui_trace`` accepts the browser's own timeline of actions,
+the calls they caused and the internal transitions between them through
+:func:`record_ui_trace`, into ``<outbox>/web_ui_trace/``. The page's JavaScript
+is otherwise only observable through tests that drive extracted functions, so a
+trace is what lets a web bug be diagnosed from what the page did rather than
+from what its source appears to say. It is denser than a web-download capture,
+so :func:`record_ui_trace` bounds it on three axes -- events per batch, bytes
+per record and files per page session -- and records every truncation.
 """
 
 import hashlib
@@ -87,6 +98,12 @@ _TEMP_SUFFIX = ".tmp"
 _lock = threading.RLock()
 _outbox_dir = None
 _groups = {}
+# Per-session UI-trace file counts, so the per-session cap survives the session
+# rather than being recomputed by listing the directory on every batch. Keyed by
+# the sanitised session token; `configure` clears it, and the count is seeded
+# from the files already on disk the first time a session is seen, so a server
+# restart does not hand the page a fresh budget.
+_ui_trace_sessions = {}
 _app_version_cache = None
 
 # Every Steam community web pull saved while `capture_web_downloads` is set --
@@ -110,14 +127,21 @@ _capture_web_downloads = False
 # the same clock as the web captures.
 _capture_image_downloads = False
 
+# Every batch of page events saved while `capture_web_ui_trace` is set. The
+# page's own timeline -- keystrokes, scrolls, the fetches they caused and the
+# internal transitions that explain them -- so a web bug can be read instead of
+# inferred. `web_ui_trace/` is a debug tree, so it ages out like the others.
+_capture_web_ui_trace = False
+
 FAILURES_DIR_NAME = "failures"
 WEB_DOWNLOADS_DIR_NAME = "web_downloads"
 IMAGE_DOWNLOADS_DIR_NAME = "image_downloads"
+WEB_UI_TRACE_DIR_NAME = "web_ui_trace"
 
 # The tree an earlier build wrote before `web_downloads/` replaced it. No code
 # writes it any more, but an outbox written by that build still holds the
 # directory and its manifest entries, so housekeeping prunes it too: to the
-# owner it is debug data like the other two, and leaving it behind would leave
+# owner it is debug data like the others, and leaving it behind would leave
 # the manifest pointing at files nothing will ever refresh.
 LEGACY_SCRAPES_DIR_NAME = "scrapes"
 
@@ -132,6 +156,7 @@ DEBUG_CAPTURE_RETENTION_DAYS = 7
 DEBUG_CAPTURE_DIR_NAMES = (
     WEB_DOWNLOADS_DIR_NAME,
     IMAGE_DOWNLOADS_DIR_NAME,
+    WEB_UI_TRACE_DIR_NAME,
     LEGACY_SCRAPES_DIR_NAME,
 )
 
@@ -179,6 +204,25 @@ IMAGE_DOWNLOAD_KIND = "image_download"
 IMAGE_FAILURE_KIND = "image_download_failed"
 IMAGE_STAGE = "image_download"
 
+# ── the page's own trace ─────────────────────────────────────────────────────
+#
+# The UI trace is far denser than a web download -- a keystroke, a scroll and
+# every fetch a click causes -- so on top of the age sweep it is bounded three
+# ways, and every bound is recorded in the record rather than silently applied.
+# The page is told these numbers through `ui_trace_limits`, so its own ring
+# buffer and stop agree with what this module enforces.
+UI_TRACE_KIND = "ui_trace"
+UI_TRACE_STAGE = "web_ui"
+# Events kept from one batch; a longer batch drops its oldest events.
+UI_TRACE_MAX_EVENTS_PER_BATCH = 200
+# Bytes of one written record. A record over this drops oldest events until it
+# fits, so a single huge event cannot defeat it.
+UI_TRACE_MAX_RECORD_BYTES = 256 * 1024
+# Event records accepted for one page session. Past this the server writes one
+# truncation marker and refuses the rest, and the page stops buffering when the
+# refusal reaches it.
+UI_TRACE_MAX_FILES_PER_SESSION = 200
+
 # Candidate signs of who the page thinks we are, in the header corner. Recorded
 # as a set of flags rather than interpreted, because which one is reliable is
 # exactly what the captured pages are for.
@@ -216,7 +260,8 @@ def _strip_script_and_style(raw: bytes) -> bytes:
 
 # ── configuration ────────────────────────────────────────────────────────────
 
-def configure(outbox_dir, capture_web_downloads=False, capture_image_downloads=False):
+def configure(outbox_dir, capture_web_downloads=False, capture_image_downloads=False,
+              capture_web_ui_trace=False):
     """Enable capture under ``<outbox_dir>/failures``. ``None`` disables it.
 
     ``capture_web_downloads`` additionally saves *every* Steam community web pull
@@ -229,13 +274,21 @@ def configure(outbox_dir, capture_web_downloads=False, capture_image_downloads=F
     ``capture_image_downloads`` additionally saves *every* image download, into
     ``<outbox_dir>/image_downloads``, as metadata and headers only — never the
     image bytes, which already live in the images bucket.
+
+    ``capture_web_ui_trace`` additionally accepts the page's own event batches on
+    ``POST /api/ui_trace`` and saves them into
+    ``<outbox_dir>/web_ui_trace``. The page is told the switch through the
+    template, so with it off nothing installs and nothing is sent.
     """
     global _outbox_dir, _capture_web_downloads, _capture_image_downloads
+    global _capture_web_ui_trace
     with _lock:
         _outbox_dir = outbox_dir or None
         _capture_web_downloads = bool(capture_web_downloads) and bool(_outbox_dir)
         _capture_image_downloads = bool(capture_image_downloads) and bool(_outbox_dir)
+        _capture_web_ui_trace = bool(capture_web_ui_trace) and bool(_outbox_dir)
         _groups.clear()
+        _ui_trace_sessions.clear()
         if _outbox_dir:
             logging.info("Failure capture enabled: %s", failures_dir(_outbox_dir))
             if _capture_web_downloads:
@@ -251,6 +304,14 @@ def configure(outbox_dir, capture_web_downloads=False, capture_image_downloads=F
                     "metadata (status, headers, saved path — never the bytes) to %s. "
                     "This is a debugging switch — turn it off when done.",
                     image_downloads_dir(_outbox_dir),
+                )
+            if _capture_web_ui_trace:
+                logging.info(
+                    "UI-trace capture enabled: accepting the page's own action, call and "
+                    "transition records on /api/ui_trace and saving them, bounded per "
+                    "batch/record/session, to %s. This is a debugging switch — turn it "
+                    "off when done.",
+                    web_ui_trace_dir(_outbox_dir),
                 )
 
 
@@ -286,6 +347,41 @@ def image_downloads_dir(outbox_dir) -> str:
     return os.path.join(outbox_dir, IMAGE_DOWNLOADS_DIR_NAME)
 
 
+def web_ui_trace_dir(outbox_dir) -> str:
+    return os.path.join(outbox_dir, WEB_UI_TRACE_DIR_NAME)
+
+
+def ui_trace_switch(daemon_config) -> bool:
+    """The ``capture_web_ui_trace`` debug switch from a parsed config.
+
+    The lookup lives here rather than in the server for the same reason
+    :func:`web_download_switch` does: the web server reads it to decide whether
+    the page is told to trace, and it is the one place a future reader of the
+    same key can find. Off unless the key is set; it has no renamed predecessor.
+    """
+    daemon_config = daemon_config or {}
+    return bool(daemon_config.get("capture_web_ui_trace", False))
+
+
+def ui_trace_capture_active() -> bool:
+    """Whether the page's batches are accepted. Read before the route writes."""
+    with _lock:
+        return bool(_outbox_dir) and _capture_web_ui_trace
+
+
+def ui_trace_limits() -> dict:
+    """The page's view of the server's bounds, so the two cannot drift apart.
+
+    Injected into the template rather than retyped there: the page's own ring
+    buffer and file-count stop have to agree with what the route enforces.
+    """
+    return {
+        "events_per_batch": UI_TRACE_MAX_EVENTS_PER_BATCH,
+        "bytes_per_record": UI_TRACE_MAX_RECORD_BYTES,
+        "files_per_session": UI_TRACE_MAX_FILES_PER_SESSION,
+    }
+
+
 def debug_capture_dirs(outbox_dir) -> list:
     """The debug trees housekeeping prunes, as absolute paths."""
     return [os.path.join(outbox_dir, name) for name in DEBUG_CAPTURE_DIR_NAMES]
@@ -295,13 +391,14 @@ def prune_debug_captures(outbox_dir=None, *, now=None,
                          max_age_days=DEBUG_CAPTURE_RETENTION_DAYS) -> list:
     """Remove debug captures older than ``max_age_days`` and their manifest entries.
 
-    The three debug trees -- ``web_downloads/``, ``image_downloads/`` and the
-    legacy ``scrapes/`` -- hold session instruments, not records: a capture older
-    than a week has served whatever purpose it had, and a debug switch left on
-    must not fill the disk. ``failures/`` and ``crashes/`` are deliberately not
-    touched: a failure is the evidence a regression test is built from and is
-    removed when it is pulled for review, not when it gets old. ``db/`` belongs
-    to the backup thread and is not this step's business.
+    The debug trees -- ``web_downloads/``, ``image_downloads/``,
+    ``web_ui_trace/`` and the legacy ``scrapes/`` -- hold session instruments,
+    not records: a capture older than a week has served whatever purpose it had,
+    and a debug switch left on must not fill the disk. ``failures/`` and
+    ``crashes/`` are deliberately not touched: a failure is the evidence a
+    regression test is built from and is removed when it is pulled for review,
+    not when it gets old. ``db/`` belongs to the backup thread and is not this
+    step's business.
 
     Removing a file also drops its ``manifest.json`` entry, in the same
     operation. The puller transfers one file per manifest entry, so an entry left
@@ -658,6 +755,176 @@ def _write_web_download(outbox, kind, workshop_id, url, data, appid, page, ok) -
             "bytes": len(raw), "role": "body", "workshop_id": workshop_id,
         })
     return True
+
+
+# ── the page's own trace ─────────────────────────────────────────────────────
+
+def ui_trace_secrets(config) -> list:
+    """Every literal credential value a UI trace must never carry.
+
+    The page never holds the session cookie, so a trace should carry nothing
+    secret; the values are scrubbed anyway, on the same principle as
+    :func:`_write_web_download` -- elision that depends on the caller being
+    careful is not elision. The set is the crash writer's own collector
+    (:func:`src.crash.secrets_for_scrubbing`), which already gathers the config
+    keys, the cookie jar and the runtime-registered values; a second collector
+    here would be a second rule about what is secret. Imported lazily because
+    ``src.crash`` imports this module.
+    """
+    try:
+        from src import crash
+        return crash.secrets_for_scrubbing(config)
+    except Exception as exc:  # noqa: BLE001 - a trace with no scrub list is still a trace
+        logging.debug("UI trace could not gather credential values: %s", exc)
+        return []
+
+
+def record_ui_trace(batch, secrets=None) -> dict:
+    """Save one batch of the page's events. Returns the outcome; never raises.
+
+    ``batch`` is what the page posted: ``session`` names the page load, ``seq``
+    the batch, ``dropped`` how many events its own ring buffer discarded, and
+    ``events`` the ordered records. ``secrets`` are the literal credential
+    values to scrub from everything written; the caller passes the values the
+    process holds (:func:`ui_trace_secrets`).
+
+    Bounded three ways and honest about every one of them:
+
+    * a batch longer than :data:`UI_TRACE_MAX_EVENTS_PER_BATCH` keeps its
+      newest events and records the rest as ``events_dropped``;
+    * a record over :data:`UI_TRACE_MAX_RECORD_BYTES` drops oldest events until
+      it fits and sets ``bytes_truncated``;
+    * past :data:`UI_TRACE_MAX_FILES_PER_SESSION` event records the session is
+      closed, the crossing batch is written as the truncation marker, and every
+      later batch is refused -- so the page can stop buffering rather than
+      losing events to a silent stop.
+
+    Additive like the rest of the module: a refused or failed trace is a
+    diagnostic that failed, not an action that failed.
+    """
+    with _lock:
+        if not _outbox_dir or not _capture_web_ui_trace:
+            return {"ok": False, "refused": "disabled", "path": None}
+        outbox = _outbox_dir
+
+    try:
+        return _write_ui_trace(outbox, batch, secrets)
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logging.warning("UI trace capture failed (page unaffected): %s", exc)
+        return {"ok": False, "refused": "error", "path": None}
+
+
+def _write_ui_trace(outbox, batch, secrets):
+    if not isinstance(batch, dict):
+        return {"ok": False, "refused": "invalid", "path": None}
+    events = batch.get("events")
+    if not isinstance(events, list):
+        return {"ok": False, "refused": "invalid", "path": None}
+
+    token = _slug(batch.get("session") or "unknown", 32)
+    directory = web_ui_trace_dir(outbox)
+    os.makedirs(directory, exist_ok=True)
+
+    with _lock:
+        state = _ui_trace_session_state(directory, token)
+        if state["closed"]:
+            return {"ok": False, "refused": "session_cap", "path": None}
+        capped = state["files"] >= UI_TRACE_MAX_FILES_PER_SESSION
+        if capped:
+            # The batch that crosses the cap becomes the marker and closes the
+            # session; nothing after it is accepted.
+            state["closed"] = True
+        number = state["files"] + 1
+
+        page_dropped = _as_int(batch.get("dropped"))
+        truncation_reason = "session_file_cap" if capped else (
+            "page_ring_buffer" if page_dropped else None)
+
+        record = {
+            "kind": UI_TRACE_KIND,
+            "stage": UI_TRACE_STAGE,
+            "session": token,
+            "batch": batch.get("seq"),
+            "page_final": bool(batch.get("final")),
+            "received_at": _utc_now_iso(),
+            "app_version": app_version(),
+            "buffer_dropped": page_dropped,
+            "events_truncated": False,
+            "events_dropped": 0,
+            "bytes_truncated": False,
+            "truncated": bool(truncation_reason),
+            "truncation_reason": truncation_reason,
+            "events": [event for event in events if isinstance(event, dict)],
+        }
+        if len(record["events"]) < len(events):
+            record["events_dropped"] += len(events) - len(record["events"])
+            record["events_truncated"] = True
+            record["truncation_reason"] = record["truncation_reason"] or "non_object_event"
+            record["truncated"] = True
+        if len(record["events"]) > UI_TRACE_MAX_EVENTS_PER_BATCH:
+            dropped = len(record["events"]) - UI_TRACE_MAX_EVENTS_PER_BATCH
+            record["events"] = record["events"][-UI_TRACE_MAX_EVENTS_PER_BATCH:]
+            record["events_dropped"] += dropped
+            record["events_truncated"] = True
+            record["truncation_reason"] = record["truncation_reason"] or "event_cap"
+            record["truncated"] = True
+        record["event_count"] = len(record["events"])
+
+        payload = json.dumps(record, indent=2, sort_keys=True)
+        while len(payload.encode("utf-8")) > UI_TRACE_MAX_RECORD_BYTES and record["events"]:
+            record["events"].pop(0)
+            record["event_count"] = len(record["events"])
+            record["events_dropped"] += 1
+            record["events_truncated"] = True
+            record["bytes_truncated"] = True
+            record["truncation_reason"] = record["truncation_reason"] or "byte_cap"
+            record["truncated"] = True
+            payload = json.dumps(record, indent=2, sort_keys=True)
+        payload = _scrub_text(payload, secrets).encode("utf-8")
+
+        stamp = _utc_now_iso().replace(":", "-")
+        record_path = os.path.join(directory, f"{stamp}-{token}-{number}.json")
+        _write_atomic(record_path, payload)
+        update_manifest(outbox, {
+            "path": _relative(outbox, record_path), "kind": UI_TRACE_KIND,
+            "bytes": len(payload), "role": "batch", "session": token,
+        })
+        state["files"] = number
+        return {
+            "ok": not capped,
+            "refused": "session_cap" if capped else None,
+            "path": _relative(outbox, record_path),
+            "truncated": record["truncated"],
+        }
+
+
+def _ui_trace_session_state(directory, token) -> dict:
+    """The file count and closed flag for one page session.
+
+    Seeded from the files already on disk the first time a session is seen, so a
+    server restart mid-session does not hand the page a fresh budget. Called
+    under ``_lock``.
+    """
+    state = _ui_trace_sessions.get(token)
+    if state is not None:
+        return state
+    count = 0
+    try:
+        for name in os.listdir(directory):
+            if name.endswith(".json") and f"-{token}-" in name:
+                count += 1
+    except OSError:
+        count = 0
+    state = {"files": count, "closed": False}
+    _ui_trace_sessions[token] = state
+    return state
+
+
+def _as_int(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 # ── image downloads ──────────────────────────────────────────────────────────
