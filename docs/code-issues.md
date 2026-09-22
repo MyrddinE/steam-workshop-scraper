@@ -37,9 +37,10 @@ ran the selected pass to its full forty batches even for an id that can never ap
 The creator-jump failure the owner reported was collateral: the restore pinned `loading`, and
 `doSearch` dropped the jump's reset at the guard, leaving author mode drawn over a grid it did not
 own. Landed second as defence in depth (it is not the root cause), a reset now supersedes an
-in-flight search instead of being dropped, and a jump whose search still does not apply restores its
-`_preJumpView` snapshot through the same path Return uses. [web-ui.md](web-ui.md#search-flow),
-[web-ui.md](web-ui.md#jump-to-author-and-author-mode)
+in-flight search instead of being dropped, and `doSearch` reports `'applied'`/`'superseded'`/`'failed'`
+so a **failed** jump — and only a failed one — restores its `_preJumpView` snapshot through the same
+path Return uses; a **superseded** jump leaves the newer action's view alone.
+[web-ui.md](web-ui.md#search-flow), [web-ui.md](web-ui.md#jump-to-author-and-author-mode)
 
 ### One failed search wedged the web UI for the life of the page (issue 79)
 

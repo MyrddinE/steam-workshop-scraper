@@ -62,7 +62,7 @@ Two layers of validation: a capture-phase `blur` event listener on the document 
 
 `doSearch` is the page's one guard against overlapping work: it sets `loading` and clears it on every exit path (`try`/`finally` around `_doSearchBody`), so a rejected `fetch` or `/api/search`'s `{"error": ...}` body at status 500 cannot leave the page wedged — every later search, sort, pagination request and author jump passes through that flag. A body that is not an array is treated as that error rather than iterated as a batch of zero rows; `items.forEach` threw on the route's JSON object and left `loading` set (issue 79, closed).
 
-**A user action supersedes an in-flight search.** Each search carries a generation. A *reset* (a search, a sort, an overlay change or an author jump) that arrives while a search is in flight replaces it, and the older search sees the newer generation and discards its result rather than drawing it over the newer one; a `console.debug` names the supersede. Two page requests still cannot overlap: a non-reset arriving while any search is in flight is dropped, because both would append the same offset. This is **defence in depth beside the restore bound, not the fix for the runaway** — the restore no longer pages long enough to hold `loading` for it to matter — but a user action must never be silently discarded, which is what made a creator jump do nothing.
+**A user action supersedes an in-flight search.** Each search carries a generation. A *reset* (a search, a sort, an overlay change or an author jump) that arrives while a search is in flight replaces it, and the older search sees the newer generation and discards its result rather than drawing it over the newer one; a `console.debug` names the supersede. Two page requests still cannot overlap: a non-reset arriving while any search is in flight is dropped, because both would append the same offset. `doSearch` answers `'applied'`, `'superseded'` or `'failed'` so a caller can tell a supersede from a failure — the two need opposite handling, and only a caller that caused no useful result may react to it. This is **defence in depth beside the restore bound, not the fix for the runaway** — the restore no longer pages long enough to hold `loading` for it to matter — but a user action must never be silently discarded, which is what made a creator jump do nothing.
 
 Every number the grid and the detail pane show is formatted in the browser: `fmtCount` (three
 significant digits with a K/M suffix) for views and subscription counts, `fmtExact` (grouped exact
@@ -230,12 +230,16 @@ same routine a reload of a saved view runs. The snapshot is **in memory**, like 
 between. Returning re-opens the item and puts the scroll back, which the TUI's Return does not; a
 browser can afford it and the mode's point is that a half-restore is worse than none.
 
-The jump is `async` for one reason: if its search does not apply — a newer action superseded it, or
-the request failed — author mode would be drawn over a grid that is not the creator's, so
-`jumpToAuthor` puts the snapshot back through the same `returnFromAuthor()` path rather than leaving
-the mode on. The failure the owner saw ("the inability to click to an author") was the restore loop
-holding `loading` so the jump's search was dropped; it was a symptom of the runaway, not a fault in
-the jump.
+The jump is `async` because the outcome of its search decides whether author mode may stay. `doSearch`
+answers `'applied'`, `'superseded'` or `'failed'`. An **applied** jump owns the grid and does nothing
+further. A **superseded** jump was replaced by a newer action (a sort, an overlay change, another
+search) that already ran with the author row in place, so the screen is correct and the jump does
+nothing — restoring the pre-jump snapshot would re-run a reset that discards the action the user just
+took. A **failed** jump (rejected fetch, non-array body, a thrown render) cleared the grid with its
+reset and never drew a result set, so it puts the `_preJumpView` snapshot back through the same
+`returnFromAuthor()` path Return uses, with a `console.warn` so a snap-back is visible. The failure the
+owner saw ("the inability to click to an author") was the restore loop holding `loading` so the jump's
+search was dropped; it was a symptom of the runaway, not a fault in the jump.
 
 `creatorId` comes from the payload's `creator_id`, which is a string. A SteamID64 is seventeen digits
 — beyond the range a JavaScript number represents exactly — so a numeric field would round in
@@ -617,7 +621,7 @@ monotonic `t` (milliseconds since the page installed the trace) and
 | `click` | `id`, `wid`, `label` of the clicked control |
 | `scroll` | `scroll_top`, `scroll_height`, `client_height`, throttled to one record per settle window |
 | `sort_change`, `overlay_change` | `id` and the new `value` |
-| `do_search` | `phase` is `enter`, `superseded`, `dropped` or `done`; entry holds `reset`, `offset`, `filters` (count), `sort_by`, `sort_order`, `overlay`; `superseded` is a reset arriving while a search is in flight (it replaces it), `dropped` is a page request arriving then (two would append the same offset); `done` holds `applied`, `batch`, `offset`, `has_more`, `loading` |
+| `do_search` | `phase` is `enter`, `superseded`, `dropped` or `done`; entry holds `reset`, `offset`, `filters` (count), `sort_by`, `sort_order`, `overlay`; `superseded` is a reset arriving while a search is in flight (it replaces it), `dropped` is a page request arriving then (two would append the same offset); `done` holds `outcome` (`applied`, `superseded` or `failed`), `batch`, `offset`, `has_more`, `loading` |
 | `fetch` | `method`, `path`, `body` (a summary: `{kind: "search", filters, subscribed, sort_by, offset}`, `{kind: "ids", ids}`, or a key list — never the whole payload), `ms`, `status`, and `items` (the response array's length) where cheap |
 | `observe_next_batch` | `branch` (`already_visible`, `observe`, `skip` or `reset`), `rect_top` beside `inner_height`, `scroll_top`/`client_height`, and the cell `released`/`armed` |
 | `intersection` | `is_intersecting`, the entry's `target`, whether it `matched_observed` (`_observedCell`), and `entry_count` |

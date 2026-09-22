@@ -663,9 +663,9 @@ function _installUiTrace() {
     }
     const promise = originalDoSearch.apply(this, arguments);
     if (promise && typeof promise.then === 'function') {
-      promise.then(function(applied) {
+      promise.then(function(outcome) {
         push({event: 'do_search', phase: 'done', reset: isReset,
-              applied: applied !== false,
+              outcome: outcome,
               batch: currentOffset - (isReset ? 0 : before),
               offset: currentOffset, has_more: hasMore, loading: loading});
       }, function() {});
@@ -1085,6 +1085,12 @@ function sizeClass(bytes) {
   return 'size-small';
 }
 
+// The outcome of a search, so a caller can tell a failure from a supersede:
+//   'applied'    -- this search's result set was rendered; it owns the grid
+//   'superseded' -- a newer search (or one already in flight) owns the moment,
+//                   so this result was discarded rather than drawn
+//   'failed'     -- the fetch, the parse or the render threw, so nothing was
+//                   drawn and the grid is whatever the reset left (usually empty)
 async function doSearch(reset = true) {
   // Two page requests must not overlap: both would append the same offset. A
   // *reset* (a new result set: search, sort, overlay, author jump) supersedes
@@ -1093,7 +1099,7 @@ async function doSearch(reset = true) {
   // dropping it is why a creator jump could do nothing while the restore held
   // `loading`. This is defence in depth beside the restore bound, not the fix
   // for the runaway itself.
-  if (loading && !reset) return false;
+  if (loading && !reset) return 'superseded';
   const generation = ++_searchGeneration;
   if (loading) {
     console.debug('doSearch: search ' + generation + ' supersedes an in-flight search');
@@ -1105,7 +1111,7 @@ async function doSearch(reset = true) {
     return await _doSearchBody(reset, generation);
   } catch (e) {
     console.warn('search failed', e);
-    return false;
+    return 'failed';
   } finally {
     if (generation === _searchGeneration) loading = false;
   }
@@ -1144,7 +1150,7 @@ async function _doSearchBody(reset, generation) {
   const items = await resp.json();
   // A newer search owns the grid now, so this result set is stale: discard it
   // rather than draw it over the newer one.
-  if (generation !== _searchGeneration) return false;
+  if (generation !== _searchGeneration) return 'superseded';
   // The route answers an exception with a JSON object at status 500. A body
   // that is not an array is an error, not a batch of zero rows: iterating it
   // throws, and before this guard that throw left `loading` set.
@@ -1212,7 +1218,7 @@ async function _doSearchBody(reset, generation) {
   // A reset re-establishes the committed filter/sort view; save it once the
   // result set it describes is on screen.
   if (reset) _saveViewState();
-  return true;
+  return 'applied';
 }
 
 // Arm infinite scroll on the batch just rendered by watching its first cell.
@@ -1765,13 +1771,15 @@ async function jumpToAuthor(creator) {
   // Fire-and-forget: the label is the creator's stored flag, which only the
   // route knows. A failed read leaves the default wording in place.
   _refreshCreatorIgnoreControl();
-  const applied = await doSearch(true);
-  if (!applied) {
-    // The jump's own result set never arrived -- a newer action superseded it,
-    // or the search failed. Author mode would then be drawn over a grid that is
-    // not the creator's (or over the empty grid its reset cleared), so the
-    // snapshot comes back through the same path Return uses. `doSearch` has
-    // already named the supersede in `console.debug`.
+  const outcome = await doSearch(true);
+  if (outcome === 'failed') {
+    // The jump's own result set never arrived -- the fetch, the parse or the
+    // render threw, so the grid is empty and author mode is drawn over it. The
+    // snapshot comes back through the same path Return uses. A *superseded*
+    // jump is deliberately left alone: the newer action already ran with the
+    // author row in place, so the screen is correct and restoring the snapshot
+    // would re-run a reset that discards the action the user just took.
+    console.warn('author jump search failed; restoring the pre-jump view');
     await returnFromAuthor();
   }
 }
@@ -1847,8 +1855,8 @@ async function returnFromAuthor() {
   _syncSubscribedOverlay();
   // Only rebuild the old view when this search owns the grid; a user action
   // during it supersedes the return too.
-  const applied = await doSearch(true);
-  if (state && applied) await _restoreView(state);
+  const outcome = await doSearch(true);
+  if (state && outcome === 'applied') await _restoreView(state);
 }
 
 // ── the creator list ──────────────────────────────────────────────────────
@@ -2358,8 +2366,8 @@ async function _loadUntil(done, maxBatches) {
   let batches = 0;
   while (hasMore && !done() && batches < maxBatches) {
     const before = currentOffset;
-    const applied = await doSearch(false);
-    if (!applied || currentOffset === before) break;
+    const outcome = await doSearch(false);
+    if (outcome !== 'applied' || currentOffset === before) break;
     batches += 1;
   }
 }
@@ -2422,8 +2430,8 @@ async function loadState() {
     // Only restore when this load's own search owns the grid. A user action
     // during the initial fetch supersedes it, and the view it would rebuild is
     // not the view that action asked for.
-    const applied = await doSearch(true);
-    if (applied && local) await _restoreView(local);
+    const outcome = await doSearch(true);
+    if (outcome === 'applied' && local) await _restoreView(local);
   } finally {
     _restoringView = false;
   }
