@@ -5,10 +5,11 @@ import os
 import re
 import logging
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_list_priorities, raise_web_scrape_priority_for_detail, raise_translation_priority_for_detail, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, toggle_ignored_item, mark_own_subscribed, mark_own_unsubscribed, dequeue_subscription, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items, live_fetch_status_predicate, IGNORED_FETCH_STATUS, creator_is_ignored, creator_ignore_label, toggle_creator_ignored
+from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_list_priorities, raise_web_scrape_priority_for_detail, raise_translation_priority_for_detail, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, toggle_ignored_item, mark_own_subscribed, mark_own_unsubscribed, dequeue_subscription, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items, live_fetch_status_predicate, IGNORED_FETCH_STATUS, creator_is_ignored, creator_ignore_label, toggle_creator_ignored, read_schema_version
 from src.analysis import view_window_analysis
 from src import capture
 from src import activity
+from src import cutoffs_cache
 from src import images
 from src import log_rotation
 from src import metrics
@@ -475,16 +476,52 @@ def api_delete_never_fetched_items():
 
 @app.route('/api/cutoffs', methods=['POST'])
 def api_cutoffs():
+    """The percentile cutoffs the grid colours from, cached beside the database.
+
+    A reload discards the page's own in-memory cache, and on the owner's live
+    database the query costs ~28 s, so the answer is persisted and reused. The
+    key is the canonical ``(filters, overlay)`` plus the database's
+    ``user_version``: a different query or a schema change misses, and so does an
+    entry older than ``daemon.cutoffs_cache_seconds`` (default 86400, `0`
+    disables). The payload is unchanged -- the ten cutoff values -- and the
+    cache state rides in headers so the page never has to know about it.
+    """
     data = request.get_json(silent=True) or {}
     filters = data.get('filters', [])
     # The overlay constrains the same population the grid shows, so the
     # percentiles are computed over it as well.
-    cutoffs = compute_wilson_cutoffs(_db_path, filters if filters else None,
-                                     subscribed_overlay=data.get('subscribed'))
+    filters = filters if filters else None
+    subscribed_overlay = data.get('subscribed')
+    ttl_seconds = cutoffs_cache.configured_ttl_seconds(_config.get('daemon'))
+    cache_path = cutoffs_cache.cache_path_for(_db_path)
+
+    key = None
+    if ttl_seconds > 0:
+        key = cutoffs_cache.query_key(
+            filters, subscribed_overlay, read_schema_version(_db_path))
+        cached = cutoffs_cache.load(cache_path, key, ttl_seconds)
+        if cached is not None:
+            cutoffs, age = cached
+            return _cutoffs_response(cutoffs, 'hit', age)
+
+    cutoffs = compute_wilson_cutoffs(_db_path, filters,
+                                     subscribed_overlay=subscribed_overlay)
     result = {}
     for k, percentile in cutoffs.items():
         result[k] = percentile
-    return jsonify(result)
+    # A failed computation returns {}; caching that would serve an empty payload
+    # for the whole TTL, so only a real answer is written.
+    if key is not None and result:
+        cutoffs_cache.store(cache_path, key, result)
+    return _cutoffs_response(result, 'miss', 0)
+
+
+def _cutoffs_response(cutoffs: dict, state: str, age_seconds: float):
+    """The cutoff payload with its cache state in headers, never in the body."""
+    response = jsonify(cutoffs)
+    response.headers['X-Cutoffs-Cache'] = state
+    response.headers['X-Cutoffs-Cache-Age'] = str(int(max(0.0, age_seconds)))
+    return response
 
 
 @app.route('/api/authors')

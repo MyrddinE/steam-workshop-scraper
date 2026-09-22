@@ -10,6 +10,7 @@ import time
 from unittest.mock import MagicMock
 import lxml.html
 from src import activity
+from src import cutoffs_cache
 from src import session_health
 from src import webserver
 from src import subscribe_engine
@@ -5332,3 +5333,269 @@ def test_images_may_still_be_cached(web_client):
     resp = client.get('/images/nothing.jpg')
     assert resp.headers.get('Cache-Control') != 'no-store', \
         "images must keep whatever caching they had"
+
+
+# ── the cutoff query is cached beside the database ────────────────────────────
+#
+# `compute_wilson_cutoffs` takes seconds on a large database and the page asks
+# again after every reload: its own cache is JavaScript module state, which a
+# reload discards. The web server now keeps the last answer in a small JSON file
+# beside the database, keyed by the query and the schema version, so a reload
+# reuses it and only a changed query, a migration or the TTL recomputes.
+
+CUTOFF_KEYS = (
+    "wilson_favorite_p99", "wilson_favorite_p90", "wilson_favorite_p50",
+    "wilson_favorite_min", "wilson_favorite_max",
+    "wilson_subscription_p99", "wilson_subscription_p90", "wilson_subscription_p50",
+    "wilson_subscription_min", "wilson_subscription_max",
+)
+
+
+def _stub_cutoffs(calls, value=None):
+    """A stand-in for the slow compute that records every call."""
+    payload = value or {key: 0.5 for key in CUTOFF_KEYS}
+
+    def _compute(*args, **kwargs):
+        calls.append((args, kwargs))
+        return dict(payload)
+
+    return _compute
+
+
+def test_a_second_identical_cutoffs_request_does_not_recompute(web_client, monkeypatch):
+    """The whole point: a reload must reuse the answer, not recompute it.
+
+    This is the assertion that fails against the uncached route, which calls
+    ``compute_wilson_cutoffs`` on every request.
+    """
+    client, _ = web_client
+    calls = []
+    monkeypatch.setattr(webserver, "compute_wilson_cutoffs", _stub_cutoffs(calls))
+
+    first = client.post('/api/cutoffs', json={"filters": [], "subscribed": None})
+    second = client.post('/api/cutoffs', json={"filters": [], "subscribed": None})
+
+    assert first.status_code == second.status_code == 200
+    assert first.get_json() == second.get_json() == {key: 0.5 for key in CUTOFF_KEYS}
+    assert len(calls) == 1, "the second request must be served from the cache"
+    assert first.headers['X-Cutoffs-Cache'] == 'miss'
+    assert second.headers['X-Cutoffs-Cache'] == 'hit'
+
+
+def test_the_query_key_is_canonical_and_ignores_dict_key_order(web_client, monkeypatch):
+    """Canonical JSON: the same filter in another key order is the same query."""
+    client, _ = web_client
+    calls = []
+    monkeypatch.setattr(webserver, "compute_wilson_cutoffs", _stub_cutoffs(calls))
+
+    client.post('/api/cutoffs', json={
+        "filters": [{"field": "Title", "op": "contains", "value": "rim"}]})
+    resp = client.post('/api/cutoffs', json={
+        "filters": [{"value": "rim", "op": "contains", "field": "Title"}]})
+
+    assert len(calls) == 1
+    assert resp.headers['X-Cutoffs-Cache'] == 'hit'
+
+
+def test_a_different_filter_set_recomputes(web_client, monkeypatch):
+    client, _ = web_client
+    calls = []
+    monkeypatch.setattr(webserver, "compute_wilson_cutoffs", _stub_cutoffs(calls))
+
+    client.post('/api/cutoffs', json={"filters": []})
+    resp = client.post('/api/cutoffs', json={
+        "filters": [{"field": "Title", "op": "contains", "value": "rim"}]})
+
+    assert len(calls) == 2
+    assert resp.headers['X-Cutoffs-Cache'] == 'miss'
+
+
+def test_a_different_overlay_recomputes(web_client, monkeypatch):
+    """The overlay constrains the population, so it is part of the key."""
+    client, _ = web_client
+    calls = []
+    monkeypatch.setattr(webserver, "compute_wilson_cutoffs", _stub_cutoffs(calls))
+
+    client.post('/api/cutoffs', json={"filters": [], "subscribed": None})
+    resp = client.post('/api/cutoffs', json={"filters": [], "subscribed": "subscribed"})
+
+    assert len(calls) == 2
+    assert resp.headers['X-Cutoffs-Cache'] == 'miss'
+
+
+def test_a_schema_version_change_recomputes(web_client, monkeypatch):
+    """A migration can move the score columns, so the version is in the key."""
+    client, db_path = web_client
+    calls = []
+    monkeypatch.setattr(webserver, "compute_wilson_cutoffs", _stub_cutoffs(calls))
+
+    client.post('/api/cutoffs', json={"filters": []})
+    conn = get_connection(db_path)
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.execute(f"PRAGMA user_version = {version + 1}")
+    conn.commit()
+    conn.close()
+
+    resp = client.post('/api/cutoffs', json={"filters": []})
+
+    assert len(calls) == 2
+    assert resp.headers['X-Cutoffs-Cache'] == 'miss'
+
+
+def test_an_entry_older_than_the_ttl_recomputes(web_client, monkeypatch):
+    client, db_path = web_client
+    calls = []
+    monkeypatch.setattr(webserver, "compute_wilson_cutoffs", _stub_cutoffs(calls))
+
+    client.post('/api/cutoffs', json={"filters": []})
+    path = cutoffs_cache.cache_path_for(db_path)
+    with open(path, encoding="utf-8") as handle:
+        document = json.load(handle)
+    document["computed_at"] = time.time() - 90000
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(document, handle)
+
+    resp = client.post('/api/cutoffs', json={"filters": []})
+
+    assert len(calls) == 2
+    assert resp.headers['X-Cutoffs-Cache'] == 'miss'
+
+
+def test_a_hit_reports_the_age_of_the_entry(web_client, monkeypatch):
+    client, db_path = web_client
+    calls = []
+    monkeypatch.setattr(webserver, "compute_wilson_cutoffs", _stub_cutoffs(calls))
+
+    client.post('/api/cutoffs', json={"filters": []})
+    path = cutoffs_cache.cache_path_for(db_path)
+    with open(path, encoding="utf-8") as handle:
+        document = json.load(handle)
+    document["computed_at"] = time.time() - 100
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(document, handle)
+
+    resp = client.post('/api/cutoffs', json={"filters": []})
+
+    assert len(calls) == 1
+    assert resp.headers['X-Cutoffs-Cache'] == 'hit'
+    age = int(resp.headers['X-Cutoffs-Cache-Age'])
+    assert 95 <= age <= 130, f"expected an age of about 100 s, got {age}"
+
+
+def test_a_cache_age_of_zero_disables_caching(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "ttl_zero.db")
+    initialize_database(db_path)
+    init_webserver(db_path, {"daemon": {"cutoffs_cache_seconds": 0}})
+    client = app.test_client()
+    calls = []
+    monkeypatch.setattr(webserver, "compute_wilson_cutoffs", _stub_cutoffs(calls))
+
+    first = client.post('/api/cutoffs', json={"filters": []})
+    second = client.post('/api/cutoffs', json={"filters": []})
+
+    assert len(calls) == 2
+    assert first.headers['X-Cutoffs-Cache'] == 'miss'
+    assert second.headers['X-Cutoffs-Cache'] == 'miss'
+    assert not os.path.exists(cutoffs_cache.cache_path_for(db_path)), \
+        "a disabled cache must not leave a file behind"
+
+
+def test_the_default_cutoffs_cache_ttl_is_a_day():
+    """The owner chose 24 hours; this pins the number, not just the lookup."""
+    assert cutoffs_cache.DEFAULT_TTL_SECONDS == 86400, \
+        "24 hours is the owner's number; change it only with that decision"
+    assert cutoffs_cache.configured_ttl_seconds({}) == 86400
+    assert cutoffs_cache.configured_ttl_seconds({"cutoffs_cache_seconds": None}) == 86400
+    assert cutoffs_cache.configured_ttl_seconds({"cutoffs_cache_seconds": 60}) == 60
+
+
+def test_a_corrupt_cache_file_recomputes_and_is_repaired(web_client, monkeypatch):
+    client, db_path = web_client
+    calls = []
+    monkeypatch.setattr(webserver, "compute_wilson_cutoffs", _stub_cutoffs(calls))
+
+    path = cutoffs_cache.cache_path_for(db_path)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("{ this is not json")
+
+    first = client.post('/api/cutoffs', json={"filters": []})
+    assert first.status_code == 200
+    assert first.headers['X-Cutoffs-Cache'] == 'miss'
+    assert len(calls) == 1
+
+    with open(path, encoding="utf-8") as handle:
+        assert json.load(handle)["cutoffs"] == {key: 0.5 for key in CUTOFF_KEYS}, \
+            "the corrupt file must be replaced with a usable one"
+
+    second = client.post('/api/cutoffs', json={"filters": []})
+    assert second.headers['X-Cutoffs-Cache'] == 'hit'
+    assert len(calls) == 1
+
+
+def test_an_unreadable_cache_path_is_not_an_error(web_client, monkeypatch):
+    """A path that cannot be read as a document means 'no entry', never a 500."""
+    client, db_path = web_client
+    calls = []
+    monkeypatch.setattr(webserver, "compute_wilson_cutoffs", _stub_cutoffs(calls))
+
+    os.mkdir(cutoffs_cache.cache_path_for(db_path))
+
+    resp = client.post('/api/cutoffs', json={"filters": []})
+
+    assert resp.status_code == 200
+    assert resp.headers['X-Cutoffs-Cache'] == 'miss'
+    assert len(calls) == 1
+
+
+def test_the_cutoffs_payload_is_exactly_the_ten_values(web_client):
+    """The response shape is unchanged: ten keys, no cache metadata in it."""
+    client, _ = web_client
+    resp = client.post('/api/cutoffs', json={"filters": []})
+    payload = resp.get_json()
+    assert set(payload) == set(CUTOFF_KEYS)
+    assert len(payload) == 10
+    assert not any(key.startswith("cache") for key in payload)
+
+
+def test_concurrent_cutoffs_requests_do_not_corrupt_the_cache(web_client, monkeypatch):
+    """Last-writer-wins on an atomic write: no torn file, no wrong answer.
+
+    Each request is answered from its own query regardless of which write lands
+    last, and the file is always a complete document.
+    """
+    import threading
+
+    _, db_path = web_client
+    calls = []
+    both_computing = threading.Barrier(2, timeout=5)
+
+    def _slow(*args, **kwargs):
+        calls.append(1)
+        both_computing.wait()
+        return {key: 0.5 for key in CUTOFF_KEYS}
+
+    monkeypatch.setattr(webserver, "compute_wilson_cutoffs", _slow)
+    responses = {}
+
+    def _post(name, filters):
+        with app.test_client() as client:
+            responses[name] = client.post('/api/cutoffs', json={"filters": filters})
+
+    threads = [
+        threading.Thread(target=_post, args=("empty", [])),
+        threading.Thread(target=_post, args=(
+            "filtered", [{"field": "Title", "op": "contains", "value": "rim"}])),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert responses["empty"].status_code == responses["filtered"].status_code == 200
+    assert len(calls) == 2
+
+    with open(cutoffs_cache.cache_path_for(db_path), encoding="utf-8") as handle:
+        document = json.load(handle)
+    assert set(document) == {"key", "computed_at", "cutoffs"}
+    assert document["cutoffs"] == {key: 0.5 for key in CUTOFF_KEYS}
