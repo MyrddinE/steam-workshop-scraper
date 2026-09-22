@@ -622,6 +622,13 @@ telling the user when the rest can be retried; the bridge that used to write tha
 `/api/subscribe_throttled/<id>` is gone, so the read now reports the resting state unless something
 records one. The budget is per account or address and refills over minutes.
 
+**The page's throttle flag is per-pass.** `_subThrottleStopped` is what the Close handler reads to keep
+the stopped pass's unverified rows queued rather than dequeuing them, and `_startAutoSubscribe` clears
+it at the start of every pass beside `_subCanceled`. A pass that stopped for throttling therefore only
+changes what *its own* Close does: the rows stay queued for the next drain. A later, normal pass clears
+the flag, and its Cancel dequeues again as usual. The throttle stop itself is unchanged — it sets
+`_subCanceled`, releases the daemon and leaves the remaining rows queued.
+
 **A drain serialises; it does not schedule.** `_startAutoSubscribe` loops over `/api/queued` and
 awaits `/api/subscribe/<id>` for each item before starting the next. The route's page read is gated on
 the shared web interval and its POST is exempt, so the interval is already paid once per item inside
