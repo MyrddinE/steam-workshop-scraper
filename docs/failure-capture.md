@@ -189,12 +189,15 @@ never the action it describes.
 The same `daemon.capture_web_ui_trace` switch gates a second instrument that
 writes **no files and no tree**, covered here because it rides that switch rather
 than a capture key of its own. With it on, `GET /api/search_diagnostic` returns a
-read-only report on the live database's search-sort path — which query indexes
-exist, the `EXPLAIN QUERY PLAN` for the real query under each sort column, each
-score column's non-NULL coverage, whether `sqlite_stat1` exists, and first/deep
-page timings — and `init_webserver` logs the same summary once at startup. It
-opens the database `mode=ro`, so it is safe beside the running daemon, and it
-exists because a "sort X is slow" report cannot be answered from this
+read-only report on the live database's search-sort path — each expected query
+index's actual definition beside the expected one, classified `present`, `missing`
+or `wrong_definition` (a same-named index on the wrong column survives
+`CREATE INDEX IF NOT EXISTS`, so a name-only check cannot see it), the `EXPLAIN
+QUERY PLAN` for the real query under each sort column with a derived `uses_index`
+boolean, each score column's non-NULL coverage, whether `sqlite_stat1` exists, and
+first/deep page timings — and `init_webserver` logs the same summary once at
+startup. It opens the database `mode=ro`, so it is safe beside the running daemon,
+and it exists because a "sort X is slow" report cannot be answered from this
 repository's schema alone. See
 [search-filter.md](search-filter.md#sort-indexes-the-subscriber-score-is-slow-investigation).
 

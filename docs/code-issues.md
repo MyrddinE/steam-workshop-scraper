@@ -100,7 +100,11 @@ ORDER BY` over the live set on the request the user waits for: *measured 2026-09
 indexed" report, whose claim about *those* columns was false — both score indexes were added together
 in `8771877` — and it is exactly the failure that report feared, on a different column. The expected
 index set is now the `QUERY_INDEXES` table, and `tests/test_sort_index_invariant.py` proves every
-sortable column has a leading index on both schema paths.
+sortable column has a leading index on both schema paths. The diagnostic that guards it was extended
+in the same pass: because `_ensure_indexes` builds with `CREATE INDEX IF NOT EXISTS`, a live index
+under the right name on the wrong column is never repaired, so `_index_report` now compares each
+expected index's actual `PRAGMA index_info` columns and `unique`/`partial` flags against the expected
+ones (`wrong_definition`) and each sort column's plan carries a derived `uses_index` boolean.
 [search-filter.md](search-filter.md#sort-indexes-the-subscriber-score-is-slow-investigation)
 
 ### The daemon log is never rotated (issue 37)

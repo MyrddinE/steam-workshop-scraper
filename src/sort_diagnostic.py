@@ -13,6 +13,16 @@ It is gated on ``daemon.capture_web_ui_trace`` through
 diagnostic is part of the same "make the web UI observable" instrument, and a
 third debug key is one more thing to document and to remember to turn off.
 
+The name of an index is not enough to answer the question. ``_ensure_indexes``
+creates with ``CREATE INDEX IF NOT EXISTS``, so a live index that exists under the
+expected name but on a different column -- or as a partial or unique index -- is
+never repaired, and a name-only check reports it ``present``. ``_index_report``
+therefore records each expected index's actual columns and ``unique``/``partial``
+flags beside the expected ones and classifies it ``present``, ``missing`` or
+``wrong_definition``; each sort column's plan carries a derived ``uses_index``
+boolean beside the plan text, because "does the plan use the index" is the
+question the owner is trying to answer by eye.
+
 **Read-only.** The connection is opened with ``mode=ro`` and every statement is
 a ``SELECT``, ``PRAGMA`` or ``EXPLAIN QUERY PLAN``. It must be safe to run
 against the live file beside a running daemon, which is the only database whose
@@ -120,21 +130,82 @@ def run(db_path: str, sorts=None, deep_offset: int = DEEP_OFFSET) -> dict:
         conn.close()
 
 
+def _expected_columns(columns: tuple[str, ...]) -> list[str]:
+    """The column names ``QUERY_INDEXES`` expects, direction words stripped.
+
+    A ``QUERY_INDEXES`` entry stores the fragment SQLite would take -- the poll
+    index is ``("priority DESC", "queued_at ASC")`` -- while ``PRAGMA index_info``
+    reports the bare name. The direction is not part of the definition comparison
+    here: an index scanned in reverse serves the opposite single direction, and a
+    mixed-direction index is still that index.
+    """
+    return [fragment.split()[0] for fragment in columns]
+
+
+def _expected_index_for_sort(column: str) -> str | None:
+    """The expected index whose *leading* column serves ``ORDER BY <column>``.
+
+    ``None`` for a sortable column with no named index -- the rowid alias
+    ``workshop_id``, whose B-tree *is* the table -- so the plan boolean is ``None``
+    rather than a false alarm.
+    """
+    for name, table, columns in QUERY_INDEXES:
+        if table == "workshop_items" and columns[0].split()[0] == column:
+            return name
+    return None
+
+
 def _index_report(conn: sqlite3.Connection) -> dict:
-    """Which indexes ``_ensure_indexes`` expects, and which a table lacks."""
-    present_by_table: dict[str, set[str]] = {}
-    expected = [name for name, _table, _columns in QUERY_INDEXES]
-    missing = []
-    for name, table, _columns in QUERY_INDEXES:
-        names = present_by_table.get(table)
-        if names is None:
-            names = {
-                row[1] for row in conn.execute(f"PRAGMA index_list({table})").fetchall()
+    """Which indexes ``_ensure_indexes`` expects, and how the live definitions compare.
+
+    For every ``QUERY_INDEXES`` entry: ``status`` is ``missing`` (the name is not in
+    ``PRAGMA index_list``), ``wrong_definition`` (the name is there but its columns,
+    ``unique`` or ``partial`` flag differ), or ``present``. A ``wrong_definition``
+    entry carries both ``expected_columns`` and the live ``columns``, so the report
+    names what was expected and what was found.
+    """
+    listed_by_table: dict[str, dict[str, dict]] = {}
+    details: dict[str, dict] = {}
+    missing: list[str] = []
+    wrong_definition: list[str] = []
+    for name, table, columns in QUERY_INDEXES:
+        expected_columns = _expected_columns(columns)
+        entry: dict = {"table": table, "expected_columns": expected_columns}
+        listed = listed_by_table.get(table)
+        if listed is None:
+            # PRAGMA index_list: (seq, name, unique, origin, partial).
+            listed = {
+                row[1]: {"unique": bool(row[2]), "partial": bool(row[4])}
+                for row in conn.execute(f"PRAGMA index_list({table})").fetchall()
             }
-            present_by_table[table] = names
-        if name not in names:
+            listed_by_table[table] = listed
+        if name not in listed:
+            entry["status"] = "missing"
             missing.append(name)
-    return {"expected": expected, "missing": missing}
+        else:
+            # PRAGMA index_info: (seqno, cid, name), name NULL for an expression.
+            entry["columns"] = [
+                row[2]
+                for row in conn.execute(f"PRAGMA index_info({name})").fetchall()
+            ]
+            entry["unique"] = listed[name]["unique"]
+            entry["partial"] = listed[name]["partial"]
+            if (
+                entry["columns"] != expected_columns
+                or entry["unique"]
+                or entry["partial"]
+            ):
+                entry["status"] = "wrong_definition"
+                wrong_definition.append(name)
+            else:
+                entry["status"] = "present"
+        details[name] = entry
+    return {
+        "expected": [name for name, _table, _columns in QUERY_INDEXES],
+        "missing": missing,
+        "wrong_definition": wrong_definition,
+        "details": details,
+    }
 
 
 def _coverage(conn: sqlite3.Connection, rows: int) -> dict:
@@ -167,10 +238,26 @@ def _stat1(conn: sqlite3.Connection) -> dict:
     }
 
 
-def _explain(conn: sqlite3.Connection, column: str) -> str:
-    rows = conn.execute(
-        "EXPLAIN QUERY PLAN " + _page_sql(column), (0,)).fetchall()
-    return " | ".join(row[3] for row in rows)
+def _explain(conn: sqlite3.Connection, column: str) -> dict:
+    """The plan for ``column``'s query, plus whether it uses the expected index.
+
+    ``uses_index`` is the derived boolean beside the plan text: it is true when the
+    expected index's name appears in the plan. It is ``None`` for a sort column with
+    no named index (the ``workshop_id`` rowid alias), where there is nothing to look
+    for and a ``False`` would be a false alarm rather than a finding.
+    """
+    plan = " | ".join(
+        row[3]
+        for row in conn.execute(
+            "EXPLAIN QUERY PLAN " + _page_sql(column), (0,)
+        ).fetchall()
+    )
+    expected = _expected_index_for_sort(column)
+    return {
+        "expected_index": expected,
+        "uses_index": None if expected is None else expected in plan,
+        "plan": plan,
+    }
 
 
 def _timings(conn: sqlite3.Connection, column: str, deep_offset: int) -> dict:
@@ -196,20 +283,24 @@ def format_summary(report: dict) -> list[str]:
         return [f"[Sort diagnostic] could not run: {report['error']}"]
 
     lines = [
-        "[Sort diagnostic] rows={rows} missing_indexes={missing} sqlite_stat1={stat1}".format(
+        "[Sort diagnostic] rows={rows} missing_indexes={missing} "
+        "wrong_definition_indexes={wrong} sqlite_stat1={stat1}".format(
             rows=report.get("rows"),
             missing=report["indexes"]["missing"] or "none",
+            wrong=report["indexes"]["wrong_definition"] or "none",
             stat1="present" if report["sqlite_stat1"]["present"] else "absent",
         )
     ]
     for column in SCORE_COLUMNS:
         coverage = report["score_coverage"].get(column, {})
         timing = report["timings"].get(column, {})
+        plan = report["plans"].get(column, {})
         lines.append(
-            "[Sort diagnostic] {column}: plan={plan!r} coverage={fraction:.4f} "
+            "[Sort diagnostic] {column}: uses_index={uses} plan={plan!r} coverage={fraction:.4f} "
             "first_page={first:.3f}s deep_page={deep:.3f}s".format(
                 column=column,
-                plan=report["plans"].get(column, ""),
+                uses=plan.get("uses_index"),
+                plan=plan.get("plan", ""),
                 fraction=coverage.get("fraction", 0.0),
                 first=timing.get("first_page_seconds", 0.0),
                 deep=timing.get("deep_page_seconds", 0.0),
@@ -221,9 +312,10 @@ def format_summary(report: dict) -> list[str]:
 def log_startup_report(db_path: str) -> dict:
     """Run the diagnostic once at startup and log it.
 
-    Missing indexes and any plan that falls back to a temp B-tree are logged at
-    WARNING, loudly, so a live file that is missing one says so on the next
-    start instead of silently proceeding.
+    Missing indexes, indexes whose definition differs from the expected one, and
+    any plan that falls back to a temp B-tree are logged at WARNING, loudly, so a
+    live file that is missing one says so on the next start instead of silently
+    proceeding.
     """
     report = run(db_path)
     for line in format_summary(report):
@@ -236,10 +328,21 @@ def log_startup_report(db_path: str) -> dict:
             "[Sort diagnostic] missing query indexes: %s",
             ", ".join(report["indexes"]["missing"]),
         )
+    for name in report["indexes"]["wrong_definition"]:
+        entry = report["indexes"]["details"][name]
+        logging.warning(
+            "[Sort diagnostic] index %s is defined on the wrong shape: "
+            "expected columns %s, found %s (unique=%s partial=%s)",
+            name,
+            entry["expected_columns"],
+            entry.get("columns"),
+            entry.get("unique"),
+            entry.get("partial"),
+        )
     for column, plan in report["plans"].items():
-        if "TEMP B-TREE" in plan.upper():
+        if "TEMP B-TREE" in plan["plan"].upper():
             logging.warning(
                 "[Sort diagnostic] sort by %s does not use an index: %s",
-                column, plan,
+                column, plan["plan"],
             )
     return report
