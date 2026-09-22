@@ -22,6 +22,7 @@ from src import workshop_folders
 from src.config import configured_outbox_dir, login_secure_value, save_config
 from src.daemon_control import DaemonController
 from src.firefox_cookies import steam_login_secure
+from src.web_worker import configured_web_delay
 
 app = Flask(__name__, template_folder='../templates')
 app.config['TEMPLATES_AUTO_RELOAD'] = True
@@ -878,6 +879,30 @@ def api_subscribe_throttle():
 @app.route('/api/subscribe_failures')
 def api_subscribe_failures():
     return jsonify(sorted(_subscribe_failures))
+
+
+@app.route('/api/subscribe_pace')
+def api_subscribe_pace():
+    """The subscription overlay's estimate seed, priced from the shared delay.
+
+    The page cannot see the persisted web delay -- it lives in the daemon state
+    file, not in ``config.yaml`` -- and the drain must not invent a second copy
+    of the pacing rule. So the guess the overlay seeds its countdowns with is
+    computed here, from the one owner the TUI's estimator uses
+    (:func:`src.web_worker.configured_web_delay`), and the read is **fresh on
+    every call** on purpose: the delay is adaptive daemon state and a throttle
+    can double it mid-pass, which is exactly why the TUI re-reads it per redraw.
+
+    ``seed_seconds`` is that delay times the number of gated page reads an item
+    pays on the current path -- one by default, two while
+    :data:`src.subscribe_engine.VERIFY_AFTER_SUBSCRIBE` restores the retired
+    confirmation read -- which is the same formula as
+    ``SubscriptionQueueScreen._seed_item_seconds``, so the two front ends cannot
+    disagree. It is an estimate, not a promise.
+    """
+    reads = 2 if subscribe_engine.VERIFY_AFTER_SUBSCRIBE else 1
+    delay = configured_web_delay(_config)
+    return jsonify({"web_delay_seconds": delay, "seed_seconds": reads * delay})
 
 
 @app.route('/api/ui_trace', methods=['POST'])

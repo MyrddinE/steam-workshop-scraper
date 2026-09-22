@@ -4318,6 +4318,12 @@ let _subPollIv = null;
 let _subScheduleIv = null;
 let _subCanceled = false;
 let _subThrottleStopped = false;
+// The pass's estimate inputs and the pure estimator the page defines. The
+// arithmetic itself is exercised in tests/test_web_sub_estimate.py; here they
+// only have to exist, and to read the pace the stub fetch reports, so the drain
+// can run its own bookkeeping and clear its figures.
+let _subEstimate = null;
+__ESTIMATOR__
 // The row HTML escapes the tooltip; the real helper is a string replace with no
 // behaviour worth re-running here.
 function _escapeHtml(text) { return String(text); }
@@ -4377,6 +4383,10 @@ global.fetch = async (url, opts) => {
     return {ok: true, status: 200, json: async () => queueItems};
   }
   if (u === '/api/subscribe_failures') { return {ok: true, status: 200, json: async () => []}; }
+  if (u === '/api/subscribe_pace') {
+    return {ok: true, status: 200,
+            json: async () => ({web_delay_seconds: 12, seed_seconds: 12})};
+  }
   if (u === '/api/subscribe_throttle') {
     return {ok: true, status: 200, json: async () => ({throttled_at: 0, retry_after: 300})};
   }
@@ -4414,8 +4424,15 @@ def test_the_queue_drain_calls_the_subscribe_route_once_per_item_in_order(web_cl
     """
     client, _ = web_client
     script = _served_inline_script(client)
+    estimator = "\n".join(
+        _extract_function(script, name)
+        for name in ("_subItemSeconds", "_subRowRemainingSeconds",
+                     "_subBatchRemainingSeconds", "_subRowFigure", "_subFormatDuration",
+                     "_subElapsedCurrent", "_subSeedSeconds", "_subRenderProgress",
+                     "_clearSubEstimates", "_subTickEstimates"))
     driver = (QUEUE_DRAIN_DRIVER
               .replace("__DOM__", FAKE_DOM)
+              .replace("__ESTIMATOR__", estimator)
               .replace("__FN__", _extract_function(script, "_startAutoSubscribe")))
     out = _run_node(driver, tmp_path)
 

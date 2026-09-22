@@ -22,6 +22,21 @@ No open defects.
 Removed from the list above rather than marked resolved. Each is now documented as current
 behaviour, or covered by a test:
 
+### The web overlay's row timer replaced its countdown with an elapsed readout
+
+The `l` overlay's first implementation counted each row down (`138f759`, "L opens overlay with
+countdown timers for each queued item"). The conversion to the server route (`5e78553`) deleted the
+`openAt` tab schedule and the countdown branch, kept the internal `elapsed` variable that had only
+existed to compare against `openAt`, and displayed it: a row's timer became seconds since the pass
+began, and the rows still waiting lost their figure entirely. That commit's own message disclosed the
+change ("The per-row timer now shows elapsed time, not a countdown to a scheduled tab") but it was
+never surfaced to the owner as a decision, and the same commit wrote the elapsed-time rationale that
+stood in [web-ui.md](web-ui.md) until the owner reported the count-up on 2026-09-22. The overlay now
+counts down: it seeds an estimate from the shared persisted web delay through
+`GET /api/subscribe_pace`, times each item's awaited `/api/subscribe/<id>` call, and draws a figure to
+each row's *completion* and to the whole batch's, using the TUI estimator's formula plus the row's own
+cost — [web-ui.md](web-ui.md#queued-row-timing-a-countdown-to-completion), [tui.md](tui.md)
+
 ### The view-restore loop paged through the result set unprompted (issue 78)
 
 The loop is **gone**, not bounded. One page load used to run a per-pass `MAX_RESTORE_BATCHES = 40`
@@ -336,7 +351,7 @@ Adding a metric meant editing `src/metrics.py` **and** `src/tui.py`, and nothing
 
 ### The subscription queue's estimate ran well below what a pass costs
 
-It priced two gated page reads at the configured delay, which counts the interval a read waits but not the request, and treats the exempt POST as clock-free — *measured live* about a third low (7.7–8.6 s gaps against a 6.0 s delay, a POST round trip of 1.1–1.8 s, one item at about 18 s against an estimate of 12 s). The configured guess still seeds it, and a running mean over the items the pass has finished now nudges it for the rows still waiting: one virtual observation from the seed, then each real item, so the first moves it a lot and later ones less. That is a progress bar's arithmetic rather than a rate learned from history, deliberately — the pane is up for a minute or two, and the items in front of it are the only evidence worth pricing the rest with. The processing row keeps its distinct `subscribing…` and is where each duration is timed from. The web overlay's countdown has no counterpart and should not acquire one: it is a fixed tab-open schedule rather than a projection from item costs, so correcting it would either disagree with when tabs actually open or change the pace that keeps Steam from throttling — the reason is recorded in [web-ui.md](web-ui.md) — [tui.md](tui.md)
+It priced two gated page reads at the configured delay, which counts the interval a read waits but not the request, and treats the exempt POST as clock-free — *measured live* about a third low (7.7–8.6 s gaps against a 6.0 s delay, a POST round trip of 1.1–1.8 s, one item at about 18 s against an estimate of 12 s). The configured guess still seeds it, and a running mean over the items the pass has finished now nudges it for the rows still waiting: one virtual observation from the seed, then each real item, so the first moves it a lot and later ones less. That is a progress bar's arithmetic rather than a rate learned from history, deliberately — the pane is up for a minute or two, and the items in front of it are the only evidence worth pricing the rest with. The processing row keeps its distinct `subscribing…` and is where each duration is timed from. The web overlay's countdown was excluded here on the stated ground that it was a fixed tab-open schedule rather than a projection from item costs — a reason that was already false when written: `5e78553`, seven minutes earlier, had deleted that schedule and replaced the countdown with the elapsed readout. The overlay now uses this estimator's seed and its running mean, with the row's own cost added so the figure is time to *complete* the row rather than to reach it (see the closed entry above) — [web-ui.md](web-ui.md#queued-row-timing-a-countdown-to-completion) — [tui.md](tui.md)
 
 ### An item the page already showed as subscribed stayed in the queue
 

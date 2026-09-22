@@ -568,6 +568,22 @@ items, and seeding it with the delay-derived guess is enough.
 
 ---
 
+## The web overlay counts down to completion
+
+**Status: Landed** — owner request, 2026-09-22.
+
+The `l` overlay's row timer showed seconds since the pass began — a count-up — and the rows still
+waiting had no figure at all. The owner asked for a countdown to completion, per row and for the whole
+batch. The overlay now seeds its estimate from the shared persisted web delay through
+`GET /api/subscribe_pace`, prices each finished item by timing its awaited `/api/subscribe/<id>` call,
+and draws one running mean with the same formula as the TUI's queue screen — plus the row's own cost,
+so the figure is time to *complete* the row rather than time to reach it. The elapsed-time decision
+once recorded in [web-ui.md](web-ui.md) is superseded; the TUI's estimate is unchanged and has no
+batch figure. [web-ui.md](web-ui.md#queued-row-timing-a-countdown-to-completion),
+[tui.md](tui.md#subscription-queue-sl-keys).
+
+---
+
 ## One item-update path: a change to an item reaches every display of it
 
 **Status: Landed.** The owner's six-point design is implemented in both front ends: a per-item
