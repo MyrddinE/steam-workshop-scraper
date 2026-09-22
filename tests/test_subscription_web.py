@@ -539,9 +539,12 @@ POLL_SCOPE_DRIVER = """
 let _listPollTimer = null;
 const _stopListPoll = () => {};
 // The tick hands every block to the one dispatch point; this driver is about
-// the ids it asks for, so the dispatch is stubbed rather than run.
+// the ids it asks for, so the dispatch is stubbed rather than run. The tick
+// itself is a top-level function beside `_startListPoll` -- named so the UI
+// trace can wrap it -- so both are served into the driver.
 const dispatchItemUpdates = () => {};
-const startFn = (__START__);
+__FNS__
+const startFn = _startListPoll;
 
 function marker(state) {
   return {getAttribute: (k) => (k === 'data-sub-state' ? state : null)};
@@ -599,8 +602,9 @@ def test_the_poll_re_reads_a_row_queued_only_for_subscription(web_client, tmp_pa
     """
     client, _ = web_client
     script = _served_inline_script(client)
-    driver = POLL_SCOPE_DRIVER.replace("__START__",
-                                       _extract_function(script, "_startListPoll"))
+    fns = "\n".join(_extract_function(script, name)
+                    for name in ("_listPollTick", "_startListPoll"))
+    driver = POLL_SCOPE_DRIVER.replace("__FNS__", fns)
     result = _run_node(driver, tmp_path)
 
     assert result["fetched"] and sorted(result["fetched"]) == [11, 22, 44], \

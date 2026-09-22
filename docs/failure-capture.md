@@ -135,6 +135,54 @@ from the same config itself (`init_webserver`); both processes write into the on
 `<outbox>/web_downloads/`, and the multi-process caveat under *Concurrency*
 below applies to that directory as much as to the manifest.
 
+## Web UI trace
+
+The page's JavaScript is otherwise only observable through tests that drive
+extracted functions, and the operator cannot open a browser. While the
+`daemon.capture_web_ui_trace` debug switch is on, the page records its own
+timeline and posts it in batches to `POST /api/ui_trace`; the server writes one
+JSON file per batch into `<outbox>/web_ui_trace/` and registers it with
+`kind: "ui_trace"`, so the puller collects it with no changes. With the switch
+off the route is inert and the page installs nothing — no `fetch` wrapper, no
+listener, no buffer.
+
+A trace is a timeline of **actions, the calls they caused and the internal
+transitions that explain them**, not a failure sample. A record carries a
+session header (page load time, viewport, grid `clientHeight`/`scrollTop`,
+build version) and the ordered events:
+
+| Event | What it records |
+|---|---|
+| `session` | the header above, once per page load |
+| `keydown` | the key, the focused element's id/`data-wid`, and whether a handler consumed it |
+| `click` | the control's id/`label` and `data-wid` |
+| `scroll` | the grid's `scrollTop`/`scrollHeight`/`clientHeight`, throttled |
+| `sort_change`, `overlay_change` | the new sort or Subscribed-overlay value |
+| `do_search` | entry (reset, offset, filter count, sort, overlay), whether the `loading` guard dropped it, and completion (batch size, new offset, `hasMore`, `loading`) |
+| `fetch` | one wrapper around `fetch`: method, path, a summary of the body (filter count, id count, offset — never the whole payload), duration, HTTP status, and the response item count where cheap |
+| `observe_next_batch` | the branch taken (already-visible shortcut, observing, skip or reset), `rect.top` beside `window.innerHeight`, the grid geometry, and the cell armed and released |
+| `intersection` | `isIntersecting`, the entry's target and whether it matched `_observedCell`, and the entry count |
+| `list_poll`, `item_poll` | each poll tick, so an endless poll cannot masquerade as scrolling |
+| `jump_to_author`, `pane_open` | a creator jump and its id, and a pane open and its `workshop_id` |
+| `view_restore` | `loadState`, whether a saved view was found, `_restoreView` and each `_loadUntil` pass with the value its `done` predicate returned |
+
+Every event also carries `loads_since_scroll`, and the page resets it on a user
+scroll. That one field answers the question the instrument was built for:
+records with a rising `loads_since_scroll` and no `scroll` event between them
+are the page loading on its own, which is what distinguishes a runaway from the
+user scrolling. The `view_restore` events are the same question for the loop
+that runs on every page load with no action at all: it records each search the
+restore requests, so those searches no longer arrive with no visible cause.
+
+**A trace is an instrument, not evidence, and it is denser than a web
+download**, so it is bounded on top of the age sweep (see *Bounds* and
+*Retention* below). The page never holds the session cookie, but the record is
+scrubbed with the same literal credential values as a crash dump
+(`src/crash.py`'s collector) on the same principle as `_write_web_download`:
+elision that depends on the caller being careful is not elision. The trace is
+additive — a trace POST that fails, throws or is refused only stops the tracing,
+never the action it describes.
+
 ## Crash dumps
 
 An unhandled traceback goes to a terminal nobody is reading, so `src/crash.py`
@@ -306,18 +354,44 @@ state file is rewritten on every miss rather than throttled: a throttled counter
 under-reports after a restart and can move backwards, and what has to stay bounded
 is the file count, not the write count.
 
+The **UI trace** has its own caps, because it is far denser than a web download
+and there is no group to hold a counter — the bound has to be in the write path
+itself. All three are constants in `src/capture.py` and are injected into the
+page, so its own buffer and stop agree with what the route enforces:
+
+* **`UI_TRACE_MAX_EVENTS_PER_BATCH`** (200) events are kept from one posted
+  batch; a longer batch drops its oldest events. The record's `events_dropped`,
+  `events_truncated` and `truncation_reason: "event_cap"` say so.
+* **`UI_TRACE_MAX_RECORD_BYTES`** (256 KB) bound one written record. A record
+  over the cap drops oldest events until it fits and sets `bytes_truncated`.
+* **`UI_TRACE_MAX_FILES_PER_SESSION`** (200) bounds one page session. The batch
+  that crosses the cap is written as the truncation marker
+  (`truncation_reason: "session_file_cap"`) and closes the session; every later
+  batch is refused with a 429 and nothing more is written. The refusal is how
+  the page learns to stop buffering, so the stop is recorded rather than silent.
+* the page's own buffer is a **ring buffer** (`UI_TRACE_BUFFER_EVENTS`, 500), so
+  a runaway — exactly what this instrument exists to catch — cannot grow the
+  tab's memory. It reports what it discarded as `buffer_dropped` on the next
+  batch.
+
+The per-session count is seeded from the files already on disk the first time a
+session is seen, so a server restart mid-session does not hand the page a fresh
+budget.
+
 ## Retention
 
 The outbox holds two kinds of thing, and they are cleaned differently.
 
 * **Debug captures** — `<outbox_dir>/web_downloads/`,
-  `<outbox_dir>/image_downloads/` and the legacy `<outbox_dir>/scrapes/` tree an
-  earlier build wrote before the rename — are a session instrument, not a record.
-  A capture older than **`DEBUG_CAPTURE_RETENTION_DAYS`** (7) is removed by the
-  daemon's housekeeping sweep, at most once a day
-  (`capture.prune_debug_captures`). The legacy tree is included on purpose: it is
-  debug data like the other two, and no current code writes it, so nothing else
-  would ever clear it.
+  `<outbox_dir>/image_downloads/`, `<outbox_dir>/web_ui_trace/` and the legacy
+  `<outbox_dir>/scrapes/` tree an earlier build wrote before the rename — are a
+  session instrument, not a record. A capture older than
+  **`DEBUG_CAPTURE_RETENTION_DAYS`** (7) is removed by the daemon's housekeeping
+  sweep, at most once a day (`capture.prune_debug_captures`). The legacy tree is
+  included on purpose: it is debug data like the others, and no current code
+  writes it, so nothing else would ever clear it. The UI trace is included even
+  though it is bounded on its own: seven days is long enough to review a session,
+  and short enough that a switch left on cannot keep filling the disk.
 * **Failures and crash dumps** are the evidence a regression test is built from.
   They are **never pruned by age**: `failures/` and `crashes/` stay until the
   owner's pull tool fetches them for review, and that fetch is a *move* — it
@@ -358,6 +432,7 @@ not this module's.
 <outbox_dir>/web_downloads/<stamp>-<kind>-<id>.json  a web pull's record
 <outbox_dir>/web_downloads/<stamp>-<kind>-<id>.body  its response body
 <outbox_dir>/image_downloads/<stamp>-<id>.json     a successful image download (metadata only)
+<outbox_dir>/web_ui_trace/<stamp>-<session>-<n>.json  one batch of page events
 <outbox_dir>/crashes/<stamp>-<process>-error<N>.txt  one crash dump
 ```
 
@@ -374,9 +449,10 @@ downloads live in `<outbox_dir>/image_downloads/`, a sibling of the web capture'
 `<outbox_dir>/web_downloads/`, and are registered with `kind: "image_download"`
 and `role: "record"`. Web-download records and their bodies are registered with
 `kind: "web_download"` and a `role` of `record` or `body` — a kind of their own,
-so a puller can collect them without also pulling the failure tree. Crash dumps
-are registered with `kind: "crash"`, their own kind again, so `--only crash`
-collects exactly them.
+so a puller can collect them without also pulling the failure tree. UI-trace
+batches are registered with `kind: "ui_trace"` and `role: "batch"`, their own
+kind again, so `--only ui_trace` collects exactly them. Crash dumps are
+registered with `kind: "crash"`, their own kind again.
 
 ## Selector misses change the queue
 

@@ -99,6 +99,7 @@ def init_webserver(db_path: str, config: dict, config_path: str = "config.yaml",
     capture.configure(
         configured_outbox_dir(daemon_config),
         capture.web_download_switch(daemon_config),
+        capture_web_ui_trace=capture.ui_trace_switch(daemon_config),
     )
 
 
@@ -198,7 +199,15 @@ def index():
                            # different things.
                            rotate_label=log_rotation.ROTATE_BUTTON_LABEL,
                            open_folder_enabled=bool(
-                               _workshop_folders and _workshop_folders.is_supported()))
+                               _workshop_folders and _workshop_folders.is_supported()),
+                           # The UI-trace switch and the bounds the server
+                           # enforces, injected so the page installs its
+                           # instrument once when the switch is on and nothing
+                           # at all when it is off. The build version travels
+                           # with it so a trace read later is interpretable.
+                           ui_trace_enabled=capture.ui_trace_capture_active(),
+                           ui_trace_limits=capture.ui_trace_limits(),
+                           build_version=capture.app_version())
 
 
 @app.route('/api/search', methods=['POST', 'GET'])
@@ -857,6 +866,35 @@ def api_subscribe_throttle():
 @app.route('/api/subscribe_failures')
 def api_subscribe_failures():
     return jsonify(sorted(_subscribe_failures))
+
+
+@app.route('/api/ui_trace', methods=['POST'])
+def api_ui_trace():
+    """Accept one batch of the page's own action/call/transition records.
+
+    **Inert unless `daemon.capture_web_ui_trace` is on**: the page must not be
+    able to write a trace the operator did not ask for, so with the switch off
+    this refuses before anything is touched and no file or manifest entry can
+    appear. With it on, ``capture.record_ui_trace`` owns the bounds (events per
+    batch, bytes per record, files per session), the atomic write and the
+    `kind: "ui_trace"` manifest registration the puller already collects.
+
+    Nothing here may change the page's control flow: the page treats any
+    non-2xx answer as "stop buffering", so a refusal is a trace that stopped,
+    never an action that failed. A 429 is the per-session cap, which is how the
+    page learns to stop rather than lose events to a silent stop.
+    """
+    if not capture.ui_trace_capture_active():
+        return jsonify({"ok": False, "error": "UI trace capture is not enabled"}), 404
+    batch = request.get_json(silent=True)
+    if not isinstance(batch, dict):
+        return jsonify({"ok": False, "error": "a JSON object is required"}), 400
+    outcome = capture.record_ui_trace(batch, capture.ui_trace_secrets(_config))
+    if outcome.get("refused") == "session_cap":
+        return jsonify(outcome), 429
+    if not outcome.get("ok"):
+        return jsonify(outcome), 400
+    return jsonify(outcome)
 
 
 @app.route('/api/fetch_new', methods=['POST'])

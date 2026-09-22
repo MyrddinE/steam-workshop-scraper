@@ -356,6 +356,13 @@ const DEAD_QUEUED_MEANING = {{ dead_queued_meaning | tojson }};
 // draws a row the item-update poll reports as ignored.
 const IGNORED_FETCH_STATUS = {{ ignored_fetch_status }};
 
+// The UI trace switch and its bounds, injected by the server. When the switch
+// is off `_startUiTraceIfEnabled` installs nothing: no fetch wrapper, no
+// listeners, no buffer, so the page costs exactly what it did before.
+const UI_TRACE_ENABLED = {{ 'true' if ui_trace_enabled else 'false' }};
+const UI_TRACE_LIMITS = {{ ui_trace_limits | tojson }};
+const BUILD_VERSION = {{ build_version | tojson }};
+
 // Derived from schema
 const ALL_FIELDS = SEARCH_FILTER_SCHEMA.map(f => f.field);
 const FIELD_OPS = {};
@@ -386,6 +393,431 @@ let currentOffset = 0, hasMore = true, loading = false, cutoffs = {};
 let _cutoffsCache = null, _cutoffsFilterKey = '';
 let _subTitleText = 'No cutoff data', _favTitleText = 'No cutoff data';
 let _listPollTimer = null;
+
+// ── the UI trace ───────────────────────────────────────────────────────────
+//
+// An operator/AI debugging instrument, not a feature. While
+// `daemon.capture_web_ui_trace` is on the server injects
+// `UI_TRACE_ENABLED = true`, and `_installUiTrace` wraps the page's own
+// functions (fetch, doSearch, the observer callback, the polls, the jumps and
+// the view restore) so the timeline is recorded without a check at any call
+// site. When the switch is off `_startUiTraceIfEnabled` installs nothing at
+// all -- no wrapper, no listener, no buffer.
+//
+// The one rule that matters: **the trace never changes control flow**. Every
+// wrapper calls through and returns exactly what the original returned, a
+// record that cannot be built is dropped, and a trace POST that fails, throws
+// or is refused only stops the tracing -- never the action it describes.
+//
+// The buffer is a ring buffer, so a runaway (exactly what this is for) cannot
+// grow the tab's memory. `UI_TRACE_LIMITS` is the server's own set of caps,
+// injected rather than retyped so the page's stop and the route's refusal agree.
+function _installUiTrace() {
+  const UI_TRACE_URL = '/api/ui_trace';
+  const UI_TRACE_BUFFER_EVENTS = 500;   // the tab's own memory bound
+  const UI_TRACE_FLUSH_EVENTS = 40;     // send early once a batch is this big
+  const UI_TRACE_FLUSH_MS = 1000;       // and at least this often
+  const UI_TRACE_SCROLL_MS = 100;       // one scroll record per settle window
+  const limits = UI_TRACE_LIMITS || {};
+  const startedAt = (window.performance && window.performance.now)
+    ? window.performance.now() : Date.now();
+  const session = (window.crypto && window.crypto.randomUUID)
+    ? window.crypto.randomUUID()
+    : String(Date.now()) + '-' + Math.random().toString(16).slice(2);
+  const originalFetch = window.fetch.bind(window);
+  const buffer = [];
+  let dropped = 0;
+  let seq = 0;
+  let sent = 0;
+  let stopped = false;
+  let loadsSinceScroll = 0;
+  let lastScrollAt = 0;
+  let flushTimer = null;
+
+  function now() {
+    return (window.performance && window.performance.now)
+      ? Math.round((window.performance.now() - startedAt) * 1000) / 1000
+      : Date.now() - startedAt;
+  }
+
+  // Every trace write goes through here. A record that cannot be built is
+  // simply absent; the action that was happening continues regardless.
+  function push(event) {
+    if (stopped) return;
+    try {
+      event.t = now();
+      event.loads_since_scroll = loadsSinceScroll;
+      buffer.push(event);
+      if (buffer.length > UI_TRACE_BUFFER_EVENTS) {
+        buffer.shift();
+        dropped += 1;
+      }
+      if (buffer.length >= UI_TRACE_FLUSH_EVENTS) send(false, null);
+    } catch (e) { /* a trace must never break the action it describes */ }
+  }
+
+  function send(final, reason) {
+    if (stopped) return;
+    if (!buffer.length && !dropped && !final) return;
+    const events = buffer.splice(0, buffer.length);
+    const batch = {
+      session: session, seq: seq++, final: !!final, reason: reason || null,
+      dropped: dropped, events: events,
+    };
+    dropped = 0;
+    try {
+      // The original fetch, so a trace POST is never itself traced.
+      const promise = originalFetch(UI_TRACE_URL, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(batch), keepalive: !!final,
+      });
+      if (promise && typeof promise.then === 'function') {
+        promise.then(function(resp) {
+          if (resp && resp.ok) {
+            sent += 1;
+            // The `!final` guard stops the marker's own success from asking
+            // for another marker.
+            if (!final && limits.files_per_session > 0 &&
+                sent >= limits.files_per_session) {
+              // One last record names the stop, then nothing more is buffered.
+              send(true, 'session_file_cap');
+              stopped = true;
+            }
+          } else {
+            // Refused: the switch is off, or the session cap is reached. Stop
+            // buffering; the action that was traced is unaffected.
+            stopped = true;
+          }
+        }, function() { stopped = true; });
+      }
+    } catch (e) { stopped = true; }
+  }
+
+  // The id or workshop id an element carries, for a record that has to be
+  // readable without the DOM in front of you.
+  function cellId(el) {
+    if (!el) return null;
+    try {
+      return el.id || (el.getAttribute ? el.getAttribute('data-wid') : null);
+    } catch (e) { return null; }
+  }
+
+  function describe(el) {
+    if (!el) return {id: null, wid: null, label: null};
+    let node = el;
+    try {
+      if (node.closest) node = node.closest('[data-wid], [id]') || el;
+    } catch (e) { /* keep the element itself */ }
+    let label = null;
+    try {
+      label = (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 80) || null;
+    } catch (e) { /* no label is not a lost record */ }
+    return {id: node && node.id ? node.id : null,
+            wid: node && node.getAttribute ? node.getAttribute('data-wid') : null,
+            label: label};
+  }
+
+  // ── the session header, so a trace read later is interpretable ───────────
+  const grid = document.getElementById('results-grid');
+  push({
+    event: 'session',
+    loaded_at: new Date().toISOString(),
+    inner_width: window.innerWidth,
+    inner_height: window.innerHeight,
+    grid_client_height: grid ? grid.clientHeight : null,
+    grid_scroll_top: grid ? grid.scrollTop : null,
+    app_version: BUILD_VERSION,
+  });
+
+  // ── actions taken directly, not through a page function ──────────────────
+  document.addEventListener('keydown', function(e) {
+    const where = describe(e.target);
+    const record = {event: 'keydown', key: e.key, id: where.id, wid: where.wid,
+                    consumed: null};
+    push(record);
+    // `defaultPrevented` is only final after every handler has run. The
+    // dispatch is synchronous and this microtask runs immediately after it, so
+    // the record is updated in place rather than guessed at.
+    Promise.resolve().then(function() {
+      try { record.consumed = !!e.defaultPrevented; } catch (err) {}
+    });
+  }, true);
+
+  document.addEventListener('click', function(e) {
+    const where = describe(e.target);
+    push({event: 'click', id: where.id, wid: where.wid, label: where.label});
+  }, true);
+
+  [['sort-by', 'sort_change'], ['sort-order', 'sort_change'],
+   ['subscribed-overlay', 'overlay_change']].forEach(function(pair) {
+    const el = document.getElementById(pair[0]);
+    if (!el || !el.addEventListener) return;
+    el.addEventListener('change', function() {
+      push({event: pair[1], id: pair[0], value: el.value});
+    });
+  });
+
+  if (grid && grid.addEventListener) {
+    grid.addEventListener('scroll', function() {
+      // The user scrolled: the runaway counter starts again from zero.
+      loadsSinceScroll = 0;
+      const at = now();
+      if (at - lastScrollAt < UI_TRACE_SCROLL_MS) return;
+      lastScrollAt = at;
+      push({event: 'scroll', scroll_top: grid.scrollTop,
+            scroll_height: grid.scrollHeight, client_height: grid.clientHeight});
+    }, {passive: true});
+  }
+
+  // ── calls: one wrapper around fetch, so a call nobody instrumented shows ──
+  function summariseBody(init) {
+    const raw = init && init.body;
+    if (typeof raw !== 'string') return null;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && Array.isArray(parsed.ids)) return {kind: 'ids', ids: parsed.ids.length};
+      if (parsed && Array.isArray(parsed.filters)) {
+        return {kind: 'search', filters: parsed.filters.length,
+                subscribed: parsed.subscribed || null, sort_by: parsed.sort_by || null,
+                sort_order: parsed.sort_order || null, offset: parsed.offset};
+      }
+      return {kind: 'json', keys: Object.keys(parsed || {}).slice(0, 12)};
+    } catch (e) {
+      return {kind: 'bytes', bytes: raw.length};
+    }
+  }
+
+  function pathOf(url) {
+    try { return new URL(url, window.location.href).pathname; }
+    catch (e) { return String(url).split('?')[0]; }
+  }
+
+  function countsItems(path) {
+    return path === '/api/search' || path === '/api/items' ||
+           path === '/api/queued' || path === '/api/authors';
+  }
+
+  const tracedFetch = function(input, init) {
+    let record = null;
+    let path = null;
+    try {
+      const url = (typeof input === 'string') ? input : ((input && input.url) || '');
+      const method = (init && init.method) || (input && input.method) || 'GET';
+      path = pathOf(url);
+      record = {event: 'fetch', method: String(method).toUpperCase(),
+                path: path, body: summariseBody(init)};
+      push(record);
+    } catch (e) { record = null; }
+    const startedCall = now();
+    const promise = originalFetch.apply(window, arguments);
+    if (record) {
+      try {
+        promise.then(function(resp) {
+          try {
+            record.status = resp ? resp.status : null;
+            record.ms = Math.round((now() - startedCall) * 1000) / 1000;
+            if (resp && resp.clone && countsItems(path)) {
+              resp.clone().json().then(function(body) {
+                record.items = Array.isArray(body) ? body.length : null;
+              }, function() {});
+            }
+          } catch (err) {}
+        }, function() {
+          record.status = 'error';
+          record.ms = Math.round((now() - startedCall) * 1000) / 1000;
+        });
+      } catch (e) {}
+    }
+    return promise;
+  };
+  window.fetch = tracedFetch;
+
+  // ── the internal transitions that explain the calls ──────────────────────
+
+  const originalDoSearch = doSearch;
+  doSearch = function(reset) {
+    const isReset = (reset === undefined) ? true : !!reset;
+    const before = currentOffset;
+    let filters = null, sortBy = null, sortOrder = null, overlay = null;
+    try {
+      filters = (getFilters() || []).length;
+      const sortEl = document.getElementById('sort-by');
+      const orderEl = document.getElementById('sort-order');
+      sortBy = sortEl ? sortEl.value : null;
+      sortOrder = orderEl ? orderEl.value : null;
+      overlay = (typeof _overlayValue === 'function') ? _overlayValue() : null;
+    } catch (e) { /* a summary is optional; the record still goes */ }
+    push({event: 'do_search', phase: 'enter', reset: isReset, offset: before,
+          loading: loading, has_more: hasMore, filters: filters,
+          sort_by: sortBy, sort_order: sortOrder, overlay: overlay});
+    loadsSinceScroll += 1;
+    if (loading) {
+      push({event: 'do_search', phase: 'dropped', reason: 'loading',
+            reset: isReset, offset: before});
+    }
+    const promise = originalDoSearch.apply(this, arguments);
+    if (promise && typeof promise.then === 'function') {
+      promise.then(function() {
+        push({event: 'do_search', phase: 'done', reset: isReset,
+              batch: currentOffset - (isReset ? 0 : before),
+              offset: currentOffset, has_more: hasMore, loading: loading});
+      }, function() {});
+    }
+    return promise;
+  };
+
+  const originalObserveNextBatch = _observeNextBatch;
+  _observeNextBatch = function(firstCell) {
+    const released = _observedCell;
+    const before = {loading: loading, has_more: hasMore};
+    let rectTop = null;
+    try { rectTop = firstCell ? firstCell.getBoundingClientRect().top : null; } catch (e) {}
+    const spot = document.getElementById('results-grid');
+    const result = originalObserveNextBatch.apply(this, arguments);
+    // The branch is read back from the state the call left, not recomputed from
+    // the function's conditions: `_observedCell` is the armed cell only on the
+    // observe branch, and the shortcut leaves it null.
+    let branch;
+    if (!firstCell) branch = 'reset';
+    else if (before.loading || !before.has_more) branch = 'skip';
+    else if (_observedCell === firstCell) branch = 'observe';
+    else branch = 'already_visible';
+    push({event: 'observe_next_batch', branch: branch,
+          released: cellId(released), cell: cellId(firstCell),
+          armed: cellId(_observedCell), rect_top: rectTop,
+          inner_height: window.innerHeight,
+          scroll_top: spot ? spot.scrollTop : null,
+          client_height: spot ? spot.clientHeight : null});
+    return result;
+  };
+
+  const originalIntersection = _onScrollIntersection;
+  _onScrollIntersection = function(entries) {
+    let entry = null;
+    try { entry = (entries && entries.length) ? entries[0] : null; } catch (e) {}
+    const target = entry ? entry.target : null;
+    push({event: 'intersection',
+          is_intersecting: entry ? !!entry.isIntersecting : null,
+          target: cellId(target),
+          matched_observed: !!(target && target === _observedCell),
+          entry_count: entries ? entries.length : 0});
+    return originalIntersection.apply(this, arguments);
+  };
+
+  const originalStartListPoll = _startListPoll;
+  _startListPoll = function(filters, sortBy, sortOrder) {
+    push({event: 'list_poll', phase: 'armed', filters: (filters || []).length,
+          sort_by: sortBy || null, sort_order: sortOrder || null});
+    return originalStartListPoll.apply(this, arguments);
+  };
+
+  const originalListPollTick = _listPollTick;
+  _listPollTick = function() {
+    push({event: 'list_poll', phase: 'tick', armed: !!_listPollTimer});
+    return originalListPollTick.apply(this, arguments);
+  };
+
+  const originalItemUpdateTick = _itemUpdateTick;
+  _itemUpdateTick = function() {
+    let count = null;
+    try {
+      count = (typeof _subscribedItemIds === 'function') ? _subscribedItemIds().length : null;
+    } catch (e) {}
+    push({event: 'item_poll', phase: 'tick', subscribed_items: count});
+    return originalItemUpdateTick.apply(this, arguments);
+  };
+
+  const originalJumpToAuthor = jumpToAuthor;
+  jumpToAuthor = function(creator) {
+    push({event: 'jump_to_author', creator: creator == null ? null : String(creator)});
+    return originalJumpToAuthor.apply(this, arguments);
+  };
+
+  const originalShowDetail = showDetail;
+  showDetail = function(wid) {
+    push({event: 'pane_open', wid: wid});
+    return originalShowDetail.apply(this, arguments);
+  };
+
+  // ── the view restore ─────────────────────────────────────────────────────
+  //
+  // `loadState` -> `_restoreView` -> `_loadUntil` runs on every page load and
+  // can issue up to two passes of `MAX_RESTORE_BATCHES` searches with no user
+  // action at all. It is the confirmed suspect for the "it is scrolling on its
+  // own" report, so it is recorded explicitly: that it ran, whether a saved
+  // view was found, each pass with the value its `done` predicate returned,
+  // and -- through the wrapped `doSearch` above -- every batch it requests.
+
+  const originalLoadViewState = _loadViewState;
+  _loadViewState = function() {
+    const saved = originalLoadViewState.apply(this, arguments);
+    push({event: 'view_restore', phase: 'saved_view', found: !!saved});
+    return saved;
+  };
+
+  const originalLoadState = loadState;
+  loadState = function() {
+    push({event: 'view_restore', phase: 'load_state'});
+    const promise = originalLoadState.apply(this, arguments);
+    if (promise && typeof promise.then === 'function') {
+      promise.then(function() {
+        push({event: 'view_restore', phase: 'load_state_done'});
+      }, function() {});
+    }
+    return promise;
+  };
+
+  const originalRestoreView = _restoreView;
+  _restoreView = function(state) {
+    push({event: 'view_restore', phase: 'enter', has_state: !!state,
+          scroll: state ? state.scroll : null,
+          selected: state ? state.selected : null,
+          offset: currentOffset, has_more: hasMore});
+    return originalRestoreView.apply(this, arguments);
+  };
+
+  const originalLoadUntil = _loadUntil;
+  _loadUntil = function(done, maxBatches) {
+    push({event: 'view_restore', phase: 'load_until_enter',
+          max_batches: maxBatches, offset: currentOffset, has_more: hasMore,
+          loads_since_scroll: loadsSinceScroll});
+    let passes = 0;
+    const wrappedDone = function() {
+      // One call per loop-condition evaluation: the value is what the loop is
+      // about to act on.
+      let value = false;
+      try { value = done(); } catch (e) { throw e; }
+      passes += 1;
+      push({event: 'view_restore', phase: 'done_check', pass: passes,
+            value: !!value, offset: currentOffset, has_more: hasMore});
+      return value;
+    };
+    const promise = originalLoadUntil.call(this, wrappedDone, maxBatches);
+    if (promise && typeof promise.then === 'function') {
+      promise.then(function() {
+        push({event: 'view_restore', phase: 'load_until_done', passes: passes,
+              offset: currentOffset});
+      }, function() {});
+    }
+    return promise;
+  };
+
+  flushTimer = setInterval(function() { send(false, null); }, UI_TRACE_FLUSH_MS);
+  window.addEventListener('pagehide', function() {
+    if (flushTimer) { clearInterval(flushTimer); flushTimer = null; }
+    send(false, null);
+  });
+}
+
+// The one guard. With the switch off nothing above is installed. An install
+// that somehow fails is swallowed: the trace is additive, so it must never be
+// able to stop the script that follows it.
+function _startUiTraceIfEnabled() {
+  if (!UI_TRACE_ENABLED) return;
+  try { _installUiTrace(); }
+  catch (e) { console.debug('UI trace install failed; continuing untraced', e); }
+}
+_startUiTraceIfEnabled();
 
 // The header shows which port this panel answered on. location already knows
 // it — it is the port in the address bar — so this reads the page's own origin
@@ -1002,54 +1434,58 @@ function _listNeedsPoll(items) {
 
 function _startListPoll(filters, sortBy, sortOrder) {
   _stopListPoll();
+  _listPollTimer = setTimeout(_listPollTick, 0);
+}
 
-  async function tick() {
-    if (!_listPollTimer) return;  // stopped during fetch
-    let pending = [];
-    try {
-      const grid = document.getElementById('results-grid');
-      // No grid is not a transient failure: there is nothing to poll.
-      if (!grid) { _stopListPoll(); return; }
-      // A stage spinner needs re-reading, but so does a row whose subscription
-      // marker is still `queued`: a subscribe can land behind the cell's back
-      // and that row has no spinner to be found by. Deciding here from the
-      // rendered state means the marker is refreshed from the database, so no
-      // writer of the flag -- this page's cancel/clear calls or /api/subscribe
-      // -- can bypass the refresh.
-      grid.querySelectorAll('.grid-cell[data-wid]').forEach(el => {
-        const sub = el.querySelector('.grid-sub');
-        if (el.classList.contains('has-spinner') ||
-            (sub && (sub.getAttribute('data-sub-state') === 'queued' ||
-                     sub.getAttribute('data-sub-state') === 'queued_remove'))) {
-          pending.push(parseInt(el.getAttribute('data-wid'), 10));
-        }
-      });
-      if (!pending.length) { _stopListPoll(); return; }
-
-      const resp = await fetch('/api/items', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ids: pending})
-      });
-      if (!resp.ok) {
-        // A 500 from a locked database is transient. Fall through to the
-        // re-arm below so the next tick retries; treating a failed response as
-        // a stop used to freeze every queued marker for the rest of the
-        // session.
-      } else {
-        const items = await resp.json();
-        // Every re-read block, for every display of it, goes through the one
-        // dispatch point; the cell's applier is what draws the fields it holds.
-        if (Array.isArray(items)) dispatchItemUpdates(items);
+// One list-poll tick. Top-level rather than a closure inside `_startListPoll`
+// so the UI trace has a named function to wrap: the closure's `filters`,
+// `sortBy` and `sortOrder` were captured but never read here, and the only
+// state it used -- `_listPollTimer` -- is already module scope. The behaviour
+// is unchanged: the same body, the same re-arm, the same stop.
+async function _listPollTick() {
+  if (!_listPollTimer) return;  // stopped during fetch
+  let pending = [];
+  try {
+    const grid = document.getElementById('results-grid');
+    // No grid is not a transient failure: there is nothing to poll.
+    if (!grid) { _stopListPoll(); return; }
+    // A stage spinner needs re-reading, but so does a row whose subscription
+    // marker is still `queued`: a subscribe can land behind the cell's back
+    // and that row has no spinner to be found by. Deciding here from the
+    // rendered state means the marker is refreshed from the database, so no
+    // writer of the flag -- this page's cancel/clear calls or /api/subscribe
+    // -- can bypass the refresh.
+    grid.querySelectorAll('.grid-cell[data-wid]').forEach(el => {
+      const sub = el.querySelector('.grid-sub');
+      if (el.classList.contains('has-spinner') ||
+          (sub && (sub.getAttribute('data-sub-state') === 'queued' ||
+                   sub.getAttribute('data-sub-state') === 'queued_remove'))) {
+        pending.push(parseInt(el.getAttribute('data-wid'), 10));
       }
-    } catch(e) { console.debug('List poll error', e); /* keep trying */ }
-    // Re-arm whatever the tick met, so one failed read is a skipped tick rather
-    // than the end of the poll; `_stopListPoll` (checked above) is the only exit.
-    if (!_listPollTimer) return;
-    const delay = Math.max(1, Math.log2(pending.length)) * 1000;
-    _listPollTimer = setTimeout(tick, delay);
-  }
+    });
+    if (!pending.length) { _stopListPoll(); return; }
 
-  _listPollTimer = setTimeout(tick, 0);
+    const resp = await fetch('/api/items', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ids: pending})
+    });
+    if (!resp.ok) {
+      // A 500 from a locked database is transient. Fall through to the
+      // re-arm below so the next tick retries; treating a failed response as
+      // a stop used to freeze every queued marker for the rest of the
+      // session.
+    } else {
+      const items = await resp.json();
+      // Every re-read block, for every display of it, goes through the one
+      // dispatch point; the cell's applier is what draws the fields it holds.
+      if (Array.isArray(items)) dispatchItemUpdates(items);
+    }
+  } catch(e) { console.debug('List poll error', e); /* keep trying */ }
+  // Re-arm whatever the tick met, so one failed read is a skipped tick rather
+  // than the end of the poll; `_stopListPoll` (checked above) is the only exit.
+  if (!_listPollTimer) return;
+  const delay = Math.max(1, Math.log2(pending.length)) * 1000;
+  _listPollTimer = setTimeout(_listPollTick, delay);
 }
 
 function _stopListPoll() {
@@ -1952,10 +2388,15 @@ document.getElementById('btn-save-filter').onclick = saveFilterAndReport;
 // is armed. Held so the next batch can unobserve it before arming its own.
 let _observedCell = null;
 
-const _scrollObserver = new IntersectionObserver((entries) => {
+// The observer's callback, named so the UI trace can wrap it: the trace needs
+// `isIntersecting`, the entry's target and whether it matched `_observedCell`
+// -- today the callback trusts `entries[0]`.
+function _onScrollIntersection(entries) {
   if (loading || !hasMore || !currentOffset) return;
   if (entries[0].isIntersecting) doSearch(false);
-});
+}
+
+const _scrollObserver = new IntersectionObserver(_onScrollIntersection);
 
 document.addEventListener('blur', e => {
   try {
