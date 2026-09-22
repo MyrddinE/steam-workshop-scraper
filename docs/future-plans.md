@@ -460,7 +460,9 @@ reports `POST /api/subscribe_failed/<id>` and `POST /api/subscribe_throttled/<id
 flow calls them:** `GET /api/queued` (the drain's queue read and its overlay poll),
 `GET /api/subscribe_failures` and `GET /api/subscribe_throttle` (that poll and the per-item throttle
 check — so the plan's "verification poll" and "throttle-reporting endpoints" are only half bridge),
-and `POST /api/subscribed/<id>` (the overlay's Cancel and Clear Failed dequeue calls). The two kept
+and the overlay's Cancel and Clear Failed dequeue call, which is `POST /api/dequeue/<id>` today — it
+was `POST /api/subscribed/<id>` until the un-subscribe work split the outcome stamps from a
+direction-agnostic dequeue (see [Un-subscribing through the subscription queue] below). The two kept
 reads now have no writer and report the resting state; removing the drain's use of them would be a
 behaviour change, not part of this removal.
 
@@ -650,23 +652,41 @@ enumerating the paths.
 
 ## Un-subscribing through the subscription queue
 
-**Status: Planned** — owner request, 2026-09-21. Not started; scheduled after the ignored-item work,
-because all three changes touch both front ends.
+**Status: Landed.** Owner request, 2026-09-21; implemented after the ignored-item work.
 
-`s` on a fully subscribed item should queue it for **removal**, so the subscription queue processes
-both additions and removals rather than additions alone. Two things make that more than a marker
-change. The queue's flag is a boolean today (`is_queued_for_subscription`, `toggle_subscription_queue`,
-`subscription_state`), so a queue that means two directions needs a value that says which — a new
-column with a migration (`EXPECTED_VERSION` is 38) or a re-derived flag, with the subscribe-only rows
-migrating cleanly either way. And `src/subscribe_engine.py` deliberately never sends an unsubscribe:
-an already-subscribed item returns before any request is made, so the removal direction is new work
-there — the endpoint, the credential and CSRF path it already owns, and the outcome vocabulary, since
-a removal can be refused or throttled exactly as an addition can. The queue screen and the web drain
-both need the direction per row, and the marker gains a queued-for-removal state drawn as an **empty
-red star outline** in both front ends, from one shared source the way the other marker states are.
-What `s` does for each existing marker state (`never`, `queued`, `subscribed`, `downloaded`) — and
-what it does when the item is already queued — is to be settled from that state machine before the
-work starts, not guessed. [tui.md](tui.md), [web-ui.md](web-ui.md), [data-pipeline.md](data-pipeline.md)
+`s` on a fully subscribed item now queues it for **removal**, and the subscription queue processes
+both directions. The flag was kept as the boolean `is_queued_for_subscription` and the direction is
+**derived** — with the flag set, `own_subscribed` decides: set is a removal, clear is an addition
+(`queued_direction` in `src/subscribe_engine.py`). *Measured before the change*: the pulled snapshot
+held **9** queued rows and **0** of them also subscribed, so no existing row changed meaning and no
+migration was needed.
+
+The marker gained `QUEUED_REMOVE` in `src/subscription.py`: the empty star `☆` in red (class
+`sub-queued-remove`, label "About to unsubscribe"), placed above `downloaded` and `subscribed` in
+`STATE_PRECEDENCE` so a pending removal is not hidden behind the subscription it is about.
+`CLICKABLE_STATES` gained `queued_remove`, and the `subscribed` marker's deliberate inertness was
+reversed — its click only queues a removal and the queue cancels, so an accidental click is
+recoverable. Both front ends' polls watch the new state, so a removal landing behind a rendered row
+still refreshes it.
+
+`subscribe_item` follows the derived direction and keeps the pre-read guard in both: an addition
+short-circuits on `toggled`, a removal on its absence, and a removal never posts against an item the
+page shows unsubscribed. The unsubscribe endpoint is **verified from Steam's own shipped
+`sharedfiles_functions_logged_in.js`**: `SubscribeItem` branches on the button's `toggled` class and
+posts `/sharedfiles/unsubscribe` with `{id, appid, sessionid}` — the subscribe form minus
+`include_dependencies` — checking only `success == 1`. The outcome vocabulary gained `unsubscribed`
+and `already_unsubscribed`; a removal the POST rejects maps to `refused` with the raw `success` value
+logged, because Steam publishes no removal failure codes. Completion writes are
+`mark_own_unsubscribed` (clears `own_subscribed` and the queue flag, leaves the sticky first-seen
+stamp so the marker becomes `previously`).
+
+The web drain and the TUI queue screen both word the direction per row (`unsubscribing…` /
+`unsubscribed`), and the overlay's **Cancel and Clear Failed** now post a new direction-agnostic
+`/api/dequeue/<id>`, which clears only the queue flag. They used to post `/api/subscribed/<id>`,
+which claimed a subscription — and stamped the sticky first-seen time — for rows the drain never
+attempted, leaving them reading `previously` for good; `/api/subscribed` and its removal counterpart
+`/api/unsubscribed` remain as explicit **outcome** stamps.
+[tui.md](tui.md), [web-ui.md](web-ui.md), [data-pipeline.md](data-pipeline.md), [data-model.md](data-model.md)
 
 ## Ignoring a creator
 

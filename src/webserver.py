@@ -5,7 +5,7 @@ import os
 import re
 import logging
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, toggle_ignored_item, mark_own_subscribed, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items, live_fetch_status_predicate, IGNORED_FETCH_STATUS, creator_is_ignored, creator_ignore_label, toggle_creator_ignored
+from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, toggle_ignored_item, mark_own_subscribed, mark_own_unsubscribed, dequeue_subscription, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items, live_fetch_status_predicate, IGNORED_FETCH_STATUS, creator_is_ignored, creator_ignore_label, toggle_creator_ignored
 from src.analysis import view_window_analysis
 from src import capture
 from src import activity
@@ -584,14 +584,48 @@ def _ensure_image_flagged(workshop_id, priority):
 # TUI's queue drives too, so the two front ends cannot drift apart.
 
 
+def _api_unsubscribe(workshop_id):
+    """Run a queued removal through the engine and answer in the route's shape.
+
+    The engine reads the item page, posts the removal only when the page still
+    shows the item subscribed (the pre-read guard), records
+    ``mark_own_unsubscribed`` on ``success: 1``, and maps a refusal or a throttle
+    into its own vocabulary. The drain reads only ``success``, so a settled
+    removal answers ``{"success": 1}``; anything else carries the engine's own
+    status and message and leaves the row queued.
+    """
+    interval = subscribe_engine.WebInterval(_config)
+    outcome = subscribe_engine.subscribe_item(
+        workshop_id, config=_config, db_path=_db_path, interval=interval)
+    logging.info(
+        f"[Unsubscribe] workshop_id={workshop_id}: {outcome.status} "
+        f"({outcome.message})")
+    if outcome.is_unsubscribed:
+        return jsonify({"success": 1, "status": outcome.status})
+    return jsonify({
+        "success": -1,
+        "status": outcome.status,
+        "message": outcome.message or subscribe_engine.status_label(outcome.status),
+        "stays_queued": outcome.stays_queued,
+    })
+
+
 @app.route('/api/subscribe/<int:workshop_id>', methods=['POST'])
 def api_subscribe(workshop_id):
-    """Subscribe to an item against Steam directly, with no browser tab.
+    """Subscribe -- or unsubscribe -- an item against Steam directly, with no tab.
 
     This is the browser-free path: the Web UI's Subscribe button and queue drain
     both call it, and it is the route the TUI has always driven. The engine in
     ``src/subscribe_engine.py`` owns the request shape, and this route builds its
     POST from the same helpers rather than keeping a second copy.
+
+    The direction is **derived from the row**, exactly as the engine derives it:
+    a queued row that is subscribed is a removal, every other queued row is an
+    addition. A removal is delegated whole to
+    :func:`subscribe_engine.subscribe_item`, which owns the pre-read guard, the
+    ``/sharedfiles/unsubscribe`` request shape, the throttle and session-health
+    handling and the ``mark_own_unsubscribed`` record; duplicating that here is
+    how the two paths would drift. The addition branch below is unchanged.
 
     The CSRF token comes from the item page this route reads, exactly as the
     engine's does. ``sessionid`` is a session cookie Firefox keeps in memory and
@@ -602,10 +636,14 @@ def api_subscribe(workshop_id):
     token. The read is gated on the shared web interval -- the persisted web
     delay in the daemon state file, through ``configured_web_delay`` and
     ``pacing.wait`` -- so it honours the same rate the daemon's worker and the
-    engine keep. **Nothing else this route decides changed**: the same refusal
-    branches, the same status codes, the same response bodies. (What a refusal
-    *records* did change; see the block below.)
+    engine keep. **Nothing else the addition branch decides changed**: the same
+    refusal branches, the same status codes, the same response bodies. (What a
+    refusal *records* did change; see the block below.)
     """
+    if subscribe_engine.queued_direction_for(
+            _db_path, workshop_id) == subscribe_engine.REMOVE:
+        return _api_unsubscribe(workshop_id)
+
     cookies, fallback_token, login = subscribe_engine.resolve_subscribe_credentials(
         _config)
     logging.info(
@@ -741,12 +779,46 @@ def api_subscribed(workshop_id):
 
     ``mark_own_subscribed`` sets ``own_subscribed`` and clears
     ``is_queued_for_subscription`` — there is nothing pending for an item that is
-    now subscribed. The Web UI's subscribe overlay posts this for every row a
-    Cancel or Clear Failed leaves behind, and the direct ``POST
+    now subscribed. This is an **outcome** route: the direct ``POST
     /api/subscribe/<id>`` route records the same fact from Steam's own
-    ``success: 1``.
+    ``success: 1``, and this is the explicit stamp for anything else that has
+    confirmed a subscription. It is deliberately *not* what the overlay's Cancel
+    and Clear Failed call any more — they post ``/api/dequeue/<id>``, which
+    records nothing.
     """
     mark_own_subscribed(_db_path, workshop_id)
+    return jsonify({"ok": True})
+
+
+@app.route('/api/unsubscribed/<int:workshop_id>', methods=['POST'])
+def api_unsubscribed(workshop_id):
+    """Stamp an item as unsubscribed and clear its queue flag.
+
+    The removal counterpart of ``/api/subscribed/<id>``:
+    ``mark_own_unsubscribed`` clears ``own_subscribed`` and
+    ``is_queued_for_subscription`` and leaves the sticky
+    ``own_first_subscribed_at`` alone, so the marker reads ``previously`` rather
+    than losing the evidence of the subscription. The drain's removal records
+    through ``POST /api/subscribe/<id>``, which runs the same write via the
+    engine; this route is the explicit outcome stamp for anything else that has
+    confirmed a removal.
+    """
+    mark_own_unsubscribed(_db_path, workshop_id)
+    return jsonify({"ok": True})
+
+
+@app.route('/api/dequeue/<int:workshop_id>', methods=['POST'])
+def api_dequeue(workshop_id):
+    """Drop one queued row without recording an outcome, in either direction.
+
+    The overlay's Cancel and Clear Failed post this for the rows the drain left
+    behind. It clears only ``is_queued_for_subscription``. The route they used
+    before was ``/api/subscribed``, which claimed a subscription -- and stamped
+    the sticky first-seen time -- for rows that were never attempted, so a
+    cancelled pass marked items subscribed and made them read ``previously`` for
+    good. A cancellation records nothing; only an outcome does.
+    """
+    dequeue_subscription(_db_path, workshop_id)
     return jsonify({"ok": True})
 
 

@@ -654,6 +654,7 @@ def test_web_save_for_scraper_writes_only_the_builder_rows(web_client, tmp_path)
 RENDER_SUBSCRIBED_AT_DRIVER = """
 const fn = (__FN__);
 const subFn = (__SUB_FN__);
+const subCtrlFn = (__SUB_CTRL__);
 let html = '';
 global.document = { getElementById: () => ({ set innerHTML(v) { html = v; } }) };
 global._showTranslated = true;
@@ -666,6 +667,7 @@ global.sizeClass = () => '';
 global.fmtCount = (n) => String(n || 0);
 global._escapeHtml = (s) => String(s == null ? '' : s);
 global.showSubscriptionMarker = subFn;
+global.subscriptionControl = subCtrlFn;
 global._refreshOpenFolderButton = () => {};
 const base = {
   workshop_id: 77, creator_steamid: 'Alice', creator_id: '76561198765432109',
@@ -693,7 +695,9 @@ def test_web_detail_pane_shows_subscribed_at_only_when_set(web_client, tmp_path)
     script = _served_inline_script(client)
     driver = (RENDER_SUBSCRIBED_AT_DRIVER
               .replace("__FN__", _extract_function(script, "renderDetail"))
-              .replace("__SUB_FN__", _extract_function(script, "showSubscriptionMarker")))
+              .replace("__SUB_FN__", _extract_function(script, "showSubscriptionMarker"))
+              .replace("__SUB_CTRL__",
+                       _extract_function(script, "subscriptionControl")))
     out = _run_node(driver, tmp_path)
 
     assert "Subscribed at:" in out["dated"]

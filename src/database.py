@@ -3462,6 +3462,71 @@ def mark_own_subscribed(db_path: str, workshop_id: int, seen_at: int | None = No
         conn.close()
 
 
+def mark_own_unsubscribed(db_path: str, workshop_id: int) -> bool:
+    """Record that the owner is no longer subscribed to ``workshop_id``.
+
+    The mirror of :func:`mark_own_subscribed` for the removal direction:
+    ``own_subscribed`` is cleared and the subscription queue flag is cleared
+    with it, because the entry that queued the removal has been carried out.
+
+    ``own_first_subscribed_at`` is deliberately **left alone**. It is sticky,
+    and a set timestamp beside a cleared subscription is exactly what turns the
+    marker into ``previously`` rather than erasing the only evidence this account
+    was ever subscribed (``src/subscription.py``).
+
+    ``steam_download_seen_at`` is left alone too. That latch belongs to
+    ``src.workshop_folders``: it says Steam had the item on disk, and the
+    subscription walk is its one clearer, when the item is observed to have left
+    the subscription list (see data-model.md). A removal carried out here has
+    not yet been observed by that walk, and the marker already declines the green
+    star because ``own_subscribed`` is clear.
+
+    Returns True when the row existed.
+    """
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT workshop_id FROM workshop_items WHERE workshop_id = ?",
+            (workshop_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        conn.execute(
+            "UPDATE workshop_items SET own_subscribed = 0, "
+            "is_queued_for_subscription = 0 "
+            "WHERE workshop_id = ?",
+            (workshop_id,)
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def dequeue_subscription(db_path: str, workshop_id: int) -> bool:
+    """Clear only the subscription queue flag for ``workshop_id``.
+
+    This is the direction-agnostic dequeue the Web UI's Cancel and Clear Failed
+    use: it changes nothing but the flag. The old route it replaces called
+    ``mark_own_subscribed``, which claimed a subscription -- and stamped the
+    sticky first-seen time -- for rows the drain never attempted, and a
+    cancellation must not record an outcome for either direction.
+
+    Returns True when a queued row was changed.
+    """
+    conn = get_connection(db_path)
+    try:
+        changed = conn.execute(
+            "UPDATE workshop_items SET is_queued_for_subscription = 0 "
+            "WHERE workshop_id = ? AND is_queued_for_subscription = 1",
+            (workshop_id,)
+        ).rowcount
+        conn.commit()
+        return bool(changed)
+    finally:
+        conn.close()
+
+
 def apply_own_subscriptions(db_path: str, appid: int, subscribed_ids,
                             seen_at: int | None = None, complete: bool = True) -> dict:
     """Reconcile one app's ``own_subscribed`` flags against a subscription list.

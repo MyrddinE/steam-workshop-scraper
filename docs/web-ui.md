@@ -156,11 +156,12 @@ An adaptive-timeout poll that keeps a rendered cell's markers in step with the d
 
 **Reading the database rather than hooking each writer.** The poll is the one path that notices a
 subscription change, so every writer of the flag is covered by one refresh: this page's own
-cancel/clear calls to `POST /api/subscribed/<id>`, and the direct
-`POST /api/subscribe/<id>` route (which stamps on Steam `success == 1`). The subscribe drain
-reads the same queue exit to mark the overlay's rows, independently of the grid. Because
-`_listNeedsPoll` only runs when a batch is rendered, `toggleDetailQueue` also starts the poll on the
-transition into `queued`, so a marker clicked into the queue after the search is watched too.
+cancel/clear calls to `POST /api/dequeue/<id>` (and the outcome stamps
+`/api/subscribed`, `/api/unsubscribed`), and the direct `POST /api/subscribe/<id>` route (which
+records on Steam `success == 1`, in either direction). The drain reads the same queue exit to mark
+the overlay's rows, independently of the grid. Because `_listNeedsPoll` only runs when a batch is
+rendered, `toggleDetailQueue` also starts the poll on the transition into `queued` or
+`queued_remove`, so a marker clicked into the queue after the search is watched too.
 
 ### Stopping the poll
 
@@ -275,17 +276,24 @@ not something a person types or remembers. The parity position is stated in [tui
 
 `renderDetail` draws the owner's subscription marker immediately before the title, and the grid
 cell draws the same marker at its top-right. The subscription-queue overlay draws it on each row
-too, from the same `/api/queued` payload. It has five states, resolved by
+too, from the same `/api/queued` payload. It has six states, resolved by
 `subscription.subscription_state(item)` and rendered from the one table in `src/subscription.py`
 (which the TUI reads too — see [tui.md](tui.md)):
 
 | State | Glyph | Colour | Meaning | Click |
 |---|---|---|---|---|
+| `queued_remove` | ☆ | red | the owner is subscribed and queued for removal | un-queues |
 | `downloaded` | ★ | deep green | the owner is subscribed and Steam has the item on disk | nothing |
-| `subscribed` | ★ | solid yellow | the owner is subscribed now | nothing |
+| `subscribed` | ★ | solid yellow | the owner is subscribed now | queues a removal |
 | `queued` | ☆ | green | queued to subscribe | un-queues |
 | `previously` | ☆ | yellow | we have seen the owner subscribed, and they are not now | queues |
 | `never` | ○ | gray | never seen subscribed | queues |
+
+The queue flag carries no direction of its own: `queued_remove` is **derived**, because a queued
+row that is subscribed is a removal and a queued row that is not is an addition. That keeps every
+existing queued row meaning what it always meant and needs no schema change. `queued_remove`
+outranks `downloaded` and `subscribed`, because the pending removal must stay visible over the
+subscription it is about.
 
 `downloaded` requires **both** `own_subscribed` and the local `steam_download_seen_at` latch, so a timestamp
 left behind by a cleared subscription cannot claim the green star. The latch is written only by
@@ -298,25 +306,46 @@ are gone, and the pane's `Queue` / `Unqueue` button pair is replaced by the mark
 marker's glyph, colour, CSS class, label, tooltip and clickability all arrive on the payload,
 computed by the server from the shared table, so the page holds no copy of the state vocabulary.
 
-Clicking the marker calls `toggleDetailQueue(wid)`, except for `subscribed`, which sends nothing —
-the only action available there would be an unsubscribe, and an accidental unsubscribe is not
-wanted. `toggleDetailQueue` POSTs the existing `/api/toggle_subscription_queue/<id>` route, which flips the
-database flag and answers only `{ok: true}`. Since the route does not report which way the flag
-moved, the client reads the item back through the read-only `/api/item/<id>` route and re-renders
-the pane and the matching cell's marker (`_applySub`) from that payload — the same path the `s`
-shortcut takes. A read-back rather than a locally flipped guess is deliberate: the `s` shortcut and
-the subscribe drain's `/api/subscribed` calls change the same flag behind the pane's back, so a
-guess could show the wrong state. Rendering from the item payload is also what lets the 3-second
-translation poll re-render the pane without reverting the toggle. A failed request alerts and leaves
-the pane alone.
+**The pane's one subscription control is worded by direction too.** `subscriptionControl(item)`
+renders a single button (`#btn-subscription`) whose label and action both come from the item's derived
+direction, carried on the payload as `subscription_action` / `subscription_action_label` by the same
+shared table (`SUBSCRIPTION_ACTIONS` in `src/subscription.py`) — so no state can show a **Subscribe**
+button whose press removes:
 
-The click is not the only writer. A subscribe can land behind a rendered cell through
-`POST /api/subscribed/<id>` (this page's cancel/clear calls) or through the
-direct `POST /api/subscribe/<id>` route, and none of those touches the DOM. The item-update registry
-is what re-reads such a cell: `_startListPoll` keeps re-reading any row whose subscription marker is
-still `queued` at its fastest, and `_startItemUpdatePoll` re-reads every displayed row on its 3-second
-cadence whether or not anything is pending, so the marker moves on its own without a new search
-([One item-update path](#one-item-update-path)).
+* `never`, `previously`, `queued` → **Subscribe**, pressing `doSubscribe` (the direct subscribe);
+* `subscribed`, `downloaded` → **Unsubscribe**, pressing `toggleDetailQueue`, which only *queues* the
+  removal. The button never unsubscribes directly: the owner's removals are deliberate and
+  recoverable, and the queue is where they are applied;
+* `queued_remove` → **Cancel Unsubscribe**, pressing `toggleDetailQueue`, which cancels the queued
+  removal.
+
+That is why a subscribed item's press costs no Steam request — it queues, and the marker shows the
+pending red star until the queue is run. A payload that predates the change falls back to
+**Subscribe**, which is the addition direction a queued row meant before the feature.
+
+Clicking the marker calls `toggleDetailQueue(wid)`. `subscribed` used to send nothing — "the only
+action available there would be an unsubscribe, and an accidental unsubscribe is not wanted" — but
+that inertness was deliberately reversed: its click now only queues a removal, and the queue
+cancels, so an accidental click is recoverable. The new `queued_remove` state is clickable for the
+same reason: a second click cancels the queued removal. `downloaded` stays inert — its action is
+the separate open-folder button and key. `toggleDetailQueue` POSTs the existing
+`/api/toggle_subscription_queue/<id>` route, which flips the database flag and answers only
+`{ok: true}`. Since the route does not report which way the flag moved, the client reads the item
+back through the read-only `/api/item/<id>` route and re-renders the pane and the matching cell's
+marker (`_applySub`) from that payload — the same path the `s` shortcut takes. A read-back rather
+than a locally flipped guess is deliberate: the `s` shortcut and the drain's own recording change
+the same flag behind the pane's back, so a guess could show the wrong state. Rendering from the
+item payload is also what lets the 3-second translation poll re-render the pane without reverting
+the toggle. A failed request alerts and leaves the pane alone.
+
+The click is not the only writer. A subscription or a removal can land behind a rendered cell through
+`POST /api/subscribed/<id>` or `POST /api/unsubscribed/<id>` (the outcome stamps), through this page's
+cancel/clear `POST /api/dequeue/<id>` calls, or through the direct `POST /api/subscribe/<id>` route,
+and none of those touches the DOM. The item-update registry is what re-reads such a cell:
+`_startListPoll` keeps re-reading any row whose subscription marker is still `queued` or
+`queued_remove` at its fastest, and `_startItemUpdatePoll` re-reads every displayed row on its
+3-second cadence whether or not anything is pending, so the marker moves on its own without a new
+search ([One item-update path](#one-item-update-path)).
 
 A cell already at `subscribed` is re-read too, for the same reason: the folder scan later stamps
 `steam_download_seen_at` behind the page's back, and the cell must move to `downloaded` without the user
@@ -481,10 +510,11 @@ The header toolbar's **Analysis** button (`#btn-analysis`, `templates/index.html
 
 ### Browser-free subscribe
 
-The Web UI subscribes through the server. `doSubscribe` POSTs `/api/subscribe/<id>`, and the queue
-drain (`_startAutoSubscribe`) calls the same route once per queued item. There is no userscript, no
-Tampermonkey bridge and no Steam tab: the page holds no session material, and the route builds its
-request from the shared helpers in `src/subscribe_engine.py`. The userscript, its
+The Web UI subscribes and unsubscribes through the server. `doSubscribe` POSTs
+`/api/subscribe/<id>`, and the queue drain (`_startAutoSubscribe`) calls the same route once per
+queued item; the route derives the direction from the row, so the same call adds or removes. There is
+no userscript, no Tampermonkey bridge and no Steam tab: the page holds no session material, and the
+route builds its request from the shared helpers in `src/subscribe_engine.py`. The userscript, its
 `autosubscribe=true` tab flow, the `/api/sessionid` token push, the `/userscript/<file>` install
 endpoint and the `userscript-version` meta tag were removed once the route had been proven in use.
 The removal is recorded in
@@ -493,13 +523,21 @@ The removal is recorded in
 ### Subscribe Flow
 
 1. User clicks Subscribe on the web UI → `doSubscribe` POSTs `/api/subscribe/<workshop_id>`
-2. Server reads `steamLoginSecure` (from config `session.login_secure`, which can be a YAML list joined with `%7C%7C`) and the item page it fetches on the shared web interval; the CSRF token is that page's own `g_sessionID`, with a `sessionid` in the cookie set and config `session.csrf_token` as fallbacks
-3. Server POSTs to `steamcommunity.com/sharedfiles/subscribe` with browser-like headers (User-Agent, Origin, Referer with workshop URL) and cookies
-4. Steam's answer is mapped to user-facing messages: a refusal (`success: 2`/`15`, or HTTP 401) is a stale CSRF token when the same attempt's page read was authenticated — the login is not reported as expired — and a session problem only when that read was anonymous
-5. On `success: 1` the route stamps `own_subscribed` and clears the queue flag; the page then re-reads `/api/item/<id>` and re-renders the pane and the matching cell's marker from that payload, the same read-back a queue toggle uses
+2. Server reads the row's derived direction: queued + subscribed is a removal (it runs through `subscribe_engine.subscribe_item`, pre-read guard included), and every other queued row is an addition
+3. Server reads `steamLoginSecure` (from config `session.login_secure`, which can be a YAML list joined with `%7C%7C`) and the item page it fetches on the shared web interval; the CSRF token is that page's own `g_sessionID`, with a `sessionid` in the cookie set and config `session.csrf_token` as fallbacks
+4. Server POSTs to `steamcommunity.com/sharedfiles/subscribe`, or to `steamcommunity.com/sharedfiles/unsubscribe` for a removal (the same form minus `include_dependencies`, verified from Steam's own page script), with browser-like headers (User-Agent, Origin, Referer with workshop URL) and cookies
+5. Steam's answer is mapped to user-facing messages: a refusal (`success: 2`/`15`, or HTTP 401) is a stale CSRF token when the same attempt's page read was authenticated — the login is not reported as expired — and a session problem only when that read was anonymous. For a removal, Steam publishes no failure codes, so a non-`1` answer is reported with the raw value and leaves the item queued
+6. On `success: 1` the route records the outcome — `own_subscribed` set and the queue flag cleared for an addition, `own_subscribed` and the queue flag cleared with the sticky stamp left for a removal; the page then re-reads `/api/item/<id>` and re-renders the pane and the matching cell's marker from that payload, the same read-back a queue toggle uses
 
 The button sends no tab and needs no userscript; a refusal shows the route's own message rather than
 falling back to a tab.
+
+**The overlay's rows name the direction.** `_startAutoSubscribe` reads `subscription_state` from each
+`/api/queued` row and renders `subscribing…` or `unsubscribing…` in a `sub-queue-verb` span, with the
+matching `unsubscribed` / `subscribed` / `failed` written when the call settles (the same word the
+poll writes when a row clears behind the loop's back). The row's marker is the shared one, so a queued
+removal draws the red empty star. Cancel and Clear Failed post `/api/dequeue/<id>`, which clears the
+flag without recording an outcome in either direction.
 
 **Throttling.** Steam answers an over-budget request with **HTTP 200** and its ordinary page shell
 carrying "too many requests", so the subscribe button is simply absent. The engine's page read
@@ -579,9 +617,17 @@ Saves the current enrichment filters to `app_discovery` for the configured AppID
 
 ### `/api/subscribe/<id>` — POST
 
-Performs the subscribe against Steam directly, with no browser tab, and returns Steam's JSON body unchanged — the TUI reads `success` and `message` from it. The request shares the scraper's session and presents the project's own Firefox User-Agent. The cookies come from one `web_scraper._build_workshop_cookies` read: the signed-in Firefox profile's whole `steamcommunity.com` set when `session.read_firefox_cookies` is on, otherwise the configured `sessionid`/`login_secure` pair. **The CSRF token does not come from that read**, because `sessionid` is a session cookie Firefox keeps in memory and never writes to `cookies.sqlite`; it comes from the item page this route reads for the attempt (`g_sessionID`, the token belonging to the session that served that page), put back into the cookie jar so the form field and the cookie agree. A `sessionid` already in the set and `session.csrf_token` are fallbacks only for a page that carries no token; the in-memory token the old userscript pushed through `/api/sessionid` went with the bridge. That read is a page load, so it is gated on the shared web interval — the persisted `web_delay` state section read through `configured_web_delay` and `pacing.wait` — exactly like the engine's reads.
+Performs the subscribe against Steam directly, with no browser tab, and returns Steam's JSON body unchanged — the TUI reads `success` and `message` from it. **The direction is derived from the row**, exactly as the engine derives it (`queued_direction`): a queued row that is subscribed is a **removal**, and every other queued row is an addition. The addition branch below is unchanged. A removal is delegated whole to `subscribe_engine.subscribe_item`, which owns the pre-read guard (it posts to `/sharedfiles/unsubscribe` only when the page still shows the item subscribed, and a page that shows it unsubscribed settles as `already_unsubscribed` with no request), the throttle and session-health handling, and the `mark_own_unsubscribed` record; the route answers `{"success": 1, "status": ...}` when the removal settled and `{"success": -1, "status", "message", "stays_queued"}` otherwise, so the drain's one `success` check keeps working. The request shares the scraper's session and presents the project's own Firefox User-Agent. The cookies come from one `web_scraper._build_workshop_cookies` read: the signed-in Firefox profile's whole `steamcommunity.com` set when `session.read_firefox_cookies` is on, otherwise the configured `sessionid`/`login_secure` pair. **The CSRF token does not come from that read**, because `sessionid` is a session cookie Firefox keeps in memory and never writes to `cookies.sqlite`; it comes from the item page this route reads for the attempt (`g_sessionID`, the token belonging to the session that served that page), put back into the cookie jar so the form field and the cookie agree. A `sessionid` already in the set and `session.csrf_token` are fallbacks only for a page that carries no token; the in-memory token the old userscript pushed through `/api/sessionid` went with the bridge. That read is a page load, so it is gated on the shared web interval — the persisted `web_delay` state section read through `configured_web_delay` and `pacing.wait` — exactly like the engine's reads.
 
-It refuses before spending a request when the set has no `steamLoginSecure` (**400**, with a message naming the remedy: sign in to Steam in the browser the daemon reads cookies from, or configure `session.login_secure`), and when `session_health.evaluate_login` says the credential's own token has expired (**400**, the reason recorded through `session_health.record_rejected` so the [session warning](#the-session-warning) shows it). A Steam `success` of `2` or `15`, or an **HTTP 401**, is a refusal of the CSRF token, and what it means depends on the page read the same attempt made: beside an **authenticated** page read the credential is proven good, so **no session problem is recorded** and the refusal is logged as a token refusal (recording one is what used to tell the owner to sign in again while the login was working); beside an **anonymous** page read it is recorded as a session problem the same way as before. The response body is passed through untouched either way. A `success` of `1` records the confirmation with `mark_own_subscribed`, setting `own_subscribed` and clearing `is_queued_for_subscription` exactly as `/api/subscribed/<id>` does, and clears any recorded session problem. A missing item still answers **404** `Item not found.`, an item with no AppID still **400** `Item has no AppID.`, and a transport failure still **502**. Each of those refusals logs the `workshop_id` and the reason, and the POST line carries a SHA-256 **fingerprint** of the token — never the token itself.
+It refuses before spending a request when the set has no `steamLoginSecure` (**400**, with a message naming the remedy: sign in to Steam in the browser the daemon reads cookies from, or configure `session.login_secure`), and when `session_health.evaluate_login` says the credential's own token has expired (**400**, the reason recorded through `session_health.record_rejected` so the [session warning](#the-session-warning) shows it). A Steam `success` of `2` or `15`, or an **HTTP 401**, is a refusal of the CSRF token, and what it means depends on the page read the same attempt made: beside an **authenticated** page read the credential is proven good, so **no session problem is recorded** and the refusal is logged as a token refusal (recording one is what used to tell the owner to sign in again while the login was working); beside an **anonymous** page read it is recorded as a session problem the same way as before. The response body is passed through untouched either way. A `success` of `1` records the confirmation with `mark_own_subscribed`, setting `own_subscribed` and clearing `is_queued_for_subscription`, and clears any recorded session problem. A missing item still answers **404** `Item not found.`, an item with no AppID still **400** `Item has no AppID.`, and a transport failure still **502**. Each of those refusals logs the `workshop_id` and the reason, and the POST line carries a SHA-256 **fingerprint** of the token — never the token itself.
+
+### `/api/subscribed/<id>` and `/api/unsubscribed/<id>` — POST
+
+The two **outcome stamps**. `mark_own_subscribed` sets `own_subscribed`, stamps the sticky `own_first_subscribed_at` if it is still NULL and clears `is_queued_for_subscription`; `mark_own_unsubscribed` is its removal mirror — it clears `own_subscribed` and the queue flag and deliberately leaves the sticky first-seen stamp, so the marker reads `previously` rather than losing the only evidence of the subscription. The direct `/api/subscribe/<id>` route records the same facts from Steam's own answer (through the engine), so these routes are the explicit stamp for anything else that has confirmed an outcome. They are **not** what Cancel and Clear Failed call — see `/api/dequeue/<id>`.
+
+### `/api/dequeue/<id>` — POST
+
+Drops one queued row **without recording an outcome**, in either direction: `dequeue_subscription` clears only `is_queued_for_subscription` and leaves `own_subscribed`, the sticky `own_first_subscribed_at` and the download latch untouched. It is what the overlay's Cancel and Clear Failed post for the rows the drain leaves behind. The route they used before was `/api/subscribed`, which claimed a subscription — and stamped the sticky first-seen time — for rows that were never attempted, so a cancelled pass marked items subscribed and made them read `previously` for good. A cancellation records nothing; only an outcome does.
 
 ### `/api/toggle_subscription_queue/<id>` — POST
 
@@ -625,8 +671,10 @@ Windows only. Opens the item's downloaded workshop folder in Explorer **on the h
 install endpoint are gone with the userscript. `GET /api/subscribe_failures` and
 `GET /api/subscribe_throttle` **stay**, because the browser-free drain reads them before and during a
 pass; with their only writer removed they report the resting state (an empty list, and
-`throttled_at: 0`). `POST /api/subscribed/<id>` also stays: the page's own Cancel and Clear Failed
-buttons post it to dequeue the rows they leave behind.
+`throttled_at: 0`). The outcome stamps `POST /api/subscribed/<id>` and
+`POST /api/unsubscribed/<id>` also stay, and `POST /api/dequeue/<id>` is the page's own Cancel and
+Clear Failed call — it clears the queue flag without recording an outcome, where the old
+`/api/subscribed` call wrongly claimed a subscription.
 
 ### `/api/session` — GET
 

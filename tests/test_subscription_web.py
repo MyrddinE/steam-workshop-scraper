@@ -1,15 +1,19 @@
-"""The subscription marker's web side: the payload, the endpoint, and the click.
+"""The subscription marker's web side: the payload, the endpoints, and the click.
 
-Three things are pinned here, all of which the old two-indicator shape got
+Four things are pinned here, all of which the old two-indicator shape got
 wrong:
 
 * the read endpoints carry the marker's state and its whole appearance, computed
   from `src/subscription.py`, so the page owns no copy of the glyph/colour table;
-* ``POST /api/subscribed`` stamps the subscription as well as clearing the queue
-  flag -- it is the confirmation the Web UI's subscribe overlay posts for the
-  rows it leaves behind, and it used to throw the subscription fact away;
-* the marker's click routes the three actionable states through the existing
-  toggle route and sends nothing for ``subscribed``.
+* ``POST /api/subscribed`` and ``POST /api/unsubscribed`` are the outcome stamps:
+  each writes its own state and clears the queue flag, and the removal stamp
+  leaves the sticky first-seen time so the marker reads ``previously``;
+* ``POST /api/dequeue`` is the direction-agnostic dequeue Cancel and Clear Failed
+  post -- it clears the flag and records no outcome, where the old
+  ``/api/subscribed`` call claimed a subscription for a row never attempted;
+* the marker's click routes every actionable state through the existing toggle
+  route and sends nothing for ``downloaded`` (the owner reversed ``subscribed``'s
+  old inertness, because its click only queues a removal).
 
 The click and the template are exercised by running the served JavaScript under
 node, so the assertions are about what the page actually builds rather than what
@@ -65,12 +69,40 @@ def test_the_item_payload_carries_the_whole_marker(web_client):
     assert item["subscription_label"] == subscription.marker_spec(subscription.NEVER)[3]
     assert item["subscription_tooltip"] == subscription.tooltip(subscription.NEVER)
     assert item["subscription_clickable"] is True
+    assert item["subscription_action"] == "subscribe"
+    assert item["subscription_action_label"] == "Subscribe"
+
+
+def test_the_payload_words_a_queued_removal_as_an_unsubscribe(web_client):
+    """The pane's control must not say Subscribe when its press removes."""
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 8, "title": "T", "fetch_status": 200,
+                                    "own_subscribed": 1, "is_queued_for_subscription": 1})
+
+    item = client.get('/api/item/8').get_json()
+
+    assert item["subscription_state"] == subscription.QUEUED_REMOVE
+    assert item["subscription_action"] == "cancel_remove"
+    assert item["subscription_action_label"] == "Cancel Unsubscribe"
+
+
+def test_the_payload_words_a_plain_subscription_as_an_unsubscribe(web_client):
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 8, "title": "T", "fetch_status": 200,
+                                    "own_subscribed": 1, "own_first_subscribed_at": 1000})
+
+    item = client.get('/api/item/8').get_json()
+
+    assert item["subscription_state"] == subscription.SUBSCRIBED
+    assert item["subscription_action"] == "queue_remove"
+    assert item["subscription_action_label"] == "Unsubscribe"
 
 
 @pytest.mark.parametrize("columns,state", [
     ({"own_subscribed": 1, "steam_download_seen_at": 1000}, subscription.DOWNLOADED),
     ({"own_subscribed": 1, "own_first_subscribed_at": 1000}, subscription.SUBSCRIBED),
     ({"is_queued_for_subscription": 1}, subscription.QUEUED),
+    ({"own_subscribed": 1, "is_queued_for_subscription": 1}, subscription.QUEUED_REMOVE),
     ({"own_first_subscribed_at": 1000}, subscription.PREVIOUSLY),
     ({}, subscription.NEVER),
 ])
@@ -99,7 +131,9 @@ def test_the_search_payload_carries_the_marker_for_every_cell(web_client):
 
     by_id = {r["workshop_id"]: r for r in rows}
     assert by_id[1]["subscription_state"] == subscription.SUBSCRIBED
-    assert by_id[1]["subscription_clickable"] is False
+    # The owner reversed the old inertness: a subscribed marker now queues a
+    # removal, so it is clickable.
+    assert by_id[1]["subscription_clickable"] is True
     assert by_id[2]["subscription_state"] == subscription.QUEUED
     # own_first_subscribed_at travels with the row, or a cell toggled away from
     # `queued` could not tell `never` from `previously`.
@@ -132,7 +166,12 @@ def test_the_items_payload_carries_the_downloaded_latch(web_client):
 
 
 def test_the_queued_payload_carries_the_whole_marker(web_client):
-    """The queue overlay is a marker surface too, so /api/queued derives it."""
+    """The queue overlay is a marker surface too, so /api/queued derives it.
+
+    A queued + subscribed row is the derived removal direction, and it outranks
+    the download latch: the pending removal must stay visible over the green
+    star, so the overlay draws the empty red outline rather than `downloaded`.
+    """
     client, db_path = web_client
     insert_or_update_item(db_path, {"workshop_id": 4, "title": "D", "fetch_status": 200,
                                     "is_queued_for_subscription": 1,
@@ -140,10 +179,10 @@ def test_the_queued_payload_carries_the_whole_marker(web_client):
 
     rows = client.get('/api/queued').get_json()
 
-    assert rows[0]["subscription_state"] == subscription.DOWNLOADED
-    assert rows[0]["subscription_glyph"] == subscription.glyph(subscription.DOWNLOADED)
-    assert rows[0]["subscription_colour"] == subscription.colour(subscription.DOWNLOADED)
-    assert rows[0]["subscription_tooltip"] == subscription.tooltip(subscription.DOWNLOADED)
+    assert rows[0]["subscription_state"] == subscription.QUEUED_REMOVE
+    assert rows[0]["subscription_glyph"] == subscription.glyph(subscription.QUEUED_REMOVE)
+    assert rows[0]["subscription_colour"] == subscription.colour(subscription.QUEUED_REMOVE)
+    assert rows[0]["subscription_tooltip"] == subscription.tooltip(subscription.QUEUED_REMOVE)
 
 
 # --- opening a downloaded item's folder -------------------------------------
@@ -264,7 +303,7 @@ def test_the_open_folder_control_is_rendered_only_on_windows(web_client, monkeyp
 # --- the stamp --------------------------------------------------------------
 
 def test_api_subscribed_stamps_the_subscription_and_clears_the_queue(web_client):
-    """The overlay's dequeue call is also a confirmed-subscription stamp."""
+    """The outcome stamp for a confirmed add: mark it and clear the queue flag."""
     client, db_path = web_client
     insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "fetch_status": 200,
                                     "is_queued_for_subscription": 1})
@@ -295,6 +334,64 @@ def test_api_subscribed_makes_the_marker_subscribed(web_client):
     client.post('/api/subscribed/9')
 
     assert client.get('/api/item/9').get_json()["subscription_state"] == subscription.SUBSCRIBED
+
+
+def test_api_unsubscribed_is_the_removal_outcome_stamp(web_client):
+    """The counterpart of /api/subscribed: clear the subscription, keep history."""
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "fetch_status": 200,
+                                    "own_subscribed": 1, "is_queued_for_subscription": 1,
+                                    "own_first_subscribed_at": 1000})
+
+    assert client.post('/api/unsubscribed/9').get_json() == {"ok": True}
+
+    row = _row(db_path, 9)
+    assert row["own_subscribed"] == 0
+    assert row["is_queued_for_subscription"] == 0
+    assert row["own_first_subscribed_at"] == 1000, "the sticky stamp is the history"
+    assert client.get('/api/item/9').get_json()["subscription_state"] \
+        == subscription.PREVIOUSLY
+
+
+def test_api_unsubscribed_makes_the_marker_previously(web_client):
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "fetch_status": 200,
+                                    "own_subscribed": 1, "own_first_subscribed_at": 1000})
+
+    client.post('/api/unsubscribed/9')
+
+    assert client.get('/api/item/9').get_json()["subscription_state"] \
+        == subscription.PREVIOUSLY
+
+
+def test_api_dequeue_clears_only_the_queue_flag(web_client):
+    """Cancel and Clear Failed must not stamp a subscription or a removal."""
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "fetch_status": 200,
+                                    "is_queued_for_subscription": 1})
+
+    assert client.post('/api/dequeue/9').get_json() == {"ok": True}
+
+    row = _row(db_path, 9)
+    assert row["is_queued_for_subscription"] == 0
+    assert row["own_subscribed"] == 0, "a cancelled add is not a subscription"
+    assert row["own_first_subscribed_at"] is None, \
+        "the sticky stamp must not be written for a row the drain never attempted"
+
+
+def test_api_dequeue_does_not_stamp_a_cancelled_removal_either(web_client):
+    """The removal direction is dequeued without claiming an unsubscribe."""
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "fetch_status": 200,
+                                    "own_subscribed": 1, "is_queued_for_subscription": 1,
+                                    "own_first_subscribed_at": 1000})
+
+    client.post('/api/dequeue/9')
+
+    row = _row(db_path, 9)
+    assert row["is_queued_for_subscription"] == 0
+    assert row["own_subscribed"] == 1, "a cancelled removal is still subscribed"
+    assert row["own_first_subscribed_at"] == 1000
 
 
 def test_toggle_subscription_queue_still_only_flips_the_queue_flag(web_client):
@@ -356,29 +453,35 @@ function el(state, clickable, wid, text) {
 }
 const event = {stopPropagation: () => { stopped += 1; }};
 
-// The four states, clicked.
-fn(event, el('subscribed', '0', 1, '\\u2605'));
-fn(event, el('queued', '1', 2, '\\u2606'));
-fn(event, el('previously', '1', 3, '\\u2606'));
-fn(event, el('never', '1', 4, '\\u25cb'));
+// Every state, clicked. `downloaded` is the one inert state.
+fn(event, el('downloaded', '0', 0, '\\u2605'));
+fn(event, el('subscribed', '1', 1, '\\u2605'));
+fn(event, el('queued_remove', '1', 2, '\\u2606'));
+fn(event, el('queued', '1', 3, '\\u2606'));
+fn(event, el('previously', '1', 4, '\\u2606'));
+fn(event, el('never', '1', 5, '\\u25cb'));
 console.log(JSON.stringify({calls: calls, stopped: stopped}));
 """
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
-def test_clicking_the_marker_routes_the_three_actionable_states(web_client, tmp_path):
-    """subscribed sends nothing; the other three toggle; none of them bubbles.
+def test_clicking_the_marker_routes_every_actionable_state(web_client, tmp_path):
+    """downloaded sends nothing; every other state toggles the queue; none bubbles.
 
-    The cell underneath opens the detail pane, so a marker click that did not
-    stop propagating would toggle the queue *and* drag the pane to the item.
+    The owner reversed the old rule that `subscribed` was inert: a click there
+    only queues a removal, and the queue cancels, so it is recoverable. The new
+    `queued_remove` state toggles too, which is how a queued removal is
+    cancelled. The cell underneath opens the detail pane, so a marker click that
+    did not stop propagating would toggle the queue *and* drag the pane to the
+    item.
     """
     client, _ = web_client
     fn = _extract_function(_served_inline_script(client), "onSubMarkerClick")
     result = _run_node(SUB_CLICK_DRIVER.replace("__FN__", fn), tmp_path)
 
-    assert result["calls"] == [2, 3, 4], \
-        "only queued, previously and never act; subscribed must send nothing"
-    assert result["stopped"] == 4, \
+    assert result["calls"] == [1, 2, 3, 4, 5], \
+        "every state but downloaded must toggle; downloaded must send nothing"
+    assert result["stopped"] == 6, \
         "every marker click must stop propagation, including the inert one"
 
 
@@ -400,6 +503,7 @@ const item = (over) => Object.assign(
 console.log(JSON.stringify({
   stage: listNeedsPoll([item({web_scrape_priority: 5})]),
   subscription: listNeedsPoll([item({subscription_state: 'queued'})]),
+  removal: listNeedsPoll([item({subscription_state: 'queued_remove'})]),
   subscribed: listNeedsPoll([item({subscription_state: 'subscribed'})]),
   never: listNeedsPoll([item({subscription_state: 'never'})]),
 }));
@@ -410,9 +514,10 @@ console.log(JSON.stringify({
 def test_a_row_queued_only_for_subscription_is_polled(web_client, tmp_path):
     """A row with no stage spinner still has a marker that can move.
 
-    The subscription marker changes the moment a subscribe lands, so the poll
-    must be started for a row whose only outstanding state is the queue entry --
-    otherwise the cell is never re-read and keeps the pending marker.
+    The subscription marker changes the moment a subscribe -- or a removal --
+    lands, so the poll must be started for a row whose only outstanding state is
+    the queue entry, in either direction. Otherwise the cell is never re-read and
+    keeps the pending marker.
     """
     client, _ = web_client
     script = _served_inline_script(client)
@@ -424,6 +529,8 @@ def test_a_row_queued_only_for_subscription_is_polled(web_client, tmp_path):
     assert result["stage"] is True, "a stage spinner still starts the poll"
     assert result["subscription"] is True, \
         "a row queued only for subscription must start the poll too"
+    assert result["removal"] is True, \
+        "a row queued for removal must be watched the same way"
     assert result["subscribed"] is False, "nothing to re-read once subscribed"
     assert result["never"] is False, "nothing to re-read when settled"
 
@@ -452,6 +559,7 @@ const cells = [
   cell(11, ['grid-cell', 'has-spinner'], null),   // a stage marker
   cell(22, ['grid-cell'], 'queued'),             // queued only for subscription
   cell(33, ['grid-cell'], 'subscribed'),          // settled
+  cell(44, ['grid-cell'], 'queued_remove'),       // queued for removal
 ];
 // The selectors the poll uses: '.grid-cell[data-wid]' and the old
 // '.grid-cell.has-spinner[data-wid]'. Emulated so the driver fails on the id
@@ -484,10 +592,10 @@ def test_the_poll_re_reads_a_row_queued_only_for_subscription(web_client, tmp_pa
     """The poll's id set must not be limited to rows with a stage spinner.
 
     Driving one tick shows the ids the page actually posts to /api/items: the
-    spinner row and the queued row, and not the settled one. Refreshing the
-    cell here rather than at each writer is what stops one write path -- the
-    page's own cancel/clear handlers, the
-    direct /api/subscribe route -- being able to bypass the refresh.
+    spinner row and both queued directions, and not the settled one. Refreshing
+    the cell here rather than at each writer is what stops one write path -- the
+    page's own cancel/clear handlers, the direct /api/subscribe route -- being
+    able to bypass the refresh.
     """
     client, _ = web_client
     script = _served_inline_script(client)
@@ -495,8 +603,8 @@ def test_the_poll_re_reads_a_row_queued_only_for_subscription(web_client, tmp_pa
                                        _extract_function(script, "_startListPoll"))
     result = _run_node(driver, tmp_path)
 
-    assert result["fetched"] and sorted(result["fetched"]) == [11, 22], \
-        "the poll must re-read the spinner row and the queued row"
+    assert result["fetched"] and sorted(result["fetched"]) == [11, 22, 44], \
+        "the poll must re-read the spinner row and both queued directions"
 
 
 TOGGLE_STARTS_POLL_DRIVER = """
@@ -506,7 +614,8 @@ const _applySub = () => {};
 global.dispatchItemUpdate = () => {};
 let started = 0;
 var _startListPoll = () => { started += 1; };
-let queued = 0;
+const states = ['queued', 'queued_remove', 'never'];
+let step = 0;
 global._currentDetail = {workshop_id: 77};
 global.renderDetail = () => {};
 global.alert = () => {};
@@ -516,10 +625,10 @@ global.fetch = async (url) => {
     return {ok: true, status: 200, statusText: 'OK'};
   }
   if (url.indexOf('/api/item/') === 0) {
-    queued = queued ? 0 : 1;
+    const state = states[Math.min(step, states.length - 1)];
+    step += 1;
     return {ok: true, status: 200, statusText: 'OK',
-            json: async () => ({workshop_id: 77,
-                                subscription_state: queued ? 'queued' : 'never'})};
+            json: async () => ({workshop_id: 77, subscription_state: state})};
   }
   throw new Error('unexpected url ' + url);
 };
@@ -528,19 +637,23 @@ const fn = (__FN__);
   await fn(77);
   const afterQueue = started;
   await fn(77);
-  const afterUnqueue = started;
-  console.log(JSON.stringify({afterQueue: afterQueue, afterUnqueue: afterUnqueue}));
+  const afterRemoval = started;
+  await fn(77);
+  const afterSettled = started;
+  console.log(JSON.stringify({afterQueue: afterQueue, afterRemoval: afterRemoval,
+                              afterSettled: afterSettled}));
 })();
 """
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
 def test_queueing_a_row_starts_the_poll(web_client, tmp_path):
-    """A row queued after the search rendered must be watched too.
+    """A row queued after the search rendered must be watched too, both ways.
 
     _listNeedsPoll only runs when a batch is rendered, so a marker clicked into
-    `queued` afterwards would otherwise never be re-read and the subscribe
-    landing would leave the stale marker the poll exists to clear.
+    `queued` (or into the removal direction) afterwards would otherwise never be
+    re-read and the outcome landing would leave the stale marker the poll exists
+    to clear. A settled read must not start it again.
     """
     client, _ = web_client
     script = _served_inline_script(client)
@@ -549,7 +662,9 @@ def test_queueing_a_row_starts_the_poll(web_client, tmp_path):
     result = _run_node(driver, tmp_path)
 
     assert result["afterQueue"] == 1, "queueing a marker must start the list poll"
-    assert result["afterUnqueue"] == 1, "un-queueing must not start it again"
+    assert result["afterRemoval"] == 2, \
+        "queueing a removal must start the poll as well"
+    assert result["afterSettled"] == 2, "a settled read must not start it again"
 
 
 # --- the template's own source ----------------------------------------------
@@ -579,9 +694,73 @@ def test_the_marker_is_inside_the_cell_that_opens_the_pane():
     assert "div.onclick = () => showDetail" in html
 
 
-def test_the_old_queue_buttons_are_gone_from_the_pane():
+def test_the_pane_has_one_direction_aware_control_and_no_queue_button_pair():
+    """The old Queue/Unqueue pair is gone; the marker is still the indicator.
+
+    The pane's one control is rendered by `subscriptionControl`, which takes its
+    word and its handler from the item's derived direction on the payload, so it
+    can say Unsubscribe for a subscribed item without a Queue/Unqueue pair
+    reappearing.
+    """
     html = TEMPLATE.read_text(encoding="utf-8")
-    assert "toggleDetailQueue(${item.workshop_id})" not in html
+    assert ">Queue</button>" not in html
     assert ">Unqueue</button>" not in html
-    # The marker helper is what the pane calls instead.
+    assert "subscriptionControl(item)" in html
+    assert "subscription_action_label" in html
+    # The marker helper is what the pane calls for the indicator.
     assert "showSubscriptionMarker(item)" in html
+
+
+PANE_CONTROL_DRIVER = """
+const _escapeHtml = (s) => String(s);
+const fn = (__FN__);
+const never = fn({workshop_id: 1, subscription_action: 'subscribe',
+                  subscription_action_label: 'Subscribe'});
+const subscribed = fn({workshop_id: 2, subscription_action: 'queue_remove',
+                       subscription_action_label: 'Unsubscribe'});
+const removal = fn({workshop_id: 3, subscription_action: 'cancel_remove',
+                    subscription_action_label: 'Cancel Unsubscribe'});
+// A payload without the new fields (an older block) must fall back safely.
+const legacy = fn({workshop_id: 4});
+console.log(JSON.stringify(
+  {never: never, subscribed: subscribed, removal: removal, legacy: legacy}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_the_pane_control_words_and_wires_the_derived_direction(web_client, tmp_path):
+    """Each state's control says what its press is, and calls the right route.
+
+    An unsubscribed item's press subscribes directly; a subscribed item's press
+    queues its removal; a queued removal's press cancels it. The label comes
+    from the shared table on the payload, never from a literal in the page.
+    """
+    client, _ = web_client
+    fn = _extract_function(_served_inline_script(client), "subscriptionControl")
+    out = _run_node(PANE_CONTROL_DRIVER.replace("__FN__", fn), tmp_path)
+
+    assert "doSubscribe(1)" in out["never"]
+    assert ">Subscribe</button>" in out["never"]
+    assert "toggleDetailQueue(2)" in out["subscribed"], \
+        "a subscribed item's control queues the removal, never acting on Steam"
+    assert ">Unsubscribe</button>" in out["subscribed"]
+    assert "toggleDetailQueue(3)" in out["removal"]
+    assert ">Cancel Unsubscribe</button>" in out["removal"]
+    assert "doSubscribe(4)" in out["legacy"], "an older payload falls back safely"
+
+
+def test_the_overlay_rows_name_the_direction_and_the_official_dequeue():
+    """The drain's rows read the direction; Cancel records no outcome.
+
+    The row carries the derived direction and a verb that reads
+    ``unsubscribing…`` / ``unsubscribed`` for a removal, and Cancel and Clear
+    Failed post the direction-agnostic ``/api/dequeue`` rather than the outcome
+    stamp that used to claim a subscription.
+    """
+    html = TEMPLATE.read_text(encoding="utf-8")
+    assert "data-remove=" in html
+    assert "sub-queue-verb" in html
+    assert "unsubscribing…" in html
+    assert "'unsubscribed' : 'subscribed'" in html
+    assert "fetch('/api/dequeue/' + wid" in html
+    assert "fetch('/api/subscribed/' + wid" not in html

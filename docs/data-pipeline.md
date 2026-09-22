@@ -346,6 +346,18 @@ through `/api/subscribe/<id>` for its Subscribe button and queue drain (the Tamp
 used to do this from a browser tab has been removed — see
 [future-plans.md](future-plans.md#removing-the-browser-bridge-from-the-subscribe-path)).
 
+**The queue has two directions.** `is_queued_for_subscription` is a boolean with no direction of its
+own, so the direction is **derived** rather than stored: with the flag set, `own_subscribed` decides —
+set means a removal is queued, clear means an addition (`queued_direction`). `subscribe_item` chooses
+from the row rather than taking a direction argument, so the TUI pass and the web drain cannot
+disagree about what a queued row means, and no schema change was needed. The endpoint used for the
+removal is **verified from Steam's own shipped JavaScript**: the captured item page's
+`sharedfiles_functions_logged_in.js` defines `SubscribeItem`, which branches on the button's `toggled`
+class; the unsubscribe branch posts `https://steamcommunity.com/sharedfiles/unsubscribe` with
+`{id, appid, sessionid}` — the subscribe form minus `include_dependencies` — and treats
+`data.success == 1` as the only success, with no `15`/`25` cases. `SubscribeInlineItem` and
+`SubscribeCollectionItem` in the same file post the same URL with the same three fields.
+
 The behaviour is dictated by facts measured against production, not by what the response body seems
 to say:
 
@@ -365,48 +377,61 @@ to say:
 
 So one run is:
 
-1. **Read** the item page (`fetch_item_page`, the scraper's own request shape via
+1. **Derive the direction** from the row (`queued_direction`): queued + subscribed is a removal;
+   every other queued row is an addition.
+2. **Read** the item page (`fetch_item_page`, the scraper's own request shape via
    `scrape_extended_details(..., keep_body=True)`). `parse_button_state` reads the one element's own
    class list.
-2. **Short-circuit** when `toggled` is present: the outcome is `already_subscribed`, and **no request
-   is sent**. This is both the guard against the endpoint ever turning out to be a toggle and the
-   reason re-running a queue is cheap. The page is the same authority the confirmation step trusts,
-   so the observation is recorded with the same write the confirmed path uses
-   (`mark_own_subscribed`): `own_subscribed` is set, `own_first_subscribed_at` is stamped if it was
-   still NULL, and `is_queued_for_subscription` is cleared. Recording nothing here would leave an
-   item already known to be subscribed in the queue, so every later pass would list it and spend a
-   gated page read rediscovering that it is subscribed.
-3. **Click** (only when the page says not subscribed): `post_subscribe_request` sends the POST, built
-   from the same helpers `/api/subscribe/<id>` uses. `resolve_subscribe_token` takes the form token
-   from the page just read -- `g_sessionID` first, then the cookie set, then the pushed/configured
-   fallback -- and puts it back into the cookie jar so the form field and the cookie agree. Steam
-   answers `success: 2`/`15` (or HTTP 401) when it refuses the request: beside an **authenticated**
-   page read that is a refused CSRF token and is reported as `token_refused` with **no session
-   problem recorded**, because the credential just fetched the page; beside an **anonymous** page read
-   the refusal is recorded as a session problem with the route's own sentence, as before.
-4. **Record** (`record_confirmed_subscription`): on the default path
-   (`VERIFY_AFTER_SUBSCRIBE = False`) the POST's own `success: 1` is the record — the subscription is
-   marked and the recorded session problem cleared, exactly as `/api/subscribe/<id>` records it; any
-   other answer is a `failed` worded by `_steam_failure_message`. The engine does **not** read the page
-   a second time. With the switch set `True` the engine instead **confirms**
-   (`confirm_subscription`): read the page again and decide from the button. `toggled` present means
-   subscribed — the same `record_confirmed_subscription` write. `toggled` absent with `success: 1` is a
-   **disagreement**: nothing is recorded and the item stays queued, because the page is the authority
-   and the JSON is corroboration only. A throttle page on the confirmation read stays queued; any other
-   button-less page reports that the result cannot be told.
+3. **Short-circuit** on the page's answer, in the direction's own sense. For an addition, `toggled`
+   present means already subscribed: the outcome is `already_subscribed`, **no request is sent**, and
+   the observation is recorded with the confirmed path's write (`mark_own_subscribed`:
+   `own_subscribed` set, `own_first_subscribed_at` stamped if NULL, queue flag cleared). For a
+   removal, `toggled` absent means already unsubscribed: the outcome is `already_unsubscribed`, no
+   request is sent, and `mark_own_unsubscribed` clears `own_subscribed` and the queue flag while
+   leaving the sticky first-seen stamp. Recording nothing would leave an item already known to be
+   subscribed (or unsubscribed) in the queue, so every later pass would list it and spend a gated page
+   read rediscovering it. This short-circuit is also the guard against the endpoint ever turning out to
+   be a toggle — it matters more for the removal, where a blind POST against an unsubscribed item is
+   the same hazard.
+4. **Click** (only when the page agrees a request is needed): `post_subscribe_request` or
+   `post_unsubscribe_request` sends the POST, built from the same helpers `/api/subscribe/<id>` uses.
+   `resolve_subscribe_token` takes the form token from the page just read -- `g_sessionID` first, then
+   the cookie set, then the pushed/configured fallback -- and puts it back into the cookie jar so the
+   form field and the cookie agree. Steam answers `success: 2`/`15` (or HTTP 401) when it refuses the
+   request: beside an **authenticated** page read that is a refused CSRF token and is reported as
+   `token_refused` with **no session problem recorded**, because the credential just fetched the page;
+   beside an **anonymous** page read the refusal is recorded as a session problem with the route's own
+   sentence, as before. The removal path keeps that same handling.
+5. **Record** (`record_confirmed_subscription`, or `record_confirmed_unsubscription` for a removal):
+   on the default path (`VERIFY_AFTER_SUBSCRIBE = False`) the POST's own `success: 1` is the record —
+   the subscription is marked and the recorded session problem cleared, exactly as
+   `/api/subscribe/<id>` records it; any other answer is a `failed` worded by
+   `_steam_failure_message`, or, for a removal, a `refused` worded by
+   `_steam_unsubscribe_failure_message`, which logs the raw `success` value because Steam publishes no
+   removal failure codes. The engine does **not** read the page a second time. With the switch set
+   `True` the engine instead **confirms** an addition (`confirm_subscription`): read the page again and
+   decide from the button. `toggled` present means subscribed — the same
+   `record_confirmed_subscription` write. `toggled` absent with `success: 1` is a **disagreement**:
+   nothing is recorded and the item stays queued, because the page is the authority and the JSON is
+   corroboration only. A throttle page on the confirmation read stays queued; any other button-less
+   page reports that the result cannot be told. The switch is addition-only: a removal is always
+   read-click, because the page is the authority and Steam's removal answer has nothing else to
+   corroborate.
 
 **Outcome vocabulary.** Each run ends in one status, and the TUI's queue row renders its phrase from
 `subscribe_engine._OUTCOME_LABELS`:
 
 | Status | Phrase | Meaning |
 |---|---|---|
-| `already_subscribed` | already subscribed | the pre-read's `toggled` said so; no request was sent |
+| `already_subscribed` | already subscribed | the pre-read's `toggled` said so for an addition; no request was sent |
 | `subscribed` | subscribed | the POST answered `success: 1` (or, with the switch on, the confirmation read said so); `mark_own_subscribed` was recorded |
+| `already_unsubscribed` | already unsubscribed | an addition's mirror for a removal: the pre-read had no `toggled`; no request was sent |
+| `unsubscribed` | unsubscribed | the removal POST answered `success: 1`; `mark_own_unsubscribed` was recorded |
 | `disagreement` | unverified (sources disagree) | with `VERIFY_AFTER_SUBSCRIBE` on, Steam said success but the page did not; nothing recorded |
 | `throttled` | left queued (throttled) | Steam's throttle shell; the item stays queued |
 | `session_problem` | session problem | a refusal beside an anonymous page read; a session problem is recorded |
 | `token_refused` | refused (stale CSRF token) | a refusal beside an authenticated page read: the login works, the token was stale |
-| `refused` | refused (see log) | the engine would not send or could not read the state — no session, no login, no item row, no AppID, or a page with no subscribe button. The cause differs per case and the caller logs it, so the phrase points there |
+| `refused` | refused (see log) | the engine would not send or could not read the state — no session, no login, no item row, no AppID, a page with no subscribe button, or a removal Steam rejected with a non-`1` answer. The cause differs per case and the caller logs it, so the phrase points there |
 | `failed` | failed | the attempt raised |
 
 `refused` is deliberately **not** "cannot tell": every outcome it covers was determined — either the

@@ -34,8 +34,16 @@ the TUI's subscription queue drives it, and the web UI drives it through
 ``/api/subscribe`` for both the Subscribe button and its queue drain (see
 ``docs/future-plans.md``).
 The request *shape* lives here too, and ``/api/subscribe`` builds its POST from
-:func:`resolve_subscribe_credentials`, :func:`subscribe_headers` and
-:func:`subscribe_form` rather than keeping a second copy.
+:func:`resolve_subscribe_credentials`, :func:`subscribe_headers`,
+:func:`subscribe_form` and :func:`unsubscribe_form` rather than keeping a second
+copy.
+
+**The queue carries both directions.** The queue flag is a boolean with no
+direction of its own, so :func:`queued_direction` derives it: a queued row that
+is subscribed is a removal, and every other queued row is the addition it always
+was. :func:`subscribe_item` chooses from that row state rather than taking a
+direction argument, so the TUI pass and the web drain cannot disagree about what
+a queued row means.
 
 What decides an attempt
 -----------------------
@@ -44,18 +52,31 @@ The engine never trusts ``{"success": 1}`` as proof that the *state* changed.
 On the default path the pre-read decides what is asked, and the POST's own answer
 is the record of what was accepted:
 
-* ``toggled`` on the pre-read -> the item is already subscribed.
+* For an addition, ``toggled`` on the pre-read -> the item is already subscribed.
   :func:`mark_own_subscribed` is recorded (which also clears the queue flag) and
   **no request is sent at all**.
+* For a removal, the mirror: a pre-read with no ``toggled`` -> the item is
+  already unsubscribed, :func:`mark_own_unsubscribed` is recorded and **no
+  request is sent at all**. The guard matters more here than for an addition: a
+  blind removal POST against an item the account is not subscribed to is exactly
+  the toggle hazard the pre-read exists for.
 * Otherwise the POST is sent, and with :data:`VERIFY_AFTER_SUBSCRIBE` ``False``
   Steam's ``{"success": 1}`` is the record:
   :func:`record_confirmed_subscription` is called and the outcome is
-  :data:`SUBSCRIBED`; any other answer is a :data:`FAILED` worded by
-  :func:`_steam_failure_message`. That is the read-click shape -- one page read,
+  :data:`SUBSCRIBED` -- or, for a removal,
+  :func:`record_confirmed_unsubscription` and :data:`UNSUBSCRIBED`; any other
+  answer is a :data:`FAILED` worded by :func:`_steam_failure_message`, or a
+  :data:`REFUSED` worded by :func:`_steam_unsubscribe_failure_message` for a
+  removal, because Steam publishes no removal failure codes: its own
+  ``SubscribeItem`` script checks only ``success == 1`` on the removal branch,
+  with no ``15``/``25`` cases. That is the read-click shape -- one page read,
   one click, and the POST's own answer as the record. The JSON cannot
-  distinguish "newly subscribed" from "already subscribed"; it says only that
-  the request was accepted, which is why the pre-read stays in front of it
-  rather than the engine posting blind.
+  distinguish "newly subscribed" from "already subscribed" (nor "newly
+  unsubscribed" from "already unsubscribed"); it says only that the request was
+  accepted, which is why the pre-read stays in front of it rather than the
+  engine posting blind. The confirmation switch is subscribe-only: a removal is
+  always read-click, because the removed page is the authority and Steam's
+  removal answer has nothing else to corroborate.
 
 **The confirmation read is retired by default.** Read-click-read costs three
 requests per item -- twice the gated page reads of read-click -- and the
@@ -94,8 +115,10 @@ doubled on a throttle page. On the default path an item pays that once; with
 subscribe POST is the button click, a browser-initiated XHR rather than a page
 load, so it is deliberately exempt and never waits.
 
-No browser tab is involved at any point, and the engine never sends an
-unsubscribe: an already-subscribed item returns before any request is made.
+No browser tab is involved at any point. The engine sends the subscribe POST for
+an addition and the unsubscribe POST for a removal; which one it sends is
+derived from the row, never guessed, and the pre-read guards both so the endpoint
+is never used as a blind toggle.
 """
 
 from __future__ import annotations
@@ -108,16 +131,30 @@ from dataclasses import dataclass
 
 from src import activity, capture, pacing, session_health, web_scraper
 from src.config import warn_retired_key
-from src.database import get_connection, mark_own_subscribed
+from src.database import (
+    get_connection,
+    get_subscription_states,
+    mark_own_subscribed,
+    mark_own_unsubscribed,
+)
 from src.web_worker import (
     WEB_DELAY_FLOOR,
     configured_web_delay,
     web_delay_store_for,
 )
 
-# --- the one endpoint and the one button ------------------------------------
+# --- the two endpoints and the one button -----------------------------------
 
 SUBSCRIBE_URL = "https://steamcommunity.com/sharedfiles/subscribe"
+
+# Verified from Steam's own shipped page script, not guessed. The captured item
+# page's `sharedfiles_functions_logged_in.js` defines `SubscribeItem`, which
+# branches on the button's `toggled` class; the unsubscribe branch posts this
+# URL with `{id, appid, sessionid}` -- the subscribe form minus
+# `include_dependencies` -- and treats `data.success == 1` as the only success.
+# `SubscribeInlineItem` and `SubscribeCollectionItem` in the same file post the
+# same URL with the same three fields.
+UNSUBSCRIBE_URL = "https://steamcommunity.com/sharedfiles/unsubscribe"
 
 ITEM_PAGE_URL = "https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}"
 
@@ -137,12 +174,19 @@ BUTTON_UNKNOWN = "unknown"
 
 ALREADY_SUBSCRIBED = "already_subscribed"
 SUBSCRIBED = "subscribed"
+ALREADY_UNSUBSCRIBED = "already_unsubscribed"
+UNSUBSCRIBED = "unsubscribed"
 DISAGREEMENT = "disagreement"
 THROTTLED = "throttled"
 SESSION_PROBLEM = "session_problem"
 TOKEN_REFUSED = "token_refused"
 REFUSED = "refused"
 FAILED = "failed"
+
+# The two directions a queue entry can mean. The flag is a boolean with no
+# direction of its own; `queued_direction` derives one from the row.
+ADD = "add"
+REMOVE = "remove"
 
 # The messages the route already shows. Kept here so the engine and the route
 # say the same thing, and so a session problem is recorded with the same
@@ -212,6 +256,41 @@ def _steam_failure_message(steam_success) -> str:
     return f"Steam refused the subscribe (success={steam_success!r})."
 
 
+def _steam_unsubscribe_failure_message(steam_success) -> str:
+    """A refusal for a removal answer that is not ``success: 1``.
+
+    Steam publishes no removal failure codes -- its own ``SubscribeItem`` script
+    checks only ``data.success == 1`` on the unsubscribe branch, with no
+    ``15``/``25`` cases as the subscribe branch has -- so the raw value is named
+    rather than translated into a cause that may not apply.
+    """
+    return f"Steam refused the unsubscribe (success={steam_success!r})."
+
+
+def queued_direction(item: dict | None) -> str:
+    """Which way a queue entry points, derived from its own row.
+
+    ``is_queued_for_subscription`` is only a membership flag, so the direction
+    has to come from somewhere: with the flag set, ``own_subscribed`` decides --
+    set means a removal is queued, clear means an addition. Every row that
+    predates this feature keeps the meaning it had, and no schema change is
+    needed.
+    """
+    if item and item.get("is_queued_for_subscription") and item.get("own_subscribed"):
+        return REMOVE
+    return ADD
+
+
+def queued_direction_for(db_path: str, workshop_id: int) -> str:
+    """The direction of one row's queue entry, read from the database.
+
+    A missing row is an addition: there is nothing to remove for an item the
+    database does not know.
+    """
+    return queued_direction(
+        get_subscription_states(db_path, [workshop_id]).get(workshop_id))
+
+
 @dataclass
 class SubscribeOutcome:
     """What one engine run concluded, in a shape both front ends can render.
@@ -219,7 +298,8 @@ class SubscribeOutcome:
     ``status`` is one of the module's outcome constants. ``subscribed`` is the
     authoritative state after the run -- true only when the page (or the
     already-toggled read) said so, never from Steam's JSON alone. ``stays_queued``
-    is true for the outcomes that must leave ``is_queued_for_subscription`` alone.
+    is true for the outcomes that must leave ``is_queued_for_subscription`` alone;
+    both settled outcomes -- a subscription and a removal -- clear it.
     """
 
     workshop_id: int
@@ -236,9 +316,14 @@ class SubscribeOutcome:
         return self.status in (ALREADY_SUBSCRIBED, SUBSCRIBED)
 
     @property
+    def is_unsubscribed(self) -> bool:
+        """Whether the item is unsubscribed now, verified or already."""
+        return self.status in (ALREADY_UNSUBSCRIBED, UNSUBSCRIBED)
+
+    @property
     def stays_queued(self) -> bool:
         """Whether the item's queue entry should survive this outcome."""
-        return not self.is_subscribed
+        return not (self.is_subscribed or self.is_unsubscribed)
 
 
 # The engine's own summary line for the TUI, one short phrase per outcome.
@@ -250,6 +335,8 @@ class SubscribeOutcome:
 _OUTCOME_LABELS = {
     ALREADY_SUBSCRIBED: "already subscribed",
     SUBSCRIBED: "subscribed",
+    ALREADY_UNSUBSCRIBED: "already unsubscribed",
+    UNSUBSCRIBED: "unsubscribed",
     DISAGREEMENT: "unverified (sources disagree)",
     THROTTLED: "left queued (throttled)",
     SESSION_PROBLEM: "session problem",
@@ -427,11 +514,13 @@ def resolve_subscribe_token(page_html: str | bytes | None, cookies: dict,
 
 
 def subscribe_headers(workshop_id: int) -> dict:
-    """The headers for the subscribe POST -- the scrape path's own identity.
+    """The headers for a subscription POST, in either direction.
 
     The UA is the project's, derived from the installed Firefox, because the
     cookies in the jar came from that browser; the fetch metadata describes a
-    same-origin XHR/form POST, not a top-level navigation.
+    same-origin XHR/form POST, not a top-level navigation. Steam's own
+    ``SubscribeItem`` posts both branches from the same page through jQuery, so
+    the identity is the same for the subscribe and the unsubscribe.
     """
     return {
         "User-Agent": web_scraper.USER_AGENT,
@@ -461,19 +550,36 @@ def subscribe_form(workshop_id: int, appid, token: str) -> dict:
     }
 
 
-def post_subscribe_request(cookies: dict, token: str, appid, workshop_id: int,
-                           session=None):
-    """POST the subscribe and capture it before the body is parsed.
+def unsubscribe_form(workshop_id: int, appid, token: str) -> dict:
+    """The form body of one unsubscribe POST.
 
-    The values captured are the ones actually handed to the session -- the jar,
-    the form and the headers are the same objects -- rather than a
-    reconstruction. A non-JSON answer is captured too, because the capture
-    happens before ``resp.json()`` is called by the caller.
+    Steam's own ``SubscribeItem`` script builds this as the same shape as the
+    subscribe form **minus** ``include_dependencies``, which the removal has no
+    use for; ``SubscribeInlineItem`` posts exactly this three-field form. Kept a
+    separate builder rather than a flag on ``subscribe_form`` so the one-field
+    difference is stated in one place and cannot be dropped by accident.
+    """
+    return {
+        "id": str(workshop_id),
+        "appid": str(appid),
+        "sessionid": token,
+    }
+
+
+def _post_captured(url: str, form: dict, cookies: dict, workshop_id: int,
+                   session=None):
+    """POST one of the two subscription requests, captured before parsing.
+
+    Both directions share the request identity and the capture: the values
+    captured are the ones actually handed to the session -- the jar, the form and
+    the headers are the same objects -- rather than a reconstruction, and a
+    non-JSON answer is captured too because the capture happens before
+    ``resp.json()`` is called by the caller. The capture kind stays ``subscribe``
+    for both: it is the one button surface, and the captured URL says which way
+    it went.
     """
     session = session if session is not None else web_scraper._get_session()
-    url = SUBSCRIBE_URL
     headers = subscribe_headers(workshop_id)
-    form = subscribe_form(workshop_id, appid, token)
     resp = session.post(url, data=form, cookies=cookies, headers=headers, timeout=15)
     if capture.web_download_capture_active():
         capture.record_web_download(
@@ -488,6 +594,22 @@ def post_subscribe_request(cookies: dict, token: str, appid, workshop_id: int,
             },
         )
     return resp
+
+
+def post_subscribe_request(cookies: dict, token: str, appid, workshop_id: int,
+                           session=None):
+    """POST the subscribe and capture it before the body is parsed."""
+    return _post_captured(
+        SUBSCRIBE_URL, subscribe_form(workshop_id, appid, token), cookies,
+        workshop_id, session=session)
+
+
+def post_unsubscribe_request(cookies: dict, token: str, appid, workshop_id: int,
+                             session=None):
+    """POST the unsubscribe and capture it before the body is parsed."""
+    return _post_captured(
+        UNSUBSCRIBE_URL, unsubscribe_form(workshop_id, appid, token), cookies,
+        workshop_id, session=session)
 
 
 def lookup_consumer_appid(db_path: str, workshop_id: int):
@@ -520,6 +642,19 @@ def record_confirmed_subscription(db_path: str, workshop_id: int) -> None:
     just succeeded.
     """
     mark_own_subscribed(db_path, workshop_id)
+    session_health.record_accepted(db_path)
+
+
+def record_confirmed_unsubscription(db_path: str, workshop_id: int) -> None:
+    """Record a confirmed removal, exactly as ``/api/unsubscribed`` does.
+
+    ``mark_own_unsubscribed`` clears ``own_subscribed`` and the queue flag in one
+    write and leaves the sticky first-seen time alone, so the marker becomes
+    ``previously`` rather than losing the only evidence of the subscription. The
+    session problem a previous refusal recorded is cleared because an
+    authenticated request has just succeeded.
+    """
+    mark_own_unsubscribed(db_path, workshop_id)
     session_health.record_accepted(db_path)
 
 
@@ -663,26 +798,51 @@ def fetch_item_page(workshop_id: int, *, interval: WebInterval,
     return data
 
 
+def _unknown_button_outcome(workshop_id: int, page_html: str,
+                            button_before: str) -> SubscribeOutcome:
+    """A pre-read with no button: a throttle if the shell says so, else a refusal.
+
+    Shared by both directions. A missing button is "cannot tell" and is never
+    read as a statement either way, so nothing is sent and the queue entry
+    survives.
+    """
+    if web_scraper.looks_like_rate_limited(page_html):
+        logging.warning(
+            "[Subscribe] Throttled while reading item %s; left queued.", workshop_id)
+        return SubscribeOutcome(
+            workshop_id, THROTTLED, _THROTTLED_MESSAGE, button_before=button_before)
+    logging.warning(
+        "[Subscribe] No subscribe button on item %s; refusing.", workshop_id)
+    return SubscribeOutcome(
+        workshop_id, REFUSED, _NO_BUTTON_MESSAGE, button_before=button_before)
+
+
 def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
                    token_fallback: str = "", interval: WebInterval | None = None,
                    keep_running=None) -> SubscribeOutcome:
-    """Subscribe one item without a browser, from the pre-read and the POST.
+    """Subscribe -- or unsubscribe -- one item without a browser.
 
-    The exact flow is in the module docstring. ``config`` supplies the cookie
-    source (``web_scraper._build_workshop_cookies``) and the configured session
-    id; ``db_path`` is where the subscription and any session problem are
-    recorded. ``token_fallback`` is an explicit CSRF token for a caller that
-    already has one; the TUI and the web route pass nothing and rely on the
-    config and the page's own token.
+    The direction comes from the queued row's own state (:func:`queued_direction`):
+    a queued row that is subscribed is a removal, every other queued row is an
+    addition. The exact flow is in the module docstring. ``config`` supplies the
+    cookie source (``web_scraper._build_workshop_cookies``) and the configured
+    session id; ``db_path`` is where the subscription, the removal and any
+    session problem are recorded. ``token_fallback`` is an explicit CSRF token
+    for a caller that already has one; the TUI and the web route pass nothing and
+    rely on the config and the page's own token.
 
     ``interval`` is the shared web interval the page read honours -- and the
-    confirmation read too, when :data:`VERIFY_AFTER_SUBSCRIBE` re-enables it. A
-    pass builds one and passes it down so the delay spans every item; a single
-    standalone call builds its own from ``config``, whose persisted delay it
-    reads and moves in the daemon state file. The submit POST is not gated on it.
+    confirmation read too, for an addition, when :data:`VERIFY_AFTER_SUBSCRIBE`
+    re-enables it. A pass builds one and passes it down so the delay spans every
+    item; a single standalone call builds its own from ``config``, whose
+    persisted delay it reads and moves in the daemon state file. The submit POST
+    is not gated on it.
     """
     if interval is None:
         interval = WebInterval(config, keep_running=keep_running)
+    # The direction is derived from the row, not passed in, so the TUI's pass and
+    # the web drain cannot disagree about what a queued row means.
+    removing = queued_direction_for(db_path, workshop_id) == REMOVE
     page = fetch_item_page(workshop_id, interval=interval)
     page_html = page_body(page)
     button_before = parse_button_state(page_html)
@@ -690,32 +850,42 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
     # read, authenticated or not, observed before the POST is sent.
     page_authenticated = page_read_authenticated(page_html)
 
-    if button_before == BUTTON_TOGGLED:
-        # The browser plugin never clicked an item it could see was already
-        # subscribed, and neither does this: no request, no toggle question. The
-        # page is the same authority the confirmed path trusts, so the
-        # observation is recorded with the same write -- `mark_own_subscribed`
-        # sets `own_subscribed`, clears `is_queued_for_subscription` and stamps
-        # the sticky first-seen time. Recording nothing here is what left an
-        # item that was already subscribed in the queue for every later pass to
-        # read and skip again.
-        mark_own_subscribed(db_path, workshop_id)
-        return SubscribeOutcome(
-            workshop_id, ALREADY_SUBSCRIBED,
-            "The item page already shows it subscribed; no request was sent.",
-            subscribed=True, button_before=button_before,
-        )
-
-    if button_before == BUTTON_UNKNOWN:
-        if web_scraper.looks_like_rate_limited(page_html):
-            logging.warning(
-                "[Subscribe] Throttled while reading item %s; left queued.", workshop_id)
+    if removing:
+        if button_before == BUTTON_NOT_TOGGLED:
+            # The mirror of the already-subscribed short-circuit: the page says
+            # there is nothing to remove, so the queue entry settles through the
+            # removal write with no request. A blind removal POST against an item
+            # the account is not subscribed to is exactly the toggle hazard the
+            # pre-read exists to prevent.
+            mark_own_unsubscribed(db_path, workshop_id)
             return SubscribeOutcome(
-                workshop_id, THROTTLED, _THROTTLED_MESSAGE, button_before=button_before)
-        logging.warning(
-            "[Subscribe] No subscribe button on item %s; refusing.", workshop_id)
-        return SubscribeOutcome(
-            workshop_id, REFUSED, _NO_BUTTON_MESSAGE, button_before=button_before)
+                workshop_id, ALREADY_UNSUBSCRIBED,
+                "The item page already shows it unsubscribed; no request was sent.",
+                button_before=button_before,
+            )
+        if button_before == BUTTON_UNKNOWN:
+            return _unknown_button_outcome(workshop_id, page_html, button_before)
+        # button_before == BUTTON_TOGGLED: the page agrees there is a removal to
+        # send, so the shared credential and POST block below runs.
+    else:
+        if button_before == BUTTON_TOGGLED:
+            # The browser plugin never clicked an item it could see was already
+            # subscribed, and neither does this: no request, no toggle question.
+            # The page is the same authority the confirmed path trusts, so the
+            # observation is recorded with the same write -- `mark_own_subscribed`
+            # sets `own_subscribed`, clears `is_queued_for_subscription` and stamps
+            # the sticky first-seen time. Recording nothing here is what left an
+            # item that was already subscribed in the queue for every later pass
+            # to read and skip again.
+            mark_own_subscribed(db_path, workshop_id)
+            return SubscribeOutcome(
+                workshop_id, ALREADY_SUBSCRIBED,
+                "The item page already shows it subscribed; no request was sent.",
+                subscribed=True, button_before=button_before,
+            )
+        if button_before == BUTTON_UNKNOWN:
+            return _unknown_button_outcome(workshop_id, page_html, button_before)
+        # button_before == BUTTON_NOT_TOGGLED: an addition to send.
 
     cookies, fallback_token, login = resolve_subscribe_credentials(
         config, token_fallback)
@@ -743,13 +913,17 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
         return SubscribeOutcome(
             workshop_id, REFUSED, "Item has no AppID.", button_before=button_before)
 
+    verb = "unsubscribe" if removing else "subscribe"
     logging.info(
-        "[Subscribe] POSTing to Steam: id=%s, appid=%s, %s, login=%s",
+        "[Subscribe] POSTing to Steam: id=%s, appid=%s, %s, login=%s, direction=%s",
         workshop_id, appid, token_log_note(token, page_token, fallback_token),
-        "set" if login else "missing")
+        "set" if login else "missing", "remove" if removing else "add")
     resp = None
     try:
-        resp = post_subscribe_request(cookies, token, appid, workshop_id)
+        if removing:
+            resp = post_unsubscribe_request(cookies, token, appid, workshop_id)
+        else:
+            resp = post_subscribe_request(cookies, token, appid, workshop_id)
         data = resp.json()
     except Exception as exc:  # noqa: BLE001 - the engine reports, never raises
         # A body that is not JSON can be Steam's throttle shell, which is not a
@@ -760,22 +934,42 @@ def subscribe_item(workshop_id: int, *, config: dict, db_path: str,
                 db_path=db_path, button_before=button_before)
         if web_scraper.looks_like_rate_limited(getattr(resp, "text", "") or ""):
             logging.warning(
-                "[Subscribe] Throttled on the subscribe POST for %s; left queued.",
-                workshop_id)
+                "[Subscribe] Throttled on the %s POST for %s; left queued.",
+                verb, workshop_id)
             return SubscribeOutcome(
                 workshop_id, THROTTLED, _THROTTLED_MESSAGE, button_before=button_before)
         logging.warning("[Subscribe] Request failed for workshop_id=%s: %s",
                         workshop_id, exc)
         return SubscribeOutcome(
-            workshop_id, FAILED, f"Subscribe request failed: {exc}",
+            workshop_id, FAILED, f"{verb.capitalize()} request failed: {exc}",
             button_before=button_before)
 
     steam_success = data.get("success") if isinstance(data, dict) else None
     if getattr(resp, "status_code", None) == 401 or steam_success in (2, 15):
         # Steam's "the session is gone / not permitted" answers. Whether that is
-        # a session problem at all depends on the page this attempt read.
+        # a session problem at all depends on the page this attempt read. The
+        # removal path keeps the same handling: a 2/15 here is the same refusal,
+        # and the raw value is not translated for the removal because Steam
+        # publishes no removal codes.
         return refusal_outcome(
             workshop_id, page_authenticated=page_authenticated, db_path=db_path,
+            button_before=button_before, steam_success=steam_success)
+
+    if removing:
+        if steam_success == 1:
+            record_confirmed_unsubscription(db_path, workshop_id)
+            return SubscribeOutcome(
+                workshop_id, UNSUBSCRIBED,
+                "Steam accepted the unsubscribe.",
+                button_before=button_before, steam_success=steam_success)
+        # Steam publishes no removal failure codes -- its own script checks only
+        # `success == 1` -- so the raw answer is logged rather than translated
+        # into a cause that may not apply.
+        logging.warning(
+            "[Unsubscribe] Steam refused the removal for %s: success=%r",
+            workshop_id, steam_success)
+        return SubscribeOutcome(
+            workshop_id, REFUSED, _steam_unsubscribe_failure_message(steam_success),
             button_before=button_before, steam_success=steam_success)
 
     if not VERIFY_AFTER_SUBSCRIBE:

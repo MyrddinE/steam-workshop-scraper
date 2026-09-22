@@ -1075,6 +1075,81 @@ def test_subscribe_item_error_branches_are_logged(subscribe_env, caplog):
     assert "Item 2 has no AppID" in caplog.text
 
 
+# --- /api/subscribe/<id>: the derived removal direction ----------------------
+#
+# The route derives the direction from the row, exactly as the engine does, and
+# delegates a removal whole to the engine: the pre-read guard, the
+# /sharedfiles/unsubscribe shape, the throttle/session-health handling and the
+# mark_own_unsubscribed record all live there.
+
+def _seed_removal(db_path, wid=1, first_seen=1000):
+    """A queued row that is subscribed: the derived removal direction."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "UPDATE workshop_items SET own_subscribed = 1, is_queued_for_subscription = 1, "
+        "own_first_subscribed_at = ? WHERE workshop_id = ?", (first_seen, wid))
+    conn.commit()
+    conn.close()
+
+
+def test_the_route_unsubscribes_a_queued_and_subscribed_row(subscribe_env):
+    db_path, state = subscribe_env
+    _seed_removal(db_path)
+    state["cookies"] = {"sessionid": "TOK",
+                        "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
+    state["page"] = _synthetic_page("PAGE_TOKEN", authenticated=True, toggled=True)
+    state["payload"] = {"success": 1}
+
+    resp = _post_subscribe(app.test_client())
+
+    assert resp.status_code == 200
+    assert resp.get_json()["success"] == 1
+    call = state["calls"][0]
+    assert call["url"] == subscribe_engine.UNSUBSCRIBE_URL
+    assert "include_dependencies" not in call["data"], "the one-field difference"
+    row = _item_row(db_path)
+    assert row["own_subscribed"] == 0
+    assert row["is_queued_for_subscription"] == 0
+    assert row["own_first_subscribed_at"] == 1000, "the sticky stamp is the history"
+
+
+def test_the_route_sends_no_removal_the_page_shows_unsubscribed(subscribe_env):
+    """The pre-read guard: a page with no `toggled` sends nothing and settles."""
+    db_path, state = subscribe_env
+    _seed_removal(db_path)
+    state["cookies"] = {"sessionid": "TOK",
+                        "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
+    state["page"] = _synthetic_page("PAGE_TOKEN", authenticated=True, toggled=False)
+
+    resp = _post_subscribe(app.test_client())
+
+    assert resp.status_code == 200
+    assert resp.get_json()["success"] == 1
+    assert state["calls"] == [], "a blind removal POST is the toggle hazard"
+    row = _item_row(db_path)
+    assert row["own_subscribed"] == 0
+    assert row["is_queued_for_subscription"] == 0
+
+
+def test_a_refused_removal_answers_minus_one_and_stays_queued(subscribe_env):
+    db_path, state = subscribe_env
+    _seed_removal(db_path)
+    state["cookies"] = {"sessionid": "TOK",
+                        "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
+    state["page"] = _synthetic_page("PAGE_TOKEN", authenticated=True, toggled=True)
+    state["payload"] = {"success": 0}
+
+    resp = _post_subscribe(app.test_client())
+
+    body = resp.get_json()
+    assert body["success"] == -1
+    assert body["stays_queued"] is True
+    assert "success=0" in body["message"], "the raw removal answer is named"
+    row = _item_row(db_path)
+    assert row["own_subscribed"] == 1, "a refused removal changes nothing"
+    assert row["is_queued_for_subscription"] == 1
+
+
 def test_subscribe_request_shape_matches_the_scrape_path(subscribe_env):
     """The POST shares the session, the project UA, and the full cookie jar.
 
@@ -3153,6 +3228,8 @@ def test_the_bridge_is_gone_and_the_drain_endpoints_remain(web_client):
 
     # The routes the browser-free flow uses are still mounted.
     assert client.get('/api/subscribed/1').status_code == 405  # POST-only
+    assert client.get('/api/unsubscribed/1').status_code == 405  # POST-only
+    assert client.get('/api/dequeue/1').status_code == 405  # POST-only
     assert client.get('/api/subscribe_throttle').status_code == 200
     assert set(client.get('/api/subscribe_throttle').get_json()) == \
         {"throttled_at", "throttled_id", "retry_after"}
@@ -3173,7 +3250,10 @@ def test_the_bridge_is_gone_and_the_drain_endpoints_remain(web_client):
     assert "fetch('/api/queued')" in html
     assert "fetch('/api/subscribe_failures')" in html
     assert "fetch('/api/subscribe_throttle')" in html
-    assert "fetch('/api/subscribed/'" in html
+    # Cancel and Clear Failed dequeue without recording an outcome; the outcome
+    # stamps are server-side, so the page no longer calls /api/subscribed.
+    assert "fetch('/api/dequeue/'" in html
+    assert "fetch('/api/subscribed/'" not in html
     assert "fetch('/api/subscribe/' + wid" in html
 
 
@@ -3613,6 +3693,7 @@ def test_jump_to_author_enters_single_creator_mode_like_the_tui(web_client, tmp_
 RENDER_DETAIL_DRIVER = """
 const fn = (__FN__);
 const subFn = (__SUB_FN__);
+const subCtrlFn = (__SUB_CTRL__);
 let html = '';
 global.document = { getElementById: () => ({ set innerHTML(v) { html = v; } }) };
 global._showTranslated = true;
@@ -3625,18 +3706,17 @@ global.sizeClass = () => '';
 global.fmtCount = (n) => String(n || 0);
 global._escapeHtml = (s) => String(s == null ? '' : s);
 global.showSubscriptionMarker = subFn;
-// The open-folder control lives in the static bottom bar, so renderDetail only
-// asks a separate helper to enable/disable it; this test is about the pane's own
-// HTML, so the helper is stubbed like the other collaborators above.
+global.subscriptionControl = subCtrlFn;
 global._refreshOpenFolderButton = () => {};
 const base = {
-  workshop_id: 77, creator_steamid: 'Alice', creator_id: '76561198765432109',
+  workshop_id: 77, creator_steamid: '76561198765432109', creator_id: '76561198765432109',
   personaname: 'Alice', has_translation: false,
   display_title_original: 'Mod', title: 'Mod',
   subscription_state: 'never', subscription_glyph: '\\u25cb',
   subscription_colour: '#808080', subscription_class: 'sub-never',
   subscription_label: 'Never subscribed', subscription_tooltip: 'never',
   subscription_clickable: true,
+  subscription_action: 'subscribe', subscription_action_label: 'Subscribe',
 };
 fn(base);
 const never = html;
@@ -3644,7 +3724,8 @@ fn(Object.assign({}, base, {
   subscription_state: 'subscribed', subscription_glyph: '\\u2605',
   subscription_colour: '#ffd700', subscription_class: 'sub-subscribed',
   subscription_label: 'Currently subscribed', subscription_tooltip: 'subscribed',
-  subscription_clickable: false,
+  subscription_clickable: true,
+  subscription_action: 'queue_remove', subscription_action_label: 'Unsubscribe',
 }));
 const subscribed = html;
 fn(Object.assign({}, base, {creator_steamid: null, creator_id: null}));
@@ -3659,16 +3740,19 @@ def test_render_detail_wires_the_author_and_subscription_marker(web_client, tmp_
 
     This runs the served function against a stub pane and inspects the HTML it
     actually builds. The old Queue/Unqueue button pair is gone: the marker is
-    the queue control now, so the pane must not carry a second indicator of the
-    same flag.
+    the queue control now, and the pane's one subscription button takes its word
+    from the payload's derived direction, so a subscribed item says Unsubscribe
+    rather than a Subscribe button whose press removes.
     """
     client, _ = web_client
     script = _served_inline_script(client)
     fn = _extract_function(script, "renderDetail")
     sub_fn = _extract_function(script, "showSubscriptionMarker")
+    sub_ctrl = _extract_function(script, "subscriptionControl")
     result = _run_node(RENDER_DETAIL_DRIVER
                        .replace("__FN__", fn)
-                       .replace("__SUB_FN__", sub_fn), tmp_path)
+                       .replace("__SUB_FN__", sub_fn)
+                       .replace("__SUB_CTRL__", sub_ctrl), tmp_path)
 
     assert "jumpToAuthor('76561198765432109')" in result["never"], \
         "the creator must carry the lossless id into the jump"
@@ -3678,11 +3762,17 @@ def test_render_detail_wires_the_author_and_subscription_marker(web_client, tmp_
     assert ">○</div>" in result["never"]
     assert result["never"].index('data-sub-state="never"') < result["never"].index("<a href="), \
         "the marker must precede the title"
-    # subscribed is not clickable, so the pane carries no action for it.
+    # `subscribed` is clickable now (its press queues the removal), and the
+    # pane's button says so.
     assert 'data-sub-state="subscribed"' in result["subscribed"]
-    assert 'data-sub-clickable="0"' in result["subscribed"]
+    assert 'data-sub-clickable="1"' in result["subscribed"]
     assert ">★</div>" in result["subscribed"]
     assert 'data-sub-clickable="1"' in result["never"]
+    assert ">Subscribe</button>" in result["never"]
+    assert ">Unsubscribe</button>" in result["subscribed"], \
+        "a subscribed item must not offer a Subscribe button"
+    assert "doSubscribe(77)" in result["never"]
+    assert "toggleDetailQueue(77)" in result["subscribed"]
 
     # The affordance this replaced must be gone, not merely hidden.
     for html in result.values():
