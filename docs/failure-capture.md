@@ -215,6 +215,20 @@ called, so the console shows exactly what it showed before. The traceback is als
 written to the log with `logging.error(..., exc_info=True)`, because the
 maintainer reads that file too.
 
+Textual's `_handle_exception` records the error and queues its traceback, but
+the write to `sys.__stderr__` happens later, on the exit path, after the driver
+has closed. When the run's stderr handle is invalid -- the owner's Windows test
+run is the measured case, `OSError: [WinError 6] The handle is invalid` -- that
+deferred write fails after the dump is already on disk, and the caller gets the
+`OSError` instead of the app's own error. The TUI's override therefore guards
+both the delegate call and the deferred render (`_print_error_renderables`): the
+console failure is logged as `Console traceback render failed` with its
+traceback, never silently swallowed, and the queued renderables are dropped so
+the exit path cannot raise them again, while the original error still
+propagates. Textual's `_exception` and `_return_code` are set before the write
+and are left untouched, and on a console that works the output and its timing
+are exactly what they were before.
+
 Installation is deliberately split in two, because logging is the one thing a
 crash can take down with it. `crash.install_hooks(process_name)` records the
 process name and installs `sys.excepthook` and `threading.excepthook` as the
