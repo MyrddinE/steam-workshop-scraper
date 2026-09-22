@@ -41,6 +41,30 @@ nothing. See [search-filter.md](search-filter.md) for the measurements.
 Removed from the list above rather than marked resolved. Each is now documented as current
 behaviour, or covered by a test:
 
+### A version-gated SQLite builtin was assumed rather than probed (issue 85)
+
+`compute_wilson_cutoffs` adopted `percentile_disc` for speed on the strength of this container's
+SQLite **3.53.1**, but the function was added in **3.51** and the production Windows host runs
+**3.49.1** (Python 3.12.10, against 3.12.14 here). Production logged
+`sqlite3.OperationalError: no such function: percentile_disc`, the function returned `{}`, and the
+grid lost all score highlighting — retried on every request, because the cache correctly refuses to
+store an empty result. The test suite could not see it: it runs on the container's newer SQLite. The
+defect was the assumption, not the query.
+
+The builtin's presence is now **probed once per process** (`SELECT percentile_disc(1, 0.5)`) and
+logged with `sqlite3.sqlite_version` and the chosen path; an `OperationalError` naming the function
+means absent, and `compute_wilson_cutoffs` then runs `_wilson_cutoffs_ntile`, the retained
+two-window form, which returns the same ten keys and values. That form measures **13.24 s** against
+**2.25 s** on the 2.5 M-row copy, paid once per filter set thanks to the 24-hour cutoff cache, so
+falling back is cheaper than requiring 3.51. Pinned by `tests/test_wilson.py`: with the capability
+forced absent the ten values are unchanged, the executed SQL contains `NTILE` and no
+`percentile_disc`, the probe runs at most once per process, and a missing-function error is read as
+absent. The equivalence test now compares the fast path against `src/database.py::_wilson_cutoffs_ntile`
+rather than a test-local copy, so the two definitions cannot diverge.
+
+**Rule: a version-dependent builtin is probed at runtime, never assumed from the environment the
+tests happen to run in.** [search-filter.md](search-filter.md)
+
 ### A re-entered autosubscribe pass leaked the previous pass's verification poll (issue 83)
 
 `_startAutoSubscribe` now clears `_subPollIv` and `_subScheduleIv` before arming the pass's own timers,

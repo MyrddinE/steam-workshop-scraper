@@ -5,6 +5,7 @@ import re
 import json
 import time
 import logging
+import threading
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -4759,14 +4760,112 @@ def _wilson_population_where(filters, subscribed_overlay, include_settled):
     return where, params
 
 
+# `percentile_disc` is a SQLite 3.51+ builtin, and the production host runs
+# 3.49.1, where the cutoff query failed with `no such function: percentile_disc`
+# and the grid lost all score colouring. A version-dependent builtin is *probed*
+# rather than assumed: the flag below is filled on the first
+# `compute_wilson_cutoffs` call and reused for the life of the process, because
+# the function is a property of the linked SQLite library rather than of the
+# database file. `None` means "not probed yet". The probe uses SQLite's own
+# two-argument aggregate form, `percentile_disc(Y, P)`, exactly as the cutoff
+# expressions call it -- the standard-SQL ordered-set spelling
+# (`percentile_disc(0.5) WITHIN GROUP (ORDER BY ...)`) is a syntax error here.
+_PERCENTILE_DISC_PROBE = "SELECT percentile_disc(1, 0.5)"
+_PERCENTILE_DISC_AVAILABLE: bool | None = None
+# The web UI serves requests on threads (`Flask.run` is threaded), so two first
+# requests can arrive before the flag is set; the lock makes "probed once" true
+# under that race rather than merely true in sequence.
+_PERCENTILE_DISC_PROBE_LOCK = threading.Lock()
+
+
+def _percentile_disc_is_available(conn) -> bool:
+    """Whether this process's SQLite provides ``percentile_disc`` (3.51+).
+
+    Probed once per process and logged once, naming the SQLite version and the
+    path chosen, so an old host announces the NTILE fallback rather than failing
+    on every request. Only an ``OperationalError`` naming the function means
+    absent; any other error is a real failure and propagates to the caller.
+    """
+    global _PERCENTILE_DISC_AVAILABLE
+    if _PERCENTILE_DISC_AVAILABLE is None:
+        with _PERCENTILE_DISC_PROBE_LOCK:
+            if _PERCENTILE_DISC_AVAILABLE is None:
+                try:
+                    conn.execute(_PERCENTILE_DISC_PROBE).fetchone()
+                    _PERCENTILE_DISC_AVAILABLE = True
+                except sqlite3.OperationalError as exc:
+                    if "percentile_disc" not in str(exc):
+                        raise
+                    _PERCENTILE_DISC_AVAILABLE = False
+                log = logging.info if _PERCENTILE_DISC_AVAILABLE else logging.warning
+                log(
+                    "compute_wilson_cutoffs: SQLite %s %s percentile_disc; using %s",
+                    sqlite3.sqlite_version,
+                    "provides" if _PERCENTILE_DISC_AVAILABLE else "does not provide",
+                    "the percentile_disc path" if _PERCENTILE_DISC_AVAILABLE
+                    else "the NTILE(100) fallback",
+                )
+    return _PERCENTILE_DISC_AVAILABLE
+
+
+def _wilson_cutoffs_ntile(conn, where, params) -> dict:
+    """The portable two-window ``NTILE(100)`` cutoff query.
+
+    The pre-2026-09-22 implementation, kept as the fallback for SQLite without
+    ``percentile_disc`` and as the reference the fast path is compared against
+    (``tests/test_wilson.py::test_percentile_disc_cutoffs_match_the_ntile_window``).
+    It materialises a window per score column, so it is slower than the
+    exact-rank form -- 13.24 s against 2.25 s on a 2.5 M-row copy, measured
+    2026-09-22 -- but it returns the same ten keys and values at every count.
+    """
+    sql = f"""
+        WITH base AS (
+            SELECT w.wilson_favorite_score, w.wilson_subscription_score
+            FROM workshop_items w WHERE {where}
+        ),
+        fav_ntile AS (
+            SELECT wilson_favorite_score,
+                   NTILE(100) OVER (ORDER BY wilson_favorite_score DESC NULLS LAST) AS bucket
+            FROM base WHERE wilson_favorite_score IS NOT NULL
+        ),
+        sub_ntile AS (
+            SELECT wilson_subscription_score,
+                   NTILE(100) OVER (ORDER BY wilson_subscription_score DESC NULLS LAST) AS bucket
+            FROM base WHERE wilson_subscription_score IS NOT NULL
+        )
+        SELECT 'wilson_favorite_p99' as key, COALESCE(MIN(wilson_favorite_score), 0) as val
+        FROM fav_ntile WHERE bucket = 1
+        UNION ALL SELECT 'wilson_favorite_p90', COALESCE(MIN(wilson_favorite_score), 0)
+        FROM fav_ntile WHERE bucket = 10
+        UNION ALL SELECT 'wilson_favorite_p50', COALESCE(MIN(wilson_favorite_score), 0)
+        FROM fav_ntile WHERE bucket = 50
+        UNION ALL SELECT 'wilson_subscription_p99', COALESCE(MIN(wilson_subscription_score), 0)
+        FROM sub_ntile WHERE bucket = 1
+        UNION ALL SELECT 'wilson_subscription_p90', COALESCE(MIN(wilson_subscription_score), 0)
+        FROM sub_ntile WHERE bucket = 10
+        UNION ALL SELECT 'wilson_subscription_p50', COALESCE(MIN(wilson_subscription_score), 0)
+        FROM sub_ntile WHERE bucket = 50
+        UNION ALL SELECT 'wilson_favorite_min', COALESCE(MIN(wilson_favorite_score), 0)
+        FROM fav_ntile WHERE bucket = 100
+        UNION ALL SELECT 'wilson_favorite_max', COALESCE(MAX(wilson_favorite_score), 0)
+        FROM fav_ntile WHERE bucket = 1
+        UNION ALL SELECT 'wilson_subscription_min', COALESCE(MIN(wilson_subscription_score), 0)
+        FROM sub_ntile WHERE bucket = 100
+        UNION ALL SELECT 'wilson_subscription_max', COALESCE(MAX(wilson_subscription_score), 0)
+        FROM sub_ntile WHERE bucket = 1
+    """
+    return {row["key"]: row["val"] for row in conn.execute(sql, params).fetchall()}
+
+
 def _wilson_cutoff_expressions(n_fav: int, n_sub: int):
     """``(keys, SELECT expressions, parameters)`` for the ten cutoff values.
 
     ``percentile_disc(Y, P)`` returns the value at ascending rank ``ceil(P*N)``,
     so ``P = rank / N`` selects exactly the rank :func:`_wilson_bucket_rank`
     computed -- the same value ``MIN(... WHERE bucket = k)`` produced, without
-    materialising either ``NTILE`` window. Requires SQLite 3.51+, which this
-    project targets (3.53 is in use).
+    materialising either ``NTILE`` window. ``percentile_disc`` is a SQLite 3.51+
+    builtin; :func:`_percentile_disc_is_available` probes for it and
+    :func:`_wilson_cutoffs_ntile` covers the hosts without it.
     """
     keys, expressions, params = [], [], []
 
@@ -4802,20 +4901,47 @@ def _wilson_cutoff_expressions(n_fav: int, n_sub: int):
     return keys, expressions, params
 
 
+def _wilson_cutoffs_percentile_disc(conn, where, params) -> dict:
+    """The exact-rank cutoff query, for SQLite 3.51+ (``percentile_disc``).
+
+    One pass, ten aggregates: the non-NULL counts give each bucket's rank, and
+    ``percentile_disc`` reads that rank back without materialising an ``NTILE``
+    window. See :func:`compute_wilson_cutoffs` for the measured cost.
+    """
+    n_fav, n_sub = conn.execute(
+        f"SELECT COUNT(w.wilson_favorite_score), COUNT(w.wilson_subscription_score) "
+        f"FROM workshop_items w WHERE {where}",
+        params,
+    ).fetchone()
+
+    keys, expressions, expression_params = _wilson_cutoff_expressions(n_fav, n_sub)
+    row = conn.execute(
+        f"SELECT {', '.join(expressions)} FROM workshop_items w WHERE {where}",
+        expression_params + params,
+    ).fetchone()
+    return {key: row[index] for index, key in enumerate(keys)}
+
+
 def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None,
                            subscribed_overlay: str = None,
                            include_settled: bool = False) -> dict:
     """Returns percentile cutoff scores for Wilson metrics across items matching filters.
 
-    One pass, ten aggregates: for each score column, the p99, p90 and p50
+    Ten aggregates over one pass: for each score column, the p99, p90 and p50
     cutoffs (the minimum of NTILE(100) buckets 1, 10 and 50) plus the min and
-    max. The bucket boundaries are computed as exact ranks and read back with
-    ``percentile_disc``, so no ``NTILE`` window is materialised. *Measured
-    2026-09-22* on the 2.5 M-row copy: **2.25 s**, against **13.24 s** for the
-    two-window NTILE form it replaced (best of 2 each; an earlier measurement of
-    the old form in this investigation recorded 9.54 s), with identical values
-    on every key
+    max. On SQLite 3.51+ the bucket boundaries are computed as exact ranks and
+    read back with ``percentile_disc``, so no ``NTILE`` window is materialised.
+    *Measured 2026-09-22* on the 2.5 M-row copy: **2.25 s**, against **13.24 s**
+    for the two-window NTILE form (best of 2 each; an earlier measurement of the
+    old form in this investigation recorded 9.54 s), with identical values on
+    every key
     (``tests/test_wilson.py::test_percentile_disc_cutoffs_match_the_ntile_window``).
+
+    ``percentile_disc`` is version-gated, and the production host's SQLite 3.49.1
+    does not have it; probing it (rather than assuming the version) is the whole
+    point. When it is absent this falls back to
+    :func:`_wilson_cutoffs_ntile`, which returns the same ten values and only
+    differs in speed. The choice is logged once per process.
 
     ``subscribed_overlay`` follows :func:`search_items`: the overlay constrains
     the same population the grid shows, so the percentiles must be computed over
@@ -4832,18 +4958,9 @@ def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None,
     try:
         where, params = _wilson_population_where(
             filters, subscribed_overlay, include_settled)
-        n_fav, n_sub = conn.execute(
-            f"SELECT COUNT(w.wilson_favorite_score), COUNT(w.wilson_subscription_score) "
-            f"FROM workshop_items w WHERE {where}",
-            params,
-        ).fetchone()
-
-        keys, expressions, expression_params = _wilson_cutoff_expressions(n_fav, n_sub)
-        row = conn.execute(
-            f"SELECT {', '.join(expressions)} FROM workshop_items w WHERE {where}",
-            expression_params + params,
-        ).fetchone()
-        return {key: row[index] for index, key in enumerate(keys)}
+        if _percentile_disc_is_available(conn):
+            return _wilson_cutoffs_percentile_disc(conn, where, params)
+        return _wilson_cutoffs_ntile(conn, where, params)
     except Exception:
         logging.exception("compute_wilson_cutoffs failed")
         return {}
