@@ -12,9 +12,21 @@ same place, and the same atomic-write discipline, as the daemon's
 
 The key is a hash of the canonical ``(filters, overlay, user_version)``, so a
 schema change drops the entry. The value is the ten cutoff values and the time
-they were computed. An entry older than ``daemon.cutoffs_cache_seconds``
-(default 86400 s, the owner's number) is recomputed; ``0`` (or any value at or
-below zero) disables the cache entirely.
+they were computed. ``daemon.cutoffs_cache_seconds`` (default 86400 s, the
+owner's number) is a **freshness** threshold, not a lifetime: an entry older
+than it is still served -- immediately, so the client always has something to
+colour with -- while the pull that got it starts one background regeneration so
+the next pull finds fresh values. Nothing prunes the file by age; an entry is
+replaced only when a regeneration succeeds. ``0`` (or any value at or below
+zero) disables the cache entirely.
+
+At most one regeneration runs per ``(cache file, key)`` at a time. The registry
+below is consulted under a lock, and a stale pull that finds one already running
+just serves the stale entry. A regeneration writes only on success, through the
+same atomic replace, so a process that dies mid-regeneration leaves the old
+entry intact and the next pull serves it and tries again; the registry itself is
+in memory, so it dies with the process and can never leave a key permanently
+marked in flight.
 
 Nothing here raises for a missing, unreadable or corrupt file: all three mean
 "no usable entry", so the caller recomputes and rewrites. A failed write is
@@ -27,7 +39,8 @@ concurrent writer can replace the entry but never interleave with it, and a
 reader sees the whole old document or the whole new one. Only the write itself
 takes a short process-local lock (two threads must not share one temp file);
 nothing is locked across the computation, so two different queries are not
-serialized behind each other and every request is answered from its own query.
+serialized behind each other, and a request is answered from its own compute
+when there is nothing to serve and from the file when there is.
 The cost of a collision is a second computation, not a wrong answer, because
 the value is never read from the file being written.
 """
@@ -51,6 +64,15 @@ DEFAULT_TTL_SECONDS = 86400
 # Serializes the temp-file-plus-replace within this process. Cross-process
 # safety comes from the unique temp name and the atomic replace, not this lock.
 _write_lock = threading.Lock()
+
+# Background regenerations currently running, keyed by ``(absolute path, key)``.
+# The lock guards the dictionary and the "is one already running" check together,
+# so two stale pulls arriving at once cannot both start a worker. The registry is
+# deliberately in memory: a process that dies mid-regeneration leaves the old
+# entry on disk untouched (only a success writes) and the next process starts
+# with no key marked in flight, so the pull after it tries again.
+_regeneration_lock = threading.Lock()
+_regenerating: dict[tuple, threading.Thread] = {}
 
 
 def cache_path_for(db_path: str) -> str:
@@ -101,11 +123,16 @@ def query_key(filters, subscribed_overlay, user_version: int) -> str:
 
 
 def load(path: str, key: str, ttl_seconds: float):
-    """Return ``(cutoffs, age_seconds)`` for a fresh entry matching ``key``.
+    """Return ``(cutoffs, age_seconds, stale)`` for an entry matching ``key``.
 
-    ``None`` means there is no usable entry -- absent, unreadable, malformed, a
-    different key, or older than the TTL. None of those is an error.
+    ``None`` means there is no entry to serve -- absent, unreadable, malformed, a
+    different key, or a non-positive TTL, which disables caching. Age is no
+    longer one of those reasons: an entry older than ``ttl_seconds`` comes back
+    with ``stale=True`` so the caller can serve it and revalidate behind the
+    response. Nothing here discards an entry for being old.
     """
+    if ttl_seconds <= 0:
+        return None
     try:
         with open(path, "r", encoding="utf-8") as handle:
             document = json.load(handle)
@@ -130,9 +157,7 @@ def load(path: str, key: str, ttl_seconds: float):
         # A clock that moved backwards: the entry cannot be older than the
         # request, so treat it as just written rather than discarding it.
         age = 0.0
-    if ttl_seconds > 0 and age > ttl_seconds:
-        return None
-    return cutoffs, age
+    return cutoffs, age, age > ttl_seconds
 
 
 def store(path: str, key: str, cutoffs: dict) -> bool:
@@ -176,3 +201,61 @@ def _write_atomic(path: str, data: bytes) -> None:
 def _now() -> float:
     """The clock, behind one function so a test can move it deliberately."""
     return time.time()
+
+
+def start_regeneration(path: str, key: str, compute) -> bool:
+    """Run ``compute()`` in a daemon thread, unless one is already running.
+
+    ``compute`` is the slow cutoff query as a zero-argument callable; a truthy
+    return value is stored under ``key``, and a falsy or raising one leaves
+    whatever is on disk in place. Returns whether this call started a thread:
+    ``False`` means an identical regeneration was already in flight, so the
+    caller just keeps serving the stale entry.
+    """
+    identity = (os.path.abspath(path), key)
+    with _regeneration_lock:
+        running = _regenerating.get(identity)
+        if running is not None and running.is_alive():
+            return False
+        thread = threading.Thread(
+            target=_regenerate,
+            args=(identity, compute),
+            name="cutoffs-regenerate",
+            daemon=True,
+        )
+        _regenerating[identity] = thread
+        thread.start()
+    return True
+
+
+def wait_for_regeneration(path: str, key: str, timeout: float | None = None) -> bool:
+    """Join the in-flight regeneration for ``(path, key)``; ``False`` if none.
+
+    A regeneration is best-effort: a daemon thread that dies with its process
+    leaves the stale entry in place and the next pull starts another, so this is
+    for a caller that wants to observe the outcome rather than for correctness.
+    """
+    with _regeneration_lock:
+        thread = _regenerating.get((os.path.abspath(path), key))
+    if thread is None:
+        return False
+    thread.join(timeout)
+    return True
+
+
+def _regenerate(identity: tuple, compute) -> None:
+    """The worker behind :func:`start_regeneration`. Never raises."""
+    path, key = identity
+    try:
+        cutoffs = compute()
+        # A falsy result is the compute's failure path; storing it would serve
+        # an empty payload. Leave the stale entry for the next pull to try from.
+        if cutoffs:
+            store(path, key, cutoffs)
+    except Exception:
+        logging.warning(
+            "Cutoffs regeneration failed for key %s; keeping the stale entry",
+            key[:12], exc_info=True)
+    finally:
+        with _regeneration_lock:
+            _regenerating.pop(identity, None)

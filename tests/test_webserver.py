@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import base64
+import threading
 import time
 from unittest.mock import MagicMock
 import lxml.html
@@ -5339,9 +5340,12 @@ def test_images_may_still_be_cached(web_client):
 #
 # `compute_wilson_cutoffs` takes seconds on a large database and the page asks
 # again after every reload: its own cache is JavaScript module state, which a
-# reload discards. The web server now keeps the last answer in a small JSON file
-# beside the database, keyed by the query and the schema version, so a reload
-# reuses it and only a changed query, a migration or the TTL recomputes.
+# reload discards. The web server keeps the last answer in a small JSON file
+# beside the database, keyed by the query and the schema version. A reload
+# reuses it; a changed query or a migration misses and computes synchronously.
+# An entry past `daemon.cutoffs_cache_seconds` is no longer a miss: it is served
+# as `stale` at once and revalidated behind the response, so the client always
+# has something to colour with and the next pull finds fresh values.
 
 CUTOFF_KEYS = (
     "wilson_favorite_p99", "wilson_favorite_p90", "wilson_favorite_p50",
@@ -5360,6 +5364,21 @@ def _stub_cutoffs(calls, value=None):
         return dict(payload)
 
     return _compute
+
+
+def _backdate_cutoffs_entry(db_path, age_seconds):
+    """Make the stored entry older than the TTL. Returns ``(path, key)``.
+
+    The key is read back from the file rather than recomputed, so the test uses
+    exactly the key the route did.
+    """
+    path = cutoffs_cache.cache_path_for(db_path)
+    with open(path, encoding="utf-8") as handle:
+        document = json.load(handle)
+    document["computed_at"] = time.time() - age_seconds
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(document, handle)
+    return path, document["key"]
 
 
 def test_a_second_identical_cutoffs_request_does_not_recompute(web_client, monkeypatch):
@@ -5442,23 +5461,201 @@ def test_a_schema_version_change_recomputes(web_client, monkeypatch):
     assert resp.headers['X-Cutoffs-Cache'] == 'miss'
 
 
-def test_an_entry_older_than_the_ttl_recomputes(web_client, monkeypatch):
-    client, db_path = web_client
-    calls = []
-    monkeypatch.setattr(webserver, "compute_wilson_cutoffs", _stub_cutoffs(calls))
+def test_a_stale_entry_is_served_at_once_and_revalidated_behind_the_request(
+        web_client, monkeypatch):
+    """The owner's rule: stale highlighting beats no highlighting.
 
-    client.post('/api/cutoffs', json={"filters": []})
-    path = cutoffs_cache.cache_path_for(db_path)
-    with open(path, encoding="utf-8") as handle:
-        document = json.load(handle)
-    document["computed_at"] = time.time() - 90000
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(document, handle)
+    An entry past the TTL is returned to the client immediately, and the pull
+    that got it starts the recomputation behind the response. This is the
+    assertion that fails against the expiring route: that route calls
+    ``compute_wilson_cutoffs`` on the request itself, so the response would carry
+    the fresh values and the header would say ``miss``.
+    """
+    client, db_path = web_client
+    stale_payload = {key: 0.25 for key in CUTOFF_KEYS}
+    fresh_payload = {key: 0.75 for key in CUTOFF_KEYS}
+    monkeypatch.setattr(
+        webserver, "compute_wilson_cutoffs",
+        _stub_cutoffs([], value=stale_payload))
+    assert client.post('/api/cutoffs', json={"filters": []}).headers[
+        'X-Cutoffs-Cache'] == 'miss'
+    path, key = _backdate_cutoffs_entry(db_path, 90000)
+
+    entered = threading.Event()
+    release = threading.Event()
+    computed_on = []
+
+    def _blocking(*args, **kwargs):
+        computed_on.append(threading.current_thread())
+        entered.set()
+        # Held until after the assertions below. A synchronous route would reach
+        # its assertions with the response still inside this call.
+        release.wait(timeout=9)
+        return dict(fresh_payload)
+
+    monkeypatch.setattr(webserver, "compute_wilson_cutoffs", _blocking)
 
     resp = client.post('/api/cutoffs', json={"filters": []})
 
-    assert len(calls) == 2
+    assert resp.status_code == 200
+    assert resp.get_json() == stale_payload, \
+        "the stale values must reach the client without waiting for fresh ones"
+    assert resp.headers['X-Cutoffs-Cache'] == 'stale'
+    assert int(resp.headers['X-Cutoffs-Cache-Age']) >= 90000
+    assert not release.is_set(), \
+        "the response must not be waiting on the recomputation"
+    assert entered.wait(timeout=5), "the stale pull must start a regeneration"
+    assert computed_on[0] is not threading.main_thread(), \
+        "the request must not run the compute itself"
+
+    # The regeneration replaced the entry, so the next pull is fresh.
+    release.set()
+    assert cutoffs_cache.wait_for_regeneration(path, key, timeout=5)
+    resp = client.post('/api/cutoffs', json={"filters": []})
+    assert resp.get_json() == fresh_payload
+    assert resp.headers['X-Cutoffs-Cache'] == 'hit'
+
+
+def test_concurrent_stale_requests_start_exactly_one_regeneration(
+        web_client, monkeypatch):
+    """A burst must not start a burst of ~28 s queries -- one worker per key.
+
+    Both requests are answered from the stale entry while the single worker is
+    held inside the compute, so neither response waits on it.
+    """
+    client, db_path = web_client
+    stale_payload = {key: 0.25 for key in CUTOFF_KEYS}
+    fresh_payload = {key: 0.75 for key in CUTOFF_KEYS}
+    monkeypatch.setattr(
+        webserver, "compute_wilson_cutoffs",
+        _stub_cutoffs([], value=stale_payload))
+    client.post('/api/cutoffs', json={"filters": []})
+    path, key = _backdate_cutoffs_entry(db_path, 90000)
+
+    calls = []
+    calls_lock = threading.Lock()
+    release = threading.Event()
+
+    def _blocking(*args, **kwargs):
+        with calls_lock:
+            calls.append(1)
+        release.wait(timeout=9)
+        return dict(fresh_payload)
+
+    monkeypatch.setattr(webserver, "compute_wilson_cutoffs", _blocking)
+
+    responses = {}
+
+    def _post(name):
+        with app.test_client() as thread_client:
+            responses[name] = thread_client.post('/api/cutoffs', json={"filters": []})
+
+    threads = [threading.Thread(target=_post, args=(name,)) for name in ("a", "b")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert not any(thread.is_alive() for thread in threads), \
+        "a stale pull must not block on the regeneration"
+    assert responses["a"].get_json() == stale_payload
+    assert responses["b"].get_json() == stale_payload
+    assert responses["a"].headers['X-Cutoffs-Cache'] == 'stale'
+    assert responses["b"].headers['X-Cutoffs-Cache'] == 'stale'
+
+    with calls_lock:
+        started = len(calls)
+    release.set()
+    assert cutoffs_cache.wait_for_regeneration(path, key, timeout=5)
+    assert started == 1, f"a burst started {started} regenerations, expected exactly one"
+
+
+def test_a_failed_regeneration_keeps_and_reserves_the_stale_entry(
+        web_client, monkeypatch):
+    """A regeneration that raises must not lose what the client can already see."""
+    client, db_path = web_client
+    stale_payload = {key: 0.25 for key in CUTOFF_KEYS}
+    monkeypatch.setattr(
+        webserver, "compute_wilson_cutoffs",
+        _stub_cutoffs([], value=stale_payload))
+    client.post('/api/cutoffs', json={"filters": []})
+    path, key = _backdate_cutoffs_entry(db_path, 90000)
+
+    calls = []
+
+    def _boom(*args, **kwargs):
+        calls.append(1)
+        raise RuntimeError("the compute failed")
+
+    monkeypatch.setattr(webserver, "compute_wilson_cutoffs", _boom)
+
+    first = client.post('/api/cutoffs', json={"filters": []})
+    assert first.status_code == 200
+    assert first.headers['X-Cutoffs-Cache'] == 'stale'
+    assert first.get_json() == stale_payload
+    assert cutoffs_cache.wait_for_regeneration(path, key, timeout=5)
+
+    with open(path, encoding="utf-8") as handle:
+        document = json.load(handle)
+    assert document["cutoffs"] == stale_payload, \
+        "a failed regeneration must leave the entry in place"
+
+    # The next pull serves the same stale entry and tries again, because
+    # nothing was replaced.
+    second = client.post('/api/cutoffs', json={"filters": []})
+    assert second.headers['X-Cutoffs-Cache'] == 'stale'
+    assert second.get_json() == stale_payload
+    assert cutoffs_cache.wait_for_regeneration(path, key, timeout=5)
+    assert len(calls) == 2, "each pull must retry a regeneration that failed"
+
+
+def test_a_missing_entry_still_computes_synchronously_and_stores(
+        web_client, monkeypatch):
+    """With nothing stale to serve, the request thread does the compute."""
+    client, db_path = web_client
+    calls = []
+    computed_on = []
+    payload = {key: 0.5 for key in CUTOFF_KEYS}
+
+    def _compute(*args, **kwargs):
+        calls.append(1)
+        computed_on.append(threading.current_thread())
+        return dict(payload)
+
+    monkeypatch.setattr(webserver, "compute_wilson_cutoffs", _compute)
+
+    resp = client.post('/api/cutoffs', json={"filters": []})
+
+    assert resp.status_code == 200
     assert resp.headers['X-Cutoffs-Cache'] == 'miss'
+    assert resp.get_json() == payload
+    assert len(calls) == 1
+    assert computed_on[0] is threading.main_thread(), \
+        "a first-time compute stays on the request thread"
+    path = cutoffs_cache.cache_path_for(db_path)
+    with open(path, encoding="utf-8") as handle:
+        assert json.load(handle)["cutoffs"] == payload
+
+
+def test_the_headers_distinguish_hit_stale_and_miss(web_client, monkeypatch):
+    client, db_path = web_client
+    payload = {key: 0.5 for key in CUTOFF_KEYS}
+    monkeypatch.setattr(
+        webserver, "compute_wilson_cutoffs", _stub_cutoffs([], value=payload))
+
+    miss = client.post('/api/cutoffs', json={"filters": []})
+    hit = client.post('/api/cutoffs', json={"filters": []})
+    path, key = _backdate_cutoffs_entry(db_path, 90000)
+    stale = client.post('/api/cutoffs', json={"filters": []})
+    assert cutoffs_cache.wait_for_regeneration(path, key, timeout=5)
+
+    assert miss.headers['X-Cutoffs-Cache'] == 'miss'
+    assert hit.headers['X-Cutoffs-Cache'] == 'hit'
+    assert stale.headers['X-Cutoffs-Cache'] == 'stale'
+    assert miss.headers['X-Cutoffs-Cache-Age'] == '0'
+    assert 0 <= int(hit.headers['X-Cutoffs-Cache-Age']) <= 2
+    assert int(stale.headers['X-Cutoffs-Cache-Age']) >= 90000
+    assert stale.get_json() == payload
 
 
 def test_a_hit_reports_the_age_of_the_entry(web_client, monkeypatch):
@@ -5498,6 +5695,28 @@ def test_a_cache_age_of_zero_disables_caching(tmp_path, monkeypatch):
     assert second.headers['X-Cutoffs-Cache'] == 'miss'
     assert not os.path.exists(cutoffs_cache.cache_path_for(db_path)), \
         "a disabled cache must not leave a file behind"
+
+
+def test_a_cache_age_of_zero_ignores_even_a_stale_entry(tmp_path, monkeypatch):
+    """`0` disables caching outright, so a stale entry is not served either."""
+    db_path = str(tmp_path / "ttl_zero_stale.db")
+    initialize_database(db_path)
+    init_webserver(db_path, {"daemon": {"target_appids": [294100]}})
+    client = app.test_client()
+    payload = {key: 0.5 for key in CUTOFF_KEYS}
+    monkeypatch.setattr(
+        webserver, "compute_wilson_cutoffs", _stub_cutoffs([], value=payload))
+    client.post('/api/cutoffs', json={"filters": []})
+    _backdate_cutoffs_entry(db_path, 90000)
+
+    init_webserver(db_path, {"daemon": {"cutoffs_cache_seconds": 0}})
+    calls = []
+    monkeypatch.setattr(webserver, "compute_wilson_cutoffs", _stub_cutoffs(calls))
+
+    resp = client.post('/api/cutoffs', json={"filters": []})
+
+    assert resp.headers['X-Cutoffs-Cache'] == 'miss'
+    assert len(calls) == 1
 
 
 def test_the_default_cutoffs_cache_ttl_is_a_day():
