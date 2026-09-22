@@ -18,6 +18,8 @@ from src.database import (
     raise_api_priority_for_detail,
     get_subscription_queue_items,
     mark_own_subscribed,
+    mark_own_unsubscribed,
+    dequeue_subscription,
     EXPECTED_VERSION,
 )
 
@@ -653,6 +655,83 @@ def test_mark_own_subscribed_clears_the_queue(db_path):
     mark_own_subscribed(db_path, 1)
     queued = get_subscription_queue_items(db_path)
     assert not any(q["workshop_id"] == 1 for q in queued)
+
+
+def _row(db_path, workshop_id):
+    conn = get_connection(db_path)
+    row = conn.execute(
+        "SELECT * FROM workshop_items WHERE workshop_id = ?", (workshop_id,)).fetchone()
+    conn.close()
+    return dict(row)
+
+
+def test_mark_own_unsubscribed_clears_the_subscription_and_the_queue(db_path):
+    """The removal's completion write mirrors `mark_own_subscribed`."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "is_queued_for_subscription": 1,
+                                    "own_subscribed": 1})
+
+    assert mark_own_unsubscribed(db_path, 1) is True
+
+    row = _row(db_path, 1)
+    assert row["own_subscribed"] == 0
+    assert row["is_queued_for_subscription"] == 0
+    assert get_subscription_queue_items(db_path) == []
+
+
+def test_mark_own_unsubscribed_leaves_the_sticky_first_seen_stamp(db_path):
+    """The timestamp is what keeps a removed item reading `previously`."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "is_queued_for_subscription": 1,
+                                    "own_subscribed": 1, "own_first_subscribed_at": 1000})
+
+    mark_own_unsubscribed(db_path, 1)
+
+    assert _row(db_path, 1)["own_first_subscribed_at"] == 1000
+
+
+def test_mark_own_unsubscribed_leaves_the_download_latch_to_the_walk(db_path):
+    """The latch's one clearer is the subscription walk, not this write."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "is_queued_for_subscription": 1,
+                                    "own_subscribed": 1, "steam_download_seen_at": 2000})
+
+    mark_own_unsubscribed(db_path, 1)
+
+    assert _row(db_path, 1)["steam_download_seen_at"] == 2000
+
+
+def test_mark_own_unsubscribed_on_an_unknown_item_is_a_no_op(db_path):
+    assert mark_own_unsubscribed(db_path, 999) is False
+
+
+def test_dequeue_subscription_changes_only_the_queue_flag(db_path):
+    """Cancel and Clear Failed must not claim a subscription or a removal."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "is_queued_for_subscription": 1,
+                                    "own_subscribed": 1, "own_first_subscribed_at": 1000})
+
+    assert dequeue_subscription(db_path, 1) is True
+
+    row = _row(db_path, 1)
+    assert row["is_queued_for_subscription"] == 0
+    assert row["own_subscribed"] == 1, "a cancelled removal is still subscribed"
+    assert row["own_first_subscribed_at"] == 1000
+
+
+def test_dequeue_subscription_does_not_stamp_a_never_subscribed_row(db_path):
+    """The issue this replaced: a cancelled add claimed a subscription forever."""
+    insert_or_update_item(db_path, {"workshop_id": 1, "is_queued_for_subscription": 1})
+
+    dequeue_subscription(db_path, 1)
+
+    row = _row(db_path, 1)
+    assert row["own_subscribed"] == 0
+    assert row["own_first_subscribed_at"] is None, \
+        "the sticky stamp must not be written for a row the drain never attempted"
+
+
+def test_dequeue_subscription_reports_nothing_to_do(db_path):
+    insert_or_update_item(db_path, {"workshop_id": 1})
+
+    assert dequeue_subscription(db_path, 1) is False
+    assert dequeue_subscription(db_path, 999) is False
 
 
 # ── v13 -> v14 migration cleanup ─────────────────────────────────────────────
