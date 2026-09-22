@@ -15,7 +15,11 @@ the production database on 2026-09-12.
 
 ## Open
 
-Nothing open. The last entry to leave the list was issue 76, on 2026-09-21.
+### Issue 77
+
+**Cancelling the subscribe overlay marks every leftover row subscribed** — *Open*, Low
+
+`api_subscribed` (`src/webserver.py:738`) is what the subscribe overlay posts for every row a **Cancel** or **Clear Failed** leaves behind — the two `.sub-queue-item:not(.done)` loops in `templates/index.html` — and it calls `mark_own_subscribed`, which sets `own_subscribed = 1` and **stamps the sticky `own_first_subscribed_at`** as well as clearing the queue flag. Rows a cancelled drain never attempted are therefore recorded as subscribed, and because the first-seen stamp is sticky and is the sole source of the `previously` marker state (`src/subscription.py:109`), those items claim "we have seen you subscribed" permanently. The route's docstring documents the behaviour, so it is current rather than an undocumented accident: a "done, drop it" call that reached for the only dequeue-shaped route there was. Cancelling should clear `is_queued_for_subscription` and change nothing else. Found while mapping the routes for the un-subscribe direction, which needs the same cancel path to work for both directions. [web-ui.md](web-ui.md), [data-model.md](data-model.md)
 
 ## Recently closed
 
