@@ -742,11 +742,11 @@ function _installUiTrace() {
   // ── the view restore ─────────────────────────────────────────────────────
   //
   // `loadState` -> `_restoreView` -> `_loadUntil` runs on every page load and
-  // can issue up to two passes of `MAX_RESTORE_BATCHES` searches with no user
-  // action at all. It is the confirmed suspect for the "it is scrolling on its
-  // own" report, so it is recorded explicitly: that it ran, whether a saved
-  // view was found, each pass with the value its `done` predicate returned,
-  // and -- through the wrapped `doSearch` above -- every batch it requests.
+  // used to page through the result set with no user action at all, which was
+  // the "it is scrolling on its own" report. It is recorded explicitly: that it
+  // ran, whether a saved view was found, each pass with the value its `done`
+  // predicate returned, and -- through the wrapped `doSearch` above -- every
+  // batch it requests.
 
   const originalLoadViewState = _loadViewState;
   _loadViewState = function() {
@@ -1081,6 +1081,19 @@ function sizeClass(bytes) {
 async function doSearch(reset = true) {
   if (loading) return;
   loading = true;
+  // Every exit path clears `loading`: it is the guard every later action --
+  // search, sort, pagination, author jump -- passes through, so a rejected
+  // fetch or the route's JSON error body must not leave it set (issue 79).
+  try {
+    await _doSearchBody(reset);
+  } catch (e) {
+    console.warn('search failed', e);
+  } finally {
+    loading = false;
+  }
+}
+
+async function _doSearchBody(reset) {
   // A reset search starts a new result set, so an item selected in the old one
   // is not a selection any more; keeping it would send restore hunting for a
   // row that is no longer there.
@@ -1111,6 +1124,12 @@ async function doSearch(reset = true) {
     body: JSON.stringify({filters, subscribed: _overlayValue(), sort_by: document.getElementById('sort-by').value, sort_order: document.getElementById('sort-order').value, offset: currentOffset, limit: 50})
   });
   const items = await resp.json();
+  // The route answers an exception with a JSON object at status 500. A body
+  // that is not an array is an error, not a batch of zero rows: iterating it
+  // throws, and before this guard that throw left `loading` set.
+  if (!Array.isArray(items)) {
+    throw new Error('/api/search returned a non-array body');
+  }
 
   const grid = document.getElementById('results-grid');
   // The batch's first cell is what the observer watches: it sits where the next
@@ -1161,6 +1180,8 @@ async function doSearch(reset = true) {
 
   currentOffset += items.length;
   hasMore = items.length >= 50;
+  // Released before arming: `_observeNextBatch` refuses to arm while this
+  // search is in flight, and the batch is on screen now.
   loading = false;
 
   if (_listNeedsPoll(items)) {
@@ -1173,20 +1194,43 @@ async function doSearch(reset = true) {
 }
 
 // Arm infinite scroll on the batch just rendered by watching its first cell.
-// The cell a previous batch armed is always released first: it is still in the
-// DOM, so leaving it observed would fire a duplicate load when it scrolled into
-// view. `firstCell` is null on the reset path, where the grid was just emptied
-// and there is nothing in the batch yet to watch.
+// The cell a previous batch armed is always released first -- before the
+// guards, so the reset path's `_observeNextBatch(null)` can actually drop a
+// node the grid has just detached. `firstCell` is null on that path, where
+// there is nothing in the batch yet to watch.
+//
+// Visibility is measured against the grid's own scroll box, not the window:
+// `#results-grid` is `overflow-y: auto` with `flex: 1; min-height: 0`, so it
+// clips its content. A cell below the grid's visible bottom can still sit
+// inside a tall window, and reading that as "already visible" asked for a page
+// the user could not see, one after another. The shortcut records the batch it
+// is loading for (`_pendingLoadCell`), so re-arming the same batch cannot
+// schedule a second load.
 function _observeNextBatch(firstCell) {
   if (_observedCell) {
     _scrollObserver.unobserve(_observedCell);
     _observedCell = null;
   }
-  if (loading || !hasMore || !firstCell) return;
+  if (loading || !hasMore || !firstCell) {
+    _pendingLoadCell = null;
+    return;
+  }
+  if (_pendingLoadCell === firstCell) return;
+  _pendingLoadCell = null;
 
-  const rect = firstCell.getBoundingClientRect();
-  if (rect.top < window.innerHeight) {
-    setTimeout(() => doSearch(false), 0);
+  const grid = document.getElementById('results-grid');
+  const cellRect = firstCell.getBoundingClientRect();
+  const boxRect = grid.getBoundingClientRect();
+  // Inside the grid's box: below its top edge and above its bottom edge.
+  const inGridBox = cellRect.top < boxRect.bottom && cellRect.bottom > boxRect.top;
+  if (inGridBox) {
+    _pendingLoadCell = firstCell;
+    setTimeout(function() {
+      // A newer batch may have been armed while this was pending.
+      if (_pendingLoadCell !== firstCell) return;
+      _pendingLoadCell = null;
+      doSearch(false);
+    }, 0);
     return;
   }
 
@@ -2185,10 +2229,13 @@ async function refreshItemState(wid) {
 // entry, so a stale build's record is ignored rather than trusted.
 const VIEW_STATE_KEY = 'view.state.v1';
 const VIEW_STATE_VERSION = 1;
-// Restoration pages through the result set to reach a saved scroll position,
-// but only this far: an item thousands of rows down is not worth a page load's
-// worth of requests just to re-open its pane.
-const MAX_RESTORE_BATCHES = 40;
+// Restoration asks for at most this many pages to rebuild a saved scroll
+// position, and never pages to find a selected item. A view saved thousands of
+// items down cannot be reached inside a sane request budget anyway, and walking
+// the result set after it is the unprompted loading this bound exists to stop:
+// a handful of pages restores a shallow position, and anything deeper lands at
+// the top rather than issuing dozens of searches on one page load.
+const MAX_RESTORE_SCROLL_BATCHES = 5;
 
 let _selectedWid = null;    // workshop_id whose detail pane is open
 let _viewSaveTimer = null;  // throttles the scroll listener's writes
@@ -2272,7 +2319,8 @@ function _applyFilters(filters) {
 
 // Ask doSearch for the next page until `done` holds, exactly as scrolling to
 // the bottom would. doSearch owns currentOffset and the observed cell, so this
-// never touches either; a page that moves no offset means there is nothing left.
+// never touches either; a page that moves no offset means there is nothing
+// left, and `hasMore` false ends the walk however unsatisfied `done` is.
 async function _loadUntil(done, maxBatches) {
   let batches = 0;
   while (hasMore && !done() && batches < maxBatches) {
@@ -2283,17 +2331,22 @@ async function _loadUntil(done, maxBatches) {
   }
 }
 
+// Restore the saved view by bounded intent, not by a batch budget. The scroll
+// position is the only thing that may page: `MAX_RESTORE_SCROLL_BATCHES` bounds
+// that pass in requests, and the walked result set is what the selected item
+// must already be in. The selection is never hunted for -- an id the current
+// filters exclude, or one the search now hides as settled, can never appear, and
+// paging after it was what issued forty searches with no user action (issue 78).
 async function _restoreView(state) {
   const grid = document.getElementById('results-grid');
   await _loadUntil(function() {
     return state.scroll <= 0 || grid.scrollHeight >= state.scroll + grid.clientHeight;
-  }, MAX_RESTORE_BATCHES);
+  }, MAX_RESTORE_SCROLL_BATCHES);
   if (state.selected != null) {
-    await _loadUntil(function() {
-      return !!grid.querySelector('.grid-cell[data-wid="' + state.selected + '"]');
-    }, MAX_RESTORE_BATCHES);
     if (grid.querySelector('.grid-cell[data-wid="' + state.selected + '"]')) {
       await showDetail(state.selected);
+    } else {
+      console.debug('view restore: selected item is not in the loaded content; not paging for it');
     }
   }
   // Scroll last: showDetail focuses the cell, and focus can move the grid, so
@@ -2387,16 +2440,35 @@ document.getElementById('btn-save-filter').onclick = saveFilterAndReport;
 // The batch-first cell the observer is currently watching, or null when nothing
 // is armed. Held so the next batch can unobserve it before arming its own.
 let _observedCell = null;
+// The batch whose next-page load the shortcut has already scheduled, or null.
+// Arming the same batch twice while that load is pending is a no-op.
+let _pendingLoadCell = null;
 
 // The observer's callback, named so the UI trace can wrap it: the trace needs
-// `isIntersecting`, the entry's target and whether it matched `_observedCell`
-// -- today the callback trusts `entries[0]`.
+// `isIntersecting`, the entry's target and whether it matched `_observedCell`.
 function _onScrollIntersection(entries) {
   if (loading || !hasMore || !currentOffset) return;
-  if (entries[0].isIntersecting) doSearch(false);
+  // A callback can carry records for targets observed earlier, so the armed
+  // cell's own record is the only one that may decide a load; `entries[0]` was
+  // not necessarily it, and a released cell's record decided loads before.
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (entry.target !== _observedCell) continue;
+    if (entry.isIntersecting) doSearch(false);
+    return;
+  }
 }
 
-const _scrollObserver = new IntersectionObserver(_onScrollIntersection);
+// Rooted at the grid -- the box the cell must enter -- not the window. With no
+// `root`, a cell inside the grid's scroll box but clipped below its visible
+// edge is reported as intersecting the window and fires a load; the grid's box
+// is also the only box the user can see it in.
+function _makeScrollObserver() {
+  return new IntersectionObserver(_onScrollIntersection, {
+    root: document.getElementById('results-grid'),
+  });
+}
+const _scrollObserver = _makeScrollObserver();
 
 document.addEventListener('blur', e => {
   try {

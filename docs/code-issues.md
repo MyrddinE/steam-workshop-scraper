@@ -15,52 +15,44 @@ the production database on 2026-09-12.
 
 ## Open
 
-### The view-restore loop pages through the result set unprompted (issue 78)
-
-Found 2026-09-22 from the owner's report that the web grid "is now infinitely scrolling" and that
-creator links intermittently do nothing.
-
-`loadState()` restores the saved view on **every** page load, and `_restoreView` runs `_loadUntil`
-twice — once to rebuild the persisted scroll offset, once to find the persisted selected item — each
-capped at `MAX_RESTORE_BATCHES = 40`. `_saveViewState` persists both `selected` (whenever a detail pane
-was open) and `scroll` (throttled on the scroll listener), so after any browsing session every later
-load issues up to **80 searches and appends up to 2,000 items with no user action**. The second pass has
-no early exit: when the saved id can never appear — the filters changed, or the item is now settled and
-hidden by the search's default — it runs its full 40 batches every time.
-
-Because `doSearch` opens with `if (loading) return;` and holds `loading` across each restore search, a
-user action arriving during a restore is silently discarded. `jumpToAuthor` has already switched the
-filter area to author mode when its search is dropped, which is the half-applied view reported as
-creator links failing for some creators. The sentinel's geometry is *not* the cause: a modelled
-scroll-box probe of the real `_observeNextBatch` converges in every scenario. See [web-ui.md](web-ui.md)
-for how the view restore and the author jump are meant to behave.
-
-### One failed search wedges the web UI for the life of the page (issue 79)
-
-`doSearch` sets `loading = true` and clears it only after the fetch, the JSON parse and the render; the
-function contains no `try`, `catch` or `finally`. `POST /api/search` answers any exception with a JSON
-**object** at status 500, and the client neither checks the status nor guards the parse before
-`items.forEach(...)`, which throws on an object. A network blip, a transient 500 or a DB lock therefore
-leaves `loading` permanently true, after which every search, sort, pagination request and author jump
-returns at the guard and does nothing until the page is reloaded. This is a second, independent cause of
-the same reported symptom. See [web-ui.md](web-ui.md) for the page's held-state conventions.
-
-### The infinite-scroll sentinel can be left armed out of view (issue 80)
-
-`_observeNextBatch` arms the batch's first cell, and the `IntersectionObserver` it installs has no
-`root`, so it measures against the window rather than the grid's own scroll box (`#results-grid` is
-`overflow-y: auto` with `flex: 1; min-height: 0`). The function's already-visible shortcut likewise
-tests `firstCell.getBoundingClientRect().top < window.innerHeight`, the wrong reference box for a
-scroller. After `_restoreView` sets a deep `scrollTop`, the armed cell can sit entirely above the grid's
-visible area, where the observer never fires again: infinite scroll stops loading until the user scrolls
-back up and down. The callback also trusts `entries[0]` rather than matching the entry's target against
-`_observedCell`, so a record for a cell released by `unobserve` can decide a load. See
-[web-ui.md](web-ui.md) for the intended scroll behaviour.
+No open defects.
 
 ## Recently closed
 
 Removed from the list above rather than marked resolved. Each is now documented as current
 behaviour, or covered by a test:
+
+### The view-restore loop paged through the result set unprompted (issue 78)
+
+`_restoreView` now pages by bounded intent. The scroll pass asks `doSearch(false)` for at most
+`MAX_RESTORE_SCROLL_BATCHES = 5` pages — where one page load used to run a per-pass
+`MAX_RESTORE_BATCHES = 40` twice, appending up to 2,000 items and issuing up to 80 searches with no
+user action — and `_loadUntil` ends the walk as soon as `hasMore` is false. The saved selected item is
+not hunted for at all any more: it is re-opened only when the content the scroll pass loaded already
+holds it, and a `console.debug` names the drop. `tests/test_webserver.py` drives the real
+`_restoreView` and `_loadUntil` against a modelled grid and fails against the pre-change code, which
+ran the selected pass to its full forty batches even for an id that can never appear.
+[web-ui.md](web-ui.md#state-persistence)
+
+### One failed search wedged the web UI for the life of the page (issue 79)
+
+`doSearch` is now its own guard and cleanup: it wraps the search body (`_doSearchBody`) in
+`try`/`finally`, so `loading` is cleared on every exit path, and it rejects a response body that is not
+an array instead of iterating `POST /api/search`'s `{"error": ...}` 500 body. A rejected `fetch` and
+that error body each leave `loading` false, so the next search, sort, pagination request or author jump
+runs; both are driven against stubbed responses in `tests/test_webserver.py`.
+[web-ui.md](web-ui.md#search-flow)
+
+### The infinite-scroll sentinel could be left armed out of view (issue 80)
+
+The already-visible shortcut and the `IntersectionObserver` now use the grid's own scroll box. The
+shortcut compares the cell's rect with `#results-grid`'s rect — below the grid's top edge and above its
+bottom edge — instead of `window.innerHeight`, so a cell clipped below the grid's visible bottom no
+longer reads as already visible in a tall window. The observer is constructed with
+`root: document.getElementById('results-grid')`, its callback matches `entry.target` against
+`_observedCell` rather than trusting `entries[0]`, and the shortcut records the batch it is loading for
+so re-arming the same batch cannot schedule a second load. With `hasMore` false nothing is armed and
+nothing loads. [web-ui.md](web-ui.md#infinite-scroll)
 
 ### The "Subscribed at" sort had no index
 

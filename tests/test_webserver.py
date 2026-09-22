@@ -2343,10 +2343,28 @@ def test_browser_state_wins_over_the_tui_seed_on_load(web_client, tmp_path):
     assert out["tui"]["searches"] == 1
 
 
+def _restore_cap(script: str) -> int:
+    """The restore's request budget, read from the served page.
+
+    The cap moved from a per-pass batch budget (`MAX_RESTORE_BATCHES = 40`) to a
+    small scroll-pass request cap (`MAX_RESTORE_SCROLL_BATCHES`). Reading either
+    name lets the pre-change page be driven with its real value, which is what
+    shows the defect, while the committed page is driven with its own.
+    """
+    for name in ("MAX_RESTORE_SCROLL_BATCHES", "MAX_RESTORE_BATCHES"):
+        if re.search(r'^const\s+' + name + r'\s*=', script, re.M):
+            return int(_extract_const(script, name))
+    raise AssertionError("no restore cap constant in the served script")
+
+
 RESTORE_DRIVER = """
 const restoreFn = (__FN__);
 global._loadUntil = (__LOADUNTIL__);
 globalThis.MAX_RESTORE_BATCHES = __MAX__;
+globalThis.MAX_RESTORE_SCROLL_BATCHES = __MAX__;
+// Diagnostics must not pollute the JSON on stdout.
+const report = console.log;
+global.console = {debug: () => {}, warn: () => {}, error: () => {}, log: report};
 const out = {};
 function makeGrid() {
   return {
@@ -2358,7 +2376,7 @@ function makeGrid() {
     },
   };
 }
-function install(grid, perBatch, stopAfter) {
+async function scenario(name, grid, perBatch, stopAfter, state) {
   globalThis.hasMore = true;
   globalThis.currentOffset = 0;
   let batches = 0;
@@ -2371,24 +2389,34 @@ function install(grid, perBatch, stopAfter) {
     if (stopAfter != null && batches >= stopAfter) globalThis.hasMore = false;
   };
   globalThis.document = {getElementById: function() { return grid; }};
+  let showDetailCalls = 0;
   globalThis.showDetail = async function() {
-    out.showDetailCalls = (out.showDetailCalls || 0) + 1;
+    showDetailCalls += 1;
     grid.scrollTop = 5;   // a focus-style jump the restore has to override
   };
-  return function() { return batches; };
+  await restoreFn(state);
+  out[name] = {batches: batches, showDetailCalls: showDetailCalls,
+               scrollTop: grid.scrollTop};
 }
 (async () => {
+  // A saved scroll the first four batches can reach, with the selected item
+  // inside the content those batches loaded.
   let grid = makeGrid();
   grid.cellOnHeight = 900;
-  let count = install(grid, 400, 4);
-  await restoreFn({scroll: 1500, selected: 77});
-  out.restore = {scrollTop: grid.scrollTop, batches: count(),
-                 showDetailCalls: out.showDetailCalls || 0};
+  await scenario('scroll', grid, 400, 4, {scroll: 1500, selected: 77});
 
+  // A saved scroll far past anything a bounded restore will load.
   grid = makeGrid();
-  count = install(grid, 1, null);
-  await restoreFn({scroll: 100000, selected: null});
-  out.cap = {batches: count()};
+  await scenario('cap', grid, 1, null, {scroll: 100000, selected: null});
+
+  // A selected id that never appears in the result set.
+  grid = makeGrid();
+  await scenario('absent_selection', grid, 1, null, {scroll: 0, selected: 999});
+
+  // The end of the result set stops the paging before the cap.
+  grid = makeGrid();
+  await scenario('exhausted', grid, 1, 2, {scroll: 100000, selected: null});
+
   console.log(JSON.stringify(out));
 })();
 """
@@ -2399,30 +2427,144 @@ def test_restore_pages_to_the_saved_position_and_scroll_wins_at_the_end(web_clie
     """Restoring a deep view asks doSearch for pages; it never re-implements them.
 
     The saved position may sit past the first 50-item batch, so `_restoreView`
-    keeps calling `doSearch(false)` — the function that owns `currentOffset`
-    and the infinite-scroll observation — until the grid is tall enough, re-opens
-    the selected
-    item, and then applies the saved scroll last because focusing that item
-    moves the grid. The paging is bounded so a deleted selection cannot walk the
-    whole result set.
+    calls `doSearch(false)` — the function that owns `currentOffset` and the
+    infinite-scroll observation — until the grid is tall enough, re-opens the
+    selected item when the loaded content holds it, and then applies the saved
+    scroll last because focusing that item moves the grid.
     """
     client, _ = web_client
     script = _served_inline_script(client)
     driver = (RESTORE_DRIVER
               .replace("__FN__", _extract_function(script, "_restoreView"))
               .replace("__LOADUNTIL__", _extract_function(script, "_loadUntil"))
-              .replace("__MAX__", _extract_const(script, "MAX_RESTORE_BATCHES")))
+              .replace("__MAX__", str(_restore_cap(script))))
     out = _run_node(driver, tmp_path)
 
-    assert out["restore"]["batches"] == 4, "must page until the grid can hold the saved scroll"
-    assert out["restore"]["showDetailCalls"] == 1, "the selected item must be re-opened"
-    assert out["restore"]["scrollTop"] == 1500, \
+    assert out["scroll"]["batches"] == 4, "must page until the grid can hold the saved scroll"
+    assert out["scroll"]["showDetailCalls"] == 1, "the selected item must be re-opened"
+    assert out["scroll"]["scrollTop"] == 1500, \
         "the saved scroll must be applied after focus moves the grid"
 
-    max_batches = int(_extract_const(script, "MAX_RESTORE_BATCHES"))
-    assert max_batches == 40
-    assert out["cap"]["batches"] == max_batches, \
-        "restoring an unreachable position must stop at the batch cap"
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_restore_is_bounded_by_intent_not_by_the_old_batch_budget(web_client, tmp_path):
+    """One page load must not walk the result set on its own.
+
+    Pre-change, each pass ran its full `MAX_RESTORE_BATCHES = 40`: an
+    unreachable saved scroll issued 40 searches per pass, and a selected id that
+    can never appear issued another 40. The scroll pass is now a small request
+    cap, and the selection is never paged for — it is re-opened only when the
+    content the scroll pass loaded already holds it.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = (RESTORE_DRIVER
+              .replace("__FN__", _extract_function(script, "_restoreView"))
+              .replace("__LOADUNTIL__", _extract_function(script, "_loadUntil"))
+              .replace("__MAX__", str(_restore_cap(script))))
+    out = _run_node(driver, tmp_path)
+
+    cap = _restore_cap(script)
+    assert cap <= 5, "the scroll pass must be a small request budget"
+    assert out["cap"]["batches"] == cap, \
+        "an unreachable saved scroll must stop at the small cap"
+    assert out["absent_selection"]["batches"] == 0, \
+        "a selected id that never appears must not page at all"
+    assert out["absent_selection"]["showDetailCalls"] == 0
+    assert out["exhausted"]["batches"] == 2, \
+        "the end of the result set stops the paging before the cap"
+
+
+# ── a failed search must not wedge the page ──────────────────────────────────
+#
+# `doSearch` is the guard every later action passes through. It sets `loading`
+# and, pre-change, cleared it only after the fetch, the JSON parse and the
+# render; with no `try`/`finally` a rejected `fetch` or a non-array body left it
+# true, and every later search, sort, pagination and author jump returned at the
+# guard without a request.
+
+SEARCH_FAILURE_DRIVER = """
+const fn = (__FN__);
+const _doSearchBody = (__BODY__);
+const out = {fetches: 0, thrown: [], loading: null};
+const report = console.log;
+global.console = {debug: () => {}, warn: () => {}, error: () => {}, log: report};
+global.getFilters = () => [];
+global._overlayValue = () => 'any';
+global._observeNextBatch = () => {};
+global._startItemUpdatePoll = () => {};
+global._listNeedsPoll = () => false;
+global._saveViewState = () => {};
+global.loading = false;
+global.hasMore = true;
+global.currentOffset = 0;
+const grid = {innerHTML: '', appendChild: () => {}};
+global.document = {
+  getElementById: (id) => (id === 'results-grid' ? grid : {value: ''}),
+  createElement: () => ({setAttribute: () => {}, appendChild: () => {},
+                         querySelector: () => null}),
+};
+function jsonResp(status, body) {
+  return {ok: status >= 200 && status < 300, status: status, statusText: 'ERR',
+          json: async () => body};
+}
+const responses = __RESPONSES__;
+global.fetch = async () => {
+  out.fetches += 1;
+  const r = responses.shift();
+  if (r instanceof Error) throw r;
+  return r;
+};
+(async () => {
+  for (let i = 0; i < __CALLS__; i++) {
+    try { await fn(false); } catch (e) { out.thrown.push(String(e && e.message || e)); }
+  }
+  out.loading = global.loading;
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_a_rejected_fetch_does_not_wedge_the_page(web_client, tmp_path):
+    """A network failure clears `loading`, so the next search still runs.
+
+    Pre-change `loading` stayed true after the rejection and every later call
+    returned at the guard; the driver's later calls must each reach `fetch`.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = (SEARCH_FAILURE_DRIVER
+              .replace("__FN__", _extract_function(script, "doSearch"))
+              .replace("__BODY__", _extract_function(script, "_doSearchBody"))
+              .replace("__RESPONSES__",
+                       "[new Error('network down'), jsonResp(200, []), jsonResp(200, [])]")
+              .replace("__CALLS__", "3"))
+    out = _run_node(driver, tmp_path)
+
+    assert out["fetches"] == 3, "a rejected search must not stop the next one"
+    assert out["loading"] is False, "loading must be clear after a rejected fetch"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_the_route_error_body_does_not_wedge_the_page(web_client, tmp_path):
+    """`/api/search` answers an exception with a JSON object at status 500.
+
+    `items.forEach` throws on an object, so the body is checked before it is
+    iterated; the failure clears `loading` and the next search runs.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = (SEARCH_FAILURE_DRIVER
+              .replace("__FN__", _extract_function(script, "doSearch"))
+              .replace("__BODY__", _extract_function(script, "_doSearchBody"))
+              .replace("__RESPONSES__",
+                       "[jsonResp(500, {error: 'boom'}), jsonResp(200, [])]")
+              .replace("__CALLS__", "2"))
+    out = _run_node(driver, tmp_path)
+
+    assert out["fetches"] == 2, "the error body must not stop the next search"
+    assert out["loading"] is False, "loading must be clear after a 500 body"
 
 # ── infinite scroll: the placeholder that was a grid cell ────────────────────
 #
@@ -2442,10 +2584,24 @@ global._scrollObserver = {
   unobserve: (el) => observerCalls.push(['unobserve', el.id]),
 };
 
-// The grid is a list of child cells. `insertBefore` and the `document` stub
+// `#results-grid` is a list of child cells *and its own scroll container*
+// (`overflow-y: auto; flex: 1; min-height: 0`), so a cell's viewport rect is
+// derived from its position in the grid's content and the box's `scrollTop`;
+// it is never passed in as a constant. `insertBefore` and the `document` stub
 // below model just enough DOM for the pre-change `_placeSentinel` as well, so
-// the same driver reproduces the old items + 1 result.
-const grid = {children: []};
+// the same driver reproduces the old items + 1 result. The window is modelled
+// too, because the bug this driver must catch is the cell being measured
+// against the window instead of the grid.
+const GRID_TOP = 0;
+const CELL_H = 120;
+const grid = {
+  children: [],
+  scrollTop: __SCROLL_TOP__,
+  clientHeight: __GRID_HEIGHT__,
+};
+grid.getBoundingClientRect = function() {
+  return {top: GRID_TOP, bottom: GRID_TOP + this.clientHeight};
+};
 grid.appendChild = function(node) { node.parentNode = this; this.children.push(node); };
 grid.insertBefore = function(node, ref) {
   const i = this.children.indexOf(ref);
@@ -2453,10 +2609,15 @@ grid.insertBefore = function(node, ref) {
   this.children.splice(i === -1 ? this.children.length : i, 0, node);
 };
 
-function makeCell(id, top) {
+function makeCell(id, contentTop) {
   return {
-    id: id, parentNode: grid, attrs: {},
-    getBoundingClientRect: () => ({top: top}),
+    id: id, parentNode: grid, attrs: {}, contentTop: contentTop,
+    getBoundingClientRect: function() {
+      return {
+        top: this.contentTop - grid.scrollTop + GRID_TOP,
+        bottom: this.contentTop - grid.scrollTop + CELL_H + GRID_TOP,
+      };
+    },
     setAttribute: function(k, v) { this.attrs[k] = v; },
     removeAttribute: function(k) { delete this.attrs[k]; },
   };
@@ -2472,6 +2633,7 @@ for (let i = 0; i < ITEM_COUNT; i++) {
 
 const prevCell = makeCell('prev-cell', 0);
 let _observedCell = __PREV_OBSERVED__ ? prevCell : null;
+let _pendingLoadCell = null;
 
 global.loading = __LOADING__;
 global.hasMore = true;
@@ -2485,7 +2647,11 @@ global.doSearch = (reset) => { searches.push(reset); };
 let sentinel = null;
 global.document = {
   createElement: () => ({id: null, remove: function() { sentinel = null; }}),
-  getElementById: (id) => (id === 'scroll-sentinel' ? sentinel : null),
+  getElementById: (id) => {
+    if (id === 'scroll-sentinel') return sentinel;
+    if (id === 'results-grid') return grid;
+    return null;
+  },
   querySelector: (sel) => (sel === '.grid-cell[data-batch-first]' ? firstCell : null),
 };
 
@@ -2504,13 +2670,17 @@ console.log(JSON.stringify({
 
 
 def _observe_driver(script, *, call, prev_observed=False, loading=False,
-                    first_top=5000, inner_height=800, item_count=4):
+                    first_top=5000, inner_height=800, item_count=4,
+                    grid_height=560, scroll_top=0):
     """Driver for the served `_observeNextBatch`, with the scenario's inputs.
 
-    The batch's first cell sits below `inner_height` by default (the observer
-    path); `first_top` below it exercises the already-visible shortcut, and
-    `call` chooses the entry point (`fn(firstCell)`, `fn(null)` on reset, or
-    `fn()` to measure the old no-argument sentinel function).
+    `first_top` is the first cell's position in the grid's content, so its
+    viewport top is `first_top - scroll_top`; the grid box runs `0..grid_height`
+    and the window is `inner_height` tall. The default puts the cell below the
+    grid's box (the observer path); a cell inside the box exercises the
+    already-visible shortcut, and `call` chooses the entry point
+    (`fn(firstCell)`, `fn(null)` on reset, or `fn()` to measure the old
+    no-argument sentinel function).
     """
     return (OBSERVE_DRIVER
             .replace("__FN__", _extract_function(script, "_observeNextBatch"))
@@ -2519,7 +2689,9 @@ def _observe_driver(script, *, call, prev_observed=False, loading=False,
             .replace("__LOADING__", "true" if loading else "false")
             .replace("__FIRST_TOP__", str(first_top))
             .replace("__INNER_HEIGHT__", str(inner_height))
-            .replace("__ITEM_COUNT__", str(item_count)))
+            .replace("__ITEM_COUNT__", str(item_count))
+            .replace("__GRID_HEIGHT__", str(grid_height))
+            .replace("__SCROLL_TOP__", str(scroll_top)))
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
@@ -2615,6 +2787,266 @@ def test_infinite_scroll_reset_releases_the_previous_observation(web_client, tmp
         "the reset path must release the observation"
     assert script.index("innerHTML = '';") < script.index("_observeNextBatch(null);"), \
         "the release must come after the grid is cleared"
+
+
+# ── the reference box: the grid is the scroller, not the window ──────────────
+#
+# `#results-grid` is `overflow-y: auto` with `flex: 1; min-height: 0`, so it
+# clips its own content. A cell just below its visible bottom can still sit
+# inside a window much taller than the grid, and the old shortcut read that as
+# "already visible" and asked for the next page -- the chain that "infinitely
+# scrolls". These drivers derive the cell's rect from the modelled scroll box,
+# so the assertion is on which box decided.
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_infinite_scroll_measures_visibility_against_the_grid_scroller(web_client, tmp_path):
+    """A cell below the grid's box is armed, not loaded, even in a tall window.
+
+    The grid clips its own content, so a cell below its visible bottom is not on
+    screen however much window surrounds it. The old shortcut tested
+    `rect.top < window.innerHeight` and loaded a page for a cell the user could
+    not see; the shortcut must read the grid's own box.
+    """
+    client, _ = web_client
+    out = _run_node(
+        _observe_driver(_served_inline_script(client), call="fn(firstCell)",
+                        first_top=900, inner_height=4000, grid_height=560),
+        tmp_path,
+    )
+
+    assert out["timeouts"] == [], \
+        "a cell below the grid's box is not visible, however tall the window is"
+    assert out["observerCalls"] == [["observe", "cell-0"]], \
+        "the cell must be observed, not treated as already visible"
+    assert out["observed"] == "cell-0"
+    assert out["searches"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_infinite_scroll_does_not_shortcut_a_cell_above_the_grid_box(web_client, tmp_path):
+    """A cell the user scrolled past is above the grid's box, not below the fold.
+
+    The old test `rect.top < window.innerHeight` is satisfied by any cell above
+    the fold, including one already scrolled out of the grid's top; the grid's
+    box has a top edge too, and a cell above it needs no load.
+    """
+    client, _ = web_client
+    out = _run_node(
+        _observe_driver(_served_inline_script(client), call="fn(firstCell)",
+                        first_top=500, scroll_top=1000, inner_height=800,
+                        grid_height=560),
+        tmp_path,
+    )
+
+    assert out["timeouts"] == [], \
+        "a cell above the grid's box was scrolled past; it needs no load"
+    assert out["observerCalls"] == [["observe", "cell-0"]]
+    assert out["searches"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_infinite_scroll_arming_the_same_cell_twice_schedules_one_load(web_client, tmp_path):
+    """Arming is idempotent: one batch can have at most one pending load.
+
+    The shortcut schedules and returns without arming, so a second call for the
+    same batch used to schedule a second load; the pending batch is now recorded
+    and re-arming it is a no-op.
+    """
+    client, _ = web_client
+    out = _run_node(
+        _observe_driver(_served_inline_script(client),
+                        call="fn(firstCell); fn(firstCell);",
+                        first_top=100),
+        tmp_path,
+    )
+
+    assert out["timeouts"] == [0], "the same batch must not schedule a second load"
+    assert out["searches"] == [False], "exactly one load for one armed batch"
+
+
+INTERSECTION_DRIVER = """
+const fn = (__FN__);
+const searches = [];
+global.loading = false;
+global.hasMore = true;
+global.currentOffset = 50;
+let _observedCell = {id: 'armed'};
+global.doSearch = (reset) => searches.push(reset);
+// A record for a cell `unobserve`d by an earlier batch arrives first; the
+// armed cell's own record says it is not intersecting. Only the target's own
+// record may decide a load.
+fn([
+  {target: {id: 'released'}, isIntersecting: true},
+  {target: _observedCell, isIntersecting: false},
+]);
+// Then the armed cell's own intersecting record: one load, once.
+fn([
+  {target: {id: 'released'}, isIntersecting: true},
+  {target: _observedCell, isIntersecting: true},
+]);
+console.log(JSON.stringify({searches: searches}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_infinite_scroll_ignores_an_entry_for_a_released_cell(web_client, tmp_path):
+    """The callback matches the entry's target against the armed cell.
+
+    An `IntersectionObserver` callback can carry records for targets observed
+    earlier; trusting `entries[0]` let a released cell's intersecting record
+    decide a load while the armed cell's own record said otherwise.
+    """
+    client, _ = web_client
+    driver = INTERSECTION_DRIVER.replace(
+        "__FN__", _extract_function(_served_inline_script(client), "_onScrollIntersection"))
+    out = _run_node(driver, tmp_path)
+
+    assert out["searches"] == [False], \
+        "only the armed cell's own intersecting record may load"
+
+
+OBSERVER_ROOT_DRIVER = """
+global.IntersectionObserver = function(cb, opts) { return {cb: cb, opts: opts}; };
+const gridEl = {id: 'results-grid'};
+global.document = {getElementById: (id) => (id === 'results-grid' ? gridEl : null)};
+global._onScrollIntersection = function() {};
+const observer = (__FN__)();
+console.log(JSON.stringify({
+  root: observer.opts && observer.opts.root ? observer.opts.root.id : null,
+  cb_is_callback: observer.cb === global._onScrollIntersection,
+}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_infinite_scroll_observer_is_rooted_at_the_grid(web_client, tmp_path):
+    """The observer must measure against the grid, its scroller.
+
+    A rootless `IntersectionObserver` measures against the window, so a cell
+    inside the grid's scroll box but clipped below its visible edge is reported
+    as intersecting and fires a load. The root is the grid element.
+    """
+    client, _ = web_client
+    driver = OBSERVER_ROOT_DRIVER.replace(
+        "__FN__", _extract_function(_served_inline_script(client), "_makeScrollObserver"))
+    out = _run_node(driver, tmp_path)
+
+    assert out["root"] == "results-grid", \
+        "the observer's root must be the grid's own scroll box"
+    assert out["cb_is_callback"] is True, \
+        "the grid-rooted observer must keep the same callback"
+
+
+SCROLL_CHAIN_DRIVER = """
+const observeFn = (__OBSERVE__);
+const intersectFn = (__INTERSECT__);
+const observerCalls = [];
+global._scrollObserver = {
+  observe: (el) => observerCalls.push(['observe', el.id]),
+  unobserve: (el) => observerCalls.push(['unobserve', el.id]),
+};
+const GRID_TOP = 0, CELL_H = 120, COLS = 4, BATCH = 50;
+const grid = {
+  scrollTop: 0, clientHeight: 560,
+  getBoundingClientRect: function() {
+    return {top: GRID_TOP, bottom: GRID_TOP + this.clientHeight};
+  },
+};
+let cells = [], contentHeight = 0;
+function makeCell(id, contentTop) {
+  return {id: id, contentTop: contentTop, getBoundingClientRect: function() {
+    return {top: this.contentTop - grid.scrollTop + GRID_TOP,
+            bottom: this.contentTop - grid.scrollTop + CELL_H + GRID_TOP};
+  }};
+}
+let _observedCell = null, _pendingLoadCell = null;
+global.loading = false;
+global.hasMore = true;
+global.currentOffset = 0;
+global.window = {innerHeight: __INNER_HEIGHT__};
+const scheduled = [];
+global.setTimeout = (cb) => { scheduled.push(cb); };
+global.document = {getElementById: (id) => (id === 'results-grid' ? grid : null)};
+let lastBatchFirst = null;
+const loads = [];
+function appendBatch() {
+  const startTop = contentHeight;
+  const first = cells.length;
+  for (let i = 0; i < BATCH; i++) {
+    cells.push(makeCell('cell-' + (first + i), startTop + Math.floor(i / COLS) * CELL_H));
+  }
+  contentHeight += Math.ceil(BATCH / COLS) * CELL_H;
+  return cells[first];
+}
+global.doSearch = function() {
+  loading = true;
+  const first = appendBatch();
+  lastBatchFirst = first.id;
+  loads.push(first.id);
+  currentOffset += BATCH;
+  hasMore = currentOffset < __TOTAL__;
+  loading = false;
+  observeFn(first);
+};
+function drain() { while (scheduled.length) scheduled.shift()(); }
+function scrollToCell(cell) { grid.scrollTop = Math.max(0, cell.contentTop - 10); }
+function state() {
+  return {observed: _observedCell ? _observedCell.id : null,
+          lastBatchFirst: lastBatchFirst, loads: loads.length};
+}
+const out = {};
+observeFn(appendBatch());      // the first batch, already at the top of the grid
+out.initial = state();
+drain();                       // the shortcut's scheduled load
+out.shortcut = state();
+let armed = _observedCell;
+scrollToCell(armed);
+intersectFn([{target: armed, isIntersecting: true}]);
+drain();
+out.scrolled = state();
+armed = _observedCell;
+scrollToCell(armed);
+intersectFn([{target: armed, isIntersecting: true}]);
+drain();
+out.scrolled2 = state();
+hasMore = false;
+observeFn(cells[cells.length - 1]);
+out.exhausted = {observed: _observedCell ? _observedCell.id : null,
+                 loads: loads.length - out.scrolled2.loads};
+out.observerCalls = observerCalls;
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_infinite_scroll_chain_arms_only_the_last_batch_and_stops(web_client, tmp_path):
+    """The chain loads one batch per event and arms the batch it just appended.
+
+    With the scroll box modelled, the batched sequence is: a short first batch
+    asks for the next page once, then the armed cell sits below the box and the
+    chain stops until an intersection is delivered -- so the armed cell is always
+    the last batch's first cell, and the end of the result set arms nothing.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = (SCROLL_CHAIN_DRIVER
+              .replace("__OBSERVE__", _extract_function(script, "_observeNextBatch"))
+              .replace("__INTERSECT__", _extract_function(script, "_onScrollIntersection"))
+              .replace("__INNER_HEIGHT__", "4000")
+              .replace("__TOTAL__", "100000"))
+    out = _run_node(driver, tmp_path)
+
+    assert out["initial"] == {"observed": None, "lastBatchFirst": None, "loads": 0}
+    assert out["shortcut"] == {"observed": "cell-50", "lastBatchFirst": "cell-50",
+                               "loads": 1}, \
+        "the short first batch loads once, then arms the batch it appended"
+    assert out["scrolled"]["loads"] == 2, "one scroll event requests one batch"
+    assert out["scrolled"]["observed"] == out["scrolled"]["lastBatchFirst"] == "cell-100"
+    assert out["scrolled2"]["loads"] == 3
+    assert out["scrolled2"]["observed"] == out["scrolled2"]["lastBatchFirst"] == "cell-150"
+    assert out["exhausted"] == {"observed": None, "loads": 0}, \
+        "with hasMore false nothing is armed and nothing loads"
 
 
 # ── author mode ──────────────────────────────────────────────────────────────
@@ -4044,7 +4476,9 @@ def test_the_search_does_not_wait_for_the_cutoff_query(web_client):
     """The stall was an `await` between clearing the grid and the first fetch."""
     client, _ = web_client
     script = _served_inline_script(client)
-    body = _extract_function(script, "doSearch")
+    # `doSearch` is the guard and the try/finally; the work it wraps is
+    # `_doSearchBody`, so the ordering the stall lived in is asserted there.
+    body = _extract_function(script, "_doSearchBody")
 
     assert "await loadCutoffs()" not in body, \
         "the cutoff query must not be awaited on the search path"
