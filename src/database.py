@@ -3186,6 +3186,64 @@ def _migration_38_to_39(cursor, conn, db_path):
         "Migration 38->39 complete. Every existing creator is not ignored."
     )
 
+# ── the query indexes, as data ───────────────────────────────────────────────
+# `_ensure_indexes` creates these. Three readers share the table: the startup
+# diagnostic checks that every one is actually present in the live file, the
+# `/api/search_diagnostic` route reports the same set, and the sort-column
+# invariant test proves every `VALID_SORT_COLS` entry is covered. One table
+# rather than twenty statements is what keeps them from drifting.
+#
+# Each entry is `(name, table, columns)`. `columns` holds the fragments SQLite
+# stores, in index order, and the *first* is the index's leading column -- the
+# one an `ORDER BY <column>` can be served from, which is what the invariant
+# test matches on. A leading column that is missing here is not a style matter:
+# the "Subscriber Score" report that opened this work was a hypothesis about a
+# missing score index, and the invariant found a *different* one missing (see
+# `idx_own_first_subscribed_at` below).
+#
+# `idx_translation_queue_poll` is here rather than in a schema builder because on
+# a legacy-chain database the builder runs while the column is still called
+# `dt_queued` (migration 13->14 renames it to `queued_at`), so an index naming
+# `queued_at` there fails with "no such column". `_ensure_indexes` runs after the
+# migration chain. Its `priority DESC, queued_at ASC` directions are the poll
+# query's: a mixed-direction sort cannot be served by a single-direction index
+# scanned in reverse, so the DESC is not optional.
+QUERY_INDEXES = (
+    ("idx_consumer_appid", "workshop_items", ("consumer_appid",)),
+    ("idx_fetch_status", "workshop_items", ("fetch_status",)),
+    ("idx_api_fetched_at", "workshop_items", ("api_fetched_at",)),
+    ("idx_title", "workshop_items", ("title",)),
+    ("idx_creator_steamid", "workshop_items", ("creator_steamid",)),
+    ("idx_short_description", "workshop_items", ("short_description",)),
+    ("idx_extended_description", "workshop_items", ("extended_description",)),
+    ("idx_appid_fetch_status", "workshop_items", ("consumer_appid", "fetch_status")),
+    ("idx_creator_steamid_api_fetched_at", "workshop_items",
+     ("creator_steamid", "api_fetched_at")),
+    ("idx_translation_priority", "workshop_items", ("translation_priority",)),
+    ("idx_is_queued", "workshop_items", ("is_queued_for_subscription",)),
+    # Sort-column indexes — avoid expensive full-table sorts. idx_time_created /
+    # idx_time_updated keep their historical names (SQLite rewrote their
+    # definitions to the renamed columns); only the target columns matter here.
+    ("idx_time_created", "workshop_items", ("steam_created_at",)),
+    ("idx_time_updated", "workshop_items", ("steam_updated_at",)),
+    ("idx_file_size", "workshop_items", ("file_size",)),
+    ("idx_subscriptions", "workshop_items", ("subscriptions",)),
+    ("idx_favorited", "workshop_items", ("favorited",)),
+    ("idx_views", "workshop_items", ("views",)),
+    ("idx_wilson_subscription_score", "workshop_items", ("wilson_subscription_score",)),
+    ("idx_wilson_favorite_score", "workshop_items", ("wilson_favorite_score",)),
+    # The "Subscribed at" sort. Both score columns above were already indexed
+    # (added together in 8771877); this one was not, so a page sorted by it paid
+    # a full temp B-tree sort on every request -- measured on a 2.5 M-row copy as
+    # 0.47/0.48/0.49 s at offsets 0/50,000/200,000 with `USE TEMP B-TREE FOR
+    # ORDER BY`, against 0.00/0.02/0.07 s and `SCAN w USING INDEX
+    # idx_own_first_subscribed_at` once the index exists. The invariant test
+    # below is what found it.
+    ("idx_own_first_subscribed_at", "workshop_items", ("own_first_subscribed_at",)),
+    ("idx_translation_queue_poll", "translation_queue", ("priority DESC", "queued_at ASC")),
+)
+
+
 def _ensure_indexes(cursor):
     """Create the query indexes, after the column renames migrations perform.
 
@@ -3194,46 +3252,14 @@ def _ensure_indexes(cursor):
     so they must run last. Idempotent: every statement is ``IF NOT EXISTS``.
     The ``scrape_version`` indexes this function used to create were dropped
     with the column in migration 34->35.
-    """
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fetch_status ON workshop_items (fetch_status)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_fetched_at ON workshop_items (api_fetched_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_title ON workshop_items (title)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_steamid ON workshop_items (creator_steamid)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_short_description ON workshop_items (short_description)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_extended_description ON workshop_items (extended_description)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_appid_fetch_status ON workshop_items (consumer_appid, fetch_status)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_steamid_api_fetched_at ON workshop_items (creator_steamid, api_fetched_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_translation_priority ON workshop_items (translation_priority)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_is_queued ON workshop_items (is_queued_for_subscription)")
-    # Sort-column indexes — avoid expensive full-table sorts. idx_time_created /
-    # idx_time_updated keep their historical names (SQLite rewrote their
-    # definitions to the renamed columns); only the target columns matter here.
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_time_created ON workshop_items (steam_created_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_time_updated ON workshop_items (steam_updated_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_file_size ON workshop_items (file_size)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions ON workshop_items (subscriptions)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_favorited ON workshop_items (favorited)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_views ON workshop_items (views)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_wilson_subscription_score ON workshop_items (wilson_subscription_score)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_wilson_favorite_score ON workshop_items (wilson_favorite_score)")
 
-    # The translation poll (`get_next_batch_for_translation`) orders the whole
-    # outstanding queue by priority then queue time on every pass, so that sort
-    # belongs in an index. It has to be created here rather than in
-    # `_create_legacy_schema`: on a fresh database `_create_legacy_schema` runs while the
-    # column is still called `dt_queued` (migration 13->14 renames it to
-    # `queued_at`), so an index naming `queued_at` there fails with
-    # "no such column". `_ensure_indexes` runs after the migration chain, which
-    # is the reason it exists at all.
-    #
-    # The directions are the query's -- `priority DESC, queued_at ASC`. A
-    # mixed-direction sort cannot be satisfied by a single-direction index
-    # scanned in reverse, so the DESC on `priority` is not optional.
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_translation_queue_poll "
-        "ON translation_queue (priority DESC, queued_at ASC)"
-    )
+    The set is :data:`QUERY_INDEXES`, iterated rather than repeated so the
+    startup diagnostic and the sort-column invariant test read the same list.
+    """
+    for name, table, columns in QUERY_INDEXES:
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({', '.join(columns)})"
+        )
 
 # Ordered schema migrations: (target user_version, function). The functions
 # above are defined in this same order, and each one runs only when the file's
