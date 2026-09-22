@@ -76,7 +76,8 @@ def _extract_function(script: str, name: str) -> str:
 def _run_node(driver: str, tmp_path):
     path = tmp_path / "creator_ignore_driver.js"
     path.write_text(driver, encoding="utf-8")
-    result = subprocess.run([NODE, str(path)], capture_output=True, text=True)
+    result = subprocess.run([NODE, str(path)], capture_output=True, text=True,
+                            encoding="utf-8")
     assert result.returncode == 0, f"node driver failed:\n{result.stdout}\n{result.stderr}"
     return json.loads(result.stdout)
 

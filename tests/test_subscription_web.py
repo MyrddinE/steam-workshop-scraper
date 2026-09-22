@@ -188,15 +188,20 @@ def test_the_queued_payload_carries_the_whole_marker(web_client):
 # --- opening a downloaded item's folder -------------------------------------
 
 
-def _enable_open_folder(monkeypatch, db_path, content_dir, launcher):
-    """Point the server's global helper at a Windows build with a fake launcher.
+def _enable_open_folder(monkeypatch, db_path, content_dir, launcher, *,
+                        platform="win32"):
+    """Point the server's global helper at a platform build with a fake launcher.
 
-    No test may open Explorer: the launcher is always injected, and the folder is
-    checked against a temp content directory rather than a real Steam library.
+    ``platform`` defaults to the Windows host the feature is for. Passing a
+    non-Windows value is how the off-Windows tests build the "off" half from the
+    same seam, so they assert the non-Windows behaviour on every host rather than
+    only on a non-Windows one. No test may open Explorer: the launcher is always
+    injected, and the folder is checked against a temp content directory rather
+    than a real Steam library.
     """
     service = workshop_folders.WorkshopFolders(
         db_path, {"steam": {"workshop_content_dirs": [str(content_dir)]}},
-        platform="win32", launcher=launcher)
+        platform=platform, launcher=launcher)
     monkeypatch.setattr(webserver, "_workshop_folders", service)
     return service
 
@@ -210,10 +215,12 @@ def _green_item(db_path, wid=7, *, content_dir, make_folder=True):
         (content_dir / "294100" / str(wid)).mkdir(parents=True)
 
 
-def test_open_folder_refuses_off_windows(web_client):
+def test_open_folder_refuses_off_windows(web_client, monkeypatch, tmp_path):
     client, db_path = web_client
     insert_or_update_item(db_path, {"workshop_id": 7, "title": "T", "fetch_status": 200,
                                     "own_subscribed": 1, "steam_download_seen_at": 1000})
+    _enable_open_folder(monkeypatch, db_path, tmp_path / "content", lambda path: None,
+                        platform="linux")
 
     resp = client.post('/api/open_folder/7')
 
@@ -289,6 +296,11 @@ def test_the_open_folder_control_is_rendered_only_on_windows(web_client, monkeyp
                                                              tmp_path):
     client, db_path = web_client
 
+    # The "off" half is the non-Windows host, injected through the same seam as
+    # the "on" half -- otherwise the assertion only holds when the suite itself
+    # runs off Windows.
+    _enable_open_folder(monkeypatch, db_path, tmp_path / "content", lambda path: None,
+                        platform="linux")
     off = client.get('/').data.decode()
     assert '<button id="btn-open-folder"' not in off
     assert "e.key === 'o'" not in off, "off Windows the shortcut is not bound"
@@ -436,7 +448,8 @@ def _extract_function(script: str, name: str) -> str:
 def _run_node(driver: str, tmp_path):
     path = tmp_path / "driver.js"
     path.write_text(driver, encoding="utf-8")
-    result = subprocess.run([NODE, str(path)], capture_output=True, text=True)
+    result = subprocess.run([NODE, str(path)], capture_output=True, text=True,
+                            encoding="utf-8")
     assert result.returncode == 0, f"node driver failed:\n{result.stdout}\n{result.stderr}"
     return json.loads(result.stdout)
 

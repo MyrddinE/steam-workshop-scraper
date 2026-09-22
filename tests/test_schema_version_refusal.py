@@ -185,6 +185,11 @@ def test_daemon_runner_exits_2_with_the_sentence(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["daemon_runner.py", "config.yaml"])
     monkeypatch.setattr(daemon_runner, "load_config",
                         lambda path: {"database": {"path": db_path}, "logging": {}})
+    # The runner takes its PID file before it reads the schema, so the path is
+    # isolated here: otherwise a daemon running in the project directory holds
+    # .daemon.pid, the runner refuses with exit 3, and this test never reaches
+    # the schema guard it is about.
+    monkeypatch.setattr(daemon_runner, "PID_FILE", str(tmp_path / ".daemon.pid"))
     # So that, if the guard is ever removed, this test fails on the missing
     # SystemExit instead of starting a real daemon and hanging.
     daemon = MagicMock()

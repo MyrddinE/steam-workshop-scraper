@@ -47,14 +47,28 @@ def test_web_worker_failure_sets_api_priority(db_path):
     insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5, "api_priority": 0})
 
     worker = WebScraperThread(db_path, '.pauselock')
+    served = 0
 
-    with patch('src.web_worker.get_next_web_scrape_item') as mock_next, \
+    def next_item(*args, **kwargs):
+        # The source hands the item out exactly once; the second call is the
+        # worker's own stop. That guarantees the failing iteration runs instead
+        # of racing a flag cleared right after start(), which on Windows can
+        # land before the loop's first pass.
+        nonlocal served
+        if served:
+            worker.running = False
+            return None
+        served += 1
+        return {"workshop_id": 1, "steam_updated_at": 123456}
+
+    with patch('src.web_worker.get_next_web_scrape_item', side_effect=next_item), \
          patch('src.web_worker.scrape_extended_details', return_value=None), \
-         patch('time.sleep'):  # don't actually sleep
-        mock_next.return_value = {"workshop_id": 1, "steam_updated_at": 123456}
+         patch('time.sleep'), patch('src.pacing.wait'):  # don't actually sleep
         worker.start()
-        worker.running = False  # stop after current iteration
-        worker.join(timeout=2)
+        worker.join(timeout=5)
+
+    assert not worker.is_alive(), "the worker did not stop within the timeout"
+    assert served == 1, "the failing iteration never ran"
 
     conn = get_connection(db_path)
     prio = conn.execute(

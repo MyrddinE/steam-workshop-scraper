@@ -1,11 +1,12 @@
 """DaemonController: the start/stop logic shared by the TUI and the web UI.
 
 No test here spawns a real daemon: ``subprocess.Popen`` is faked and liveness
-probes ("is this PID alive?") are answered by a fake ``os.kill``.
+probes ("is this PID alive?") are answered by patching the platform-neutral
+``daemon_control._pid_alive`` seam. Patching ``os.kill`` instead does nothing on
+Windows, where the probe is ``OpenProcess``, so the fake PIDs read as dead there.
 """
 
 import os
-import signal
 import time
 
 import pytest
@@ -59,6 +60,37 @@ class FakeKill:
 
 def _pid_file(tmp_path, name=".daemon.pid"):
     return str(tmp_path / name)
+
+
+def _fake_liveness(monkeypatch, *answers):
+    """Patch the platform-neutral liveness seam and record every probe.
+
+    These tests are about what the controller does given a live or dead PID, not
+    about how liveness is discovered, so they patch ``_pid_alive`` -- the seam
+    every platform goes through. Patching ``os.kill`` says nothing on Windows,
+    where the probe is ``OpenProcess`` and the fake PIDs read as dead. Answers
+    are consumed one per call and the last one repeats.
+    """
+    probes = []
+    pending = list(answers) or [True]
+
+    def probe(pid):
+        probes.append(pid)
+        if len(pending) > 1:
+            return pending.pop(0)
+        return pending[0]
+
+    monkeypatch.setattr(daemon_control, "_pid_alive", probe)
+    return probes
+
+
+def _forbid_signals(monkeypatch):
+    """Fail if the controller reaches for a real signal instead of the seam."""
+    def forbidden(pid, sig):
+        raise AssertionError(
+            f"os.kill({pid}, {sig}) must not signal a PID the controller did "
+            f"not start")
+    monkeypatch.setattr(daemon_control.os, "kill", forbidden)
 
 
 def test_the_stop_grace_is_the_daemons_documented_worst_case():
@@ -135,7 +167,7 @@ def test_is_running_true_from_live_pid_file(tmp_path, monkeypatch):
     with open(pid_file, "w") as f:
         f.write("321")
     controller = DaemonController(pid_file=pid_file)
-    monkeypatch.setattr(daemon_control.os, "kill", lambda pid, sig: None)
+    _fake_liveness(monkeypatch, True)
     assert controller.is_running() is True
 
 
@@ -267,7 +299,7 @@ def test_status_reports_stopped_then_running(tmp_path, monkeypatch):
 
     with open(pid_file, "w") as f:
         f.write("77")
-    monkeypatch.setattr(daemon_control.os, "kill", lambda pid, sig: None)
+    _fake_liveness(monkeypatch, True)
     assert controller.status() == {"running": True, "pid": 77}
 
 
@@ -311,7 +343,7 @@ def test_start_is_noop_when_already_running(tmp_path, monkeypatch):
     with open(pid_file, "w") as f:
         f.write("8888")
     controller = DaemonController(pid_file=pid_file)
-    monkeypatch.setattr(daemon_control.os, "kill", lambda pid, sig: None)
+    _fake_liveness(monkeypatch, True)
     monkeypatch.setattr(daemon_control.subprocess, "Popen",
                         lambda *a, **k: pytest.fail("must not spawn while running"))
 
@@ -401,16 +433,16 @@ def test_stop_removes_the_pid_file_without_signalling_a_pid_it_did_not_start(
     with open(pid_file, "w") as f:
         f.write("4321")
     controller = DaemonController(pid_file=pid_file)
-    kill = FakeKill(alive_probes=1)
-    monkeypatch.setattr(daemon_control.os, "kill", kill)
+    probes = _fake_liveness(monkeypatch, True, False)
+    _forbid_signals(monkeypatch)
     monkeypatch.setattr(daemon_control.platform, "system", lambda: "Linux")
 
     changed, message = controller.stop()
 
     assert changed is True
-    assert [sig for _pid, sig in kill.calls] == [0, 0], (
-        "the file names a PID this controller did not start, so only liveness "
-        f"probes are allowed: {kill.calls}")
+    assert probes == [4321, 4321], (
+        "the file names a PID this controller did not start, so it may only be "
+        f"probed for liveness: {probes}")
     assert not os.path.exists(pid_file)
     assert controller.proc is None
 
@@ -437,8 +469,8 @@ def test_stop_reports_failure_instead_of_killing_a_pid_it_did_not_start(
     with open(pid_file, "w") as f:
         f.write("9999")
     controller = DaemonController(pid_file=pid_file)
-    kill = FakeKill(alive_probes=1000)
-    monkeypatch.setattr(daemon_control.os, "kill", kill)
+    probes = _fake_liveness(monkeypatch, True)
+    _forbid_signals(monkeypatch)
     monkeypatch.setattr(daemon_control.platform, "system", lambda: "Linux")
     # Zero wait so the escalation decision runs without a real 15-second sleep.
     monkeypatch.setattr(daemon_control, "STOP_TIMEOUT_SECONDS", 0)
@@ -447,9 +479,8 @@ def test_stop_reports_failure_instead_of_killing_a_pid_it_did_not_start(
 
     assert changed is False
     assert "not started by this controller" in message
-    assert not any(sig in (signal.SIGTERM, signal.SIGKILL)
-                   for _pid, sig in kill.calls), (
-        f"a PID from the file is not ours to signal: {kill.calls}")
+    assert probes == [9999], (
+        "a PID from the file is not ours to signal, only to probe")
     assert not os.path.exists(pid_file)
 
 
@@ -467,8 +498,8 @@ def test_stop_does_not_kill_the_process_named_by_a_wrong_pid_file(
     with open(pid_file, "w") as f:
         f.write("31337")  # an unrelated, long-lived process
     controller = DaemonController(pid_file=pid_file)
-    kill = FakeKill(alive_probes=1000)  # the named process stays alive
-    monkeypatch.setattr(daemon_control.os, "kill", kill)
+    probes = _fake_liveness(monkeypatch, True)  # the named process stays alive
+    _forbid_signals(monkeypatch)
     monkeypatch.setattr(daemon_control.platform, "system", lambda: "Linux")
     monkeypatch.setattr(daemon_control, "STOP_TIMEOUT_SECONDS", 0)
 
@@ -476,8 +507,8 @@ def test_stop_does_not_kill_the_process_named_by_a_wrong_pid_file(
 
     assert changed is False
     assert "did not exit" in message
-    assert all(sig == 0 for _pid, sig in kill.calls), (
-        f"only a liveness probe may touch a PID from the file: {kill.calls}")
+    assert probes == [31337], (
+        "only a liveness probe may touch a PID from the file")
     assert not os.path.exists(pid_file), (
         "the file must still be removed so the real daemon notices the stop")
 
@@ -495,8 +526,8 @@ def test_stop_does_not_signal_when_its_popen_handle_is_the_exited_fork_parent(
         f.write("31337")
     dead_fork_parent = FakeProc(pid=111, alive=False)
     controller = DaemonController(pid_file=pid_file, proc=dead_fork_parent)
-    kill = FakeKill(alive_probes=1000)
-    monkeypatch.setattr(daemon_control.os, "kill", kill)
+    probes = _fake_liveness(monkeypatch, True)
+    _forbid_signals(monkeypatch)
     monkeypatch.setattr(daemon_control.platform, "system", lambda: "Linux")
     monkeypatch.setattr(daemon_control, "STOP_TIMEOUT_SECONDS", 0)
 
@@ -506,7 +537,7 @@ def test_stop_does_not_signal_when_its_popen_handle_is_the_exited_fork_parent(
     assert "not started by this controller" in message
     assert dead_fork_parent.terminated is False, (
         "terminating the exited fork parent would not reach the daemon")
-    assert all(sig == 0 for _pid, sig in kill.calls)
+    assert probes == [31337], "the file's PID was probed and never signalled"
 
 
 def test_stop_escalates_on_the_popen_handle(tmp_path, monkeypatch):
@@ -549,12 +580,14 @@ def test_tail_log_returns_new_lines_only(tmp_path):
     controller = DaemonController(config={"logging": {"file": str(log)}})
 
     first = controller.tail_log(0)
-    assert first == {"lines": ["one", "two"], "offset": len("one\ntwo\n"), "reset": False}
+    assert first == {"lines": ["one", "two"], "offset": log.stat().st_size,
+                     "reset": False}
 
     with open(log, "a") as f:
         f.write("three\n")
     second = controller.tail_log(first["offset"])
-    assert second == {"lines": ["three"], "offset": len("one\ntwo\nthree\n"), "reset": False}
+    assert second == {"lines": ["three"], "offset": log.stat().st_size,
+                      "reset": False}
 
 
 def test_tail_log_waits_for_a_complete_line(tmp_path):
@@ -564,7 +597,10 @@ def test_tail_log_waits_for_a_complete_line(tmp_path):
 
     first = controller.tail_log(0)
     assert first["lines"] == ["one"]
-    assert first["offset"] == len("one\n")
+    # The offset is a byte position, so it must be read off the file's real
+    # bytes: on Windows the text write above stores CRLF and the line is one
+    # byte longer than ``len("one\\n")``.
+    assert first["offset"] == log.read_bytes().rindex(b"\n") + 1
 
     # The line is still half-written: the offset must not move, so the partial
     # text is not returned a second time when it is finally complete.
@@ -658,7 +694,7 @@ def test_tail_log_resets_when_the_caller_fell_behind(tmp_path):
     controller = DaemonController(config={"logging": {"file": str(log)}})
     log.write_text("head\n")
     first = controller.tail_log(0)
-    assert first["offset"] == len("head\n")
+    assert first["offset"] == log.stat().st_size
 
     with open(log, "a") as f:
         for i in range(2000):
@@ -721,7 +757,7 @@ def test_tail_log_resets_after_truncation(tmp_path):
     second = controller.tail_log(first["offset"])
     assert second["reset"] is True
     assert second["lines"] == ["x"]
-    assert second["offset"] == len("x\n")
+    assert second["offset"] == log.stat().st_size
 
 
 def test_tail_log_missing_file_returns_empty(tmp_path):

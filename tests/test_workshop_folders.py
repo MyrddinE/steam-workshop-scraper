@@ -60,9 +60,10 @@ def _service(db_path, content_dirs=None, *, platform="win32", launcher=None,
              discover=None, config=None):
     """A locator with an injected launcher and, normally, a config override.
 
-    ``content_dirs`` is written as the ``steam.workshop_content_dirs`` override
-    so discovery (which reads the real registry) is never consulted unless a test
-    injects ``discover`` explicitly.
+    ``content_dirs`` is written as the ``steam.workshop_content_dirs`` override.
+    Discovery still runs on top of it, and on Windows that reads the real
+    registry, so a test whose point is "no folders at all" must also inject an
+    empty ``discover`` -- an empty override list alone is not hermetic there.
     """
     if config is None:
         config = ({"steam": {"workshop_content_dirs": list(content_dirs)}}
@@ -331,13 +332,18 @@ def test_scan_downloads_logs_once_when_it_changed_something(tmp_path, caplog):
 
 
 def test_the_status_note_names_why_the_feature_is_off(tmp_path):
-    off_platform, _ = _service(_db(tmp_path), [], platform="linux")
+    # `[]` means "there are no folders anywhere", so discovery is injected empty
+    # too: without it the real Windows registry answers for the empty case.
+    off_platform, _ = _service(_db(tmp_path), [], platform="linux",
+                               discover=lambda: [])
     assert "Windows" in off_platform.status_note()
 
-    no_dirs, _ = _service(_db(tmp_path), [], platform="win32")
+    no_dirs, _ = _service(_db(tmp_path), [], platform="win32",
+                          discover=lambda: [])
     assert "no Steam workshop content folder" in no_dirs.status_note()
 
-    on, _ = _service(_db(tmp_path), [str(tmp_path / "content")], platform="win32")
+    on, _ = _service(_db(tmp_path), [str(tmp_path / "content")], platform="win32",
+                     discover=lambda: [])
     assert on.status_note() is None
 
 

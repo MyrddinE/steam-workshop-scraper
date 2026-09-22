@@ -493,7 +493,8 @@ def _render_web_rows(scope: dict) -> str:
         + "\nconsole.log(_coverageRows(" + json.dumps(scope) + "));"
     )
     completed = subprocess.run(
-        [node, "-e", harness], capture_output=True, text=True, check=True)
+        [node, "-e", harness], capture_output=True, text=True, encoding="utf-8",
+        check=True)
     return completed.stdout.strip()
 
 

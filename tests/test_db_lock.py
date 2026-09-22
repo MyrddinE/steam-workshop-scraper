@@ -399,7 +399,8 @@ def test_web_list_poll_actually_reaches_the_server_again_after_a_500(tmp_path):
                              for name in ("_listPollTick", "_startListPoll")))
     script_path = tmp_path / "driver.js"
     script_path.write_text(driver, encoding="utf-8")
-    result = subprocess.run([NODE, str(script_path)], capture_output=True, text=True)
+    result = subprocess.run([NODE, str(script_path)], capture_output=True,
+                            text=True, encoding="utf-8")
     assert result.returncode == 0, f"node driver failed:\n{result.stdout}\n{result.stderr}"
     out = json.loads(result.stdout)
 
