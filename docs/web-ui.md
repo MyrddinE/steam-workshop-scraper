@@ -196,7 +196,7 @@ The browser's polls and the TUI's polls read the same database, and the same tra
 
 ### `renderDetail`
 
-Builds the detail view HTML inline. Shows: title (linked to Steam), creator (a jump-to-author button), workshop ID, Wilson scores (color-coded), the `Subscribed at` line when `own_first_subscribed_at` is set, created date, file size (color-coded), updated date (if different from created), views (via `fmtCount`), subscriptions/favorites (current/lifetime via `fmtCount`), tags (comma-separated from junction table or legacy JSON), Queue/Unqueue and Subscribe buttons, and description text (BBCode-to-HTML converted server-side).
+Builds the detail view HTML inline. Shows: title (linked to Steam), creator (a jump-to-author button), workshop ID, Wilson scores (color-coded), the `Subscribed at` line when `own_first_subscribed_at` is set, created date, file size (color-coded), updated date (if different from created), views (via `fmtCount`), subscriptions/favorites (current/lifetime via `fmtCount`), tags (comma-separated from junction table or legacy JSON), the direction-aware subscription control, and description text (BBCode-to-HTML converted server-side). It also refreshes the two controls in the static bottom bar — `_refreshOpenFolderButton` and `_refreshIgnoreButton` — so both follow whichever item the pane is showing.
 
 It is the detail pane subscriber's applier: `_detailSubscriber` merges each dispatched block into the item it holds and then calls this, so the pane redraws because it subscribed to the `workshop_id` rather than because a caller remembered it. The merge is what lets the summary block from `/api/items` refresh the marker without dropping the description the full payload brought.
 
@@ -380,13 +380,45 @@ invariant rests on it.
 The marker sits inside the cell that opens the detail pane, so its click handler stops propagation:
 without that, toggling the queue would also drag the pane to the item.
 
+### Keyboard hints (`o`, `s`, `i`)
+
+The page underlines the key that fires a control, for exactly three controls and only in the web UI:
+the TUI already lists every binding in its `Footer`, so no TUI label changes. One helper,
+`_hintKey(label, key)`, builds all of them, so the marking rule cannot differ per surface:
+
+* it marks the **first occurrence of the key letter**, which is what puts the mark on the `s` of
+  `Unsubscribe` rather than on the label's leading `U`;
+* a label with no such letter gets the key in brackets (`Label (S)`) instead, so a hint is never
+  silently absent;
+* every character of the label is escaped before the `<u>` markup is attached. The subscription
+  button's label comes from the server (`subscription_action_label`, built in `src/subscription.py`),
+  so nothing server-provided is interpolated raw.
+
+The three surfaces:
+
+| control | key | label |
+| --- | --- | --- |
+| `#btn-subscription` (pane) | `s` | the payload's `subscription_action_label` — `Subscribe`, `Unsubscribe`, `Cancel Unsubscribe` |
+| `#btn-ignore-item` (pane) | `i` | `Ignore` ⇄ `Unignore` |
+| `#btn-open-folder` (Windows) | `o` | `Open Folder` / `Open Folder (not downloaded)`, hint kept while disabled |
+
 ### Ignoring an item (`i`)
 
 The `i` key, with a `.grid-cell` focused, toggles the owner's ignored marker on that cell's item
 through `POST /api/ignore/<id>`; it mirrors `s`, acting on the same focused cell's `data-wid` and
-calling `preventDefault()`. The same key restores an item that is already ignored. Where `s` leaves
-focus alone, `i` then advances the way the arrow keys do — through the shared `_focusGridCell`
-helper, to the next cell, or to the previous one when the focused cell is the last.
+calling `preventDefault()`. The same key restores an item that is already ignored. Both `i` and `s`
+then advance the way the arrow keys do — through the shared `_focusGridCell` helper, to the next
+cell, or to the previous one when the focused cell is the last. `s` used to return without moving;
+that was the one place the web diverged from the TUI's own `s`, whose
+`action_toggle_subscription_queue` advances the list index.
+
+**The pane has its own item ignore toggle.** `#btn-ignore-item` sits in `#detail-buttons` beside
+Open Folder, and its press calls `toggleIgnoredItemFromDetail()`, which hands the pane's
+`_currentDetail.workshop_id` to the same `toggleIgnoredItem` the `i` key calls — so the key and the
+button cannot diverge. Its label and tooltip are refreshed by `_refreshIgnoreButton` from the same
+payload field the grid's `ignored` class is keyed off (`fetch_status === IGNORED_FETCH_STATUS`), so
+the button is the detail pane's first indication of the ignored state, which the grid otherwise
+shows only as a strikethrough on the title.
 
 **The row is not removed.** Ignoring does not re-query the list, so a search that already returned
 the row keeps it on screen until the next search hides it; the toggle has to show what it did to the
@@ -418,12 +450,19 @@ tooltip says this rather than implying a complete record.
 ### Opening the downloaded item's folder (Windows only)
 
 When the pane's item is in the `downloaded` state, `Open Folder` in `#detail-buttons` opens the
-item's workshop folder — and the `o` key does the same for the focused grid cell, beside the `s`, `l`
-and `i` shortcuts. The button is **visible but disabled** for anything not downloaded, with the reason in
-its label (`Open Folder (not downloaded)`) and title, so the affordance is discoverable rather than
-invisible; the key path shows the same refusal as an alert. The button and the shortcut are rendered
-**only on Windows** (`open_folder_enabled`, computed by the server from
-`src.workshop_folders`), so off Windows the page does not advertise an action that cannot happen.
+item's workshop folder. The `o` key is the same action at the app level, beside the `s`, `l` and `i`
+shortcuts: with a grid cell focused it opens that cell's item, and with focus anywhere in the detail
+surface — the pane holds the subscription button, `#detail-buttons` holds Open Folder, and this pane's
+own subscription press leaves focus inside it — it presses the button's action for the item the pane
+shows. `_openFolderShortcut` runs exactly one of those two and reports whether it acted, so the grid
+handler does not run as well: one keypress, one action, never two. A filter input is deliberately not
+a detail surface, so an `o` typed into one is left to the input rather than firing the route. The
+button is **visible but disabled** for anything not downloaded, with the reason in its label
+(`Open Folder (not downloaded)`) and title, so the affordance is discoverable rather than invisible —
+and that disabled label keeps its hint, because the point is discoverability with the reason; the key
+path shows the same refusal as an alert. The button and the shortcut are rendered **only on Windows**
+(`open_folder_enabled`, computed by the server from `src.workshop_folders`), so off Windows the page
+does not advertise an action that cannot happen.
 
 The click POSTs to `POST /api/open_folder/<id>`, which uses the same shared helper as the TUI. **The
 folder opens in Explorer on the host running the server, not in the browser** — the click travels to
@@ -435,6 +474,17 @@ rather than launching anything into an error. A refusal is **400** with `{ok: fa
 success is **200** with `{ok: true, folder, message}`. The helper stamps no timestamps and clears
 none — the only clearer of the green state is the subscription walk in
 [data-pipeline.md](data-pipeline.md).
+
+**Why the TUI's Explorer window comes forward and the web's may not.** The TUI's `o` works in the
+foreground because the TUI process received the last input event, so Windows permits it to call
+`SetForegroundWindow`. The web server is a background process that received no input: the keystroke or
+click happened in the browser, and the POST arrives without the server ever being the foreground
+process. Windows permits `SetForegroundWindow` only for a caller that is the foreground process, has
+received the last input event, was started by the foreground process, or when no window is currently
+in the foreground, and `AllowSetForegroundWindow` may only be called by a process that already
+qualifies. None of those holds for the server, so an Explorer window it raises can stay behind the
+browser. The owner accepted this as an OS restriction; the doc records it rather than working around
+it, and no code attempts to force the foreground.
 
 ### Translated and original text
 
@@ -457,7 +507,7 @@ detail panes print the same words.
 
 ## Maintenance Actions
 
-The row under the detail pane (`#detail-buttons`) holds the queue and database actions: **Fetch New**, **Update Visible**, and **Delete Never Fetched**.
+The row under the detail pane (`#detail-buttons`) holds the queue and database actions: **Fetch New**, **Update Visible**, and **Delete Never Fetched** — plus the two item-level controls that follow the pane's item, [`#btn-open-folder`](#opening-the-downloaded-items-folder-windows-only) (Windows only) and the `i` toggle **Ignore** ⇄ **Unignore** (`#btn-ignore-item`), which is refreshed by `_refreshIgnoreButton` and described under [Keyboard hints](#keyboard-hints-o-s-i) and [Ignoring an item](#ignoring-an-item-i).
 
 **Delete Never Fetched** (`#btn-delete-never-fetched`, `doDeleteNeverFetched`) mirrors the TUI's command-palette action. `confirm()` names the exact set before anything is sent — items with no status or a 404 status whose API data was never fetched — because the delete is destructive and irreversible; declining sends no request at all. On a 2xx it reports the count returned by the route and re-runs the search, on a rejected response it shows the status, and on a dead backend it shows the error, so a failed clear is never presented as a successful one.
 
@@ -765,13 +815,15 @@ Drops one queued row **without recording an outcome**, in either direction: `deq
 
 ### `/api/toggle_subscription_queue/<id>` — POST
 
-Flips `is_queued_for_subscription` for one item and answers `{ok: true}`. It is the route behind both the `s` shortcut on a grid cell and the detail pane's Queue/Unqueue button. It returns no new state, so the detail pane reads the item back through the read-only `/api/item/<id>` route to label its button.
+Flips `is_queued_for_subscription` for one item and answers `{ok: true}`. It is the route behind both the `s` shortcut on a grid cell and the detail pane's direction-aware subscription control (`#btn-subscription`). It returns no new state, so the detail pane reads the item back through the read-only `/api/item/<id>` route to label its button.
 
 ### `/api/ignore/<id>` — POST
 
 Toggles the owner's ignored marker (`fetch_status = -2`) for one item and answers `{ok: true}`, the
 same shape as `/api/toggle_subscription_queue/<id>` so the page treats the two uniformly. It is the
-route behind the `i` shortcut on a grid cell. The direction is not passed in: `toggle_ignored_item`
+route behind the `i` shortcut on a grid cell and behind the detail pane's `#btn-ignore-item` toggle
+(whose press runs `toggleIgnoredItemFromDetail`, calling the same `toggleIgnoredItem` the key does, so
+the two cannot diverge). The direction is not passed in: `toggle_ignored_item`
 owns the rule, sending an ignored row through `unignore_item` and every other row through
 `ignore_item` (which settles the item exactly as death does — all four queue priorities cleared and
 its `translation_queue` rows deleted). Like the queue route, it returns no new state, so the client
