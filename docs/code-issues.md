@@ -15,7 +15,15 @@ the production database on 2026-09-12.
 
 ## Open
 
-No open defects.
+### A throttled pass leaves the overlay's cancellation dequeue disabled (issue 81)
+
+`_subThrottleStopped` is set when the autosubscribe overlay stops a pass because Steam is throttling, and
+the Cancel handler reads it to decide whether to dequeue the rows the pass never verified: a throttle stop
+deliberately leaves them queued for a later drain, a normal Cancel does not. The flag is module scope and
+is **never reset when a pass starts** — `_subCanceled` is reset there, this one is not — so after any
+throttled pass the page keeps it `true` for the rest of its life, and every later Cancel silently skips
+the dequeue and leaves rows queued. Found 2026-09-22 while implementing the overlay's countdown. See
+[web-ui.md](web-ui.md) for the overlay's cancel and throttle behaviour.
 
 ## Recently closed
 
