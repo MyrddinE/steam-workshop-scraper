@@ -8,6 +8,11 @@ import logging
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
+# `src.images` is a leaf (no project imports), so the batched list-priority
+# writer below can ask the one decider whether an image answer is final instead
+# of spelling the rule out a second time.
+from src import images
+
 WORKSHOP_ITEM_COLUMNS = frozenset({
     "workshop_id", "first_seen_at", "api_fetched_at", "last_fetch_attempted_at",
     "translate_version",
@@ -4998,6 +5003,155 @@ def raise_translation_priority_for_list(db_path: str, workshop_id: int):
     ]:
         if text and not text.isascii() and not translated:
             queue_field_for_translation(db_path, "item", workshop_id, field, text, 5)
+
+
+def _queue_list_translation_fields(conn, workshop_ids: list[int]) -> None:
+    """The batched body of :func:`raise_translation_priority_for_list`.
+
+    Runs on the caller's connection so the whole page's list flags are one
+    transaction. It does exactly what the per-field loop did: read the six text
+    columns, queue each field that is non-empty, non-ASCII and still untranslated
+    through the same upsert :func:`queue_field_for_translation` performs (bump an
+    existing row's priority only when it is below 5, else insert), and raise the
+    item's ``translation_priority`` to at least 5 once per item rather than once
+    per field -- the ``MAX`` makes the repeated raise equivalent.
+
+    The existing rows are read once for the whole page instead of once per
+    field, and the ``entity_type`` is the literal ``'item'`` the caller always
+    passed.
+    """
+    placeholders = ",".join("?" * len(workshop_ids))
+    rows = conn.execute(
+        f"SELECT workshop_id, title, title_en, short_description, short_description_en, "
+        f"extended_description, extended_description_en FROM workshop_items "
+        f"WHERE workshop_id IN ({placeholders})",
+        workshop_ids,
+    ).fetchall()
+
+    # (workshop_id, field, text), in the per-row loop's order so a test can pin
+    # the queue contents deterministically.
+    pending = []
+    for row in rows:
+        for field, text, translated in (
+            ("title_en", row["title"] or "", row["title_en"]),
+            ("short_description_en", row["short_description"] or "", row["short_description_en"]),
+            ("extended_description_en", row["extended_description"] or "", row["extended_description_en"]),
+        ):
+            if text and not text.isascii() and not translated:
+                pending.append((row["workshop_id"], field, text))
+    if not pending:
+        return
+
+    existing = {
+        (row["entity_id"], row["field"]): (row["id"], row["priority"])
+        for row in conn.execute(
+            f"SELECT id, entity_id, field, priority FROM translation_queue "
+            f"WHERE entity_type = 'item' AND entity_id IN ({placeholders})",
+            workshop_ids,
+        ).fetchall()
+    }
+
+    queued_at = int(time.time())
+    queued_items = set()
+    for workshop_id, field, text in pending:
+        found = existing.get((workshop_id, field))
+        if found is not None:
+            if found[1] < 5:
+                conn.execute(
+                    "UPDATE translation_queue SET priority = 5 WHERE id = ?",
+                    (found[0],),
+                )
+        else:
+            conn.execute(
+                "INSERT INTO translation_queue "
+                "(entity_type, entity_id, field, original_text, priority, queued_at) "
+                "VALUES ('item', ?, ?, ?, 5, ?)",
+                (workshop_id, field, text, queued_at),
+            )
+        queued_items.add(workshop_id)
+
+    if queued_items:
+        item_ids = sorted(queued_items)
+        item_placeholders = ",".join("?" * len(item_ids))
+        conn.execute(
+            f"UPDATE workshop_items SET translation_priority = MAX(translation_priority, 5) "
+            f"WHERE workshop_id IN ({item_placeholders})",
+            item_ids,
+        )
+
+
+def raise_list_priorities(db_path: str, workshop_ids) -> int:
+    """Raise the list-view priorities for a whole page in one transaction.
+
+    ``POST /api/search`` used to call the three per-row raisers
+    (:func:`raise_web_scrape_priority_for_list`,
+    :func:`raise_image_priority_for_list`,
+    :func:`raise_translation_priority_for_list`) plus the image-flag check once
+    for each of the 50 rows it returned, and every one of those opened its own
+    connection, committed and closed -- ~150 connection/commit/close cycles on
+    the request the user waits for. This is the same work on one connection with
+    one commit: one ``UPDATE ... WHERE workshop_id IN (...)`` for
+    ``web_scrape_priority``, one for ``image_priority``, the image-flag UPDATE,
+    and the translation queue's inserts and bumps batched the same way.
+
+    The resulting column values are **identical** to the per-row calls,
+    statement for statement. Each batched UPDATE carries the same predicate and
+    the same expression the per-row one did; the image step runs after the
+    ``image_priority`` list raise in the same connection, so it reads the raised
+    value exactly as the per-row sequence did (a NULL priority stays NULL, since
+    ``MAX(NULL, ...)`` is NULL). See
+    ``tests/test_list_priority_batch.py``, which compares every priority column
+    and the translation queue against the per-row path.
+
+    Returns the number of rows flagged for image download -- the same count
+    ``_ensure_image_flagged`` accumulated for the route's log line.
+    """
+    ids = [int(workshop_id) for workshop_id in workshop_ids]
+    if not ids:
+        return 0
+
+    conn = get_connection(db_path)
+    try:
+        placeholders = ",".join("?" * len(ids))
+
+        conn.execute(
+            f"UPDATE workshop_items SET web_scrape_priority = 5 "
+            f"WHERE workshop_id IN ({placeholders}) "
+            f"AND web_scrape_priority > 0 AND web_scrape_priority < 5",
+            ids,
+        )
+        conn.execute(
+            f"UPDATE workshop_items SET image_priority = 5 "
+            f"WHERE workshop_id IN ({placeholders}) "
+            f"AND image_priority > 0 AND image_priority < 5",
+            ids,
+        )
+
+        rows = conn.execute(
+            f"SELECT workshop_id, preview_url, image_answer, image_priority "
+            f"FROM workshop_items WHERE workshop_id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        flag_ids = [
+            row["workshop_id"] for row in rows
+            if row["preview_url"] and not images.is_resolved(row["image_answer"])
+        ]
+        if flag_ids:
+            flag_placeholders = ",".join("?" * len(flag_ids))
+            # `raise_image_priority(wid, max(image_priority or 1, 5))`, verbatim.
+            conn.execute(
+                f"UPDATE workshop_items "
+                f"SET image_priority = MAX(image_priority, MAX(COALESCE(image_priority, 1), 5)) "
+                f"WHERE workshop_id IN ({flag_placeholders})",
+                flag_ids,
+            )
+
+        _queue_list_translation_fields(conn, ids)
+
+        conn.commit()
+        return len(flag_ids)
+    finally:
+        conn.close()
 
 
 def raise_translation_priority_for_detail(db_path: str, workshop_id: int):

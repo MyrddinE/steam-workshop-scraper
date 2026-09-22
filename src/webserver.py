@@ -5,7 +5,7 @@ import os
 import re
 import logging
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, toggle_ignored_item, mark_own_subscribed, mark_own_unsubscribed, dequeue_subscription, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items, live_fetch_status_predicate, IGNORED_FETCH_STATUS, creator_is_ignored, creator_ignore_label, toggle_creator_ignored
+from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_list_priorities, raise_web_scrape_priority_for_detail, raise_translation_priority_for_detail, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, toggle_ignored_item, mark_own_subscribed, mark_own_unsubscribed, dequeue_subscription, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items, live_fetch_status_predicate, IGNORED_FETCH_STATUS, creator_is_ignored, creator_ignore_label, toggle_creator_ignored
 from src.analysis import view_window_analysis
 from src import capture
 from src import activity
@@ -246,16 +246,17 @@ def api_search():
         )
 
         if results:
-            image_flagged_count = 0
-            for item in results:
-                wid = item['workshop_id']
-                raise_web_scrape_priority_for_list(_db_path, wid)
-                raise_image_priority_for_list(_db_path, wid)
-                if _ensure_image_flagged(wid, 5):
-                    image_flagged_count += 1
-                raise_translation_priority_for_list(_db_path, wid)
-
             ids = [row['workshop_id'] for row in results]
+            # One connection and one transaction for the whole page. This used
+            # to call the three per-row raisers (plus the image-flag check) once
+            # per returned row, and each of those opened, committed and closed
+            # its own connection -- ~150 cycles on the request the user waits
+            # for. `raise_list_priorities` runs the same statements batched; its
+            # result is identical column-for-column (see
+            # tests/test_list_priority_batch.py) and it returns the same
+            # flagged-for-image count the loop accumulated.
+            image_flagged_count = raise_list_priorities(_db_path, ids)
+
             conn = get_connection(_db_path)
             placeholders = ','.join('?' * len(ids))
             flag_rows = conn.execute(

@@ -630,7 +630,7 @@ the page learns to stop buffering at the session cap.
 
 ### `/api/search` — POST
 
-Main search endpoint. Accepts `{filters, subscribed, sort_by, sort_order, offset, limit}`. `subscribed` is the `Subscribed:` overlay value and is ANDed as one predicate outside the builder's group; `any` or a value the build does not know adds nothing. Server-side bumps web/image/translation priorities and re-queries priority fields to include updated values. Returns 50 items with summary fields. `sort_by` accepts the `VALID_SORT_COLS` whitelist, including `own_first_subscribed_at` (**Subscribed at**; descending leaves never-subscribed rows last).
+Main search endpoint. Accepts `{filters, subscribed, sort_by, sort_order, offset, limit}`. `subscribed` is the `Subscribed:` overlay value and is ANDed as one predicate outside the builder's group; `any` or a value the build does not know adds nothing. Server-side bumps web/image/translation priorities for the returned rows in **one connection and one transaction** (`raise_list_priorities`, `src/database.py`) and re-queries priority fields to include updated values. The batch produces column-for-column identical state to the per-row raisers it replaced (`tests/test_list_priority_batch.py` compares every priority column and the translation queue); it exists because the per-row form opened, committed and closed a connection for each raise on each row — **measured 2026-09-22 as 150 commits for a 50-row page**, against 1 after batching. Returns 50 items with summary fields. `sort_by` accepts the `VALID_SORT_COLS` whitelist, including `own_first_subscribed_at` (**Subscribed at**; descending leaves never-subscribed rows last).
 
 ### `/api/item/<id>` — GET
 
