@@ -4686,30 +4686,41 @@ def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
     return {key: result[metric_name]["value"] for key, metric_name in _LEGACY_STAT_KEYS}
 
 
-def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None,
-                           subscribed_overlay: str = None,
-                           include_settled: bool = False) -> dict:
-    """Returns percentile cutoff scores for Wilson metrics across items matching filters.
-    Uses NTILE(100) — returns p99, p90, p50 thresholds for both scores.
-    Returns empty dict if fewer than 10 items in the filtered set.
+# The NTILE(100) buckets whose minimum `compute_wilson_cutoffs` reports. Bucket
+# 1 is the top 1% (the p99 cutoff), bucket 10 the top 10%, bucket 50 the median.
+_WILSON_CUTOFF_BUCKETS = (("p99", 1), ("p90", 10), ("p50", 50))
 
-    ``subscribed_overlay`` follows :func:`search_items`: the overlay constrains
-    the same population the grid shows, so the percentiles must be computed over
-    it too or the colours would describe a different set of rows.
 
-    ``include_settled`` follows :func:`search_items` and defaults to hiding. The
-    percentiles colour the *visible* rows, so computing them over hidden ones
-    would place a visible item's colour against a distribution the owner cannot
-    see -- which is exactly the wrong reading. The population here therefore
-    matches the search's by default; the escape hatch exists for the later
-    surfacing feature, not for the grid.
+def _wilson_bucket_rank(n: int, bucket: int) -> int | None:
+    """The 1-based *ascending* rank of the minimum of NTILE(100) bucket ``bucket``.
+
+    ``NTILE(100)`` divides ``n`` rows into ``min(100, n)`` groups as evenly as
+    possible, the first ``n % 100`` of them one row larger. In the descending
+    score order the window used, bucket ``bucket``'s last row -- the one whose
+    value is the bucket's ``MIN`` -- sits at descending rank
+    ``bucket*base + min(bucket, remainder)``, hence ascending rank
+    ``n - that + 1``. With fewer than 100 rows the group count drops to ``n`` and
+    every bucket is a single row. ``None`` means the bucket does not exist (the
+    old ``COALESCE(MIN(...))`` over an empty bucket, which was ``0``).
     """
-    conn = get_connection(db_path)
-    sql = ("SELECT w.workshop_id, w.wilson_favorite_score, w.wilson_subscription_score "
-           "FROM workshop_items w WHERE 1=1")
+    if n <= 0 or bucket > n:
+        return None
+    if n < 100:
+        return n - bucket + 1
+    base, remainder = divmod(n, 100)
+    return n - (bucket * base + min(bucket, remainder)) + 1
+
+
+def _wilson_population_where(filters, subscribed_overlay, include_settled):
+    """The cutoff population's ``WHERE`` clause and its parameters.
+
+    Shared by the count query and the cutoff query so the two cannot disagree
+    about which rows the percentiles describe.
+    """
+    where = "1=1"
     params = []
     if not include_settled:
-        sql += f" AND {live_fetch_status_predicate('w.fetch_status')}"
+        where += f" AND {live_fetch_status_predicate('w.fetch_status')}"
     if filters:
         filter_clauses = []
         for f in filters:
@@ -4740,61 +4751,104 @@ def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None,
             for idx, (logic, clause) in enumerate(filter_clauses):
                 group_sql += f" {logic} " if idx > 0 else ""
                 group_sql += clause
-            sql += f" AND ({group_sql})"
-
+            where += f" AND ({group_sql})"
     overlay_clause, overlay_params = subscribed_overlay_clause(subscribed_overlay)
     if overlay_clause:
-        sql += f" AND ({overlay_clause})"
+        where += f" AND ({overlay_clause})"
         params.extend(overlay_params)
+    return where, params
 
-    cutoff_sql = f"""
-        WITH base AS (
-            {sql}
-            ORDER BY workshop_id
-        ),
-        scores AS (
-            SELECT wilson_favorite_score, wilson_subscription_score FROM base
-        ),
-        fav_ntile AS (
-            SELECT wilson_favorite_score,
-                   NTILE(100) OVER (ORDER BY wilson_favorite_score DESC NULLS LAST) AS bucket
-            FROM scores WHERE wilson_favorite_score IS NOT NULL
-        ),
-        sub_ntile AS (
-            SELECT wilson_subscription_score,
-                   NTILE(100) OVER (ORDER BY wilson_subscription_score DESC NULLS LAST) AS bucket
-            FROM scores WHERE wilson_subscription_score IS NOT NULL
-        )
-        SELECT 'wilson_favorite_p99' as key, COALESCE(MIN(wilson_favorite_score), 0) as val
-        FROM fav_ntile WHERE bucket = 1
-        UNION ALL SELECT 'wilson_favorite_p90', COALESCE(MIN(wilson_favorite_score), 0)
-        FROM fav_ntile WHERE bucket = 10
-        UNION ALL SELECT 'wilson_favorite_p50', COALESCE(MIN(wilson_favorite_score), 0)
-        FROM fav_ntile WHERE bucket = 50
-        UNION ALL SELECT 'wilson_subscription_p99', COALESCE(MIN(wilson_subscription_score), 0)
-        FROM sub_ntile WHERE bucket = 1
-        UNION ALL SELECT 'wilson_subscription_p90', COALESCE(MIN(wilson_subscription_score), 0)
-        FROM sub_ntile WHERE bucket = 10
-        UNION ALL SELECT 'wilson_subscription_p50', COALESCE(MIN(wilson_subscription_score), 0)
-        FROM sub_ntile WHERE bucket = 50
-        UNION ALL SELECT 'wilson_favorite_min', COALESCE(MIN(wilson_favorite_score), 0)
-        FROM fav_ntile WHERE bucket = 100
-        UNION ALL SELECT 'wilson_favorite_max', COALESCE(MAX(wilson_favorite_score), 0)
-        FROM fav_ntile WHERE bucket = 1
-        UNION ALL SELECT 'wilson_subscription_min', COALESCE(MIN(wilson_subscription_score), 0)
-        FROM sub_ntile WHERE bucket = 100
-        UNION ALL SELECT 'wilson_subscription_max', COALESCE(MAX(wilson_subscription_score), 0)
-        FROM sub_ntile WHERE bucket = 1
+
+def _wilson_cutoff_expressions(n_fav: int, n_sub: int):
+    """``(keys, SELECT expressions, parameters)`` for the ten cutoff values.
+
+    ``percentile_disc(Y, P)`` returns the value at ascending rank ``ceil(P*N)``,
+    so ``P = rank / N`` selects exactly the rank :func:`_wilson_bucket_rank`
+    computed -- the same value ``MIN(... WHERE bucket = k)`` produced, without
+    materialising either ``NTILE`` window. Requires SQLite 3.51+, which this
+    project targets (3.53 is in use).
     """
+    keys, expressions, params = [], [], []
+
+    def add_bucket(key, column, n, bucket):
+        keys.append(key)
+        rank = _wilson_bucket_rank(n, bucket)
+        if rank is None:
+            expressions.append("0")
+        else:
+            expressions.append(f"COALESCE(percentile_disc({column}, ?), 0)")
+            params.append(rank / n)
+
+    for suffix, bucket in _WILSON_CUTOFF_BUCKETS:
+        add_bucket(f"wilson_favorite_{suffix}", "wilson_favorite_score", n_fav, bucket)
+    for suffix, bucket in _WILSON_CUTOFF_BUCKETS:
+        add_bucket(f"wilson_subscription_{suffix}", "wilson_subscription_score", n_sub, bucket)
+
+    # MIN(bucket 100) is the global minimum once 100 buckets exist; with fewer
+    # than 100 scores there is no bucket 100 and the old COALESCE(MIN(...)) was
+    # 0, so a small set's "min" is 0 rather than its real minimum. MAX(bucket 1)
+    # is the global maximum whenever at least one score exists.
+    for key, column, n, aggregate in (
+        ("wilson_favorite_min", "wilson_favorite_score", n_fav, "MIN"),
+        ("wilson_favorite_max", "wilson_favorite_score", n_fav, "MAX"),
+        ("wilson_subscription_min", "wilson_subscription_score", n_sub, "MIN"),
+        ("wilson_subscription_max", "wilson_subscription_score", n_sub, "MAX"),
+    ):
+        keys.append(key)
+        if aggregate == "MIN" and n < 100:
+            expressions.append("0")
+        else:
+            expressions.append(f"COALESCE({aggregate}({column}), 0)")
+    return keys, expressions, params
+
+
+def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None,
+                           subscribed_overlay: str = None,
+                           include_settled: bool = False) -> dict:
+    """Returns percentile cutoff scores for Wilson metrics across items matching filters.
+
+    One pass, ten aggregates: for each score column, the p99, p90 and p50
+    cutoffs (the minimum of NTILE(100) buckets 1, 10 and 50) plus the min and
+    max. The bucket boundaries are computed as exact ranks and read back with
+    ``percentile_disc``, so no ``NTILE`` window is materialised. *Measured
+    2026-09-22* on the 2.5 M-row copy: **2.25 s**, against **13.24 s** for the
+    two-window NTILE form it replaced (best of 2 each; an earlier measurement of
+    the old form in this investigation recorded 9.54 s), with identical values
+    on every key
+    (``tests/test_wilson.py::test_percentile_disc_cutoffs_match_the_ntile_window``).
+
+    ``subscribed_overlay`` follows :func:`search_items`: the overlay constrains
+    the same population the grid shows, so the percentiles must be computed over
+    it too or the colours would describe a different set of rows.
+
+    ``include_settled`` follows :func:`search_items` and defaults to hiding. The
+    percentiles colour the *visible* rows, so computing them over hidden ones
+    would place a visible item's colour against a distribution the owner cannot
+    see -- which is exactly the wrong reading. The population here therefore
+    matches the search's by default; the escape hatch exists for the later
+    surfacing feature, not for the grid.
+    """
+    conn = get_connection(db_path)
     try:
-        cursor = conn.execute(cutoff_sql, params)
-        result = {row["key"]: row["val"] for row in cursor.fetchall()}
-        conn.close()
-        return result
+        where, params = _wilson_population_where(
+            filters, subscribed_overlay, include_settled)
+        n_fav, n_sub = conn.execute(
+            f"SELECT COUNT(w.wilson_favorite_score), COUNT(w.wilson_subscription_score) "
+            f"FROM workshop_items w WHERE {where}",
+            params,
+        ).fetchone()
+
+        keys, expressions, expression_params = _wilson_cutoff_expressions(n_fav, n_sub)
+        row = conn.execute(
+            f"SELECT {', '.join(expressions)} FROM workshop_items w WHERE {where}",
+            expression_params + params,
+        ).fetchone()
+        return {key: row[index] for index, key in enumerate(keys)}
     except Exception:
         logging.exception("compute_wilson_cutoffs failed")
-        conn.close()
         return {}
+    finally:
+        conn.close()
 
 def get_app_tracking(db_path: str, appid: int) -> dict | None:
     """

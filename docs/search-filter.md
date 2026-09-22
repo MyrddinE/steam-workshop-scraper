@@ -284,6 +284,14 @@ When computing Wilson score percentile cutoffs for display coloring, any filter 
 
 The population is also restricted by `include_settled`, which defaults to hiding: the cutoffs colour the rows the grid shows, so a percentile computed over dead or ignored rows would give a visible item a colour from a distribution the owner cannot see. With `include_settled=False` (the default) the query carries `live_fetch_status_predicate("w.fetch_status")`; the filter group is parenthesised alongside it so an OR row cannot absorb the live clause and leak a settled row into the percentile.
 
+### `compute_wilson_cutoffs` cost (database)
+
+One pass, ten aggregates. For each score column it reports the p99/p90/p50 cutoffs — the minimum of `NTILE(100)` buckets 1, 10 and 50 — plus the min and max. The bucket boundaries are computed as exact ranks from the non-NULL counts ([`_wilson_bucket_rank`](../src/database.py)) and read back with `percentile_disc(Y, rank/N)`, so neither `NTILE` window is materialised. The two-window form it replaced is kept as the reference in `tests/test_wilson.py::_ntile_cutoffs`, and `test_percentile_disc_cutoffs_match_the_ntile_window` compares the two at every count that changes the bucket arithmetic (0, 1, 5, 9, 10, 49, 50, 99, 100, 101, 199, 200, 999, 1000), with tied scores and NULLs, and under a tag filter.
+
+*Measured 2026-09-22* on the 2.5 M-row copy: **2.25 s** for the current form, against **13.24 s** for the `NTILE` form (best of 2 each; the earlier measurement recorded in this investigation was 9.54 s). Both returned identical values on all ten keys. The client cache key is `JSON.stringify([filters, overlay])` (`loadCutoffs`, `templates/index.html:550-559`), so the sort is not part of it and a sort change does not refetch: this is paid once per filter set and at first load, not per page.
+
+`percentile_disc` is a SQLite 3.51+ builtin; the project runs 3.53 (see [schema-migrations.md](schema-migrations.md)).
+
 ---
 
 ## In-Memory Filter Evaluation

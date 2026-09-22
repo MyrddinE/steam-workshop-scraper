@@ -668,7 +668,7 @@ Read-only report on the live database's search-sort path, for answering a "sort 
 
 ### `/api/cutoffs` — POST
 
-Wilson score percentile thresholds. Accepts `{filters, subscribed}` (filters excluding percentile filters). The overlay is included so the percentiles describe the same population the grid shows. Returns `{wilson_favorite_p99, wilson_favorite_p90, ...}`.
+Wilson score percentile thresholds. Accepts `{filters, subscribed}` (filters excluding percentile filters). The overlay is included so the percentiles describe the same population the grid shows. Returns `{wilson_favorite_p99, wilson_favorite_p90, ...}`. Computed in one pass from exact percentile ranks (`percentile_disc`), not two `NTILE(100)` windows — **measured 2026-09-22 as 2.25 s against 13.24 s** on the 2.5 M-row copy, with identical values ([search-filter.md](search-filter.md#compute_wilson_cutoffs-cost-database)).
 
 ### `/api/state` — GET
 
