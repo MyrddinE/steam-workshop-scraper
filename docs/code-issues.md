@@ -15,6 +15,24 @@ the production database on 2026-09-12.
 
 ## Open
 
+### A still-draining pass can clear a newer pass's timer handles (issue 86)
+
+`_checkSubThrottle` and the subscription loop's `finally` clear the module-scope `_subPollIv` and
+`_subScheduleIv`. A new pass clears them at its own start (issue 83's fix), but an *older* pass that is
+still draining can clear them afterwards — and by then they belong to the newer pass, so the new pass's
+verification poll stops and its estimate stops ticking. It needs a second pass started mid-drain (the `l`
+shortcut while a pass is running), which is not reachable from the cancel-then-start sequence issue 83
+described, but is reachable by pressing `l` twice. Found while reviewing that fix and left alone there
+because it is a different reachability. See [web-ui.md](web-ui.md) for the overlay's poll behaviour.
+
+### The overlay is shown before the pause and the timer clear (issue 87)
+
+`_startAutoSubscribe` draws the fresh overlay, then awaits `/api/pause`, then resets its per-pass state
+and clears the handles. A Cancel/Close click landing inside that await sees `_subScheduleIv` still null, so
+it takes the Close branch: it hides the overlay and resumes the daemon — while the pass it was pressed
+against carries on arming its schedule and draining rows with nothing on screen. Found while reviewing the
+issue-83 fix and left alone as pre-existing. See [web-ui.md](web-ui.md) for the overlay's start sequence.
+
 ## Recently closed
 
 Removed from the list above rather than marked resolved. Each is now documented as current
