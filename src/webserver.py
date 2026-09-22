@@ -481,10 +481,13 @@ def api_cutoffs():
     A reload discards the page's own in-memory cache, and on the owner's live
     database the query costs ~28 s, so the answer is persisted and reused. The
     key is the canonical ``(filters, overlay)`` plus the database's
-    ``user_version``: a different query or a schema change misses, and so does an
-    entry older than ``daemon.cutoffs_cache_seconds`` (default 86400, `0`
-    disables). The payload is unchanged -- the ten cutoff values -- and the
-    cache state rides in headers so the page never has to know about it.
+    ``user_version``: a different query or a schema change misses, and a missing
+    entry is computed synchronously -- there is nothing stale to serve. An entry
+    past ``daemon.cutoffs_cache_seconds`` (default 86400, `0` disables) is not a
+    miss: it is served as `stale` at once, and the pull that got it starts one
+    background regeneration so the next pull finds fresh values. The payload is
+    unchanged -- the ten cutoff values -- and the cache state rides in headers
+    so the page never has to know about it.
     """
     data = request.get_json(silent=True) or {}
     filters = data.get('filters', [])
@@ -501,19 +504,30 @@ def api_cutoffs():
             filters, subscribed_overlay, read_schema_version(_db_path))
         cached = cutoffs_cache.load(cache_path, key, ttl_seconds)
         if cached is not None:
-            cutoffs, age = cached
+            cutoffs, age, stale = cached
+            if stale:
+                # The owner's rule: colour with the old values now and refresh
+                # behind the request. One regeneration per key at a time, so a
+                # burst of stale pulls does not start a burst of slow queries.
+                cutoffs_cache.start_regeneration(
+                    cache_path, key,
+                    lambda: _cutoff_payload(filters, subscribed_overlay))
+                return _cutoffs_response(cutoffs, 'stale', age)
             return _cutoffs_response(cutoffs, 'hit', age)
 
-    cutoffs = compute_wilson_cutoffs(_db_path, filters,
-                                     subscribed_overlay=subscribed_overlay)
-    result = {}
-    for k, percentile in cutoffs.items():
-        result[k] = percentile
+    result = _cutoff_payload(filters, subscribed_overlay)
     # A failed computation returns {}; caching that would serve an empty payload
-    # for the whole TTL, so only a real answer is written.
+    # until it was replaced, so only a real answer is written.
     if key is not None and result:
         cutoffs_cache.store(cache_path, key, result)
     return _cutoffs_response(result, 'miss', 0)
+
+
+def _cutoff_payload(filters, subscribed_overlay) -> dict:
+    """The ten values the page consumes, from the slow cutoff query."""
+    cutoffs = compute_wilson_cutoffs(_db_path, filters,
+                                     subscribed_overlay=subscribed_overlay)
+    return {key: percentile for key, percentile in cutoffs.items()}
 
 
 def _cutoffs_response(cutoffs: dict, state: str, age_seconds: float):
