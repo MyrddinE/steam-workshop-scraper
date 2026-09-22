@@ -15,7 +15,47 @@ the production database on 2026-09-12.
 
 ## Open
 
-Nothing open. The last entry to leave the list was issue 77, on 2026-09-22.
+### The view-restore loop pages through the result set unprompted (issue 78)
+
+Found 2026-09-22 from the owner's report that the web grid "is now infinitely scrolling" and that
+creator links intermittently do nothing.
+
+`loadState()` restores the saved view on **every** page load, and `_restoreView` runs `_loadUntil`
+twice — once to rebuild the persisted scroll offset, once to find the persisted selected item — each
+capped at `MAX_RESTORE_BATCHES = 40`. `_saveViewState` persists both `selected` (whenever a detail pane
+was open) and `scroll` (throttled on the scroll listener), so after any browsing session every later
+load issues up to **80 searches and appends up to 2,000 items with no user action**. The second pass has
+no early exit: when the saved id can never appear — the filters changed, or the item is now settled and
+hidden by the search's default — it runs its full 40 batches every time.
+
+Because `doSearch` opens with `if (loading) return;` and holds `loading` across each restore search, a
+user action arriving during a restore is silently discarded. `jumpToAuthor` has already switched the
+filter area to author mode when its search is dropped, which is the half-applied view reported as
+creator links failing for some creators. The sentinel's geometry is *not* the cause: a modelled
+scroll-box probe of the real `_observeNextBatch` converges in every scenario. See [web-ui.md](web-ui.md)
+for how the view restore and the author jump are meant to behave.
+
+### One failed search wedges the web UI for the life of the page (issue 79)
+
+`doSearch` sets `loading = true` and clears it only after the fetch, the JSON parse and the render; the
+function contains no `try`, `catch` or `finally`. `POST /api/search` answers any exception with a JSON
+**object** at status 500, and the client neither checks the status nor guards the parse before
+`items.forEach(...)`, which throws on an object. A network blip, a transient 500 or a DB lock therefore
+leaves `loading` permanently true, after which every search, sort, pagination request and author jump
+returns at the guard and does nothing until the page is reloaded. This is a second, independent cause of
+the same reported symptom. See [web-ui.md](web-ui.md) for the page's held-state conventions.
+
+### The infinite-scroll sentinel can be left armed out of view (issue 80)
+
+`_observeNextBatch` arms the batch's first cell, and the `IntersectionObserver` it installs has no
+`root`, so it measures against the window rather than the grid's own scroll box (`#results-grid` is
+`overflow-y: auto` with `flex: 1; min-height: 0`). The function's already-visible shortcut likewise
+tests `firstCell.getBoundingClientRect().top < window.innerHeight`, the wrong reference box for a
+scroller. After `_restoreView` sets a deep `scrollTop`, the armed cell can sit entirely above the grid's
+visible area, where the observer never fires again: infinite scroll stops loading until the user scrolls
+back up and down. The callback also trusts `entries[0]` rather than matching the entry's target against
+`_observedCell`, so a record for a cell released by `unobserve` can decide a load. See
+[web-ui.md](web-ui.md) for the intended scroll behaviour.
 
 ## Recently closed
 
