@@ -1,5 +1,6 @@
 import pytest
 import json
+import sqlite3
 from src import database
 from src.daemon import wilson_lower
 from src.database import (
@@ -246,50 +247,25 @@ def test_tag_migration_normalizes_malformed_json(db_path):
 # ── percentile_disc cutoffs are the NTILE cutoffs, without the windows ───────
 
 
-def _ntile_cutoffs(conn, where, params):
-    """The pre-2026-09-22 implementation, kept here as the reference.
+def _record_statements(monkeypatch):
+    """Route `database.get_connection` through a wrapper recording every SQL."""
+    statements = []
+    real = database.get_connection
 
-    Two materialised ``NTILE(100)`` windows and ten aggregates. The current
-    implementation reads the same bucket minima from exact ranks with
-    ``percentile_disc``; this is what it is compared against.
-    """
-    sql = f"""
-        WITH base AS (
-            SELECT w.wilson_favorite_score, w.wilson_subscription_score
-            FROM workshop_items w WHERE {where}
-        ),
-        fav_ntile AS (
-            SELECT wilson_favorite_score,
-                   NTILE(100) OVER (ORDER BY wilson_favorite_score DESC NULLS LAST) AS bucket
-            FROM base WHERE wilson_favorite_score IS NOT NULL
-        ),
-        sub_ntile AS (
-            SELECT wilson_subscription_score,
-                   NTILE(100) OVER (ORDER BY wilson_subscription_score DESC NULLS LAST) AS bucket
-            FROM base WHERE wilson_subscription_score IS NOT NULL
-        )
-        SELECT 'wilson_favorite_p99' as key, COALESCE(MIN(wilson_favorite_score), 0) as val
-        FROM fav_ntile WHERE bucket = 1
-        UNION ALL SELECT 'wilson_favorite_p90', COALESCE(MIN(wilson_favorite_score), 0)
-        FROM fav_ntile WHERE bucket = 10
-        UNION ALL SELECT 'wilson_favorite_p50', COALESCE(MIN(wilson_favorite_score), 0)
-        FROM fav_ntile WHERE bucket = 50
-        UNION ALL SELECT 'wilson_subscription_p99', COALESCE(MIN(wilson_subscription_score), 0)
-        FROM sub_ntile WHERE bucket = 1
-        UNION ALL SELECT 'wilson_subscription_p90', COALESCE(MIN(wilson_subscription_score), 0)
-        FROM sub_ntile WHERE bucket = 10
-        UNION ALL SELECT 'wilson_subscription_p50', COALESCE(MIN(wilson_subscription_score), 0)
-        FROM sub_ntile WHERE bucket = 50
-        UNION ALL SELECT 'wilson_favorite_min', COALESCE(MIN(wilson_favorite_score), 0)
-        FROM fav_ntile WHERE bucket = 100
-        UNION ALL SELECT 'wilson_favorite_max', COALESCE(MAX(wilson_favorite_score), 0)
-        FROM fav_ntile WHERE bucket = 1
-        UNION ALL SELECT 'wilson_subscription_min', COALESCE(MIN(wilson_subscription_score), 0)
-        FROM sub_ntile WHERE bucket = 100
-        UNION ALL SELECT 'wilson_subscription_max', COALESCE(MAX(wilson_subscription_score), 0)
-        FROM sub_ntile WHERE bucket = 1
-    """
-    return {row["key"]: row["val"] for row in conn.execute(sql, params).fetchall()}
+    class _RecordingConnection:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, *args):
+            statements.append(sql)
+            return self._conn.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    monkeypatch.setattr(
+        database, "get_connection", lambda path: _RecordingConnection(real(path)))
+    return statements
 
 
 def _seed_scores(db_path, count, with_tags=False):
@@ -318,7 +294,7 @@ def test_percentile_disc_cutoffs_match_the_ntile_window(tmp_path, count):
     where = "1=1 AND " + live_fetch_status_predicate("w.fetch_status")
     conn = get_connection(db_path)
     try:
-        expected = _ntile_cutoffs(conn, where, [])
+        expected = database._wilson_cutoffs_ntile(conn, where, [])
     finally:
         conn.close()
 
@@ -334,7 +310,7 @@ def test_percentile_disc_cutoffs_match_the_ntile_window_with_a_filter(tmp_path):
     where, params = database._wilson_population_where(filters, None, False)
     conn = get_connection(db_path)
     try:
-        expected = _ntile_cutoffs(conn, where, params)
+        expected = database._wilson_cutoffs_ntile(conn, where, params)
     finally:
         conn.close()
 
@@ -347,22 +323,7 @@ def test_cutoffs_use_percentile_disc_not_a_materialised_ntile_window(tmp_path, m
     initialize_database(db_path)
     _seed_scores(db_path, 120)
 
-    statements = []
-    real = database.get_connection
-
-    class _RecordingConnection:
-        def __init__(self, conn):
-            self._conn = conn
-
-        def execute(self, sql, *args):
-            statements.append(sql)
-            return self._conn.execute(sql, *args)
-
-        def __getattr__(self, name):
-            return getattr(self._conn, name)
-
-    monkeypatch.setattr(
-        database, "get_connection", lambda path: _RecordingConnection(real(path)))
+    statements = _record_statements(monkeypatch)
     compute_wilson_cutoffs(db_path)
 
     aggregate_sql = [s for s in statements if "workshop_items" in s]
@@ -370,4 +331,100 @@ def test_cutoffs_use_percentile_disc_not_a_materialised_ntile_window(tmp_path, m
     # `"NTILE"` alone would also match inside "perceNTILE_disc".
     assert all("NTILE(" not in s.upper() for s in aggregate_sql), aggregate_sql
     assert any("percentile_disc" in s for s in aggregate_sql)
+
+
+# ── percentile_disc is probed, not assumed: the NTILE(100) fallback ──────────
+
+
+@pytest.mark.parametrize("count", [0, 1, 5, 10, 99, 100, 300])
+def test_cutoffs_fall_back_to_ntile_when_percentile_disc_is_absent(
+        tmp_path, count, monkeypatch):
+    """Forcing the capability absent must not change any of the ten values.
+
+    SQLite 3.49.1 (production) has no ``percentile_disc``; the fallback is not
+    a second set of numbers.
+    """
+    db_path = str(tmp_path / f"fallback-{count}.db")
+    initialize_database(db_path)
+    _seed_scores(db_path, count)
+
+    monkeypatch.setattr(database, "_PERCENTILE_DISC_AVAILABLE", None)
+    present = compute_wilson_cutoffs(db_path)
+    assert len(present) == 10
+
+    monkeypatch.setattr(database, "_PERCENTILE_DISC_AVAILABLE", False)
+    statements = _record_statements(monkeypatch)
+    fallback = compute_wilson_cutoffs(db_path)
+
+    assert fallback == present
+    assert len(fallback) == 10
+    aggregate_sql = [s for s in statements if "workshop_items" in s]
+    assert any("NTILE(" in s.upper() for s in aggregate_sql), aggregate_sql
+
+
+def test_fallback_path_sql_uses_ntile_and_never_percentile_disc(tmp_path, monkeypatch):
+    """The executed SQL on the fallback path is the portable NTILE form."""
+    db_path = str(tmp_path / "fallback-sql.db")
+    initialize_database(db_path)
+    _seed_scores(db_path, 120)
+
+    monkeypatch.setattr(database, "_PERCENTILE_DISC_AVAILABLE", False)
+    statements = _record_statements(monkeypatch)
+    result = compute_wilson_cutoffs(db_path)
+
+    assert len(result) == 10
+    assert all("percentile_disc" not in s for s in statements), statements
+    aggregate_sql = [s for s in statements if "workshop_items" in s]
+    assert aggregate_sql, "no cutoff query was recorded"
+    assert all("NTILE(" in s.upper() for s in aggregate_sql), aggregate_sql
+
+
+def test_percentile_disc_probe_runs_at_most_once_per_process(tmp_path, monkeypatch):
+    """The capability belongs to the linked library, so it is probed once."""
+    db_path = str(tmp_path / "probe-once.db")
+    initialize_database(db_path)
+    _seed_scores(db_path, 20)
+
+    monkeypatch.setattr(database, "_PERCENTILE_DISC_AVAILABLE", None)
+    statements = _record_statements(monkeypatch)
+    compute_wilson_cutoffs(db_path)
+    compute_wilson_cutoffs(db_path)
+
+    probes = [s for s in statements if s == database._PERCENTILE_DISC_PROBE]
+    assert len(probes) == 1, statements
+    assert database._PERCENTILE_DISC_AVAILABLE is not None
+
+
+def test_probe_reads_a_missing_function_error_as_absent(tmp_path, monkeypatch):
+    """The 3.49.1 path itself: a probe raising `no such function` means absent.
+
+    This container's SQLite has ``percentile_disc``, so the real probe cannot
+    take this branch; the wrapper makes the connection answer the way the
+    production host's does.
+    """
+    db_path = str(tmp_path / "probe-missing.db")
+    initialize_database(db_path)
+    _seed_scores(db_path, 30)
+
+    monkeypatch.setattr(database, "_PERCENTILE_DISC_AVAILABLE", None)
+    real = database.get_connection
+
+    class _MissingPercentileDisc:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, *args):
+            if sql == database._PERCENTILE_DISC_PROBE:
+                raise sqlite3.OperationalError("no such function: percentile_disc")
+            return self._conn.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    monkeypatch.setattr(
+        database, "get_connection", lambda path: _MissingPercentileDisc(real(path)))
+    result = compute_wilson_cutoffs(db_path)
+
+    assert len(result) == 10
+    assert database._PERCENTILE_DISC_AVAILABLE is False
 
