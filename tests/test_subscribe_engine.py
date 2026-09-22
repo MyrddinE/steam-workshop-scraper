@@ -859,3 +859,204 @@ def test_the_two_refusal_labels_are_distinguishable():
     assert engine.status_label(engine.REFUSED) != engine.status_label(
         engine.TOKEN_REFUSED)
 
+
+# ── the derived direction ────────────────────────────────────────────────────
+
+def _set_subscribed(db_path, wid=7, at=1000):
+    """Make the queued row subscribed without going through mark_own_subscribed.
+
+    ``mark_own_subscribed`` clears the queue flag, which is the opposite of what
+    a queued-removal test needs, so the two columns are written directly.
+    """
+    conn = get_connection(db_path)
+    conn.execute(
+        "UPDATE workshop_items SET own_subscribed = 1, own_first_subscribed_at = ? "
+        "WHERE workshop_id = ?", (at, wid))
+    conn.commit()
+    conn.close()
+
+
+def test_a_queued_and_subscribed_row_is_a_removal(engine_env):
+    """The derivation: the flag plus own_subscribed is the removal direction."""
+    db_path, _config = engine_env
+    _set_subscribed(db_path)
+
+    assert engine.queued_direction_for(db_path, 7) == engine.REMOVE
+
+
+def test_a_queued_and_unsubscribed_row_is_an_addition(engine_env):
+    db_path, _config = engine_env
+
+    assert engine.queued_direction_for(db_path, 7) == engine.ADD
+
+
+def test_an_unqueued_subscribed_row_is_still_an_addition(engine_env):
+    """Only queued+subscribed is a removal; a plain subscribed row is not."""
+    db_path, _config = engine_env
+    conn = get_connection(db_path)
+    conn.execute("UPDATE workshop_items SET is_queued_for_subscription = 0, "
+                 "own_subscribed = 1 WHERE workshop_id = 7")
+    conn.commit()
+    conn.close()
+
+    assert engine.queued_direction_for(db_path, 7) == engine.ADD
+
+
+def test_an_unknown_row_is_an_addition(tmp_path):
+    db_path = str(tmp_path / "unknown.db")
+    initialize_database(db_path)
+
+    assert engine.queued_direction_for(db_path, 999) == engine.ADD
+    assert engine.queued_direction(None) == engine.ADD
+
+
+def test_the_unsubscribe_form_is_the_subscribe_form_minus_one_field():
+    """The one documented difference, from Steam's own `SubscribeItem`."""
+    token = "PAGE_TOKEN"
+    subscribe = engine.subscribe_form(7, 294100, token)
+    unsubscribe = engine.unsubscribe_form(7, 294100, token)
+
+    assert unsubscribe == {"id": "7", "appid": "294100", "sessionid": token}
+    assert set(subscribe) - set(unsubscribe) == {"include_dependencies"}
+    assert engine.UNSUBSCRIBE_URL == "https://steamcommunity.com/sharedfiles/unsubscribe"
+
+
+# ── the removal path ─────────────────────────────────────────────────────────
+
+def test_a_queued_removal_posts_the_unsubscribe_and_clears_both_flags(engine_env,
+                                                                      monkeypatch):
+    db_path, config = engine_env
+    _set_subscribed(db_path)
+    monkeypatch.setattr(web_scraper, "scrape_extended_details", _Fetcher([TOGGLED]))
+    session = _Session(payload={"success": 1})
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: session)
+
+    outcome = engine.subscribe_item(7, config=config, db_path=db_path)
+
+    assert outcome.status == engine.UNSUBSCRIBED
+    assert outcome.is_unsubscribed is True
+    assert outcome.stays_queued is False
+    assert len(session.calls) == 1
+    assert session.calls[0]["url"] == engine.UNSUBSCRIBE_URL
+    assert "include_dependencies" not in session.calls[0]["data"]
+    row = _row(db_path, 7)
+    assert row["own_subscribed"] == 0
+    assert row["is_queued_for_subscription"] == 0, "the removal settles the queue entry"
+    assert row["own_first_subscribed_at"] == 1000, "the sticky stamp is left alone"
+
+
+def test_a_removal_that_the_page_already_shows_settles_with_no_request(engine_env,
+                                                                        monkeypatch):
+    """The pre-read guard: a page saying not-subscribed sends nothing."""
+    db_path, config = engine_env
+    _set_subscribed(db_path)
+    monkeypatch.setattr(web_scraper, "scrape_extended_details",
+                        _Fetcher([NOT_TOGGLED]))
+    session = _Session(payload={"success": 1})
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: session)
+
+    outcome = engine.subscribe_item(7, config=config, db_path=db_path)
+
+    assert outcome.status == engine.ALREADY_UNSUBSCRIBED
+    assert outcome.is_unsubscribed is True
+    assert session.calls == [], "a blind removal POST is the toggle hazard"
+    row = _row(db_path, 7)
+    assert row["own_subscribed"] == 0
+    assert row["is_queued_for_subscription"] == 0
+
+
+def test_a_refused_removal_leaves_the_flags_and_logs_the_raw_answer(engine_env,
+                                                                     monkeypatch, caplog):
+    """Steam publishes no removal codes, so the raw success value is logged."""
+    db_path, config = engine_env
+    _set_subscribed(db_path)
+    monkeypatch.setattr(web_scraper, "scrape_extended_details", _Fetcher([TOGGLED]))
+    session = _Session(payload={"success": 0})
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: session)
+
+    with caplog.at_level(logging.WARNING):
+        outcome = engine.subscribe_item(7, config=config, db_path=db_path)
+
+    assert outcome.status == engine.REFUSED
+    assert outcome.stays_queued is True
+    assert outcome.steam_success == 0
+    assert "success=0" in caplog.text, "the raw value must reach the log"
+    row = _row(db_path, 7)
+    assert row["own_subscribed"] == 1, "a refused removal changes nothing"
+    assert row["is_queued_for_subscription"] == 1
+
+
+def test_a_throttle_page_leaves_a_removal_queued(engine_env, monkeypatch):
+    db_path, config = engine_env
+    _set_subscribed(db_path)
+    monkeypatch.setattr(web_scraper, "scrape_extended_details",
+                        _Fetcher(["<html>You have made too many requests</html>"]))
+    session = _Session(payload={"success": 1})
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: session)
+
+    outcome = engine.subscribe_item(7, config=config, db_path=db_path)
+
+    assert outcome.status == engine.THROTTLED
+    assert outcome.stays_queued is True
+    assert session.calls == []
+    assert _queued(db_path, 7) is True
+
+
+def test_a_removal_whose_session_is_refused_records_the_problem(engine_env, monkeypatch):
+    """A 2/15 answer keeps the subscribe path's session-health handling."""
+    db_path, config = engine_env
+    _set_subscribed(db_path)
+    # NOT_TOGGLED carries no account marker, so the page read was anonymous and
+    # the refusal is the session's problem.
+    monkeypatch.setattr(web_scraper, "scrape_extended_details", _Fetcher([TOGGLED]))
+    session = _Session(payload={"success": 2}, status_code=401)
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: session)
+
+    outcome = engine.subscribe_item(7, config=config, db_path=db_path)
+
+    assert outcome.status in (engine.SESSION_PROBLEM, engine.TOKEN_REFUSED)
+    assert _queued(db_path, 7) is True
+
+
+def test_the_removal_is_captured_through_the_existing_switch(engine_env, monkeypatch,
+                                                              tmp_path):
+    db_path, config = engine_env
+    _set_subscribed(db_path)
+    outbox = tmp_path / "outbox"
+    capture.configure(str(outbox), capture_web_downloads=True)
+    try:
+        monkeypatch.setattr(web_scraper, "scrape_extended_details", _Fetcher([TOGGLED]))
+        session = _Session(payload={"success": 1})
+        monkeypatch.setattr(web_scraper, "_get_session", lambda: session)
+
+        engine.subscribe_item(7, config=config, db_path=db_path)
+
+        directory = Path(capture.web_downloads_dir(str(outbox)))
+        records = [json.loads(p.read_text(encoding="utf-8"))
+                   for p in directory.glob("*.json")]
+    finally:
+        capture.configure(None)
+
+    posts = [r for r in records if r["kind"] == capture.SUBSCRIBE_KIND]
+    assert len(posts) == 1, "the removal POST is captured"
+    assert posts[0]["request"]["url"] == engine.UNSUBSCRIBE_URL
+    assert "include_dependencies" not in posts[0]["request"]["data"]
+
+
+# ── the removal vocabulary ───────────────────────────────────────────────────
+
+def test_the_removal_outcomes_have_direction_words():
+    assert engine.status_label(engine.UNSUBSCRIBED) == "unsubscribed"
+    assert engine.status_label(engine.ALREADY_UNSUBSCRIBED) == "already unsubscribed"
+    assert engine.status_label(engine.UNSUBSCRIBED) != engine.status_label(
+        engine.ALREADY_UNSUBSCRIBED)
+
+
+def test_stays_queued_is_false_for_both_settled_directions():
+    assert engine.SubscribeOutcome(1, engine.UNSUBSCRIBED).stays_queued is False
+    assert engine.SubscribeOutcome(1, engine.ALREADY_UNSUBSCRIBED).stays_queued is False
+    assert engine.SubscribeOutcome(1, engine.SUBSCRIBED).stays_queued is False
+    assert engine.SubscribeOutcome(1, engine.ALREADY_SUBSCRIBED).stays_queued is False
+    assert engine.SubscribeOutcome(1, engine.REFUSED).stays_queued is True
+    assert engine.SubscribeOutcome(1, engine.FAILED).stays_queued is True
+
