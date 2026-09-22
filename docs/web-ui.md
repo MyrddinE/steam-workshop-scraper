@@ -642,7 +642,11 @@ skip its clears and its pause release, leaving the daemon paused and the countdo
 claim is also handed back when the `/api/pause` rejects: the pass saves the prior token, live flag and
 per-pass flags and restores them (`templates/index.html:2811`), and a predecessor's handles are not
 cleared until the pause has succeeded (`templates/index.html:2847`), so a pass that never ran does not
-disturb a predecessor that is still running. Once the token is taken, a new pass started from the grid
+disturb a predecessor that is still running. The handback covers the ordinary rejection only: if the
+predecessor finished inside that same await its `finally` has already skipped, so the token it gets back
+cannot make it release the `.pauselock`, and a throw in the start window between the claim and the pause's
+`try` leaves the claim taken — both recorded as issue 88 in [code-issues.md](code-issues.md). Once the
+token is taken, a new pass started from the grid
 cell that still holds focus (`l`) supersedes any earlier pass immediately — including one that is still
 draining. The code after each later await re-checks the token — after the pause and the pace read,
 before it arms anything (`templates/index.html:2823`, `templates/index.html:2854`) — the poll's tick

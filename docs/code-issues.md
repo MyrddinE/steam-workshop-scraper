@@ -15,28 +15,79 @@ the production database on 2026-09-12.
 
 ## Open
 
-### A still-draining pass can clear a newer pass's timer handles (issue 86)
+### A pass that claims ownership and then throws can still strand the running pass (issue 88)
 
-`_checkSubThrottle` and the subscription loop's `finally` clear the module-scope `_subPollIv` and
-`_subScheduleIv`. A new pass clears them at its own start (issue 83's fix), but an *older* pass that is
-still draining can clear them afterwards — and by then they belong to the newer pass, so the new pass's
-verification poll stops and its estimate stops ticking. It needs a second pass started mid-drain (the `l`
-shortcut while a pass is running), which is not reachable from the cancel-then-start sequence issue 83
-described, but is reachable by pressing `l` twice. Found while reviewing that fix and left alone there
-because it is a different reachability. See [web-ui.md](web-ui.md) for the overlay's poll behaviour.
+Ownership of the overlay's module-scope state is taken once the pass commits to running, and handed back
+when `/api/pause` rejects (`templates/index.html:2811`). Two windows remain where a claim is taken and
+then abandoned without a handback, and in both the predecessor is stale by then, so its `finally`
+(`templates/index.html:3030`) skips the handle clears and the `/api/resume`:
 
-### The overlay is shown before the pause and the timer clear (issue 87)
+- **the pause rejects *and* the predecessor finishes inside that same await.** Restoring the predecessor's
+  token no longer helps, because its `finally` has already run and skipped. The `.pauselock` beside the
+  database then survives with no holder, and the daemon's web and image workers stay paused until
+  something calls `end_pause` — the overlay's Cancel-then-Close, or the TUI's subscription screen. The
+  window is one localhost round-trip, so a transport failure is needed to open it at all;
+- **a throw between the claim and the pause's `try`.** The start-window DOM writes
+  (`templates/index.html:2762-2792`) run there, so a page whose markup lost one of the modal elements
+  would throw with the claim taken.
 
-`_startAutoSubscribe` draws the fresh overlay, then awaits `/api/pause`, then resets its per-pass state
-and clears the handles. A Cancel/Close click landing inside that await sees `_subScheduleIv` still null, so
-it takes the Close branch: it hides the overlay and resumes the daemon — while the pass it was pressed
-against carries on arming its schedule and draining rows with nothing on screen. Found while reviewing the
-issue-83 fix and left alone as pre-existing. See [web-ui.md](web-ui.md) for the overlay's start sequence.
+Left open rather than patched because every available fix trades one failure for another. Making the claim
+provisional until the pause resolves lets a predecessor's `finally` resume a pause the successor then owns.
+Releasing the pause inside the handback is worse than it looks: `/api/resume` removes `.pauselock`
+unconditionally (`src/webserver.py:1075`), the file has three writers — the TUI's subscription screen holds
+the same lock — so a pass that never successfully paused could release someone else's pause. The clean
+close is to give the lock an owner rather than to keep patching the claim: tag `.pauselock` with whoever
+took it, so a web pass can release only its own and a stranded claim can be reclaimed. That changes the
+pause mechanism itself, not this overlay. Issues 86 and 87 are fixed and pinned regardless; this is the
+residue of the same mechanism. See [web-ui.md](web-ui.md).
 
 ## Recently closed
 
 Removed from the list above rather than marked resolved. Each is now documented as current
 behaviour, or covered by a test:
+
+### A still-draining pass could clear a newer pass's timer handles (issue 86)
+
+Two module-scope handles (`_subPollIv`, `_subScheduleIv`) and `_subEstimate` belonged to whichever pass
+last wrote them, and a pass cleared them on its way out — including the ones it never armed.
+`_checkSubThrottle` and the loop's `finally` therefore reached a successor's handles: a predecessor still
+draining when a second `l` started a successor stopped the successor's 1 s verification poll, dropped its
+countdown, and released a `/api/resume` the successor owned.
+
+The pass state now has one owner, and ownership is a **monotonic token**: `_subPassToken` is incremented
+once the pass has committed to running (`templates/index.html:2755`), re-checked after the pause and the
+pace read, inside the poll's tick and inside the throttle check, and every clear — the handles, the
+estimate, the pause release — is guarded by it (`templates/index.html:3030`). A stale pass still stops
+itself; it writes nothing. Ownership is taken only after `/api/queued` has returned a non-empty list, and
+handed back if the pause rejects (`templates/index.html:2811`), because a pass that aborts must not
+invalidate the one that is running — the regression the first cut of this fix introduced, and the third
+test pins.
+
+*Verified*: `test_a_stale_pass_leaves_a_newer_passs_poll_schedule_and_estimate_alone` fails against the
+pre-change page (`poll_after_pass1: null` where the successor had armed handle 3, `estimate_survived:
+false`, `resumes_after_pass1: 3`) and passes after it;
+`test_an_empty_queue_pass_leaves_a_running_pass_its_ownership` fails against that first cut
+(`resumes_after_pass1: 0`) and passes after it. [web-ui.md](web-ui.md)
+
+### Cancel was read from a timer handle armed only after the pause (issue 87)
+
+The first Cancel click ends the pass and the second closes the overlay, and the two were told apart by
+`_subScheduleIv` being armed. But `_startAutoSubscribe` draws the overlay *before* awaiting `/api/pause`
+and arms the schedule only after it, so a click landing inside that await saw a null handle, took the
+Close branch, hid the overlay and resumed the daemon — while the pass it was pressed against armed its
+schedule and drained rows with nothing on screen.
+
+The handler now reads `_subPassLive` (`templates/index.html:3049`), true from the moment the overlay is
+drawn until the newest pass ends or bails, and the pass re-checks `_subCanceled` after the pause and after
+the pace read, before it arms the schedule or drains a row: a pass cancelled in either window arms
+nothing, drains nothing and releases the pause exactly once.
+
+*Verified*: `test_a_cancel_inside_the_pause_await_stops_the_pass_before_it_drains` fails against the
+pre-change page (`button_after_click: "Cancel"` where `"Close"` was wanted, with two `/api/subscribe` and
+two `/api/dequeue` calls, `resumes: 2`, `schedule_arms: 1`, overlay hidden) and passes after it
+(`subscribe_calls: []`, `schedule_arms: 0`, `resumes: 1`, `display: "block"`);
+`test_a_rejected_pause_hands_ownership_back_to_the_running_pass` fails against the cut without the
+handback and passes after it. [web-ui.md](web-ui.md)
 
 ### A version-gated SQLite builtin was assumed rather than probed (issue 85)
 
