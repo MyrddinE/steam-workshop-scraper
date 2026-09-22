@@ -629,6 +629,17 @@ changes what *its own* Close does: the rows stay queued for the next drain. A la
 the flag, and its Cancel dequeues again as usual. The throttle stop itself is unchanged — it sets
 `_subCanceled`, releases the daemon and leaves the remaining rows queued.
 
+**The pass's timer handles are per-pass too.** `_startAutoSubscribe` clears both `_subPollIv` and
+`_subScheduleIv` before it arms the pass's own timers, so a new pass can neither inherit a predecessor's
+handle nor be stopped by a predecessor's completion. The handle that is actually live there is the poll:
+the first Cancel deliberately leaves the cancelled pass's 1 s poll running while the overlay stays open —
+it is what updates the rows — and only Close clears it, so a new pass started from the grid cell that
+still holds focus (`l`) used to arm its own poll over that live handle, and then lose it when the old
+interval's completion branch ran `clearInterval(_subPollIv)`. `_subScheduleIv` is live at a new pass's
+start only when a pass is re-entered mid-drain, because Cancel and the loop's `finally` clear it on every
+pass that has ended; it is cleared there anyway. Cancel's own behaviour is unchanged: its poll runs until
+Close, not until the pass loop ends.
+
 **A drain serialises; it does not schedule.** `_startAutoSubscribe` loops over `/api/queued` and
 awaits `/api/subscribe/<id>` for each item before starting the next. The route's page read is gated on
 the shared web interval and its POST is exempt, so the interval is already paid once per item inside
