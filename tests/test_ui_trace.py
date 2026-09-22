@@ -280,25 +280,6 @@ function _startListPoll(filters, sortBy, sortOrder) {}
 function jumpToAuthor(creator) {}
 function showDetail(wid) { return Promise.resolve(); }
 function _subscribedItemIds() { return [1, 2]; }
-function _loadViewState() { return __SAVED_VIEW__; }
-async function _loadUntil(done, maxBatches) {
-  let batches = 0;
-  while (hasMore && !done() && batches < maxBatches) {
-    const before = currentOffset;
-    await doSearch(false);
-    if (currentOffset === before) break;
-    batches += 1;
-  }
-}
-let _restoreChecks = 0;
-async function _restoreView(state) {
-  _restoreChecks = 0;
-  await _loadUntil(function() { _restoreChecks += 1; return _restoreChecks >= 3; }, 5);
-}
-async function loadState() {
-  const local = _loadViewState();
-  if (local) await _restoreView(local);
-}
 
 // ── the served trace code ───────────────────────────────────────────────────
 const UI_TRACE_ENABLED = __ENABLED__;
@@ -350,19 +331,13 @@ _TRACE_ACTION = """
     await doSearch(true);
 """
 
-# The view restore the page runs on every load, with no user action at all.
-_TRACE_RESTORE = """
-    await loadState();
-"""
 
-
-def _trace_driver(script, *, enabled, trace_fails=False, action=None, saved_view="null"):
+def _trace_driver(script, *, enabled, trace_fails=False, action=None):
     limits = json.dumps(capture.ui_trace_limits())
     return (UI_TRACE_DRIVER
             .replace("__ENABLED__", "true" if enabled else "false")
             .replace("__LIMITS__", limits)
             .replace("__VERSION__", json.dumps(capture.app_version()))
-            .replace("__SAVED_VIEW__", saved_view)
             .replace("__ACTION__", _TRACE_ACTION if action is None else action)
             .replace("__TRACE_FAIL__",
                      "if (url === '/api/ui_trace') return Promise.reject(new Error('refused'));"
@@ -421,50 +396,6 @@ def test_a_keydown_and_the_call_it_causes_appear_in_order(tmp_path):
     assert call["body"]["kind"] == "search"
     assert call["body"]["filters"] == 0
     assert call["status"] == 200
-
-
-@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
-def test_the_view_restore_is_traced_with_its_done_values_and_batches(tmp_path):
-    """The loop that runs on every load, with no user action, is visible.
-
-    `loadState` -> `_restoreView` -> `_loadUntil` is the confirmed suspect for
-    the "it is scrolling on its own" report: up to two passes of 40 searches
-    before anyone touches the page. A trace has to show the restore ran, whether
-    a saved view was found, each pass's `done` value and every batch it asked
-    for -- otherwise those searches arrive with no visible cause.
-    """
-    outbox = tmp_path / "outbox"
-    client, _, _ = _server(tmp_path,
-                           {"outbox_dir": str(outbox), "capture_web_ui_trace": True})
-    script = _served_inline_script(client)
-
-    out = _run_node(_trace_driver(
-        script, enabled=True, action=_TRACE_RESTORE,
-        saved_view="{scroll: 6000, selected: null}"), tmp_path)
-
-    events = out["batch"]["events"]
-    assert events[0]["event"] == "session"
-
-    saved = next(e for e in events if e.get("phase") == "saved_view")
-    assert saved["found"] is True
-
-    enter = next(e for e in events if e.get("phase") == "enter")
-    assert enter["has_state"] is True
-    assert enter["scroll"] == 6000
-
-    checks = [e for e in events if e.get("phase") == "done_check"]
-    assert [e["value"] for e in checks] == [False, False, True], \
-        "each pass records the value its done predicate returned"
-
-    searches = [e for e in events
-                if e["event"] == "do_search" and e.get("phase") == "enter"]
-    assert searches, "the restore's batches must appear in the timeline"
-    assert all(e["reset"] is False for e in searches)
-    assert out["calls"].count("/api/search") == len(searches), \
-        "every batch the loop requested is a recorded call"
-
-    done = next(e for e in events if e.get("phase") == "load_until_done")
-    assert done["passes"] == 3
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")

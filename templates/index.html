@@ -741,72 +741,10 @@ function _installUiTrace() {
   };
 
   const originalShowDetail = showDetail;
-  showDetail = function(wid) {
-    push({event: 'pane_open', wid: wid});
+  showDetail = function(wid, opts) {
+    push({event: 'pane_open', wid: wid,
+          read_only: !!(opts && opts.readOnly)});
     return originalShowDetail.apply(this, arguments);
-  };
-
-  // ── the view restore ─────────────────────────────────────────────────────
-  //
-  // `loadState` -> `_restoreView` -> `_loadUntil` runs on every page load and
-  // used to page through the result set with no user action at all, which was
-  // the "it is scrolling on its own" report. It is recorded explicitly: that it
-  // ran, whether a saved view was found, each pass with the value its `done`
-  // predicate returned, and -- through the wrapped `doSearch` above -- every
-  // batch it requests.
-
-  const originalLoadViewState = _loadViewState;
-  _loadViewState = function() {
-    const saved = originalLoadViewState.apply(this, arguments);
-    push({event: 'view_restore', phase: 'saved_view', found: !!saved});
-    return saved;
-  };
-
-  const originalLoadState = loadState;
-  loadState = function() {
-    push({event: 'view_restore', phase: 'load_state'});
-    const promise = originalLoadState.apply(this, arguments);
-    if (promise && typeof promise.then === 'function') {
-      promise.then(function() {
-        push({event: 'view_restore', phase: 'load_state_done'});
-      }, function() {});
-    }
-    return promise;
-  };
-
-  const originalRestoreView = _restoreView;
-  _restoreView = function(state) {
-    push({event: 'view_restore', phase: 'enter', has_state: !!state,
-          scroll: state ? state.scroll : null,
-          selected: state ? state.selected : null,
-          offset: currentOffset, has_more: hasMore});
-    return originalRestoreView.apply(this, arguments);
-  };
-
-  const originalLoadUntil = _loadUntil;
-  _loadUntil = function(done, maxBatches) {
-    push({event: 'view_restore', phase: 'load_until_enter',
-          max_batches: maxBatches, offset: currentOffset, has_more: hasMore,
-          loads_since_scroll: loadsSinceScroll});
-    let passes = 0;
-    const wrappedDone = function() {
-      // One call per loop-condition evaluation: the value is what the loop is
-      // about to act on.
-      let value = false;
-      try { value = done(); } catch (e) { throw e; }
-      passes += 1;
-      push({event: 'view_restore', phase: 'done_check', pass: passes,
-            value: !!value, offset: currentOffset, has_more: hasMore});
-      return value;
-    };
-    const promise = originalLoadUntil.call(this, wrappedDone, maxBatches);
-    if (promise && typeof promise.then === 'function') {
-      promise.then(function() {
-        push({event: 'view_restore', phase: 'load_until_done', passes: passes,
-              offset: currentOffset});
-      }, function() {});
-    }
-    return promise;
   };
 
   flushTimer = setInterval(function() { send(false, null); }, UI_TRACE_FLUSH_MS);
@@ -1118,14 +1056,10 @@ async function doSearch(reset = true) {
 }
 
 async function _doSearchBody(reset, generation) {
-  // A reset search starts a new result set, so an item selected in the old one
-  // is not a selection any more; keeping it would send restore hunting for a
-  // row that is no longer there.
   if (reset) {
     _stopListPoll();
     currentOffset = 0;
     hasMore = true;
-    _selectedWid = null;
     // The old result set is about to leave the screen, so it leaves the
     // registry: a cell that is being removed must not keep receiving updates.
     document.querySelectorAll('#results-grid .grid-cell[data-wid]').forEach(el => {
@@ -1215,9 +1149,22 @@ async function _doSearchBody(reset, generation) {
     _startListPoll(filters, document.getElementById('sort-by').value, document.getElementById('sort-order').value);
   }
   _observeNextBatch(firstCell);
-  // A reset re-establishes the committed filter/sort view; save it once the
-  // result set it describes is on screen.
-  if (reset) _saveViewState();
+  if (reset) {
+    // TUI parity: a freshly rendered list starts at the top, highlights its
+    // first row, and its detail pane follows. This is the one implementation
+    // point every reset path funnels through -- a new search, a sort or overlay
+    // change, a filter edit, Return from author mode, a creator jump and the
+    // ignore toggle's re-query. Nothing positional is restored, so the reset
+    // puts the grid at the top explicitly rather than trusting the cleared
+    // content to have done it. The pane is opened read-only: an automatic
+    // selection must not apply detail priority the way a click does.
+    grid.scrollTop = 0;
+    // A reset re-establishes the committed filter/sort/overlay view *definition*;
+    // save it once the result set it describes is on screen, before the pane
+    // fetch below yields, so a later reset cannot be overwritten by this one.
+    _saveViewState();
+    if (firstCell) await showDetail(items[0].workshop_id, {readOnly: true});
+  }
   return 'applied';
 }
 
@@ -1701,16 +1648,16 @@ function toggleTranslation() {
 // return is the view the click interrupted and not an approximation of it.
 //
 // The snapshot is in memory on purpose. localStorage already holds the
-// committed view for a reload, but author mode deliberately does not write it:
-// `_saveViewState` is a no-op while `_authorMode` is set, so the stored view
-// stays the one Return restores even if the search or the scroll listener runs
-// between the jump and the Return.
+// committed view definition for a reload, but author mode deliberately does not
+// write it: `_saveViewState` is a no-op while `_authorMode` is set, so the
+// stored definition stays the one a reload uses even if a search runs between
+// the jump and the Return.
 let _authorMode = false;
 let _preJumpView = null;
 // The creator the view is pinned to, or null outside author mode. The creator
-// toggle acts on this, never on `_selectedWid`: the mode is one creator's whole
-// catalogue, and the selected item may be nothing at all (an ignored view comes
-// back empty). It is set by `_setAuthorModeUi`, the same call that names the
+// toggle acts on this, not on any item: the mode is one creator's whole
+// catalogue, and the view may hold nothing at all (an ignored view comes back
+// empty). It is set by `_setAuthorModeUi`, the same call that names the
 // creator on screen, so the two cannot disagree.
 let _authorCreator = null;
 
@@ -1718,18 +1665,16 @@ function _authorModeActive() {
   return _authorMode;
 }
 
-// What the jump replaces. Every field is one the view actually holds, so
-// restoring them all is restoring the view: filters, sort, the Subscribed
-// overlay, the open item and the scroll position.
+// What the jump replaces: the view *definition* the jump is about to replace --
+// filters, sort and the Subscribed overlay. Position is deliberately absent: no
+// scroll and no selection is restored anywhere, so the return's own reset
+// renders the top of the view it brings back, exactly as every reset does.
 function _viewSnapshot() {
-  const grid = document.getElementById('results-grid');
   return {
     filters: getFilters(),
     sort_by: document.getElementById('sort-by').value,
     sort_order: document.getElementById('sort-order').value,
     subscribed: _overlayValue(),
-    selected: _selectedWid,
-    scroll: (grid && grid.scrollTop) ? grid.scrollTop : 0,
   };
 }
 
@@ -1759,9 +1704,6 @@ async function jumpToAuthor(creator) {
     _preJumpView = _viewSnapshot();
   }
   _authorMode = true;
-  // A reset search clears the open item; with the snapshot held separately the
-  // old id would only send the render hunting for a row that is not there.
-  _selectedWid = null;
   _setAuthorModeUi(true, creator);
 
   const container = document.getElementById('filter-rows');
@@ -1834,12 +1776,12 @@ async function toggleCreatorIgnored() {
   await doSearch(true);
 }
 
-// Return from author mode: the TUI's `action_return_from_author_mode`. The snapshot
-// is applied through the same `_restoreView` a reload of a saved view uses, so
-// the return re-opens the item and the scroll position the jump interrupted and
-// not merely the filters. Clearing the flag first makes the view writable again,
-// which is the order the TUI uses -- a return with no snapshot still leaves a
-// usable page.
+// Return from author mode: the TUI's `action_return_from_author_mode`. Only the
+// view definition the jump replaced comes back -- the filter rows, the sort and
+// the Subscribed overlay. There is no positional restore: the reset search
+// renders the top of that view and selects its first item, exactly as any other
+// reset does. Clearing the flag first makes the view writable again, which is
+// the order the TUI uses -- a return with no snapshot still leaves a usable page.
 async function returnFromAuthor() {
   const state = _preJumpView;
   _preJumpView = null;
@@ -1853,10 +1795,7 @@ async function returnFromAuthor() {
     _applySubscribedOverlay(state.subscribed);
   }
   _syncSubscribedOverlay();
-  // Only rebuild the old view when this search owns the grid; a user action
-  // during it supersedes the return too.
-  const outcome = await doSearch(true);
-  if (state && outcome === 'applied') await _restoreView(state);
+  await doSearch(true);
 }
 
 // ── the creator list ──────────────────────────────────────────────────────
@@ -2140,14 +2079,22 @@ function _stopDetailPoll() {
   _detailPollWid = null;
 }
 
-async function showDetail(wid) {
+async function showDetail(wid, opts) {
+  // An automatic pane (the top item of a reset render) is opened read-only.
+  // Only a pane the owner asked for by clicking may apply detail priority: an
+  // automatic selection must not queue fetch work nobody requested, and the
+  // route that bumps priority is POST /api/item/<id>/open.
+  const readOnly = !!(opts && opts.readOnly);
   _stopDetailPoll();
   const pane = document.getElementById('detail-pane');
   pane.innerHTML = '<p>Loading...</p>';
   try {
-    // Opening a pane is the one path that applies detail priority. The 3-second
-    // poll below uses the read-only route, so it cannot re-queue the item.
-    const resp = await fetch('/api/item/' + wid + '/open', {method: 'POST'});
+    // Opening a pane by click is the one path that applies detail priority. The
+    // 3-second poll below uses the read-only route, so it cannot re-queue the
+    // item, and neither can an automatic selection.
+    const resp = readOnly
+      ? await fetch('/api/item/' + wid)
+      : await fetch('/api/item/' + wid + '/open', {method: 'POST'});
     if (!resp.ok) {
       pane.innerHTML = `<p>Error loading item ${wid}: ${resp.status} ${resp.statusText}</p>`;
       return;
@@ -2162,10 +2109,10 @@ async function showDetail(wid) {
   dispatchItemUpdate(item);
   document.querySelectorAll('#results-grid .grid-cell').forEach(el => el.classList.remove('selected'));
   const cell = document.querySelector(`#results-grid .grid-cell[data-wid="${wid}"]`);
-  if (cell) { cell.classList.add('selected'); cell.focus(); }
-  _selectedWid = wid;
+  // preventScroll: the reset render selects the top item, and focus is allowed
+  // to move a scroller -- opening the pane must not move the grid it selects in.
+  if (cell) { cell.classList.add('selected'); cell.focus({preventScroll: true}); }
   _startDetailPoll(wid, item);
-  _saveViewState();
   } catch(e) { pane.innerHTML = '<p>Error loading detail: ' + e.message + '</p>'; }
 }
 
@@ -2259,8 +2206,12 @@ async function refreshItemState(wid) {
 }
 
 // ── View state persistence ────────────────────────────────────────────────
-// The browser's own view -- filter rows, sort, the open item, the scroll
-// position -- is per-browser layout, not scraper configuration. `.tui_state.yaml`
+// The browser's own view *definition* -- filter rows, sort and the Subscribed
+// overlay -- is per-browser layout, not scraper configuration. Nothing
+// positional is persisted: neither the open item nor the scroll position. A
+// scroll offset describes a place in a result set that a changed search does
+// not reproduce, and re-querying pages on load to rebuild one costs more than
+// the feature is worth, so every render starts at the top. `.tui_state.yaml`
 // has a different shape and is rewritten by the TUI on its own schedule, so
 // sharing the file would have each front end overwrite fields the other does
 // not understand. Browser storage is the natural home. The stored entry is
@@ -2268,17 +2219,6 @@ async function refreshItemState(wid) {
 // entry, so a stale build's record is ignored rather than trusted.
 const VIEW_STATE_KEY = 'view.state.v1';
 const VIEW_STATE_VERSION = 1;
-// Restoration asks for at most this many pages to rebuild a saved scroll
-// position, and never pages to find a selected item. A view saved thousands of
-// items down cannot be reached inside a sane request budget anyway, and walking
-// the result set after it is the unprompted loading this bound exists to stop:
-// a handful of pages restores a shallow position, and anything deeper lands at
-// the top rather than issuing dozens of searches on one page load.
-const MAX_RESTORE_SCROLL_BATCHES = 5;
-
-let _selectedWid = null;    // workshop_id whose detail pane is open
-let _viewSaveTimer = null;  // throttles the scroll listener's writes
-let _restoringView = false; // suppresses saves while loadState restores
 
 function _loadViewState() {
   try {
@@ -2296,6 +2236,9 @@ function _loadViewState() {
       if (typeof f.logic === 'string') entry.logic = f.logic;
       filters.push(entry);
     });
+    // An entry an older browser still holds may carry `selected` and `scroll`.
+    // They are simply not read: the shape check above runs on stored data and
+    // tolerates the extra keys, and nothing downstream may act on them.
     return {
       filters: filters,
       sort_by: typeof parsed.sort_by === 'string' ? parsed.sort_by : '',
@@ -2303,8 +2246,6 @@ function _loadViewState() {
       // The overlay is view state, so it lives here beside the sort. An unknown
       // value reads back as `any` (no constraint) rather than hiding rows.
       subscribed: _normaliseSubscribedValue(parsed.subscribed),
-      selected: (typeof parsed.selected === 'number' && isFinite(parsed.selected)) ? parsed.selected : null,
-      scroll: (typeof parsed.scroll === 'number' && isFinite(parsed.scroll) && parsed.scroll > 0) ? parsed.scroll : 0,
     };
   } catch (e) {
     // A corrupt entry is not worth failing the page over.
@@ -2314,22 +2255,17 @@ function _loadViewState() {
 }
 
 function _saveViewState() {
-  if (_restoringView) return;
   // Author mode does not own the persisted view. The stored entry is the view
-  // Return restores, so a search or a scroll while the mode is on must not
-  // overwrite it with the author's filter set -- that would make the return a
-  // reload away from being wrong.
+  // definition a reload restores, so a search while the mode is on must not
+  // overwrite it with the author's filter set.
   if (_authorMode) return;
   try {
-    const grid = document.getElementById('results-grid');
     localStorage.setItem(VIEW_STATE_KEY, JSON.stringify({
       v: VIEW_STATE_VERSION,
       filters: getFilters(),
       sort_by: document.getElementById('sort-by').value,
       sort_order: document.getElementById('sort-order').value,
       subscribed: (_subscribedOverlayEl() || {}).value || 'any',
-      selected: _selectedWid,
-      scroll: grid ? grid.scrollTop : 0,
     }));
   } catch (e) {
     console.debug('view state save failed', e);
@@ -2354,49 +2290,6 @@ function _applyFilters(filters) {
     if (f.op) div.querySelector('.op-select').value = f.op;
     updateValueControl(div, f.value != null ? String(f.value) : null);
   });
-}
-
-// Ask doSearch for the next page until `done` holds, exactly as scrolling to
-// the bottom would. doSearch owns currentOffset and the observed cell, so this
-// never touches either; a page that moves no offset means there is nothing
-// left, `hasMore` false ends the walk however unsatisfied `done` is, and a
-// search that did not apply -- dropped because one is already in flight, or
-// superseded by a user action -- stops the walk rather than fighting it.
-async function _loadUntil(done, maxBatches) {
-  let batches = 0;
-  while (hasMore && !done() && batches < maxBatches) {
-    const before = currentOffset;
-    const outcome = await doSearch(false);
-    if (outcome !== 'applied' || currentOffset === before) break;
-    batches += 1;
-  }
-}
-
-// Restore the saved view by bounded intent, not by a batch budget. The scroll
-// position is the only thing that may page: `MAX_RESTORE_SCROLL_BATCHES` bounds
-// that pass in requests, and the walked result set is what the selected item
-// must already be in. The selection is never hunted for -- an id the current
-// filters exclude, or one the search now hides as settled, can never appear, and
-// paging after it was what issued forty searches with no user action (issue 78).
-async function _restoreView(state) {
-  const grid = document.getElementById('results-grid');
-  const generation = _searchGeneration;
-  await _loadUntil(function() {
-    return state.scroll <= 0 || grid.scrollHeight >= state.scroll + grid.clientHeight;
-  }, MAX_RESTORE_SCROLL_BATCHES);
-  // A user action during the pass owns the grid; re-opening the old item or
-  // jumping the old scroll over it would fight the thing that superseded it.
-  if (generation !== _searchGeneration) return;
-  if (state.selected != null) {
-    if (grid.querySelector('.grid-cell[data-wid="' + state.selected + '"]')) {
-      await showDetail(state.selected);
-    } else {
-      console.debug('view restore: selected item is not in the loaded content; not paging for it');
-    }
-  }
-  // Scroll last: showDetail focuses the cell, and focus can move the grid, so
-  // the saved position has to be the final word.
-  if (state.scroll > 0) grid.scrollTop = state.scroll;
 }
 
 async function loadState() {
@@ -2425,27 +2318,12 @@ async function loadState() {
   // The builder's rows decide whether the overlay is usable; sync after both
   // branches have drawn them.
   _syncSubscribedOverlay();
-  _restoringView = true;
-  try {
-    // Only restore when this load's own search owns the grid. A user action
-    // during the initial fetch supersedes it, and the view it would rebuild is
-    // not the view that action asked for.
-    const outcome = await doSearch(true);
-    if (outcome === 'applied' && local) await _restoreView(local);
-  } finally {
-    _restoringView = false;
-  }
+  // One search, one batch, at the top. There is no restore: a stored scroll
+  // position or open item would only send the page paging through a result set
+  // it cannot reproduce -- the loop behind issue 78, removed rather than bounded.
+  await doSearch(true);
 }
 
-// Scroll fires per frame; the value is only read on the next load, so a short
-// settle delay is enough and keeps the write off the scroll path.
-document.getElementById('results-grid').addEventListener('scroll', function() {
-  if (_viewSaveTimer) return;
-  _viewSaveTimer = setTimeout(function() {
-    _viewSaveTimer = null;
-    _saveViewState();
-  }, 250);
-}, {passive: true});
 window.addEventListener('pagehide', _saveViewState);
 
 document.getElementById('sort-by').onchange = () => doSearch(true);

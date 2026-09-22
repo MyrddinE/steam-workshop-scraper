@@ -2122,12 +2122,16 @@ const version = __VER__;
 global.VIEW_STATE_KEY = key;
 global.VIEW_STATE_VERSION = version;
 global.ALL_FIELDS = ['Title', 'Subs'];
+// A pre-change page still reads this flag while saving; the committed page no
+// longer has one. Defined so the driver runs against either and the assertions,
+// not a ReferenceError, are what decide the test.
 global._restoringView = false;
-// Author mode is a no-op writer for the same reason a restore is: the stored
-// entry is the view Return restores, so the author's filter set must not
-// replace it.
-global._authorMode = false;
+// A pre-change `_saveViewState` reads this; the committed one writes no
+// selection. Defined so the driver runs against either.
 global._selectedWid = 42;
+// Author mode is a no-op writer: the stored entry is the view definition a
+// reload restores, so the author's filter set must not replace it.
+global._authorMode = false;
 const store = {};
 global.localStorage = {
   getItem: (k) => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
@@ -2158,6 +2162,8 @@ store[key] = 'not json';
 out.malformed = loadFn();
 store[key] = JSON.stringify({v: version, filters: 'nope'});
 out.badFilters = loadFn();
+// An older entry may carry `selected` and `scroll`; they must be tolerated but
+// never read back.
 store[key] = JSON.stringify({
   v: version,
   filters: [
@@ -2173,16 +2179,9 @@ out.filtered = loadFn();
 store[key] = JSON.stringify({v: version, filters: [], subscribed: 'currently'});
 out.legacySubscribed = loadFn();
 
-// While the page is restoring, nothing may write the state back early.
+// Author mode does not write the stored view definition: it is the view a
+// reload restores, so a search while the mode is on must not overwrite it.
 delete store[key];
-global._restoringView = true;
-saveFn();
-out.wroteWhileRestoring = Object.prototype.hasOwnProperty.call(store, key);
-
-// The same holds in author mode: the saved view is the one Return restores, so
-// a search or a scroll while the mode is on must not overwrite it.
-delete store[key];
-global._restoringView = false;
 global._authorMode = true;
 saveFn();
 out.wroteInAuthorMode = Object.prototype.hasOwnProperty.call(store, key);
@@ -2218,10 +2217,9 @@ def test_view_state_round_trips_and_rejects_stale_or_malformed_entries(web_clien
         "sort_by": "subscriptions",
         "sort_order": "DESC",
         "subscribed": "never",
-        "selected": 42,
-        "scroll": 777,
     }
-    assert out["stored"] == expected, "the saved shape must carry every restored field"
+    assert out["stored"] == expected, \
+        "the saved shape must carry the view definition and nothing positional"
     # The loaded view is the validated set of fields; the guard's own version
     # marker is consumed on the way in rather than handed to the caller.
     assert out["loaded"] == {k: v for k, v in expected.items() if k != "v"}, \
@@ -2234,20 +2232,41 @@ def test_view_state_round_trips_and_rejects_stale_or_malformed_entries(web_clien
     # Unknown fields are dropped and the value is coerced to the string the
     # text input holds; a negative scroll is not a position.
     assert out["filtered"]["filters"] == [{"field": "Title", "op": "contains", "value": "5"}]
-    assert out["filtered"]["selected"] == 7
-    assert out["filtered"]["scroll"] == 0
+    assert "selected" not in out["filtered"] and "scroll" not in out["filtered"], \
+        "an older stored entry's selection and scroll must be tolerated but never read back"
     # A stored view that predates the overlay, or carries a value this build
     # does not know, reads back as the no-constraint default rather than hiding
     # rows.
     assert out["filtered"]["subscribed"] == "any"
     assert out["legacySubscribed"]["subscribed"] == "subscribed", \
         "a view saved with `currently` must load as the current value"
-    assert out["wroteWhileRestoring"] is False, \
-        "a restore in progress must not overwrite the state it is reading"
     assert out["wroteInAuthorMode"] is False, \
-        "author mode must not overwrite the view its Return restores"
+        "author mode must not overwrite the stored view definition"
     assert out["wroteAfterAuthorMode"] == expected, \
         "leaving author mode must let the view be persisted again"
+
+
+def test_view_state_is_saved_only_by_a_reset_and_pagehide(web_client):
+    """Nothing positional is written any more, so nothing else may save.
+
+    The old page saved on a throttled `#results-grid` `scroll` listener and when
+    a pane opened, because both were where the position lived. With no position
+    to keep, the only writer is the end of a reset `doSearch` (the view
+    definition the render just established) plus the `pagehide` flush. A scroll
+    listener that still wrote would be a position being persisted under a
+    different name.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+
+    # The call sites, not the `function _saveViewState() {` definition and not
+    # the bare `pagehide` reference.
+    assert script.count("_saveViewState();") == 1, \
+        "the reset render is the only call site; no listener and no pane open"
+    assert "window.addEventListener('pagehide', _saveViewState);" in script, \
+        "the pagehide flush stays"
+    assert "_viewSaveTimer" not in script, \
+        "the throttled scroll-save timer must be gone with the scroll position"
 
 
 LOAD_STATE_DRIVER = """
@@ -2261,7 +2280,9 @@ global._loadViewState = () => local;
 global._applyFilters = (f) => { out.applied = f; filterRows.children.length = f.length; };
 global.addRow = () => { out.addedRow = (out.addedRow || 0) + 1; };
 global.doSearch = async () => { out.searches = (out.searches || 0) + 1; return 'applied'; };
-global._restoreView = async (s) => { out.restored = s; };
+// A pre-change page pages the restore here; the committed page never calls it.
+// Defined so the driver runs against either.
+global._restoreView = async () => {};
 // The overlay control is DOM-backed; loadState only hands it a value and then
 // syncs its greyed-out state once the builder rows are drawn.
 global._applySubscribedOverlay = (v) => { out.subscribed = v; };
@@ -2286,16 +2307,16 @@ global.document = {getElementById: (id) => {
   await fn();
   out.local = {applied: out.applied, sort_by: sortBy.value, sort_order: sortOrder.value,
                subscribed: out.subscribed,
-               fetches: fetches.slice(), searches: out.searches, restored: out.restored,
+               fetches: fetches.slice(), searches: out.searches,
                addedRow: out.addedRow || 0};
   local = null;
-  out.applied = null; out.searches = 0; out.restored = null; out.addedRow = 0;
+  out.applied = null; out.searches = 0; out.addedRow = 0;
   out.subscribed = null;
   fetches.length = 0; sortBy.value = ''; sortOrder.value = ''; filterRows.children.length = 0;
   await fn();
   out.tui = {applied: out.applied, sort_by: sortBy.value, sort_order: sortOrder.value,
              subscribed: out.subscribed,
-             fetches: fetches.slice(), searches: out.searches, restored: out.restored,
+             fetches: fetches.slice(), searches: out.searches,
              addedRow: out.addedRow || 0};
   emit(JSON.stringify(out));
 })();
@@ -2308,14 +2329,14 @@ def test_browser_state_wins_over_the_tui_seed_on_load(web_client, tmp_path):
 
     The two sources exist side by side, so the rule has to be one of them
     outright: local state wins, and `/api/state` is consulted only on a first
-    visit (no entry, or one the guard rejected).
+    visit (no entry, or one the guard rejected). Either way the load ends in one
+    reset search -- the stored view definition is applied, then rendered.
     """
     client, _ = web_client
     script = _served_inline_script(client)
     local = {
         "filters": [{"field": "Title", "op": "contains", "value": "x"}],
         "sort_by": "title", "sort_order": "DESC", "subscribed": "queued",
-        "selected": 5, "scroll": 120,
     }
     driver = (LOAD_STATE_DRIVER
               .replace("__FN__", _extract_function(script, "loadState"))
@@ -2329,8 +2350,7 @@ def test_browser_state_wins_over_the_tui_seed_on_load(web_client, tmp_path):
     assert out["local"]["sort_order"] == "DESC"
     assert out["local"]["subscribed"] == "queued", \
         "the browser's own overlay value is restored with the rest of its view"
-    assert out["local"]["restored"] == local, "the saved view drives the restore"
-    assert out["local"]["searches"] == 1
+    assert out["local"]["searches"] == 1, "the load is one reset search"
 
     assert out["tui"]["fetches"] == ["/api/state"], \
         "a first visit must still seed from the TUI's saved state"
@@ -2339,142 +2359,449 @@ def test_browser_state_wins_over_the_tui_seed_on_load(web_client, tmp_path):
     assert out["tui"]["sort_order"] == "ASC"
     assert out["tui"]["subscribed"] == "previously", \
         "the TUI's saved overlay is the first-visit seed, beside its sort and filters"
-    assert out["tui"]["restored"] is None, "there is nothing of the browser's own to restore"
     assert out["tui"]["searches"] == 1
 
 
-def _restore_cap(script: str) -> int:
-    """The restore's request budget, read from the served page.
+# ── a reset render selects the top item, at the top ──────────────────────────
+#
+# The owner's decision: nothing positional persists, and every re-render of the
+# list starts at the top with its first cell selected and that cell's detail
+# pane open -- the TUI's highlighted row and the pane that follows it. The
+# selection lives in `_doSearchBody`'s reset branch, so a new search, a sort or
+# overlay change, a filter edit, Return from author mode, a creator jump and the
+# ignore toggle's re-query all get it together. The pane is opened through the
+# read-only `/api/item/<id>` route: an automatic pane must not apply detail
+# priority the way a click does.
 
-    The cap moved from a per-pass batch budget (`MAX_RESTORE_BATCHES = 40`) to a
-    small scroll-pass request cap (`MAX_RESTORE_SCROLL_BATCHES`). Reading either
-    name lets the pre-change page be driven with its real value, which is what
-    shows the defect, while the committed page is driven with its own.
-    """
-    for name in ("MAX_RESTORE_SCROLL_BATCHES", "MAX_RESTORE_BATCHES"):
-        if re.search(r'^const\s+' + name + r'\s*=', script, re.M):
-            return int(_extract_const(script, name))
-    raise AssertionError("no restore cap constant in the served script")
-
-
-RESTORE_DRIVER = """
-const restoreFn = (__FN__);
-global._loadUntil = (__LOADUNTIL__);
-globalThis.MAX_RESTORE_BATCHES = __MAX__;
-globalThis.MAX_RESTORE_SCROLL_BATCHES = __MAX__;
-let _searchGeneration = 0;
-// Diagnostics must not pollute the JSON on stdout.
+RESET_RENDER_DRIVER = """
+const realDoSearch = (__SEARCH__);
+const bodyFn = (__BODY__);
+const showDetailFn = (__SHOWDETAIL__);
+const out = {panePaths: [], focus: [], searches: []};
 const report = console.log;
 global.console = {debug: () => {}, warn: () => {}, error: () => {}, log: report};
-const out = {};
-function makeGrid() {
+global.getFilters = () => [];
+global._overlayValue = () => 'any';
+global._observeNextBatch = () => {};
+global._startItemUpdatePoll = () => {};
+global._listNeedsPoll = () => false;
+global._saveViewState = () => {};
+global._stopListPoll = () => {};
+global._unsubscribeItem = () => {};
+global._refreshCutoffs = () => {};
+global._applyPending = () => {};
+global._applySub = () => {};
+global._subscribeItem = () => {};
+global._imageCellHtml = () => '';
+global.fmtSize = () => '0 B';
+global.sizeClass = () => '';
+global.wClass = () => '';
+global._stopDetailPoll = () => {};
+global._subscribeDetail = (wid) => { out.subscribedDetail = wid; };
+global._startDetailPoll = () => {};
+global.dispatchItemUpdate = (item) => { out.dispatched = item; };
+global._searchGeneration = 0;
+global.loading = false;
+global.hasMore = true;
+global.currentOffset = 0;
+global.cutoffs = {};
+
+const grid = {scrollTop: 0, scrollHeight: 500, clientHeight: 500, children: []};
+Object.defineProperty(grid, 'innerHTML', {
+  get() { return ''; },
+  set(v) { if (v === '') this.children.length = 0; },
+});
+grid.appendChild = function(node) { this.children.push(node); };
+function makeCell() {
+  const classes = new Set(['grid-cell']);
   return {
-    scrollTop: 0, clientHeight: 500, scrollHeight: 500,
-    cell: false, cellOnHeight: null,
-    querySelector: function(sel) {
-      if (sel.indexOf('data-wid') !== -1 && this.cell) return {wid: 77};
-      return null;
+    attrs: {}, className: 'grid-cell', innerHTML: '', onclick: null,
+    classList: {
+      add: (c) => classes.add(c),
+      remove: (c) => classes.delete(c),
+      contains: (c) => classes.has(c),
+    },
+    setAttribute: function(k, v) { this.attrs[k] = String(v); },
+    getAttribute: function(k) { return this.attrs[k]; },
+    querySelector: () => null,
+    focus: function(opts) {
+      out.focus.push(opts && opts.preventScroll ? 'preventScroll' : 'none');
+      // A plain focus is allowed to move the scroller; preventScroll is what
+      // keeps the selection from moving the grid it selects in.
+      if (!opts || !opts.preventScroll) grid.scrollTop = 250;
     },
   };
 }
-async function scenario(name, grid, perBatch, stopAfter, state) {
-  globalThis.hasMore = true;
-  globalThis.currentOffset = 0;
-  let batches = 0;
-  globalThis.doSearch = async function() {
-    if (!globalThis.hasMore) return false;
-    batches += 1;
-    globalThis.currentOffset += 50;
-    grid.scrollHeight += perBatch;
-    if (grid.cellOnHeight != null && grid.scrollHeight >= grid.cellOnHeight) grid.cell = true;
-    if (stopAfter != null && batches >= stopAfter) globalThis.hasMore = false;
-    return 'applied';
+const elements = {
+  'sort-by': {value: ''}, 'sort-order': {value: ''},
+  'subscribed-overlay': {value: 'any'}, 'btn-search': {},
+};
+global.document = {
+  getElementById: (id) => (id === 'results-grid' ? grid : (elements[id] || {value: '', innerHTML: ''})),
+  querySelectorAll: (sel) => (sel.indexOf('grid-cell') !== -1 ? grid.children.slice() : []),
+  querySelector: (sel) => {
+    const m = /data-wid="(\\d+)"/.exec(sel);
+    if (!m) return null;
+    return grid.children.find((c) => c.getAttribute('data-wid') === m[1]) || null;
+  },
+  createElement: makeCell,
+};
+const batches = [];
+function item(wid) { return {workshop_id: wid, title: 't', file_size: 0}; }
+global.fetch = async (url, opts) => {
+  const path = String(url);
+  const method = (opts && opts.method) || 'GET';
+  if (path === '/api/search') {
+    return {ok: true, status: 200, statusText: 'OK', json: async () => batches.shift()};
+  }
+  out.panePaths.push(method + ' ' + path);
+  const m = /\\/api\\/item\\/(\\d+)/.exec(path);
+  const wid = m ? parseInt(m[1], 10) : null;
+  return {ok: true, status: 200, statusText: 'OK',
+          json: async () => ({workshop_id: wid, title: 'item-' + wid, file_size: 0})};
+};
+const _doSearchBody = bodyFn;
+const showDetail = showDetailFn;
+// The page's own `doSearch`, wrapped only to capture the promise its handlers
+// discard, so the driver can await the reset each control starts.
+function doSearch(reset) {
+  const p = realDoSearch(reset);
+  out.searches.push(p);
+  return p;
+}
+// The served page's own handler wiring, injected so the reset is started by the
+// control rather than by the driver calling doSearch itself.
+__HANDLERS__
+async function runReset(name, trigger) {
+  out.searches.length = 0;
+  out.panePaths.length = 0; out.focus.length = 0;
+  out.dispatched = null; out.subscribedDetail = null;
+  grid.children.length = 0;
+  grid.scrollTop = 300;   // a stale position the reset must clear
+  batches.push([item(7), item(8), item(9)]);
+  trigger();
+  await out.searches[0];
+  out[name] = {
+    detail: out.subscribedDetail,
+    dispatched: out.dispatched && out.dispatched.workshop_id,
+    pane: out.panePaths.slice(),
+    focus: out.focus.slice(),
+    scrollTop: grid.scrollTop,
+    selected: grid.children.filter((c) => c.classList.contains('selected'))
+      .map((c) => c.getAttribute('data-wid')),
   };
-  globalThis.document = {getElementById: function() { return grid; }};
-  let showDetailCalls = 0;
-  globalThis.showDetail = async function() {
-    showDetailCalls += 1;
-    grid.scrollTop = 5;   // a focus-style jump the restore has to override
-  };
-  await restoreFn(state);
-  out[name] = {batches: batches, showDetailCalls: showDetailCalls,
-               scrollTop: grid.scrollTop};
 }
 (async () => {
-  // A saved scroll the first four batches can reach, with the selected item
-  // inside the content those batches loaded.
-  let grid = makeGrid();
-  grid.cellOnHeight = 900;
-  await scenario('scroll', grid, 400, 4, {scroll: 1500, selected: 77});
+  await runReset('sort', () => elements['sort-by'].onchange());
+  await runReset('filter', () => elements['btn-search'].onclick());
+  await runReset('overlay', () => elements['subscribed-overlay'].onchange());
+  console.log(JSON.stringify(out));
+})();
+"""
 
-  // A saved scroll far past anything a bounded restore will load.
-  grid = makeGrid();
-  await scenario('cap', grid, 1, null, {scroll: 100000, selected: null});
 
-  // A selected id that never appears in the result set.
-  grid = makeGrid();
-  await scenario('absent_selection', grid, 1, null, {scroll: 0, selected: 999});
+def _reset_handler_lines(script: str) -> str:
+    """The served page's own reset-control wiring, for the reset driver."""
+    return "\n".join(
+        line for line in script.splitlines()
+        if re.match(r"document\.getElementById\('(sort-by|sort-order|subscribed-overlay|btn-search)'\)"
+                    r"\.(onchange|onclick) = ", line))
 
-  // The end of the result set stops the paging before the cap.
-  grid = makeGrid();
-  await scenario('exhausted', grid, 1, 2, {scroll: 100000, selected: null});
 
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_a_reset_render_selects_the_top_item_through_the_read_only_route(web_client, tmp_path):
+    """Every reset -- sort, filter, overlay -- returns to the top, top item open.
+
+    The reset branch of `_doSearchBody` is the one implementation point, and the
+    driver starts each reset from the served page's own control wiring rather
+    than calling `doSearch` itself. Every reset puts `scrollTop` back to 0,
+    focuses the first cell without moving the grid, and opens its pane through
+    `GET /api/item/<id>`, never `POST /api/item/<id>/open`: an automatic
+    selection must not queue the detail fetch work a click asks for.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = (RESET_RENDER_DRIVER
+              .replace("__SEARCH__", _extract_function(script, "doSearch"))
+              .replace("__BODY__", _extract_function(script, "_doSearchBody"))
+              .replace("__SHOWDETAIL__", _extract_function(script, "showDetail"))
+              .replace("__HANDLERS__", _reset_handler_lines(script)))
+    out = _run_node(driver, tmp_path)
+
+    assert set(out.keys()) >= {"sort", "filter", "overlay"}
+    for name in ("sort", "filter", "overlay"):
+        reset = out[name]
+        assert reset["detail"] == 7, f"{name}: the top cell's pane must open on the first item"
+        assert reset["dispatched"] == 7, f"{name}: the pane must hold the first item"
+        assert reset["pane"] == ["GET /api/item/7"], \
+            f"{name}: the automatic pane must use the read-only route, not /open"
+        assert reset["focus"] == ["preventScroll"], \
+            f"{name}: focusing the selected cell must not move the grid"
+        assert reset["scrollTop"] == 0, f"{name}: the reset must return to the top"
+        assert reset["selected"] == ["7"], f"{name}: the first cell must be selected"
+
+
+
+# ── a load and a Return persist nothing positional ──────────────────────────
+
+LOAD_SELECTION_DRIVER = """
+const loadStateFn = (__LOADSTATE__);
+const loadViewFn = (__LOADVIEW__);
+const saveViewFn = (__SAVEVIEW__);
+const doSearchFn = (__SEARCH__);
+const bodyFn = (__BODY__);
+const showDetailFn = (__SHOWDETAIL__);
+const returnFn = (__RETURN__);
+const out = {searchPaths: [], panePaths: [], focus: [], paneOpens: []};
+const report = console.log;
+global.console = {debug: () => {}, warn: () => {}, error: () => {}, log: report};
+global.ALL_FIELDS = ['Title', 'Subs'];
+global.VIEW_STATE_KEY = __KEY__;
+global.VIEW_STATE_VERSION = __VER__;
+global._normaliseSubscribedValue = (v) => (v == null ? 'any' : String(v));
+global.getFilters = () => ([{field: 'Subs', op: 'gte', value: '100'}]);
+global._overlayValue = () => 'any';
+global._subscribedOverlayEl = () => document.getElementById('subscribed-overlay');
+global._applyFilters = (f) => { out.appliedFilters = f; };
+global._applySubscribedOverlay = (v) => { out.appliedOverlay = v; };
+global._syncSubscribedOverlay = () => {};
+global.addRow = () => {};
+global._observeNextBatch = () => {};
+global._startItemUpdatePoll = () => {};
+global._listNeedsPoll = () => false;
+global._stopListPoll = () => {};
+global._unsubscribeItem = () => {};
+global._refreshCutoffs = () => {};
+global._applyPending = () => {};
+global._applySub = () => {};
+global._subscribeItem = () => {};
+global._imageCellHtml = () => '';
+global.fmtSize = () => '0 B';
+global.sizeClass = () => '';
+global.wClass = () => '';
+global._stopDetailPoll = () => {};
+global._subscribeDetail = (wid) => { out.subscribedDetail = wid; out.paneOpens.push(wid); };
+global._startDetailPoll = () => {};
+global.dispatchItemUpdate = (item) => { out.dispatched = item && item.workshop_id; };
+global._setAuthorModeUi = () => {};
+// A pre-change `loadState` calls its bounded restore here; the committed page
+// never calls it. Defined so the driver runs against either and the new
+// assertions -- one search, top of the list, top item -- are what fail.
+global._restoreView = async () => {};
+global.loading = false;
+global.hasMore = true;
+global.currentOffset = 0;
+global.cutoffs = {};
+let _authorMode = false;
+let _preJumpView = null;
+
+const store = {};
+global.localStorage = {
+  getItem: (k) => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
+  setItem: (k, v) => { store[k] = String(v); },
+  removeItem: (k) => { delete store[k]; },
+};
+const grid = {scrollTop: 0, scrollHeight: 500, clientHeight: 500, children: []};
+Object.defineProperty(grid, 'innerHTML', {
+  get() { return ''; },
+  set(v) { if (v === '') this.children.length = 0; },
+});
+grid.appendChild = function(node) { this.children.push(node); };
+function makeCell() {
+  const classes = new Set(['grid-cell']);
+  return {
+    attrs: {}, className: 'grid-cell', innerHTML: '', onclick: null,
+    classList: {
+      add: (c) => classes.add(c),
+      remove: (c) => classes.delete(c),
+      contains: (c) => classes.has(c),
+    },
+    setAttribute: function(k, v) { this.attrs[k] = String(v); },
+    getAttribute: function(k) { return this.attrs[k]; },
+    querySelector: () => null,
+    focus: function(opts) {
+      out.focus.push(opts && opts.preventScroll ? 'preventScroll' : 'none');
+      if (!opts || !opts.preventScroll) grid.scrollTop = 250;
+    },
+  };
+}
+const elements = {
+  'results-grid': grid,
+  'sort-by': {value: ''},
+  'sort-order': {value: ''},
+  'subscribed-overlay': {value: 'any'},
+  'filter-rows': {innerHTML: '', children: {length: 1}},
+  'detail-pane': {innerHTML: ''},
+};
+global.document = {
+  getElementById: (id) => elements[id] || {value: '', innerHTML: ''},
+  querySelectorAll: (sel) => (sel.indexOf('grid-cell') !== -1 ? grid.children.slice() : []),
+  querySelector: (sel) => {
+    const m = /data-wid="(\\d+)"/.exec(sel);
+    if (!m) return null;
+    return grid.children.find((c) => c.getAttribute('data-wid') === m[1]) || null;
+  },
+  createElement: makeCell,
+};
+const batches = [];
+function item(wid) { return {workshop_id: wid, title: 't', file_size: 0}; }
+function makeBatch(first) {
+  const b = [];
+  for (let i = 0; i < 50; i++) b.push(item(first + i));
+  return b;
+}
+global.fetch = async (url, opts) => {
+  const path = String(url);
+  const method = (opts && opts.method) || 'GET';
+  if (path === '/api/search') {
+    out.searchPaths.push(method + ' ' + path);
+    return {ok: true, status: 200, statusText: 'OK',
+            json: async () => batches.shift() || []};
+  }
+  if (path === '/api/state') {
+    return {ok: true, status: 200, statusText: 'OK', json: async () => ({})};
+  }
+  out.panePaths.push(method + ' ' + path);
+  const m = /\\/api\\/item\\/(\\d+)/.exec(path);
+  const wid = m ? parseInt(m[1], 10) : null;
+  return {ok: true, status: 200, statusText: 'OK',
+          json: async () => ({workshop_id: wid, title: 'item-' + wid, file_size: 0})};
+};
+function resetPage() {
+  grid.children.length = 0;
+  grid.scrollTop = 0;
+  grid.scrollHeight = 500;
+  batches.length = 0;
+  out.searchPaths.length = 0;
+  out.panePaths.length = 0;
+  out.focus.length = 0;
+  out.paneOpens.length = 0;
+  out.dispatched = null;
+  out.subscribedDetail = null;
+  out.appliedFilters = null;
+  out.appliedOverlay = null;
+  global.currentOffset = 0;
+  global.hasMore = true;
+  global.loading = false;
+  global._searchGeneration = 0;
+  _authorMode = false;
+  _preJumpView = null;
+}
+const loadState = loadStateFn;
+const _loadViewState = loadViewFn;
+const _saveViewState = saveViewFn;
+const doSearch = doSearchFn;
+const _doSearchBody = bodyFn;
+const showDetail = showDetailFn;
+const returnFromAuthor = returnFn;
+(async () => {
+  // A fresh load whose stored view names an item deep in the list (75, the
+  // second page) and a deep scroll position. Neither may be acted on.
+  store[global.VIEW_STATE_KEY] = JSON.stringify({
+    v: global.VIEW_STATE_VERSION,
+    filters: [{field: 'Subs', op: 'gte', value: '100'}],
+    sort_by: 'subscriptions', sort_order: 'DESC', subscribed: 'never',
+    selected: 75, scroll: 1500,
+  });
+  const loadedBefore = loadViewFn();
+  resetPage();
+  // Batches stand ready; only the first may be requested.
+  batches.push(makeBatch(1), makeBatch(51), makeBatch(101));
+  grid.scrollTop = 400;   // a stale position a refresh must not keep
+  await loadStateFn();
+  out.load = {
+    searches: out.searchPaths.length,
+    loadedHasSelection: Object.prototype.hasOwnProperty.call(loadedBefore, 'selected'),
+    loadedHasScroll: Object.prototype.hasOwnProperty.call(loadedBefore, 'scroll'),
+    panePaths: out.panePaths.slice(),
+    paneOpens: out.paneOpens.slice(),
+    dispatched: out.dispatched,
+    scrollTop: grid.scrollTop,
+    offset: global.currentOffset,
+    saved: JSON.parse(store[global.VIEW_STATE_KEY] || 'null'),
+  };
+
+  // Return from author mode: the snapshot's item and scroll must not come back.
+  // The return's own reset renders the top of the restored view.
+  resetPage();
+  store[global.VIEW_STATE_KEY] = JSON.stringify({
+    v: global.VIEW_STATE_VERSION, filters: [],
+    sort_by: 'subscriptions', sort_order: 'DESC', subscribed: 'never',
+  });
+  batches.push(makeBatch(1), makeBatch(51));
+  _authorMode = true;
+  _preJumpView = {
+    filters: [{field: 'Subs', op: 'gte', value: '500'}],
+    sort_by: 'subscriptions', sort_order: 'DESC', subscribed: 'previously',
+    selected: 25, scroll: 1500,
+  };
+  grid.scrollTop = 400;
+  await returnFn();
+  out.ret = {
+    searches: out.searchPaths.length,
+    panePaths: out.panePaths.slice(),
+    paneOpens: out.paneOpens.slice(),
+    dispatched: out.dispatched,
+    scrollTop: grid.scrollTop,
+    appliedFilters: out.appliedFilters,
+    authorMode: _authorMode,
+  };
   console.log(JSON.stringify(out));
 })();
 """
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
-def test_restore_pages_to_the_saved_position_and_scroll_wins_at_the_end(web_client, tmp_path):
-    """Restoring a deep view asks doSearch for pages; it never re-implements them.
+def test_a_load_and_a_return_ignore_stored_position_and_choose_the_top_item(web_client, tmp_path):
+    """A stored view names an item and a scroll; neither is restored.
 
-    The saved position may sit past the first 50-item batch, so `_restoreView`
-    calls `doSearch(false)` — the function that owns `currentOffset` and the
-    infinite-scroll observation — until the grid is tall enough, re-opens the
-    selected item when the loaded content holds it, and then applies the saved
-    scroll last because focusing that item moves the grid.
+    `_loadViewState` tolerates `selected` and `scroll` in an older entry and
+    reads back neither. The load issues exactly one search -- the reset -- with
+    no follow-up batches, the grid is at the top, and the pane holds the first
+    item of that batch, opened read-only. Return does the same from its snapshot:
+    one reset, top of the list, top item selected, nothing re-opened.
     """
     client, _ = web_client
     script = _served_inline_script(client)
-    driver = (RESTORE_DRIVER
-              .replace("__FN__", _extract_function(script, "_restoreView"))
-              .replace("__LOADUNTIL__", _extract_function(script, "_loadUntil"))
-              .replace("__MAX__", str(_restore_cap(script))))
+    driver = (LOAD_SELECTION_DRIVER
+              .replace("__LOADSTATE__", _extract_function(script, "loadState"))
+              .replace("__LOADVIEW__", _extract_function(script, "_loadViewState"))
+              .replace("__SAVEVIEW__", _extract_function(script, "_saveViewState"))
+              .replace("__SEARCH__", _extract_function(script, "doSearch"))
+              .replace("__BODY__", _extract_function(script, "_doSearchBody"))
+              .replace("__SHOWDETAIL__", _extract_function(script, "showDetail"))
+              .replace("__RETURN__", _extract_function(script, "returnFromAuthor"))
+              .replace("__KEY__", _extract_const(script, "VIEW_STATE_KEY"))
+              .replace("__VER__", _extract_const(script, "VIEW_STATE_VERSION")))
     out = _run_node(driver, tmp_path)
 
-    assert out["scroll"]["batches"] == 4, "must page until the grid can hold the saved scroll"
-    assert out["scroll"]["showDetailCalls"] == 1, "the selected item must be re-opened"
-    assert out["scroll"]["scrollTop"] == 1500, \
-        "the saved scroll must be applied after focus moves the grid"
+    load = out["load"]
+    assert load["loadedHasSelection"] is False, \
+        "an older stored entry's selection must not be read back"
+    assert load["loadedHasScroll"] is False, \
+        "an older stored entry's scroll must not be read back"
+    assert load["searches"] == 1, "a load is one reset search, no follow-up batches"
+    assert load["offset"] == 50, "exactly the first batch was rendered"
+    assert load["paneOpens"] == [1], \
+        "the first item of the rendered batch must be selected, not the stored one"
+    assert load["panePaths"] == ["GET /api/item/1"], \
+        "the automatic pane must use the read-only route"
+    assert load["dispatched"] == 1, "the pane must hold the first item's payload"
+    assert load["scrollTop"] == 0, "a load must start at the top"
+    assert "selected" not in load["saved"] and "scroll" not in load["saved"], \
+        "the reset must persist the view definition only"
 
+    ret = out["ret"]
+    assert ret["searches"] == 1, "Return is one reset search"
+    assert ret["paneOpens"] == [1], \
+        "Return must select the restored view's top item, not re-open the snapshot's"
+    assert ret["panePaths"] == ["GET /api/item/1"]
+    assert ret["dispatched"] == 1
+    assert ret["scrollTop"] == 0, "Return must put the grid at the top"
+    assert ret["appliedFilters"] == [{"field": "Subs", "op": "gte", "value": "500"}], \
+        "Return still puts back the filters the jump replaced"
+    assert ret["authorMode"] is False
 
-@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
-def test_restore_is_bounded_by_intent_not_by_the_old_batch_budget(web_client, tmp_path):
-    """One page load must not walk the result set on its own.
-
-    Pre-change, each pass ran its full `MAX_RESTORE_BATCHES = 40`: an
-    unreachable saved scroll issued 40 searches per pass, and a selected id that
-    can never appear issued another 40. The scroll pass is now a small request
-    cap, and the selection is never paged for — it is re-opened only when the
-    content the scroll pass loaded already holds it.
-    """
-    client, _ = web_client
-    script = _served_inline_script(client)
-    driver = (RESTORE_DRIVER
-              .replace("__FN__", _extract_function(script, "_restoreView"))
-              .replace("__LOADUNTIL__", _extract_function(script, "_loadUntil"))
-              .replace("__MAX__", str(_restore_cap(script))))
-    out = _run_node(driver, tmp_path)
-
-    cap = _restore_cap(script)
-    assert cap <= 5, "the scroll pass must be a small request budget"
-    assert out["cap"]["batches"] == cap, \
-        "an unreachable saved scroll must stop at the small cap"
-    assert out["absent_selection"]["batches"] == 0, \
-        "a selected id that never appears must not page at all"
-    assert out["absent_selection"]["showDetailCalls"] == 0
-    assert out["exhausted"]["batches"] == 2, \
-        "the end of the result set stops the paging before the cap"
 
 
 # ── a failed search must not wedge the page ──────────────────────────────────
@@ -2678,15 +3005,13 @@ JUMP_SUPERSEDE_DRIVER = """
 const jump = (__JUMP__);
 const returnFn = (__RETURN__);
 global.returnFromAuthor = returnFn;
-const out = {uiCalls: [], restoreViews: [], searches: 0};
+const out = {uiCalls: [], searches: 0};
 const report = console.log;
 global.console = {debug: () => {}, warn: () => {}, error: () => {}, log: report};
 let _authorMode = false;
 let _preJumpView = null;
-let _selectedWid = null;
 const snapshot = {filters: [{field: 'Title', op: 'is', value: 'x'}],
-                  sort_by: 'views', sort_order: 'DESC', subscribed: 'any',
-                  selected: null, scroll: 0};
+                  sort_by: 'views', sort_order: 'DESC', subscribed: 'any'};
 global._viewSnapshot = () => snapshot;
 global._setAuthorModeUi = (on, creator) => out.uiCalls.push([on, creator]);
 global.addRow = () => {};
@@ -2694,7 +3019,6 @@ global._syncSubscribedOverlay = () => {};
 global._refreshCreatorIgnoreControl = () => {};
 global._applyFilters = (f) => { out.appliedFilters = f; };
 global._applySubscribedOverlay = () => {};
-global._restoreView = async (s) => { out.restoreViews.push(s); };
 const filterRows = {innerHTML: ''};
 global.document = {getElementById: (id) => (id === 'filter-rows' ? filterRows : {value: ''})};
 const answers = ['failed', 'applied', 'applied'];  // a failed jump, its return, then an applied jump
@@ -2705,16 +3029,16 @@ global.doSearch = async () => { out.searches += 1; return answers.shift(); };
     authorMode: _authorMode,
     lastUi: out.uiCalls[out.uiCalls.length - 1],
     appliedFilters: out.appliedFilters,
-    restoreViews: out.restoreViews.slice(),
+    searches: out.searches,
   };
   _authorMode = false; _preJumpView = null;
-  out.uiCalls.length = 0; out.restoreViews.length = 0;
+  out.uiCalls.length = 0;
   out.appliedFilters = null; out.searches = 0;
   await jump('creator-2');
   out.applied = {
     authorMode: _authorMode,
     lastUi: out.uiCalls[out.uiCalls.length - 1],
-    restoreViews: out.restoreViews.slice(),
+    searches: out.searches,
   };
   console.log(JSON.stringify(out));
 })();
@@ -2728,7 +3052,8 @@ def test_jump_to_author_restores_the_pre_jump_view_when_its_search_fails(web_cli
     `doSearch` answers `'failed'` when the fetch, the parse or the render threw:
     the reset already cleared the grid and nothing replaced it, so author mode
     would be drawn over an empty grid. The snapshot goes back through the same
-    path Return uses -- and an applied jump leaves author mode on.
+    path Return uses -- a filter/sort/overlay restore and one reset search --
+    and an applied jump leaves author mode on.
     """
     client, _ = web_client
     script = _served_inline_script(client)
@@ -2743,15 +3068,14 @@ def test_jump_to_author_restores_the_pre_jump_view_when_its_search_fails(web_cli
         "the author-mode chrome is taken down"
     assert out["failed"]["appliedFilters"] == [{"field": "Title", "op": "is", "value": "x"}], \
         "the pre-jump filters come back"
-    assert len(out["failed"]["restoreViews"]) == 1, \
-        "the pre-jump view is restored through the same path Return uses"
-    assert out["failed"]["restoreViews"][0]["sort_by"] == "views"
+    assert out["failed"]["searches"] == 2, \
+        "the failed jump and the return's own reset are the two searches"
 
     assert out["applied"]["authorMode"] is True, \
         "an applied jump leaves author mode on"
     assert out["applied"]["lastUi"] == [True, "creator-2"]
-    assert out["applied"]["restoreViews"] == [], \
-        "an applied jump has nothing to restore"
+    assert out["applied"]["searches"] == 1, \
+        "an applied jump is one reset and has nothing to restore"
 
 
 # A supersede is not a failure: the newer action already ran with the author row
@@ -2764,20 +3088,18 @@ const returnFn = (__RETURN__);
 const doSearch = (__SEARCH__);
 const _doSearchBody = (__BODY__);
 global.returnFromAuthor = returnFn;
-const out = {uiCalls: [], restoreViews: [], appliedFilters: null, warns: []};
+const out = {uiCalls: [], appliedFilters: null, warns: []};
 const report = console.log;
 global.console = {debug: () => {}, warn: (m) => out.warns.push(String(m)),
                   error: () => {}, log: report};
 let _authorMode = false;
 let _preJumpView = null;
-let _selectedWid = null;
 let _searchGeneration = 0;
 global.loading = false;
 global.hasMore = true;
 global.currentOffset = 0;
 const snapshot = {filters: [{field: 'Title', op: 'is', value: 'x'}],
-                  sort_by: 'subscriptions', sort_order: 'DESC', subscribed: 'any',
-                  selected: null, scroll: 0};
+                  sort_by: 'subscriptions', sort_order: 'DESC', subscribed: 'any'};
 global._viewSnapshot = () => snapshot;
 global._setAuthorModeUi = (on, creator) => out.uiCalls.push([on, creator]);
 global.addRow = () => {};
@@ -2785,7 +3107,6 @@ global._syncSubscribedOverlay = () => {};
 global._refreshCreatorIgnoreControl = () => {};
 global._applyFilters = (f) => { out.appliedFilters = f; };
 global._applySubscribedOverlay = () => {};
-global._restoreView = async (s) => { out.restoreViews.push(s); };
 global.getFilters = () => [];
 global._overlayValue = () => 'any';
 global._observeNextBatch = () => {};
@@ -2854,7 +3175,6 @@ function item(wid) { return {workshop_id: wid, title: 't', file_size: 0}; }
   if (pending[1]) { const r = pending[1]; pending[1] = null; r(resp([item(7)])); }
   await newerPromise;
   out.authorMode = _authorMode;
-  out.restoreViewCount = out.restoreViews.length;
   out.fetches = bodies.length;
   out.sortBys = bodies.map((b) => b.sort_by);
   out.renderedWids = grid.children.map((c) => c.attrs['data-wid']);
@@ -2884,12 +3204,10 @@ def test_a_superseded_jump_leaves_the_newer_actions_view_untouched(web_client, t
 
     assert out["authorMode"] is True, \
         "a superseded jump leaves the newer action's author view in place"
-    assert out["restoreViewCount"] == 0, \
-        "the pre-jump snapshot must not be restored over the newer action"
     assert out["appliedFilters"] is None, \
         "the pre-jump filters must not come back"
     assert out["fetches"] == 2, \
-        "the jump must not issue a third (restore) reset"
+        "the jump must not issue a third (return/reset) search"
     assert out["sortBys"] == ["subscriptions", "views"], \
         "the searches are the jump's and the newer action's, in that order"
     assert out["renderedWids"] == ["7"], \
@@ -3466,9 +3784,10 @@ def _author_driver(script, tmp_path):
 
     The harness installs the stubs the page's own module scope would provide --
     the DOM lookups, the row builder, the search call -- and records what the
-    jump and the return did to them. `_restoreView` and `showDetail` are stubbed
-    because they page the result set, which the restore test above already
-    covers; what is asserted here is the state handed to them.
+    jump and the return did to them. `doSearch` and `showDetail` are stubbed
+    because the served page's own reset search is exercised by the reset-render
+    and load drivers above; what is asserted here is the view definition handed
+    to the search and the chrome the jump and the return draw.
 
     The served functions are injected as parenthesised function expressions, so
     `__JUMPTOAUTHOR__('76561198000000000')` is an IIFE. A bare `async function
@@ -3494,17 +3813,18 @@ def _author_driver(script, tmp_path):
 AUTHOR_MODE_DRIVER = """
 __DOM__
 
-let _selectedWid = 222;
 let _authorMode = false;
 let _preJumpView = null;
 let _authorCreator = null;
+// A pre-change `_viewSnapshot` reads this; the committed one carries no
+// selection. Defined so the driver runs against either.
+let _selectedWid = null;
 let _creatorRefreshes = 0;
 let _snapshotSubscribed = null;
 let _appliedFilters = [];
 let _appliedOverlay = null;
 let _detailOpened = [];
 let _closedList = 0;
-let _restoreViewState = null;
 const _searches = [];
 
 function _rowOf(r) { return {field: r.row.querySelector('.field-select').value, op: r.row.querySelector('.op-select').value, value: r.row.querySelector('.value-input').value}; }
@@ -3530,7 +3850,9 @@ function _overlayValue() { return _snapshotSubscribed; }
 function _applySubscribedOverlay(value) { _appliedOverlay = value; }
 function _syncSubscribedOverlay() { _syncs += 1; }
 function doSearch(reset) { _searches.push(reset); return Promise.resolve('applied'); }
-function _restoreView(state) { _restoreViewState = state; return Promise.resolve(); }
+// A pre-change `returnFromAuthor` calls its restore here; the committed one
+// does not. Defined so the driver runs against either.
+function _restoreView(state) { return Promise.resolve(); }
 function showDetail(wid) { _detailOpened.push(wid); return Promise.resolve(); }
 // The creator-ignore label read, stubbed: it is exercised on its own in the
 // creator-toggle driver below, and what the author tests want from the jump is
@@ -3628,7 +3950,6 @@ __INITAUTHORLIST__;
     sortOrder: _elements['sort-order'].value,
     subscribed: _appliedOverlay,
     appliedFilters: _appliedFilters,
-    restoreState: _restoreViewState,
     detailOpened: _detailOpened.slice(),
     barVisible: _elements['author-mode-bar'].style.display,
     name: _elements['author-mode-name'].textContent,
@@ -3706,13 +4027,15 @@ def test_entering_author_mode_from_an_item_overrides_filters_and_keeps_the_sort(
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
 def test_returning_from_author_mode_restores_the_previous_view_exactly(web_client, tmp_path):
-    """The point of the mode: Return puts back what the jump threw away.
+    """The point of the mode: Return puts back the view definition it threw away.
 
     The assertions are on the restored state -- the rows' field/op/value, the
-    sort pair, the Subscribed overlay, the paged restore of the item and scroll
-    position -- rather than on the presence of a Return button. A half-restore
+    sort pair, the Subscribed overlay, and the snapshot carrying nothing
+    positional -- rather than on the presence of a Return button. A half-restore
     (filters back but the author row still present, or the sort left where the
-    author view had it) fails here.
+    author view had it) fails here. The item and scroll do **not** come back:
+    the return's own reset renders the top of the view, and the snapshot has no
+    position to hand to anything.
     """
     client, _ = web_client
     script = _served_inline_script(client)
@@ -3728,8 +4051,8 @@ def test_returning_from_author_mode_restores_the_previous_view_exactly(web_clien
     assert restored["subscribed"] == "previously", \
         "the Subscribed overlay is view state the jump must restore too"
     assert restored["appliedFilters"] == out["snapshot"]["filters"]
-    assert restored["restoreState"] == out["snapshot"], \
-        "the item and scroll snapshot must be handed to the restore routine"
+    assert "selected" not in out["snapshot"] and "scroll" not in out["snapshot"], \
+        "the snapshot must carry the view definition only, nothing positional"
     assert restored["barVisible"] == "none" and restored["name"] == ""
     assert restored["saveVisible"] == "", "Save Filter comes back with the filter area"
     assert restored["buttonsVisible"] == "flex"
@@ -4352,7 +4675,6 @@ const elements = {
 global.document = {getElementById: (id) => elements[id] || null};
 global._authorMode = false;
 global._preJumpView = null;
-global._selectedWid = 222;
 global._applied = null;
 global.getFilters = () => ([{field: 'Subs', op: 'gte', value: '500'}]);
 global._applyFilters = (filters) => { global._applied = filters; };
@@ -4368,12 +4690,10 @@ global._viewSnapshot = () => ({
   filters: global.getFilters(),
   sort_by: elements['sort-by'].value, sort_order: elements['sort-order'].value,
   subscribed: elements['subscribed-overlay'].value,
-  selected: global._selectedWid, scroll: elements['results-grid'].scrollTop,
 });
 global._syncSubscribedOverlay = () => {};
 global._overlayValue = () => elements['subscribed-overlay'].value;
 global._applySubscribedOverlay = () => {};
-global._restoreView = () => Promise.resolve();
 let searched = 0;
 global.doSearch = () => { searched += 1; return Promise.resolve('applied'); };
 global.addRow = (logic, initial) => added.push({hasLogic: logic !== undefined, initial: initial});
