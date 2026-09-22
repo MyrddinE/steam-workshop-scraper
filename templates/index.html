@@ -2583,6 +2583,18 @@ let _subThrottleStopped = false;
 // `{seed, observed, currentStartedAt, count, done}`. Seeded from
 // `/api/subscribe_pace` and dropped with the pass.
 let _subEstimate = null;
+// The newest pass owns every module-scope piece of pass state above. Each
+// `_startAutoSubscribe` takes the next token once it has committed to running
+// (after its queue read) and re-checks it after every later await and before
+// every clear, so a predecessor still draining cannot stop a successor's poll,
+// drop its estimate or release its daemon pause (issue 86).
+let _subPassToken = 0;
+// True from the moment a pass starts until the newest pass ends. The Cancel
+// button reads this rather than `_subScheduleIv`, because the schedule is armed
+// only after the `/api/pause` await: a click landing inside that await used to
+// fall through to the Close branch and hide the overlay while the pass it was
+// pressed against carried on (issue 87).
+let _subPassLive = false;
 
 // ── the subscription estimate ─────────────────────────────────────────────
 //
@@ -2725,9 +2737,35 @@ function _subTickEstimates(list, verified, count) {
 // than this loop's own bookkeeping, and the pass still pauses the daemon while
 // it runs.
 async function _startAutoSubscribe() {
+  // Read the queue before taking ownership. A pass that aborts here -- the
+  // empty-queue return below, or a rejected read -- must leave the pass that is
+  // actually running its token, handles, estimate and pause untouched, so the
+  // claim cannot be taken above this await.
   const resp = await fetch('/api/queued');
   const items = await resp.json();
   if (!items.length) { alert('No items queued for subscription.'); return; }
+
+  // This pass owns the module-scope pass state from here, now that it has
+  // committed to running: the token is what lets the code after each later
+  // await tell whether a newer pass has taken over (issue 86). The state it
+  // replaces is kept so a pause that rejects can hand ownership back instead of
+  // leaving a running predecessor stale.
+  const previous = {token: _subPassToken, live: _subPassLive,
+                    canceled: _subCanceled, throttled: _subThrottleStopped};
+  const passToken = ++_subPassToken;
+  // Per-pass flags, reset before the pause await rather than after it: a Cancel
+  // click landing while an await is in flight must survive it, or the cancelled
+  // pass carries on arming and draining (issue 87).
+  _subCanceled = false;
+  // Per-pass like `_subCanceled`: the throttle stop sets it so *this* pass's
+  // Close keeps its unverified rows queued, and it must not outlive the pass or
+  // a later Cancel would skip that dequeue for good.
+  _subThrottleStopped = false;
+  // The overlay is about to be drawn, and from here a click on Cancel is a
+  // click against this pass: the handler reads `_subPassLive`, and it must be
+  // true before the `/api/pause` await below, because the schedule is armed
+  // only after it (issue 87).
+  _subPassLive = true;
 
   const overlay = document.getElementById('sub-queue-modal');
   const list = document.getElementById('sub-queue-list');
@@ -2756,36 +2794,70 @@ async function _startAutoSubscribe() {
   if (clearBtn) clearBtn.style.display = 'none';
   document.getElementById('sub-cancel').textContent = 'Cancel';
 
-  await fetch('/api/pause', {method:'POST'});
-
-  // The pass owns its timers, so a predecessor's handles never outlive it into
-  // this one. `_subPollIv` is the one that is actually live here: Cancel
-  // deliberately leaves the cancelled pass's poll running while the overlay
-  // stays open -- that is what updates its rows -- and `l` starts a new pass
-  // from the grid cell that still holds focus, so the new handle would
-  // otherwise overwrite a live one. `_subScheduleIv` is live here only when a
-  // pass is re-entered *mid-drain* (a second `l` before the previous loop has
-  // run its `finally`), because Cancel and the loop's own `finally` clear it on
-  // every pass that has ended; it is cleared here anyway, so neither a
-  // cancelled poll nor a still-draining pass's schedule can be inherited, and a
-  // predecessor's completion branch can never clear a successor's handle.
-  if (_subPollIv) { clearInterval(_subPollIv); _subPollIv = null; }
-  if (_subScheduleIv) { clearInterval(_subScheduleIv); _subScheduleIv = null; }
-
-  _subCanceled = false;
-  // Per-pass like `_subCanceled`: the throttle stop sets it so *this* pass's
-  // Close keeps its unverified rows queued, and it must not outlive the pass or
-  // a later Cancel would skip that dequeue for good.
-  _subThrottleStopped = false;
   // The daemon is paused for the pass, so release it on every exit path: a
   // cancel, a throttle stop, and the normal end.
   const finish = async () => {
     await fetch('/api/resume', {method:'POST'});
   };
 
+  // A rejected pause leaves no pass committed to running. Hand ownership back
+  // to whoever held it and clear nothing: a running predecessor must not be
+  // left stale, or its `finally` would skip its clears and its pause release.
+  // The handback is skipped if a newer pass has claimed in the meantime -- that
+  // pass owns everything then.
+  try {
+    await fetch('/api/pause', {method:'POST'});
+  } catch (e) {
+    if (passToken === _subPassToken) {
+      _subPassToken = previous.token;
+      _subPassLive = previous.live;
+      _subCanceled = previous.canceled;
+      _subThrottleStopped = previous.throttled;
+    }
+    throw e;
+  }
+
+  // A newer pass took over while the pause was in flight: it owns the overlay,
+  // the handles and the pause now, so this pass stops without touching any of
+  // them.
+  if (passToken !== _subPassToken) return;
+
+  // A Cancel click landed inside the pause await. The pass ends before it arms
+  // the schedule or drains a row -- no schedule, no drain -- and releases the
+  // pause once, exactly as a running pass's cancel does. The overlay stays up
+  // for the user's Close, which the Cancel branch already relabelled (issue 87).
+  if (_subCanceled) {
+    _subPassLive = false;
+    await finish();
+    return;
+  }
+
+  // The pass owns its timers now that the pause has committed. `_subPollIv` is
+  // the one that is actually live here: Cancel deliberately leaves the
+  // cancelled pass's poll running while the overlay stays open -- that is what
+  // updates its rows -- and `l` starts a new pass from the grid cell that still
+  // holds focus, so the new handle would otherwise overwrite a live one.
+  // `_subScheduleIv` is live here only when a pass is re-entered *mid-drain* (a
+  // second `l` before the previous loop has run its `finally`), because Cancel
+  // and the loop's own `finally` clear it on every pass that has ended; it is
+  // cleared here anyway, so neither a cancelled poll nor a still-draining
+  // pass's schedule can be inherited, and a predecessor's completion branch can
+  // never clear a successor's handle. The clear sits after the pause so a
+  // rejected pause hands the handles back untouched.
+  if (_subPollIv) { clearInterval(_subPollIv); _subPollIv = null; }
+  if (_subScheduleIv) { clearInterval(_subScheduleIv); _subScheduleIv = null; }
+
   // The estimate is for this pass only: seed it from the shared delay and draw
-  // the batch figure before the first call starts.
-  _subEstimate = {seed: await _subSeedSeconds(), observed: [], currentStartedAt: null,
+  // the batch figure before the first call starts. The seed read awaits too, so
+  // the cancel/supersede check is repeated before anything is armed.
+  const seed = await _subSeedSeconds();
+  if (passToken !== _subPassToken) return;
+  if (_subCanceled) {
+    _subPassLive = false;
+    await finish();
+    return;
+  }
+  _subEstimate = {seed: seed, observed: [], currentStartedAt: null,
                   count: items.length, done: 0};
   _subRenderProgress(0, items.length);
   const verified = new Set();
@@ -2804,6 +2876,13 @@ async function _startAutoSubscribe() {
       const queued = await qresp.json();
       const failures = await fresp.json();
       const pace = await presp.json();
+      // A newer pass owns the module-scope state if this poll's pass is stale
+      // (its tick was still in flight when `l` started the next pass): the
+      // stale tick must not re-read the queue for a superseded `items` list,
+      // redraw the newer pass's rows or clear its handle. The new pass clears
+      // this interval at its start, so this only catches a tick already
+      // awaiting its fetches (issue 86).
+      if (passToken !== _subPassToken) return;
       // A throttle can double the delay mid-pass, so the seed is re-read here
       // rather than held from the pass's start.
       if (_subEstimate) _subEstimate.seed = Number(pace.seed_seconds) || 0;
@@ -2862,6 +2941,11 @@ async function _startAutoSubscribe() {
       if (!health.throttled_at) return false;
       const since = (Date.now() / 1000) - health.throttled_at;
       if (since >= health.retry_after) return false;
+      // A newer pass owns `_subThrottleStopped`, the handles, the estimate and
+      // the pause if this pass is stale. This pass still stops -- Steam is
+      // refusing it too -- but a stale pass must not clear a successor's poll,
+      // drop its estimate or release its pause (issue 86).
+      if (passToken !== _subPassToken) return true;
       _subThrottleStopped = true;
       _subCanceled = true;
       if (_subPollIv) { clearInterval(_subPollIv); _subPollIv = null; }
@@ -2899,8 +2983,9 @@ async function _startAutoSubscribe() {
       // seed/mean, so its clock starts when its call does. The measurement is
       // around the awaited fetch itself; the trace switch's fetch wrapper only
       // observes a call and hands back the same promise, so it cannot change
-      // what is measured here.
-      if (_subEstimate) _subEstimate.currentStartedAt = Date.now();
+      // what is measured here. A stale pass's call must not time itself against
+      // -- or write into -- the estimate a successor owns (issue 86).
+      if (passToken === _subPassToken && _subEstimate) _subEstimate.currentStartedAt = Date.now();
       // Sequential on purpose: the next page read must not start until this
       // call has returned, or the two reads overlap on one shared interval.
       let data = null;
@@ -2915,7 +3000,7 @@ async function _startAutoSubscribe() {
       }
       // A finished item's whole cost is the call's wall-clock duration,
       // success or refusal -- a refusal still spent the pass that time.
-      if (_subEstimate) {
+      if (passToken === _subPassToken && _subEstimate) {
         _subEstimate.observed.push(
           Math.max(0, (Date.now() - _subEstimate.currentStartedAt) / 1000));
         _subEstimate.currentStartedAt = null;
@@ -2929,7 +3014,7 @@ async function _startAutoSubscribe() {
           ? (item.subscription_state === 'queued_remove' ? 'unsubscribed' : 'subscribed')
           : 'failed';
       }
-      _subRenderProgress(verified.size, items.length);
+      if (passToken === _subPassToken) _subRenderProgress(verified.size, items.length);
       if (!(data && data.success === 1)) {
         console.debug('Subscribe refused for ' + item.workshop_id + ': ' +
                       ((data && data.message) || status + ' ' + statusText));
@@ -2937,21 +3022,33 @@ async function _startAutoSubscribe() {
       if (await _checkSubThrottle()) break;
     }
   } finally {
-    if (_subScheduleIv) { clearInterval(_subScheduleIv); _subScheduleIv = null; }
-    // The estimate is only for a live pass; drop it with the pass so no stale
-    // countdown is left on the row or the progress line.
-    _clearSubEstimates();
-    // Released even if the loop threw: leaving the daemon paused would be worse
-    // than any single failed subscribe.
-    await finish();
+    // Only the newest pass clears the handles, drops the estimate and releases
+    // the pause. A predecessor still draining when a successor starts is stale
+    // and must leave all three to the successor (issue 86): clearing the
+    // module-scope handles here used to stop the newer pass's verification poll
+    // and estimate, and resume a daemon pause the newer pass owns.
+    if (passToken === _subPassToken) {
+      _subPassLive = false;
+      if (_subScheduleIv) { clearInterval(_subScheduleIv); _subScheduleIv = null; }
+      // The estimate is only for a live pass; drop it with the pass so no stale
+      // countdown is left on the row or the progress line.
+      _clearSubEstimates();
+      // Released even if the loop threw: leaving the daemon paused would be worse
+      // than any single failed subscribe.
+      await finish();
+    }
   }
 }
 
 document.getElementById('sub-cancel').onclick = () => {
-  if (_subScheduleIv) {
+  // A live pass is one that has started, whether or not it has armed its
+  // schedule yet: clicking Cancel inside `_startAutoSubscribe`'s `/api/pause`
+  // (or seed) await used to see a null `_subScheduleIv`, take the Close branch,
+  // hide the overlay and resume the daemon while the pass it was pressed
+  // against carried on with nothing on screen (issue 87).
+  if (_subPassLive) {
     _subCanceled = true;
-    clearInterval(_subScheduleIv);
-    _subScheduleIv = null;
+    if (_subScheduleIv) { clearInterval(_subScheduleIv); _subScheduleIv = null; }
     // Cancel ends the pass, so it takes every figure off the screen now rather
     // than waiting for the in-flight call to return.
     _clearSubEstimates();
