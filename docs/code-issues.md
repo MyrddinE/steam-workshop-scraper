@@ -34,13 +34,26 @@ platform-independent by construction rather than tuned until green.
   `test_schema_version_refusal.py` test defeated by the owner's running daemon holding `.daemon.pid` in the
   project directory — the log's own captured output shows the exit-3 PID refusal — which makes that test
   non-hermetic in the same way issue 67 was.
-- **6 held pending the owner**: three `test_webserver.py` assertions on non-ASCII output whose diagnosis
-  depends on the captured log's encoding (the owner is re-capturing it in UTF-8); two `test_crash.py`
-  failures with `OSError: [WinError 6] The handle is invalid` from `target_stream.write(text)` inside
-  Textual's `app.py` — writing the traceback to the original stderr failed, which is either the capture
-  method or a real gap where a failed console write defeats the crash dump; and
-  `test_tui_accessibility.py::test_select_dropdown_contrast`, where `SelectOverlay` is not found, which looks
-  like a Textual version difference between the container and the unpinned 3.14 install.
+- **was 6 held, now 1**: the owner re-saved the log in UTF-8 (valid, same run), which settled the three
+  `test_webserver.py` assertions as a **test-side decoding bug** — visible as `assert 'â—‹' == '○'`, the node
+  drivers' UTF-8 stdout read with the Windows codepage by `_run_node`'s `subprocess.run(..., text=True)` with
+  no `encoding=`. They are folded into the same dispatched batch, together with the same latent bug in six
+  other `tests/` files (which pass only because their fixtures are ASCII). The two `test_crash.py` failures
+  are a real gap of ours and are dispatched separately: Textual renders the traceback to `sys.__stderr__`
+  (`textual/app.py:790`, written at `:2100`), and when that handle is invalid the `OSError` escapes
+  `_handle_exception` instead of Textual's re-raise of the app's own error — the dump is written first
+  (`src/tui.py:2644`), so no evidence is lost, but the handler's stated contract is broken. Still open for the
+  owner: `test_tui_accessibility.py::test_select_dropdown_contrast`, where `SelectOverlay` is not found and
+  the palette screen is, which looks like a Textual version difference between the container and the unpinned
+  3.14 install — one `py -3.14 -m pip show textual pytest` settles whether it is drift.
+
+**What the running daemon does and does not explain (measured 2026-09-22).** The owner confirmed the daemon
+was running, which accounts for the non-hermetic `test_schema_version_refusal.py` failure on its own: the log
+shows the runner refusing on the daemon's `.daemon.pid`, exit 3, before the schema guard that test is about.
+It does **not** account for the three worker/translation failures — planting a `.pauselock` in the project
+directory and re-running those three in the container leaves them passing, because the worker's pause gate
+(`src/web_worker.py:445`) exits on the stop flag and falls through to process one item anyway, so an ambient
+lock cannot starve a one-iteration test. They stay classified as the missing handshake.
 
 ### A pass that claims ownership and then throws can still strand the running pass (issue 88)
 
