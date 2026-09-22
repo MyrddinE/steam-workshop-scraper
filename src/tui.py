@@ -2651,12 +2651,39 @@ class ScraperApp(App):
         is closed -- and the delegate call is unchanged, so Textual still renders
         its own traceback (with locals, which the file also carries redacted) and
         still exits.
+
+        Textual records ``_exception`` and ``_return_code`` here and queues that
+        traceback, but writes it later, on the exit path, after the driver has
+        closed. On Windows the process's stderr handle can be invalid, so that
+        deferred write raises ``OSError: [WinError 6] The handle is invalid`` and
+        the caller receives it instead of the app's own error. Both the delegate
+        call and its deferred render (``_print_error_renderables``) are caught
+        and the console failure is logged, so the original error still
+        propagates and the queued traceback is dropped rather than raised again.
         """
         try:
             crash.record_exception(type(error), error, error.__traceback__)
         except Exception:
             logging.error("Crash dump failed", exc_info=True)
-        super()._handle_exception(error)
+        try:
+            super()._handle_exception(error)
+        except Exception:
+            logging.error("Console traceback render failed", exc_info=True)
+
+    def _print_error_renderables(self) -> None:
+        """Write Textual's queued traceback, guarded against a dead console.
+
+        ``_handle_exception`` queues the traceback and Textual writes it here,
+        after the driver has closed and the terminal is restored -- which is why
+        the write cannot be caught around the delegate call alone. A broken
+        stderr must not replace the error the caller is about to receive, so the
+        failure is logged and the queue cleared, not raised.
+        """
+        try:
+            super()._print_error_renderables()
+        except Exception:
+            logging.error("Console traceback render failed", exc_info=True)
+            self._exit_renderables.clear()
 
     def save_state(self) -> None:
         """Saves current UI state to disk."""

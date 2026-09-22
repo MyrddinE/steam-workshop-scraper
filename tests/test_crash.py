@@ -727,3 +727,64 @@ async def test_every_handle_exception_call_writes_its_own_dump(tmp_path):
         texts = [dump.read_text(encoding="utf-8") for dump in dumps]
         assert any("first textual error" in text for text in texts)
         assert any("second textual error" in text for text in texts)
+
+
+@pytest.mark.asyncio
+async def test_a_broken_console_does_not_defeat_the_handler(tmp_path, caplog):
+    """A console write that fails must not replace the original error.
+
+    On Windows the run's stderr handle is invalid, so Textual's own traceback
+    write raises ``OSError`` while the app shuts down and the caller sees that
+    instead of the app's error (issue 89). A real invalid handle cannot be made
+    on Linux -- the write succeeds there -- so the failure is forced: the stream
+    Textual writes to is replaced with one whose ``write`` raises.
+
+    The handler must log the render failure rather than swallow it, keep the
+    dump it wrote first, leave Textual's ``_exception``/``_return_code`` alone,
+    and let the original ``RuntimeError`` reach the caller, which is the
+    ``raise self._exception`` at the end of ``run_test``.
+    """
+    from src.database import initialize_database
+    from src.tui import ScraperApp
+
+    db_path = str(tmp_path / "tui.db")
+    initialize_database(db_path)
+    outbox = tmp_path / "outbox"
+    config = {"database": {"path": db_path}, "logging": {"level": "INFO"},
+              "daemon": {"outbox_dir": str(outbox)}}
+    crash.install("tui", config, config_path="config.yaml")
+
+    class _InvalidHandle:
+        """What ``sys.__stderr__`` is on the owner's Windows test run."""
+
+        def write(self, text: str) -> None:
+            raise OSError("[WinError 6] The handle is invalid")
+
+        def flush(self) -> None:
+            pass
+
+        def isatty(self) -> bool:
+            return True
+
+    with patch("src.tui.load_config", return_value=config):
+        app = ScraperApp()
+        error = RuntimeError("broken console probe")
+        with caplog.at_level(logging.ERROR):
+            # The original error, not the console failure, is what propagates.
+            with pytest.raises(RuntimeError):
+                async with app.run_test() as pilot:
+                    await pilot.pause(ASYNC_PAUSE)
+                    app._original_stderr = _InvalidHandle()
+                    try:
+                        raise error
+                    except RuntimeError:
+                        app._handle_exception(error)
+
+        assert app._exception is error
+        assert app._return_code == 1
+
+        dumps = _crash_files(tmp_path)
+        assert len(dumps) == 1, "the dump is written before the console render"
+        assert "broken console probe" in dumps[0].read_text(encoding="utf-8")
+        assert "Console traceback render failed" in caplog.text
+        assert "[WinError 6] The handle is invalid" in caplog.text
