@@ -158,7 +158,7 @@ def _run_node(driver: str, tmp_path):
 
 
 # The overlay's state is declared module scope by the page; the driver declares
-# the same five names so the extracted functions close over them. The timers are
+# the same names so the extracted functions close over them. The timers are
 # stubbed to handles that never fire, because this driver drives the pass itself
 # and a 250 ms tick or a 1 s poll running behind it would only add noise.
 OVERLAY_CANCEL_DEQUEUE_DRIVER = r"""
@@ -171,6 +171,8 @@ let _subScheduleIv = null;
 let _subCanceled = false;
 let _subThrottleStopped = false;
 let _subEstimate = null;
+let _subPassToken = 0;
+let _subPassLive = false;
 
 let _timerId = 0;
 global.setInterval = function() { return ++_timerId; };
@@ -384,6 +386,8 @@ let _subScheduleIv = null;
 let _subCanceled = false;
 let _subThrottleStopped = false;
 let _subEstimate = null;
+let _subPassToken = 0;
+let _subPassLive = false;
 
 // Timers are registered but never fire on their own. `fireInterval` invokes a
 // still-registered interval's callback and says whether it ran, which is how
@@ -621,3 +625,1002 @@ def test_the_new_polls_handle_survives_the_stale_completion(web_client, tmp_path
     assert out["live_polls_after_stale_fire"] == [out["new_poll"]], (
         "the new pass's poll must still be the one live interval after the "
         f"stale completion; got {out['live_polls_after_stale_fire']}")
+
+
+# --- a still-draining pass must not clear a newer pass's handles -------------
+#
+# Issue 86. Two passes overlap: the second is started from the `l` shortcut
+# while the first is still draining, so the first reaches its per-item throttle
+# check and its `finally` *after* the second has armed its own poll and
+# schedule. Those two exit paths cleared the module-scope `_subPollIv` and
+# `_subScheduleIv` and dropped `_subEstimate` -- by then the second pass's --
+# so a stale pass stopped the new pass's verification poll and its estimate.
+#
+# The driver holds the first pass inside its first `/api/subscribe` call, starts
+# the second, then lets the first finish. The first pass is throttled on its
+# one throttle check, so both of its stale clears run. What is asked afterwards
+# is whether the second pass's poll, schedule and estimate survived, whether the
+# schedule tick still draws, and whether the stale pass released a daemon pause
+# the second pass owns.
+
+OVERLAY_STALE_PASS_DRIVER = r"""
+__ESTIMATOR__
+// A plain string escape, not the behaviour under test.
+function _escapeHtml(text) { return String(text); }
+
+let _subPollIv = null;
+let _subScheduleIv = null;
+let _subCanceled = false;
+let _subThrottleStopped = false;
+let _subEstimate = null;
+let _subPassToken = 0;
+let _subPassLive = false;
+
+// Timers are registered but never fire on their own; the test fires the
+// schedule by hand, which is what makes "the estimate still ticks" observable.
+let _timerId = 0;
+const _timers = new Map();
+global.setInterval = function(fn, ms) {
+  const id = ++_timerId;
+  _timers.set(id, {fn: fn, ms: ms, kind: 'interval'});
+  return id;
+};
+global.setTimeout = function(fn, ms) {
+  const id = ++_timerId;
+  _timers.set(id, {fn: fn, ms: ms, kind: 'timeout'});
+  return id;
+};
+global.clearInterval = function(id) { _timers.delete(id); };
+global.clearTimeout = function(id) { _timers.delete(id); };
+function fireInterval(id) {
+  const t = _timers.get(id);
+  if (!t || t.kind !== 'interval') return {ran: false, promise: null};
+  return {ran: true, promise: t.fn()};
+}
+function liveIntervals(ms) {
+  const out = [];
+  _timers.forEach(function(t, id) {
+    if (t.kind === 'interval' && t.ms === ms) out.push(id);
+  });
+  return out;
+}
+
+function makeRow(wid) {
+  const classes = ['sub-queue-item'];
+  const countdown = {textContent: ''};
+  const verb = {textContent: ''};
+  return {
+    dataset: {wid: String(wid)}, style: {}, textContent: '',
+    classList: {
+      add: function(name) { if (classes.indexOf(name) === -1) classes.push(name); },
+      contains: function(name) { return classes.indexOf(name) !== -1; }
+    },
+    getAttribute: function(k) { return k === 'data-wid' ? String(wid) : null; },
+    querySelector: function(sel) {
+      if (sel === '.countdown') return countdown;
+      if (sel === '.sub-queue-verb') return verb;
+      return null;
+    }
+  };
+}
+const rows = [11, 22].map(makeRow);
+const list = {
+  innerHTML: '',
+  querySelector: function(sel) {
+    const m = sel.match(/\[data-wid="(\d+)"\]/);
+    if (!m) return null;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].getAttribute('data-wid') === m[1]) return rows[i];
+    }
+    return null;
+  },
+  querySelectorAll: function(sel) {
+    if (sel === '.sub-queue-item') return rows.slice();
+    if (sel === '.sub-queue-item .countdown') {
+      return rows.map(function(r) { return r.querySelector('.countdown'); });
+    }
+    return [];
+  }
+};
+const elements = {
+  'sub-queue-modal': {style: {}},
+  'sub-queue-list': list,
+  'sub-progress': {textContent: ''},
+  'sub-cancel': {textContent: '', onclick: null},
+  'sub-clear-failed': {textContent: '', style: {}}
+};
+global.document = {
+  getElementById: function(id) { return elements[id] || null; },
+  querySelectorAll: function(sel) {
+    if (sel === '.sub-queue-item:not(.done)') {
+      return rows.filter(function(r) { return !r.classList.contains('done'); });
+    }
+    return [];
+  }
+};
+global.alert = function() {};
+
+// The served click handler, wired onto the stub exactly as the page wires it.
+__CANCEL__
+
+const queuedNow = [
+  {workshop_id: 11, title: 'A', subscription_state: 'queued',
+   subscription_colour: '#0f0', subscription_tooltip: 'a', subscription_glyph: 'x'},
+  {workshop_id: 22, title: 'B', subscription_state: 'queued',
+   subscription_colour: '#0f0', subscription_tooltip: 'b', subscription_glyph: 'x'}
+];
+
+function okJson(body) {
+  return {ok: true, status: 200, statusText: 'OK', json: async function() { return body; }};
+}
+
+let phase = 'pass1';
+let pass1Calls = 0, pass2Calls = 0;
+let pass1StartedResolve = null;
+const pass1Started = new Promise(function(resolve) { pass1StartedResolve = resolve; });
+let releasePass1 = null;
+let pass2StartedResolve = null;
+const pass2Started = new Promise(function(resolve) { pass2StartedResolve = resolve; });
+let releasePass2 = null;
+let throttleCalls = 0;
+const subscribeCalls = [];
+const resumes = [];
+
+global.fetch = async function(url, opts) {
+  const u = String(url);
+  if (u === '/api/queued') return okJson(queuedNow.slice());
+  if (u === '/api/subscribe_pace') return okJson({seed_seconds: 1});
+  if (u === '/api/subscribe_failures') return okJson([]);
+  if (u === '/api/pause') return okJson({ok: true});
+  if (u === '/api/resume') { resumes.push(1); return okJson({ok: true}); }
+  if (u === '/api/subscribe_throttle') {
+    throttleCalls += 1;
+    // The first check is pass one's; it is throttled, so both of that stale
+    // pass's clears run before it stops.
+    if (throttleCalls === 1) {
+      return okJson({throttled_at: Date.now() / 1000, retry_after: 300});
+    }
+    return okJson({throttled_at: 0, retry_after: 300});
+  }
+  if (u.indexOf('/api/subscribe/') === 0) {
+    subscribeCalls.push(phase + ':' + u);
+    if (phase === 'pass1') {
+      pass1Calls += 1;
+      if (pass1Calls === 1) {
+        pass1StartedResolve();
+        await new Promise(function(resolve) { releasePass1 = resolve; });
+      }
+    } else {
+      pass2Calls += 1;
+      if (pass2Calls === 1) {
+        pass2StartedResolve();
+        await new Promise(function(resolve) { releasePass2 = resolve; });
+      }
+    }
+    return {ok: true, status: 200, statusText: 'OK',
+            json: async function() { return {success: 1}; }};
+  }
+  return okJson({ok: true});
+};
+
+const runPass = (__START__);
+
+(async function() {
+  // Pass one: hold it inside its first subscribe call.
+  const pass1 = runPass();
+  await pass1Started;
+
+  // Pass two starts mid-drain and arms its own poll, schedule and estimate.
+  phase = 'pass2';
+  const pass2 = runPass();
+  await pass2Started;
+  const pollB = _subPollIv;
+  const schedB = _subScheduleIv;
+  const estimateB = _subEstimate;
+
+  // Let pass one finish. Its throttle check and its finally both ran against
+  // handles and an estimate that already belonged to pass two.
+  releasePass1();
+  await pass1;
+  const pollAfterPass1 = _subPollIv;
+  const schedAfterPass1 = _subScheduleIv;
+  const estimateSurvived = _subEstimate === estimateB;
+  const resumesAfterPass1 = resumes.length;
+  const liveSchedulesAfterPass1 = liveIntervals(250);
+
+  // The 250 ms schedule tick is what redraws the countdowns; a stale pass that
+  // dropped the estimate leaves the tick with nothing to draw.
+  const tick = fireInterval(schedB);
+  if (tick.promise && typeof tick.promise.then === 'function') await tick.promise;
+  const countdownsAfterTick = rows.map(function(r) {
+    return r.querySelector('.countdown').textContent;
+  });
+
+  // Let pass two finish so nothing is left in flight.
+  releasePass2();
+  await pass2;
+
+  console.log(JSON.stringify({
+    poll_b: pollB,
+    sched_b: schedB,
+    poll_after_pass1: pollAfterPass1,
+    sched_after_pass1: schedAfterPass1,
+    estimate_survived: estimateSurvived,
+    resumes_after_pass1: resumesAfterPass1,
+    live_schedules_after_pass1: liveSchedulesAfterPass1,
+    schedule_tick_ran: tick.ran,
+    countdowns_after_tick: countdownsAfterTick,
+    subscribe_calls: subscribeCalls
+  }));
+})();
+"""
+
+
+def _overlay_stale_pass_scenario(client, tmp_path):
+    script = _served_inline_script(client)
+    helpers = "\n".join(
+        _extract_function(script, name)
+        for name in ("_subItemSeconds", "_subRowRemainingSeconds",
+                     "_subBatchRemainingSeconds", "_subRowFigure", "_subFormatDuration",
+                     "_subElapsedCurrent", "_subSeedSeconds", "_subRenderProgress",
+                     "_clearSubEstimates", "_subTickEstimates"))
+    driver = (OVERLAY_STALE_PASS_DRIVER
+              .replace("__ESTIMATOR__", helpers)
+              .replace("__START__", _extract_function(script, "_startAutoSubscribe"))
+              .replace("__CANCEL__", _extract_cancel_onclick(script)))
+    return _run_node(driver, tmp_path)
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_a_stale_pass_leaves_a_newer_passs_poll_schedule_and_estimate_alone(web_client, tmp_path):
+    """The defect: the older pass's exit paths clear the newer pass's handles.
+
+    Against the pre-change page the first pass's throttle stop clears
+    `_subPollIv` (already the second pass's) and drops `_subEstimate`, and its
+    `finally` clears `_subScheduleIv`, so the second pass is left with no poll,
+    no schedule tick and no estimate -- and the stale pass also resumed the
+    daemon pause the second pass owns.
+    """
+    client, _ = web_client
+    out = _overlay_stale_pass_scenario(client, tmp_path)
+
+    assert out["poll_after_pass1"] == out["poll_b"], (
+        "the older pass's throttle stop must not clear the newer pass's poll; "
+        f"got {out['poll_after_pass1']!r} for new {out['poll_b']!r}")
+    assert out["sched_after_pass1"] == out["sched_b"], (
+        "the older pass's finally must not clear the newer pass's schedule; "
+        f"got {out['sched_after_pass1']!r} for new {out['sched_b']!r}")
+    assert out["estimate_survived"] is True, (
+        "the older pass must not drop the newer pass's estimate")
+    assert out["schedule_tick_ran"] is True, (
+        "the newer pass's schedule tick must still be live")
+    assert all(out["countdowns_after_tick"]), (
+        "the newer pass's estimate must still draw figures; got "
+        f"{out['countdowns_after_tick']}")
+    assert out["resumes_after_pass1"] == 0, (
+        "a stale pass must not release the daemon pause the newer pass owns; "
+        f"got {out['resumes_after_pass1']} resume call(s)")
+
+
+# --- a Cancel click landing inside the `/api/pause` await --------------------
+#
+# Issue 87. `_startAutoSubscribe` draws the fresh overlay and then awaits
+# `/api/pause`; the schedule is armed only after that await. A Cancel click in
+# that window saw `_subScheduleIv` still null and fell through to the Close
+# branch -- hiding the overlay and resuming the daemon -- while the pass it was
+# pressed against carried on arming its schedule and draining rows with nothing
+# on screen. The driver holds the pass inside the await, clicks the served
+# Cancel handler, and asks what the pass did after the await returned.
+
+OVERLAY_CANCEL_DURING_PAUSE_DRIVER = r"""
+__ESTIMATOR__
+// A plain string escape, not the behaviour under test.
+function _escapeHtml(text) { return String(text); }
+
+let _subPollIv = null;
+let _subScheduleIv = null;
+let _subCanceled = false;
+let _subThrottleStopped = false;
+let _subEstimate = null;
+let _subPassToken = 0;
+let _subPassLive = false;
+
+let _timerId = 0;
+const _timers = new Map();
+let scheduleArms = 0;
+global.setInterval = function(fn, ms) {
+  const id = ++_timerId;
+  if (ms === 250) scheduleArms += 1;
+  _timers.set(id, {fn: fn, ms: ms, kind: 'interval'});
+  return id;
+};
+global.setTimeout = function(fn, ms) {
+  const id = ++_timerId;
+  _timers.set(id, {fn: fn, ms: ms, kind: 'timeout'});
+  return id;
+};
+global.clearInterval = function(id) { _timers.delete(id); };
+global.clearTimeout = function(id) { _timers.delete(id); };
+function liveSchedules() {
+  const out = [];
+  _timers.forEach(function(t, id) {
+    if (t.kind === 'interval' && t.ms === 250) out.push(id);
+  });
+  return out;
+}
+
+function makeRow(wid) {
+  const classes = ['sub-queue-item'];
+  const countdown = {textContent: ''};
+  const verb = {textContent: ''};
+  return {
+    dataset: {wid: String(wid)}, style: {}, textContent: '',
+    classList: {
+      add: function(name) { if (classes.indexOf(name) === -1) classes.push(name); },
+      contains: function(name) { return classes.indexOf(name) !== -1; }
+    },
+    getAttribute: function(k) { return k === 'data-wid' ? String(wid) : null; },
+    querySelector: function(sel) {
+      if (sel === '.countdown') return countdown;
+      if (sel === '.sub-queue-verb') return verb;
+      return null;
+    }
+  };
+}
+const rows = [11, 22].map(makeRow);
+const list = {
+  innerHTML: '',
+  querySelector: function(sel) {
+    const m = sel.match(/\[data-wid="(\d+)"\]/);
+    if (!m) return null;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].getAttribute('data-wid') === m[1]) return rows[i];
+    }
+    return null;
+  },
+  querySelectorAll: function(sel) {
+    if (sel === '.sub-queue-item') return rows.slice();
+    if (sel === '.sub-queue-item .countdown') {
+      return rows.map(function(r) { return r.querySelector('.countdown'); });
+    }
+    return [];
+  }
+};
+const elements = {
+  'sub-queue-modal': {style: {}},
+  'sub-queue-list': list,
+  'sub-progress': {textContent: ''},
+  'sub-cancel': {textContent: '', onclick: null},
+  'sub-clear-failed': {textContent: '', style: {}}
+};
+global.document = {
+  getElementById: function(id) { return elements[id] || null; },
+  querySelectorAll: function(sel) {
+    if (sel === '.sub-queue-item:not(.done)') {
+      return rows.filter(function(r) { return !r.classList.contains('done'); });
+    }
+    return [];
+  }
+};
+global.alert = function() {};
+
+// The served click handler, wired onto the stub exactly as the page wires it.
+__CANCEL__
+
+const queuedNow = [
+  {workshop_id: 11, title: 'A', subscription_state: 'queued',
+   subscription_colour: '#0f0', subscription_tooltip: 'a', subscription_glyph: 'x'},
+  {workshop_id: 22, title: 'B', subscription_state: 'queued',
+   subscription_colour: '#0f0', subscription_tooltip: 'b', subscription_glyph: 'x'}
+];
+
+function okJson(body) {
+  return {ok: true, status: 200, statusText: 'OK', json: async function() { return body; }};
+}
+
+const subscribeCalls = [];
+const dequeues = [];
+const resumes = [];
+let pauseStartedResolve = null;
+const pauseStarted = new Promise(function(resolve) { pauseStartedResolve = resolve; });
+let releasePause = null;
+
+global.fetch = async function(url, opts) {
+  const u = String(url);
+  if (u === '/api/queued') return okJson(queuedNow.slice());
+  if (u === '/api/subscribe_pace') return okJson({seed_seconds: 1});
+  if (u === '/api/subscribe_failures') return okJson([]);
+  if (u === '/api/pause') {
+    // Hold the pass exactly where the overlay is drawn and no schedule exists.
+    pauseStartedResolve();
+    await new Promise(function(resolve) { releasePause = resolve; });
+    return okJson({ok: true});
+  }
+  if (u === '/api/resume') { resumes.push(1); return okJson({ok: true}); }
+  if (u === '/api/subscribe_throttle') return okJson({throttled_at: 0, retry_after: 300});
+  if (u.indexOf('/api/subscribe/') === 0) {
+    subscribeCalls.push(u);
+    return {ok: true, status: 200, statusText: 'OK',
+            json: async function() { return {success: 1}; }};
+  }
+  if (u.indexOf('/api/dequeue/') === 0) {
+    dequeues.push(u.slice('/api/dequeue/'.length));
+    return okJson({ok: true});
+  }
+  return okJson({ok: true});
+};
+
+const runPass = (__START__);
+const cancelButton = elements['sub-cancel'];
+
+(async function() {
+  const pass = runPass();
+  await pauseStarted;
+  // The click lands inside the await, before any schedule is armed.
+  cancelButton.onclick();
+  const buttonAfterClick = cancelButton.textContent;
+  releasePause();
+  await pass;
+
+  console.log(JSON.stringify({
+    button_after_click: buttonAfterClick,
+    subscribe_calls: subscribeCalls,
+    dequeues: dequeues,
+    resumes: resumes.length,
+    schedule_arms: scheduleArms,
+    live_schedules: liveSchedules(),
+    overlay_display: elements['sub-queue-modal'].style.display
+  }));
+})();
+"""
+
+
+def _overlay_cancel_during_pause_scenario(client, tmp_path):
+    script = _served_inline_script(client)
+    helpers = "\n".join(
+        _extract_function(script, name)
+        for name in ("_subItemSeconds", "_subBatchRemainingSeconds", "_subFormatDuration",
+                     "_subElapsedCurrent", "_subSeedSeconds", "_subRenderProgress",
+                     "_clearSubEstimates", "_subTickEstimates"))
+    driver = (OVERLAY_CANCEL_DURING_PAUSE_DRIVER
+              .replace("__ESTIMATOR__", helpers)
+              .replace("__START__", _extract_function(script, "_startAutoSubscribe"))
+              .replace("__CANCEL__", _extract_cancel_onclick(script)))
+    return _run_node(driver, tmp_path)
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_a_cancel_inside_the_pause_await_stops_the_pass_before_it_drains(web_client, tmp_path):
+    """The defect: the click takes the Close branch and the pass drains on.
+
+    Against the pre-change page the click sees `_subScheduleIv` null, hides the
+    overlay, dequeues both rows and resumes the daemon; the pass then arms its
+    schedule, drains both items, and resumes the daemon a second time. The
+    assertions below therefore fail on the subscribe calls, the schedule arming
+    and the resume count, not only on the overlay's visibility.
+    """
+    client, _ = web_client
+    out = _overlay_cancel_during_pause_scenario(client, tmp_path)
+
+    assert out["button_after_click"] == "Close", \
+        "the click must be read as Cancel, not as a Close of nothing"
+    assert out["subscribe_calls"] == [], (
+        "a pass cancelled inside the pause await must drain no row; got "
+        f"{out['subscribe_calls']}")
+    assert out["schedule_arms"] == 0, (
+        "a cancelled pass must not arm its schedule; armed "
+        f"{out['schedule_arms']} time(s)")
+    assert out["live_schedules"] == [], (
+        f"no schedule may be left armed; got {out['live_schedules']}")
+    assert out["resumes"] == 1, (
+        "the cancelled pass must release the daemon pause exactly once; got "
+        f"{out['resumes']} resume call(s)")
+    assert out["dequeues"] == [], (
+        "Cancel must not dequeue -- that is Close's job; got "
+        f"{out['dequeues']}")
+    assert out["overlay_display"] == "block", \
+        "the overlay must stay up for the user's Close"
+
+
+# --- a pass that aborts on an empty queue must not take ownership -------------
+#
+# The ownership claim has to be taken only once a pass has committed to
+# running. Taking the token above the `/api/queued` read let a pass that then
+# abandoned -- the empty-queue return, or a rejected read -- invalidate the
+# pass that was actually running: the running pass's `finally` saw a stale
+# token, so it skipped the handle clears, `_clearSubEstimates()` and `finish()`,
+# and nothing else releases the pause. Reachable by starting a pass with a row
+# or two, letting the drain empty the queue, and pressing `l` again while the
+# verification poll is still running. The driver holds pass one inside its
+# first `/api/subscribe` call, runs a second pass that reads an empty queue, and
+# asks whether pass one's own exit still cleared its handles and released the
+# pause.
+#
+# This is a regression pin, not a pre-issue-86 reproduction: on the page before
+# the ownership token the aborting pass mutated nothing either, so this test
+# passes there.
+
+OVERLAY_EMPTY_QUEUE_DRIVER = r"""
+__ESTIMATOR__
+// A plain string escape, not the behaviour under test.
+function _escapeHtml(text) { return String(text); }
+
+let _subPollIv = null;
+let _subScheduleIv = null;
+let _subCanceled = false;
+let _subThrottleStopped = false;
+let _subEstimate = null;
+let _subPassToken = 0;
+let _subPassLive = false;
+
+// Timers are registered but never fire on their own; this scenario only asks
+// which handles are still registered.
+let _timerId = 0;
+const _timers = new Map();
+global.setInterval = function(fn, ms) {
+  const id = ++_timerId;
+  _timers.set(id, {fn: fn, ms: ms, kind: 'interval'});
+  return id;
+};
+global.setTimeout = function(fn, ms) {
+  const id = ++_timerId;
+  _timers.set(id, {fn: fn, ms: ms, kind: 'timeout'});
+  return id;
+};
+global.clearInterval = function(id) { _timers.delete(id); };
+global.clearTimeout = function(id) { _timers.delete(id); };
+function liveIntervals(ms) {
+  const out = [];
+  _timers.forEach(function(t, id) {
+    if (t.kind === 'interval' && t.ms === ms) out.push(id);
+  });
+  return out;
+}
+
+function makeRow(wid) {
+  const classes = ['sub-queue-item'];
+  const countdown = {textContent: ''};
+  const verb = {textContent: ''};
+  return {
+    dataset: {wid: String(wid)}, style: {}, textContent: '',
+    classList: {
+      add: function(name) { if (classes.indexOf(name) === -1) classes.push(name); },
+      contains: function(name) { return classes.indexOf(name) !== -1; }
+    },
+    getAttribute: function(k) { return k === 'data-wid' ? String(wid) : null; },
+    querySelector: function(sel) {
+      if (sel === '.countdown') return countdown;
+      if (sel === '.sub-queue-verb') return verb;
+      return null;
+    }
+  };
+}
+const rows = [11, 22].map(makeRow);
+const list = {
+  innerHTML: '',
+  querySelector: function(sel) {
+    const m = sel.match(/\[data-wid="(\d+)"\]/);
+    if (!m) return null;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].getAttribute('data-wid') === m[1]) return rows[i];
+    }
+    return null;
+  },
+  querySelectorAll: function(sel) {
+    if (sel === '.sub-queue-item') return rows.slice();
+    if (sel === '.sub-queue-item .countdown') {
+      return rows.map(function(r) { return r.querySelector('.countdown'); });
+    }
+    return [];
+  }
+};
+const elements = {
+  'sub-queue-modal': {style: {}},
+  'sub-queue-list': list,
+  'sub-progress': {textContent: ''},
+  'sub-cancel': {textContent: '', onclick: null},
+  'sub-clear-failed': {textContent: '', style: {}}
+};
+global.document = {
+  getElementById: function(id) { return elements[id] || null; },
+  querySelectorAll: function(sel) {
+    if (sel === '.sub-queue-item:not(.done)') {
+      return rows.filter(function(r) { return !r.classList.contains('done'); });
+    }
+    return [];
+  }
+};
+const alerts = [];
+global.alert = function(message) { alerts.push(String(message)); };
+
+// The served click handler, wired onto the stub exactly as the page wires it.
+__CANCEL__
+
+let queuedNow = [
+  {workshop_id: 11, title: 'A', subscription_state: 'queued',
+   subscription_colour: '#0f0', subscription_tooltip: 'a', subscription_glyph: 'x'},
+  {workshop_id: 22, title: 'B', subscription_state: 'queued',
+   subscription_colour: '#0f0', subscription_tooltip: 'b', subscription_glyph: 'x'}
+];
+
+function okJson(body) {
+  return {ok: true, status: 200, statusText: 'OK', json: async function() { return body; }};
+}
+
+const resumes = [];
+const subscribeCalls = [];
+let pass1Calls = 0;
+let pass1StartedResolve = null;
+const pass1Started = new Promise(function(resolve) { pass1StartedResolve = resolve; });
+let releasePass1 = null;
+
+global.fetch = async function(url, opts) {
+  const u = String(url);
+  if (u === '/api/queued') return okJson(queuedNow.slice());
+  if (u === '/api/subscribe_pace') return okJson({seed_seconds: 1});
+  if (u === '/api/subscribe_failures') return okJson([]);
+  if (u === '/api/pause') return okJson({ok: true});
+  if (u === '/api/resume') { resumes.push(1); return okJson({ok: true}); }
+  if (u === '/api/subscribe_throttle') return okJson({throttled_at: 0, retry_after: 300});
+  if (u.indexOf('/api/subscribe/') === 0) {
+    subscribeCalls.push(u);
+    pass1Calls += 1;
+    if (pass1Calls === 1) {
+      pass1StartedResolve();
+      await new Promise(function(resolve) { releasePass1 = resolve; });
+    }
+    return {ok: true, status: 200, statusText: 'OK',
+            json: async function() { return {success: 1}; }};
+  }
+  return okJson({ok: true});
+};
+
+const runPass = (__START__);
+
+(async function() {
+  // Pass one: hold it inside its first subscribe call, with its poll and
+  // schedule armed and the daemon paused.
+  const pass1 = runPass();
+  await pass1Started;
+  const liveBefore = _subPassLive;
+  const scheduleBefore = _subScheduleIv;
+  const estimateBefore = _subEstimate !== null;
+
+  // The drain's own subscribe calls have emptied the queue. A second pass finds
+  // nothing and aborts; it must not become the owner or touch pass one.
+  queuedNow = [];
+  const pass2 = runPass();
+  await pass2;
+  const resumesAfterPass2 = resumes.length;
+  const scheduleAfterPass2 = _subScheduleIv;
+  const liveAfterPass2 = _subPassLive;
+
+  // Let pass one finish. Its finally is now the only holder of the pause.
+  releasePass1();
+  await pass1;
+  const resumesAfterPass1 = resumes.length;
+  const scheduleAfterPass1 = _subScheduleIv;
+  const estimateAfterPass1 = _subEstimate;
+  const liveAfterPass1 = _subPassLive;
+
+  console.log(JSON.stringify({
+    live_before: liveBefore,
+    schedule_before: scheduleBefore,
+    estimate_before: estimateBefore,
+    resumes_after_pass2: resumesAfterPass2,
+    schedule_after_pass2: scheduleAfterPass2,
+    live_after_pass2: liveAfterPass2,
+    resumes_after_pass1: resumesAfterPass1,
+    schedule_after_pass1: scheduleAfterPass1,
+    estimate_after_pass1: estimateAfterPass1,
+    live_after_pass1: liveAfterPass1,
+    live_schedules_after_pass1: liveIntervals(250),
+    subscribe_calls: subscribeCalls,
+    alerts: alerts
+  }));
+})();
+"""
+
+
+def _overlay_empty_queue_scenario(client, tmp_path):
+    script = _served_inline_script(client)
+    helpers = "\n".join(
+        _extract_function(script, name)
+        for name in ("_subItemSeconds", "_subRowRemainingSeconds",
+                     "_subBatchRemainingSeconds", "_subRowFigure", "_subFormatDuration",
+                     "_subElapsedCurrent", "_subSeedSeconds", "_subRenderProgress",
+                     "_clearSubEstimates", "_subTickEstimates"))
+    driver = (OVERLAY_EMPTY_QUEUE_DRIVER
+              .replace("__ESTIMATOR__", helpers)
+              .replace("__START__", _extract_function(script, "_startAutoSubscribe"))
+              .replace("__CANCEL__", _extract_cancel_onclick(script)))
+    return _run_node(driver, tmp_path)
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_an_empty_queue_pass_leaves_a_running_pass_its_ownership(web_client, tmp_path):
+    """A pass that aborts on an empty queue must not invalidate the live one.
+
+    The ownership claim has to sit below the queue read. Against a page that
+    takes the token first, the aborting pass's bump leaves the running pass
+    stale, so its `finally` skips the clears and the pause release and the
+    daemon stays paused with the countdown tick still registered.
+    """
+    client, _ = web_client
+    out = _overlay_empty_queue_scenario(client, tmp_path)
+
+    assert out["live_before"] is True, "pass one must be the live pass"
+    assert out["schedule_before"] is not None, "pass one must have armed its schedule"
+    assert out["estimate_before"] is True, "pass one must have drawn an estimate"
+    assert out["alerts"] == ["No items queued for subscription."], \
+        "the second pass must be the one that aborts"
+
+    assert out["resumes_after_pass1"] == 1, (
+        "the running pass must still release the daemon pause after a newer "
+        "pass aborts on an empty queue; got "
+        f"{out['resumes_after_pass1']} resume call(s)")
+    assert out["schedule_after_pass1"] is None, (
+        "the running pass's own finally must still clear its schedule; got "
+        f"{out['schedule_after_pass1']}")
+    assert out["live_schedules_after_pass1"] == [], (
+        "no countdown tick may outlive the pass that armed it; got "
+        f"{out['live_schedules_after_pass1']}")
+    assert out["estimate_after_pass1"] is None, (
+        "the running pass must still drop its estimate; got "
+        f"{out['estimate_after_pass1']}")
+    assert out["live_after_pass1"] is False, (
+        "the running pass must still end as the live pass; got "
+        f"{out['live_after_pass1']}")
+
+
+# --- a rejected pause must hand ownership back -------------------------------
+#
+# The other early exit after the ownership claim. A pass that takes the token
+# and then fails its `/api/pause` never runs; if it kept the token, the pass
+# that was already draining would be stale, its `finally` would skip its clears
+# and its pause release, and the daemon would stay paused with the countdown
+# tick registered. The driver holds pass one mid-drain, runs a second pass whose
+# pause rejects, and asks whether pass one kept its ownership, handles and
+# estimate and still released the pause when it finished.
+
+OVERLAY_PAUSE_REJECT_DRIVER = r"""
+__ESTIMATOR__
+// A plain string escape, not the behaviour under test.
+function _escapeHtml(text) { return String(text); }
+
+let _subPollIv = null;
+let _subScheduleIv = null;
+let _subCanceled = false;
+let _subThrottleStopped = false;
+let _subEstimate = null;
+let _subPassToken = 0;
+let _subPassLive = false;
+
+let _timerId = 0;
+const _timers = new Map();
+global.setInterval = function(fn, ms) {
+  const id = ++_timerId;
+  _timers.set(id, {fn: fn, ms: ms, kind: 'interval'});
+  return id;
+};
+global.setTimeout = function(fn, ms) {
+  const id = ++_timerId;
+  _timers.set(id, {fn: fn, ms: ms, kind: 'timeout'});
+  return id;
+};
+global.clearInterval = function(id) { _timers.delete(id); };
+global.clearTimeout = function(id) { _timers.delete(id); };
+function liveIntervals(ms) {
+  const out = [];
+  _timers.forEach(function(t, id) {
+    if (t.kind === 'interval' && t.ms === ms) out.push(id);
+  });
+  return out;
+}
+
+function makeRow(wid) {
+  const classes = ['sub-queue-item'];
+  const countdown = {textContent: ''};
+  const verb = {textContent: ''};
+  return {
+    dataset: {wid: String(wid)}, style: {}, textContent: '',
+    classList: {
+      add: function(name) { if (classes.indexOf(name) === -1) classes.push(name); },
+      contains: function(name) { return classes.indexOf(name) !== -1; }
+    },
+    getAttribute: function(k) { return k === 'data-wid' ? String(wid) : null; },
+    querySelector: function(sel) {
+      if (sel === '.countdown') return countdown;
+      if (sel === '.sub-queue-verb') return verb;
+      return null;
+    }
+  };
+}
+const rows = [11, 22].map(makeRow);
+const list = {
+  innerHTML: '',
+  querySelector: function(sel) {
+    const m = sel.match(/\[data-wid="(\d+)"\]/);
+    if (!m) return null;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].getAttribute('data-wid') === m[1]) return rows[i];
+    }
+    return null;
+  },
+  querySelectorAll: function(sel) {
+    if (sel === '.sub-queue-item') return rows.slice();
+    if (sel === '.sub-queue-item .countdown') {
+      return rows.map(function(r) { return r.querySelector('.countdown'); });
+    }
+    return [];
+  }
+};
+const elements = {
+  'sub-queue-modal': {style: {}},
+  'sub-queue-list': list,
+  'sub-progress': {textContent: ''},
+  'sub-cancel': {textContent: '', onclick: null},
+  'sub-clear-failed': {textContent: '', style: {}}
+};
+global.document = {
+  getElementById: function(id) { return elements[id] || null; },
+  querySelectorAll: function(sel) {
+    if (sel === '.sub-queue-item:not(.done)') {
+      return rows.filter(function(r) { return !r.classList.contains('done'); });
+    }
+    return [];
+  }
+};
+global.alert = function() {};
+
+// The served click handler, wired onto the stub exactly as the page wires it.
+__CANCEL__
+
+const queuedNow = [
+  {workshop_id: 11, title: 'A', subscription_state: 'queued',
+   subscription_colour: '#0f0', subscription_tooltip: 'a', subscription_glyph: 'x'},
+  {workshop_id: 22, title: 'B', subscription_state: 'queued',
+   subscription_colour: '#0f0', subscription_tooltip: 'b', subscription_glyph: 'x'}
+];
+
+function okJson(body) {
+  return {ok: true, status: 200, statusText: 'OK', json: async function() { return body; }};
+}
+
+const resumes = [];
+const subscribeCalls = [];
+let pass1Calls = 0;
+let pass1StartedResolve = null;
+const pass1Started = new Promise(function(resolve) { pass1StartedResolve = resolve; });
+let releasePass1 = null;
+let pauseCalls = 0;
+let failNextPause = false;
+
+global.fetch = async function(url, opts) {
+  const u = String(url);
+  if (u === '/api/queued') return okJson(queuedNow.slice());
+  if (u === '/api/subscribe_pace') return okJson({seed_seconds: 1});
+  if (u === '/api/subscribe_failures') return okJson([]);
+  if (u === '/api/pause') {
+    pauseCalls += 1;
+    if (failNextPause) throw new Error('pause unavailable');
+    return okJson({ok: true});
+  }
+  if (u === '/api/resume') { resumes.push(1); return okJson({ok: true}); }
+  if (u === '/api/subscribe_throttle') return okJson({throttled_at: 0, retry_after: 300});
+  if (u.indexOf('/api/subscribe/') === 0) {
+    subscribeCalls.push(u);
+    pass1Calls += 1;
+    if (pass1Calls === 1) {
+      pass1StartedResolve();
+      await new Promise(function(resolve) { releasePass1 = resolve; });
+    }
+    return {ok: true, status: 200, statusText: 'OK',
+            json: async function() { return {success: 1}; }};
+  }
+  return okJson({ok: true});
+};
+
+const runPass = (__START__);
+
+(async function() {
+  // Pass one: hold it inside its first subscribe call, running.
+  const pass1 = runPass();
+  await pass1Started;
+  const pollA = _subPollIv;
+  const schedA = _subScheduleIv;
+  const estimateA = _subEstimate;
+
+  // Pass two claims, then its pause rejects. It never runs, so it must hand
+  // ownership back rather than leave pass one stale.
+  failNextPause = true;
+  let pass2Error = null;
+  try {
+    await runPass();
+  } catch (e) {
+    pass2Error = e.message;
+  }
+  const pollAfterReject = _subPollIv;
+  const schedAfterReject = _subScheduleIv;
+  const liveAfterReject = _subPassLive;
+
+  // Let pass one finish; it must still be the owner.
+  releasePass1();
+  await pass1;
+  const resumesAfterPass1 = resumes.length;
+  const scheduleAfterPass1 = _subScheduleIv;
+  const estimateAfterPass1 = _subEstimate;
+  const liveAfterPass1 = _subPassLive;
+
+  console.log(JSON.stringify({
+    poll_a: pollA,
+    sched_a: schedA,
+    estimate_a: estimateA !== null,
+    pass2_error: pass2Error,
+    poll_after_reject: pollAfterReject,
+    sched_after_reject: schedAfterReject,
+    live_after_reject: liveAfterReject,
+    resumes_after_pass1: resumesAfterPass1,
+    schedule_after_pass1: scheduleAfterPass1,
+    estimate_after_pass1: estimateAfterPass1,
+    live_after_pass1: liveAfterPass1,
+    live_schedules_after_pass1: liveIntervals(250),
+    subscribe_calls: subscribeCalls
+  }));
+})();
+"""
+
+
+def _overlay_pause_reject_scenario(client, tmp_path):
+    script = _served_inline_script(client)
+    helpers = "\n".join(
+        _extract_function(script, name)
+        for name in ("_subItemSeconds", "_subRowRemainingSeconds",
+                     "_subBatchRemainingSeconds", "_subRowFigure", "_subFormatDuration",
+                     "_subElapsedCurrent", "_subSeedSeconds", "_subRenderProgress",
+                     "_clearSubEstimates", "_subTickEstimates"))
+    driver = (OVERLAY_PAUSE_REJECT_DRIVER
+              .replace("__ESTIMATOR__", helpers)
+              .replace("__START__", _extract_function(script, "_startAutoSubscribe"))
+              .replace("__CANCEL__", _extract_cancel_onclick(script)))
+    return _run_node(driver, tmp_path)
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_a_rejected_pause_hands_ownership_back_to_the_running_pass(web_client, tmp_path):
+    """A pass that never ran must not leave the running pass stale.
+
+    Against a page that claims the token and clears the predecessor's handles
+    before the pause, the rejection leaves the running pass stale: its handles
+    are already gone, its `finally` skips the estimate clear and the pause
+    release, and the daemon stays paused.
+    """
+    client, _ = web_client
+    out = _overlay_pause_reject_scenario(client, tmp_path)
+
+    assert out["pass2_error"] == "pause unavailable", \
+        "the second pass must fail on the rejected pause"
+    assert out["live_after_reject"] is True, (
+        "the running pass must still be the live pass after the attempt fails; "
+        f"got {out['live_after_reject']}")
+    assert out["poll_after_reject"] == out["poll_a"], (
+        "the running pass's poll must survive the rejected pause; got "
+        f"{out['poll_after_reject']!r} for {out['poll_a']!r}")
+    assert out["sched_after_reject"] == out["sched_a"], (
+        "the running pass's schedule must survive the rejected pause; got "
+        f"{out['sched_after_reject']!r} for {out['sched_a']!r}")
+    assert out["resumes_after_pass1"] == 1, (
+        "the running pass must still release the daemon pause; got "
+        f"{out['resumes_after_pass1']} resume call(s)")
+    assert out["schedule_after_pass1"] is None, (
+        f"the running pass's finally must clear its schedule; got "
+        f"{out['schedule_after_pass1']}")
+    assert out["live_schedules_after_pass1"] == [], (
+        f"no countdown tick may outlive the pass; got "
+        f"{out['live_schedules_after_pass1']}")
+    assert out["estimate_after_pass1"] is None, (
+        f"the running pass must drop its estimate; got "
+        f"{out['estimate_after_pass1']}")
+    assert out["live_after_pass1"] is False, (
+        f"the running pass must end as the live pass; got "
+        f"{out['live_after_pass1']}")
