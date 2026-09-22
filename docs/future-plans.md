@@ -500,12 +500,30 @@ What must not go with it is the **pre-read**, and the order matters:
 
 1. **First, drop the confirmation read** — *landed* (`VERIFY_AFTER_SUBSCRIBE = False`), which removes
    one read per item and leaves the POST's own answer as the record.
-2. **Only then, and only once idempotency is trusted beyond a single observation, consider dropping
-   the pre-read.** It has two jobs that no other code does: it is the guard against the endpoint ever
-   turning out to be a *toggle* (an item that is already subscribed would be unsubscribed by a blind
-   POST), and it is the filter that lets a re-run of a queue skip items that are already subscribed
-   without spending a request on them. Until idempotency has more than one observation behind it, both
-   jobs are load-bearing, and the "already `toggled` → no request at all" short-circuit stays.
+2. **Only then consider dropping the pre-read — and the condition is about the endpoint's semantics,
+   not about how often the feature has worked.** The pre-read has **three** jobs that no other code
+   does, not the two an earlier version of this entry listed:
+   - it is the guard against `POST /sharedfiles/subscribe` turning out to be a *toggle* — a blind POST
+     on an item that is already subscribed would unsubscribe it;
+   - it is the filter that lets a pass skip an already-subscribed item without spending a request on it
+     (the "already `toggled` → no request at all" short-circuit);
+   - **and it is the preferred CSRF-token source.** `resolve_subscribe_token`
+     (`src/subscribe_engine.py:407`) takes the page's own `g_sessionID` first and treats the configured
+     `session.csrf_token` as a *fallback for a page that carries no token*, because `sessionid` is a
+     session cookie Firefox never persists (`:380`). The same read supplies `page_authenticated`, the
+     evidence that decides whether a refusal is a token refusal or a session problem.
+
+   **Successful use cannot test the first job, which is why "it has worked N times" is not the
+   evidence.** While the guard works, the engine never sends the POST the question is about:
+   `subscribe_item` returns `ALREADY_SUBSCRIBED` with no request at all (`:693`). The evidence is
+   Steam's own client: the item page's `SubscribeItem` branches on the button's `toggled` class and
+   posts to two *different* endpoints — `/sharedfiles/subscribe` when not subscribed and
+   `/sharedfiles/unsubscribe` when subscribed — so the subscribe endpoint is not a toggle, or the
+   vendor's own page would call the wrong one when the button is toggled.
+
+   What remains unresolved is the third job: dropping the pre-read means every POST depends on the
+   configured fallback token being current, so the step is now a decision about the token source — and
+   about whether one gated page read per item is worth paying for it — rather than about idempotency.
 
 **The cheap middle ground.** Rather than a third read or trusting the JSON, the existing daily
 subscription reconcile (`src/subscription_sync.py`, the `/my/myworkshopfiles/?browsefilter=mysubscriptions`
