@@ -15,6 +15,28 @@ the production database on 2026-09-12.
 
 ## Open
 
+### The backup schedule does not survive a daemon restart (issue 82)
+
+Found 2026-09-22, asking why the outbox's only database snapshot was four days old while the daemon had
+been up and down across that period.
+
+`BackupThread` decides when to snapshot from `self._next_due`, set in `__init__` to `now +
+interval_seconds` and held **in memory only** — the name appears nowhere else in the source, and nothing
+records when the last snapshot was taken. Every daemon start therefore defers the first scheduled snapshot
+by a full `backup_interval_seconds`, so a daemon restarted more often than once per interval never reaches
+its due time at all. It is silent about it: the log shows another `Backup thread started (interval=…)` and
+nothing about the deferral.
+
+The fallback is the closing snapshot (`Daemon._closing_snapshot`), which is not a schedule: it runs only on
+a graceful stop **and only when every worker exited inside `SHUTDOWN_BUDGET_SECONDS`**. A worker
+overrunning that budget skips it with a warning; a crash or a kill skips it without one.
+
+The consequence is that the snapshot in the outbox can be arbitrarily stale while every indication the
+owner has says backups are enabled, and a pull then collects it as though it were current. This is not the
+free-space refusal or a verification failure — both have their own log lines and neither is this defect.
+See [failure-capture.md](failure-capture.md) for the backup's retention and [threading.md](threading.md)
+for the worker lifecycle.
+
 ### A throttled pass leaves the overlay's cancellation dequeue disabled (issue 81)
 
 `_subThrottleStopped` is set when the autosubscribe overlay stops a pass because Steam is throttling, and
