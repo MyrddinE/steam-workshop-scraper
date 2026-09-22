@@ -15,6 +15,27 @@ the production database on 2026-09-12.
 
 ## Open
 
+### An AND of tag filters is checked per row instead of driving the scan (issue 84)
+
+Found 2026-09-22 investigating the owner's report that **only** the Subscriber Score sort was slow
+(30 s per reload) while every other sort was instant with the same filters.
+
+The `Tags` `contains` filters render as one correlated `EXISTS` subquery per tag, so they are only ever
+*checked* against rows whatever index the planner chose. With the owner's filter set — Tags *Mature*
+**AND** Tags *Video* **AND** File Size > 100 MB **AND** Subscribed is_not *previously* — following
+`idx_wilson_subscription_score` means walking the score order and doing four index probes per row until 50
+rows match. Near the top of that order almost nothing matches, so the walk approaches a full scan.
+Measured on a 2,528,304-row copy: **56.53 s cold, 1.31 s warm** for today's query, against **6.08 s cold,
+0.74 s warm** when the tag conjunction drives the scan instead (`workshop_id IN (SELECT ... GROUP BY
+workshop_id HAVING COUNT(DISTINCT tag_name) = N)`). The sort order only appears to matter because the
+walk stops early when the filter happens to be dense along it — which is why the same query is instant
+for the favorite-score sort and catastrophic for the subscriber-score one.
+
+`ANALYZE` does not help: it changes the cold/warm spread but not the plan shape, because the selectivity
+that matters is the cross-correlation between the filter and the sort order, which no per-column
+statistic captures. Only the ~500-row *unfiltered* diagnostic query is symmetric, which is why it showed
+nothing. See [search-filter.md](search-filter.md) for the measurements.
+
 ### A re-entered autosubscribe pass leaks the previous pass's verification poll (issue 83)
 
 `_startAutoSubscribe` arms `_subPollIv = setInterval(...)` without clearing a live handle. The first
