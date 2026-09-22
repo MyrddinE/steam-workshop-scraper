@@ -1,10 +1,11 @@
 import pytest
 import json
+from src import database
 from src.daemon import wilson_lower
 from src.database import (
     initialize_database, insert_or_update_item, _evaluate_filters,
     compute_wilson_cutoffs, normalize_tags, search_items, get_connection,
-    EXPECTED_VERSION,
+    live_fetch_status_predicate, EXPECTED_VERSION,
 )
 
 # ── wilson_lower ─────────────────────────────────────────────────────────────
@@ -240,3 +241,133 @@ def test_tag_migration_normalizes_malformed_json(db_path):
     ).fetchall()}
     assert tags_8802 == {"mod", "tool"}
     conn.close()
+
+
+# ── percentile_disc cutoffs are the NTILE cutoffs, without the windows ───────
+
+
+def _ntile_cutoffs(conn, where, params):
+    """The pre-2026-09-22 implementation, kept here as the reference.
+
+    Two materialised ``NTILE(100)`` windows and ten aggregates. The current
+    implementation reads the same bucket minima from exact ranks with
+    ``percentile_disc``; this is what it is compared against.
+    """
+    sql = f"""
+        WITH base AS (
+            SELECT w.wilson_favorite_score, w.wilson_subscription_score
+            FROM workshop_items w WHERE {where}
+        ),
+        fav_ntile AS (
+            SELECT wilson_favorite_score,
+                   NTILE(100) OVER (ORDER BY wilson_favorite_score DESC NULLS LAST) AS bucket
+            FROM base WHERE wilson_favorite_score IS NOT NULL
+        ),
+        sub_ntile AS (
+            SELECT wilson_subscription_score,
+                   NTILE(100) OVER (ORDER BY wilson_subscription_score DESC NULLS LAST) AS bucket
+            FROM base WHERE wilson_subscription_score IS NOT NULL
+        )
+        SELECT 'wilson_favorite_p99' as key, COALESCE(MIN(wilson_favorite_score), 0) as val
+        FROM fav_ntile WHERE bucket = 1
+        UNION ALL SELECT 'wilson_favorite_p90', COALESCE(MIN(wilson_favorite_score), 0)
+        FROM fav_ntile WHERE bucket = 10
+        UNION ALL SELECT 'wilson_favorite_p50', COALESCE(MIN(wilson_favorite_score), 0)
+        FROM fav_ntile WHERE bucket = 50
+        UNION ALL SELECT 'wilson_subscription_p99', COALESCE(MIN(wilson_subscription_score), 0)
+        FROM sub_ntile WHERE bucket = 1
+        UNION ALL SELECT 'wilson_subscription_p90', COALESCE(MIN(wilson_subscription_score), 0)
+        FROM sub_ntile WHERE bucket = 10
+        UNION ALL SELECT 'wilson_subscription_p50', COALESCE(MIN(wilson_subscription_score), 0)
+        FROM sub_ntile WHERE bucket = 50
+        UNION ALL SELECT 'wilson_favorite_min', COALESCE(MIN(wilson_favorite_score), 0)
+        FROM fav_ntile WHERE bucket = 100
+        UNION ALL SELECT 'wilson_favorite_max', COALESCE(MAX(wilson_favorite_score), 0)
+        FROM fav_ntile WHERE bucket = 1
+        UNION ALL SELECT 'wilson_subscription_min', COALESCE(MIN(wilson_subscription_score), 0)
+        FROM sub_ntile WHERE bucket = 100
+        UNION ALL SELECT 'wilson_subscription_max', COALESCE(MAX(wilson_subscription_score), 0)
+        FROM sub_ntile WHERE bucket = 1
+    """
+    return {row["key"]: row["val"] for row in conn.execute(sql, params).fetchall()}
+
+
+def _seed_scores(db_path, count, with_tags=False):
+    """Modulo gives ties; the every-17th/every-13th NULLs exercise NULL inputs."""
+    for i in range(1, count + 1):
+        item = {
+            "workshop_id": i,
+            "title": f"Item {i}",
+            "fetch_status": 200,
+            "wilson_favorite_score": None if i % 17 == 0 else (i % 37) / 37.0,
+            "wilson_subscription_score": None if i % 13 == 0 else (i % 29) / 29.0,
+        }
+        if with_tags:
+            item["tags"] = '"mod"' if i % 2 else '"map"'
+        insert_or_update_item(db_path, item)
+
+
+@pytest.mark.parametrize(
+    "count", [0, 1, 5, 9, 10, 49, 50, 99, 100, 101, 199, 200, 999, 1000])
+def test_percentile_disc_cutoffs_match_the_ntile_window(tmp_path, count):
+    """Every count that changes the bucket arithmetic, ties and NULLs included."""
+    db_path = str(tmp_path / f"scores-{count}.db")
+    initialize_database(db_path)
+    _seed_scores(db_path, count)
+
+    where = "1=1 AND " + live_fetch_status_predicate("w.fetch_status")
+    conn = get_connection(db_path)
+    try:
+        expected = _ntile_cutoffs(conn, where, [])
+    finally:
+        conn.close()
+
+    assert compute_wilson_cutoffs(db_path) == expected
+
+
+def test_percentile_disc_cutoffs_match_the_ntile_window_with_a_filter(tmp_path):
+    db_path = str(tmp_path / "filtered.db")
+    initialize_database(db_path)
+    _seed_scores(db_path, 300, with_tags=True)
+    filters = [{"field": "Tags", "op": "contains", "value": "mod"}]
+
+    where, params = database._wilson_population_where(filters, None, False)
+    conn = get_connection(db_path)
+    try:
+        expected = _ntile_cutoffs(conn, where, params)
+    finally:
+        conn.close()
+
+    assert compute_wilson_cutoffs(db_path, filters=filters) == expected
+
+
+def test_cutoffs_use_percentile_disc_not_a_materialised_ntile_window(tmp_path, monkeypatch):
+    """The performance change itself: exact ranks, no ``NTILE`` window."""
+    db_path = str(tmp_path / "mechanism.db")
+    initialize_database(db_path)
+    _seed_scores(db_path, 120)
+
+    statements = []
+    real = database.get_connection
+
+    class _RecordingConnection:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, *args):
+            statements.append(sql)
+            return self._conn.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    monkeypatch.setattr(
+        database, "get_connection", lambda path: _RecordingConnection(real(path)))
+    compute_wilson_cutoffs(db_path)
+
+    aggregate_sql = [s for s in statements if "workshop_items" in s]
+    assert aggregate_sql, "no cutoff query was recorded"
+    # `"NTILE"` alone would also match inside "perceNTILE_disc".
+    assert all("NTILE(" not in s.upper() for s in aggregate_sql), aggregate_sql
+    assert any("percentile_disc" in s for s in aggregate_sql)
+

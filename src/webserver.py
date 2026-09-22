@@ -5,7 +5,7 @@ import os
 import re
 import logging
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, toggle_ignored_item, mark_own_subscribed, mark_own_unsubscribed, dequeue_subscription, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items, live_fetch_status_predicate, IGNORED_FETCH_STATUS, creator_is_ignored, creator_ignore_label, toggle_creator_ignored
+from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_list_priorities, raise_web_scrape_priority_for_detail, raise_translation_priority_for_detail, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, toggle_ignored_item, mark_own_subscribed, mark_own_unsubscribed, dequeue_subscription, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items, live_fetch_status_predicate, IGNORED_FETCH_STATUS, creator_is_ignored, creator_ignore_label, toggle_creator_ignored
 from src.analysis import view_window_analysis
 from src import capture
 from src import activity
@@ -14,6 +14,7 @@ from src import log_rotation
 from src import metrics
 from src import pending
 from src import session_health
+from src import sort_diagnostic
 from src import subscribe_engine
 from src import subscription
 from src import web_scraper
@@ -101,6 +102,16 @@ def init_webserver(db_path: str, config: dict, config_path: str = "config.yaml",
         capture.web_download_switch(daemon_config),
         capture_web_ui_trace=capture.ui_trace_switch(daemon_config),
     )
+    # The sort diagnostic rides the same switch as the UI trace: with it on, the
+    # live file's sort path is logged once here so the next report arrives with
+    # the measurement attached instead of a hypothesis. Off, this costs nothing
+    # and the route beside it is inert. Defensive because a diagnostic must
+    # never stop the server from starting.
+    if capture.ui_trace_capture_active():
+        try:
+            sort_diagnostic.log_startup_report(_db_path)
+        except Exception:
+            logging.exception("Sort diagnostic failed at startup")
 
 
 def _get_daemon_controller() -> DaemonController:
@@ -235,16 +246,17 @@ def api_search():
         )
 
         if results:
-            image_flagged_count = 0
-            for item in results:
-                wid = item['workshop_id']
-                raise_web_scrape_priority_for_list(_db_path, wid)
-                raise_image_priority_for_list(_db_path, wid)
-                if _ensure_image_flagged(wid, 5):
-                    image_flagged_count += 1
-                raise_translation_priority_for_list(_db_path, wid)
-
             ids = [row['workshop_id'] for row in results]
+            # One connection and one transaction for the whole page. This used
+            # to call the three per-row raisers (plus the image-flag check) once
+            # per returned row, and each of those opened, committed and closed
+            # its own connection -- ~150 cycles on the request the user waits
+            # for. `raise_list_priorities` runs the same statements batched; its
+            # result is identical column-for-column (see
+            # tests/test_list_priority_batch.py) and it returns the same
+            # flagged-for-image count the loop accumulated.
+            image_flagged_count = raise_list_priorities(_db_path, ids)
+
             conn = get_connection(_db_path)
             placeholders = ','.join('?' * len(ids))
             flag_rows = conn.execute(
@@ -895,6 +907,25 @@ def api_ui_trace():
     if not outcome.get("ok"):
         return jsonify(outcome), 400
     return jsonify(outcome)
+
+
+@app.route('/api/search_diagnostic')
+def api_search_diagnostic():
+    """Read-only report on the search's sort path for the live database.
+
+    **Inert unless `daemon.capture_web_ui_trace` is on**: with the switch off it
+    answers 404 before opening the database, so a diagnostic the operator did not
+    ask for cannot run against the live file. With it on, `src.sort_diagnostic`
+    opens the file `mode=ro` -- no write, no journal-mode switch, no file
+    creation -- and reports which query indexes are present, the `EXPLAIN QUERY
+    PLAN` for the real summary query under each sort column, each score column's
+    non-NULL coverage, whether `sqlite_stat1` exists, and the first-page and
+    deep-page wall-clock time per sort column. Safe beside a running daemon, so
+    the owner can answer "is it indexed?" from a URL and paste the answer back.
+    """
+    if not capture.ui_trace_capture_active():
+        return jsonify({"ok": False, "error": "Sort diagnostics are not enabled"}), 404
+    return jsonify(sort_diagnostic.run(_db_path))
 
 
 @app.route('/api/fetch_new', methods=['POST'])

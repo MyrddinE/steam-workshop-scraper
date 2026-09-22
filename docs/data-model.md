@@ -172,6 +172,12 @@ reason: on a legacy-chain fresh database `_create_legacy_schema` runs while the 
 `dt_queued` (migration 13→14 renames it), so an index naming `queued_at` there fails with "no such
 column". `_ensure_indexes` runs after the migration chain.
 
+The whole `_ensure_indexes` set is the `QUERY_INDEXES` table in `src/database.py` — `(name, table,
+columns)` rows — which the startup diagnostic and the sort-column invariant test read, so the expected
+indexes have one source. `idx_own_first_subscribed_at` was added to it (2026-09-22) after the invariant
+found the **Subscribed at** sort with no index at all; see
+[search-filter.md](search-filter.md#sort-indexes-the-subscriber-score-is-slow-investigation).
+
 ## Queue Priorities
 
 The work-queue columns share a vocabulary but not a single distribution. The intended scale is:

@@ -8,6 +8,11 @@ import logging
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
+# `src.images` is a leaf (no project imports), so the batched list-priority
+# writer below can ask the one decider whether an image answer is final instead
+# of spelling the rule out a second time.
+from src import images
+
 WORKSHOP_ITEM_COLUMNS = frozenset({
     "workshop_id", "first_seen_at", "api_fetched_at", "last_fetch_attempted_at",
     "translate_version",
@@ -3186,6 +3191,64 @@ def _migration_38_to_39(cursor, conn, db_path):
         "Migration 38->39 complete. Every existing creator is not ignored."
     )
 
+# ── the query indexes, as data ───────────────────────────────────────────────
+# `_ensure_indexes` creates these. Three readers share the table: the startup
+# diagnostic checks that every one is actually present in the live file, the
+# `/api/search_diagnostic` route reports the same set, and the sort-column
+# invariant test proves every `VALID_SORT_COLS` entry is covered. One table
+# rather than twenty statements is what keeps them from drifting.
+#
+# Each entry is `(name, table, columns)`. `columns` holds the fragments SQLite
+# stores, in index order, and the *first* is the index's leading column -- the
+# one an `ORDER BY <column>` can be served from, which is what the invariant
+# test matches on. A leading column that is missing here is not a style matter:
+# the "Subscriber Score" report that opened this work was a hypothesis about a
+# missing score index, and the invariant found a *different* one missing (see
+# `idx_own_first_subscribed_at` below).
+#
+# `idx_translation_queue_poll` is here rather than in a schema builder because on
+# a legacy-chain database the builder runs while the column is still called
+# `dt_queued` (migration 13->14 renames it to `queued_at`), so an index naming
+# `queued_at` there fails with "no such column". `_ensure_indexes` runs after the
+# migration chain. Its `priority DESC, queued_at ASC` directions are the poll
+# query's: a mixed-direction sort cannot be served by a single-direction index
+# scanned in reverse, so the DESC is not optional.
+QUERY_INDEXES = (
+    ("idx_consumer_appid", "workshop_items", ("consumer_appid",)),
+    ("idx_fetch_status", "workshop_items", ("fetch_status",)),
+    ("idx_api_fetched_at", "workshop_items", ("api_fetched_at",)),
+    ("idx_title", "workshop_items", ("title",)),
+    ("idx_creator_steamid", "workshop_items", ("creator_steamid",)),
+    ("idx_short_description", "workshop_items", ("short_description",)),
+    ("idx_extended_description", "workshop_items", ("extended_description",)),
+    ("idx_appid_fetch_status", "workshop_items", ("consumer_appid", "fetch_status")),
+    ("idx_creator_steamid_api_fetched_at", "workshop_items",
+     ("creator_steamid", "api_fetched_at")),
+    ("idx_translation_priority", "workshop_items", ("translation_priority",)),
+    ("idx_is_queued", "workshop_items", ("is_queued_for_subscription",)),
+    # Sort-column indexes — avoid expensive full-table sorts. idx_time_created /
+    # idx_time_updated keep their historical names (SQLite rewrote their
+    # definitions to the renamed columns); only the target columns matter here.
+    ("idx_time_created", "workshop_items", ("steam_created_at",)),
+    ("idx_time_updated", "workshop_items", ("steam_updated_at",)),
+    ("idx_file_size", "workshop_items", ("file_size",)),
+    ("idx_subscriptions", "workshop_items", ("subscriptions",)),
+    ("idx_favorited", "workshop_items", ("favorited",)),
+    ("idx_views", "workshop_items", ("views",)),
+    ("idx_wilson_subscription_score", "workshop_items", ("wilson_subscription_score",)),
+    ("idx_wilson_favorite_score", "workshop_items", ("wilson_favorite_score",)),
+    # The "Subscribed at" sort. Both score columns above were already indexed
+    # (added together in 8771877); this one was not, so a page sorted by it paid
+    # a full temp B-tree sort on every request -- measured on a 2.5 M-row copy as
+    # 0.47/0.48/0.49 s at offsets 0/50,000/200,000 with `USE TEMP B-TREE FOR
+    # ORDER BY`, against 0.00/0.02/0.07 s and `SCAN w USING INDEX
+    # idx_own_first_subscribed_at` once the index exists. The invariant test
+    # below is what found it.
+    ("idx_own_first_subscribed_at", "workshop_items", ("own_first_subscribed_at",)),
+    ("idx_translation_queue_poll", "translation_queue", ("priority DESC", "queued_at ASC")),
+)
+
+
 def _ensure_indexes(cursor):
     """Create the query indexes, after the column renames migrations perform.
 
@@ -3194,46 +3257,14 @@ def _ensure_indexes(cursor):
     so they must run last. Idempotent: every statement is ``IF NOT EXISTS``.
     The ``scrape_version`` indexes this function used to create were dropped
     with the column in migration 34->35.
-    """
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_consumer_appid ON workshop_items (consumer_appid)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fetch_status ON workshop_items (fetch_status)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_fetched_at ON workshop_items (api_fetched_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_title ON workshop_items (title)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_steamid ON workshop_items (creator_steamid)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_short_description ON workshop_items (short_description)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_extended_description ON workshop_items (extended_description)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_appid_fetch_status ON workshop_items (consumer_appid, fetch_status)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_creator_steamid_api_fetched_at ON workshop_items (creator_steamid, api_fetched_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_translation_priority ON workshop_items (translation_priority)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_is_queued ON workshop_items (is_queued_for_subscription)")
-    # Sort-column indexes — avoid expensive full-table sorts. idx_time_created /
-    # idx_time_updated keep their historical names (SQLite rewrote their
-    # definitions to the renamed columns); only the target columns matter here.
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_time_created ON workshop_items (steam_created_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_time_updated ON workshop_items (steam_updated_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_file_size ON workshop_items (file_size)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions ON workshop_items (subscriptions)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_favorited ON workshop_items (favorited)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_views ON workshop_items (views)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_wilson_subscription_score ON workshop_items (wilson_subscription_score)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_wilson_favorite_score ON workshop_items (wilson_favorite_score)")
 
-    # The translation poll (`get_next_batch_for_translation`) orders the whole
-    # outstanding queue by priority then queue time on every pass, so that sort
-    # belongs in an index. It has to be created here rather than in
-    # `_create_legacy_schema`: on a fresh database `_create_legacy_schema` runs while the
-    # column is still called `dt_queued` (migration 13->14 renames it to
-    # `queued_at`), so an index naming `queued_at` there fails with
-    # "no such column". `_ensure_indexes` runs after the migration chain, which
-    # is the reason it exists at all.
-    #
-    # The directions are the query's -- `priority DESC, queued_at ASC`. A
-    # mixed-direction sort cannot be satisfied by a single-direction index
-    # scanned in reverse, so the DESC on `priority` is not optional.
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_translation_queue_poll "
-        "ON translation_queue (priority DESC, queued_at ASC)"
-    )
+    The set is :data:`QUERY_INDEXES`, iterated rather than repeated so the
+    startup diagnostic and the sort-column invariant test read the same list.
+    """
+    for name, table, columns in QUERY_INDEXES:
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({', '.join(columns)})"
+        )
 
 # Ordered schema migrations: (target user_version, function). The functions
 # above are defined in this same order, and each one runs only when the file's
@@ -4655,30 +4686,41 @@ def get_db_stats(db_path: str, staleness_days: int = 30) -> dict:
     return {key: result[metric_name]["value"] for key, metric_name in _LEGACY_STAT_KEYS}
 
 
-def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None,
-                           subscribed_overlay: str = None,
-                           include_settled: bool = False) -> dict:
-    """Returns percentile cutoff scores for Wilson metrics across items matching filters.
-    Uses NTILE(100) — returns p99, p90, p50 thresholds for both scores.
-    Returns empty dict if fewer than 10 items in the filtered set.
+# The NTILE(100) buckets whose minimum `compute_wilson_cutoffs` reports. Bucket
+# 1 is the top 1% (the p99 cutoff), bucket 10 the top 10%, bucket 50 the median.
+_WILSON_CUTOFF_BUCKETS = (("p99", 1), ("p90", 10), ("p50", 50))
 
-    ``subscribed_overlay`` follows :func:`search_items`: the overlay constrains
-    the same population the grid shows, so the percentiles must be computed over
-    it too or the colours would describe a different set of rows.
 
-    ``include_settled`` follows :func:`search_items` and defaults to hiding. The
-    percentiles colour the *visible* rows, so computing them over hidden ones
-    would place a visible item's colour against a distribution the owner cannot
-    see -- which is exactly the wrong reading. The population here therefore
-    matches the search's by default; the escape hatch exists for the later
-    surfacing feature, not for the grid.
+def _wilson_bucket_rank(n: int, bucket: int) -> int | None:
+    """The 1-based *ascending* rank of the minimum of NTILE(100) bucket ``bucket``.
+
+    ``NTILE(100)`` divides ``n`` rows into ``min(100, n)`` groups as evenly as
+    possible, the first ``n % 100`` of them one row larger. In the descending
+    score order the window used, bucket ``bucket``'s last row -- the one whose
+    value is the bucket's ``MIN`` -- sits at descending rank
+    ``bucket*base + min(bucket, remainder)``, hence ascending rank
+    ``n - that + 1``. With fewer than 100 rows the group count drops to ``n`` and
+    every bucket is a single row. ``None`` means the bucket does not exist (the
+    old ``COALESCE(MIN(...))`` over an empty bucket, which was ``0``).
     """
-    conn = get_connection(db_path)
-    sql = ("SELECT w.workshop_id, w.wilson_favorite_score, w.wilson_subscription_score "
-           "FROM workshop_items w WHERE 1=1")
+    if n <= 0 or bucket > n:
+        return None
+    if n < 100:
+        return n - bucket + 1
+    base, remainder = divmod(n, 100)
+    return n - (bucket * base + min(bucket, remainder)) + 1
+
+
+def _wilson_population_where(filters, subscribed_overlay, include_settled):
+    """The cutoff population's ``WHERE`` clause and its parameters.
+
+    Shared by the count query and the cutoff query so the two cannot disagree
+    about which rows the percentiles describe.
+    """
+    where = "1=1"
     params = []
     if not include_settled:
-        sql += f" AND {live_fetch_status_predicate('w.fetch_status')}"
+        where += f" AND {live_fetch_status_predicate('w.fetch_status')}"
     if filters:
         filter_clauses = []
         for f in filters:
@@ -4709,61 +4751,104 @@ def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None,
             for idx, (logic, clause) in enumerate(filter_clauses):
                 group_sql += f" {logic} " if idx > 0 else ""
                 group_sql += clause
-            sql += f" AND ({group_sql})"
-
+            where += f" AND ({group_sql})"
     overlay_clause, overlay_params = subscribed_overlay_clause(subscribed_overlay)
     if overlay_clause:
-        sql += f" AND ({overlay_clause})"
+        where += f" AND ({overlay_clause})"
         params.extend(overlay_params)
+    return where, params
 
-    cutoff_sql = f"""
-        WITH base AS (
-            {sql}
-            ORDER BY workshop_id
-        ),
-        scores AS (
-            SELECT wilson_favorite_score, wilson_subscription_score FROM base
-        ),
-        fav_ntile AS (
-            SELECT wilson_favorite_score,
-                   NTILE(100) OVER (ORDER BY wilson_favorite_score DESC NULLS LAST) AS bucket
-            FROM scores WHERE wilson_favorite_score IS NOT NULL
-        ),
-        sub_ntile AS (
-            SELECT wilson_subscription_score,
-                   NTILE(100) OVER (ORDER BY wilson_subscription_score DESC NULLS LAST) AS bucket
-            FROM scores WHERE wilson_subscription_score IS NOT NULL
-        )
-        SELECT 'wilson_favorite_p99' as key, COALESCE(MIN(wilson_favorite_score), 0) as val
-        FROM fav_ntile WHERE bucket = 1
-        UNION ALL SELECT 'wilson_favorite_p90', COALESCE(MIN(wilson_favorite_score), 0)
-        FROM fav_ntile WHERE bucket = 10
-        UNION ALL SELECT 'wilson_favorite_p50', COALESCE(MIN(wilson_favorite_score), 0)
-        FROM fav_ntile WHERE bucket = 50
-        UNION ALL SELECT 'wilson_subscription_p99', COALESCE(MIN(wilson_subscription_score), 0)
-        FROM sub_ntile WHERE bucket = 1
-        UNION ALL SELECT 'wilson_subscription_p90', COALESCE(MIN(wilson_subscription_score), 0)
-        FROM sub_ntile WHERE bucket = 10
-        UNION ALL SELECT 'wilson_subscription_p50', COALESCE(MIN(wilson_subscription_score), 0)
-        FROM sub_ntile WHERE bucket = 50
-        UNION ALL SELECT 'wilson_favorite_min', COALESCE(MIN(wilson_favorite_score), 0)
-        FROM fav_ntile WHERE bucket = 100
-        UNION ALL SELECT 'wilson_favorite_max', COALESCE(MAX(wilson_favorite_score), 0)
-        FROM fav_ntile WHERE bucket = 1
-        UNION ALL SELECT 'wilson_subscription_min', COALESCE(MIN(wilson_subscription_score), 0)
-        FROM sub_ntile WHERE bucket = 100
-        UNION ALL SELECT 'wilson_subscription_max', COALESCE(MAX(wilson_subscription_score), 0)
-        FROM sub_ntile WHERE bucket = 1
+
+def _wilson_cutoff_expressions(n_fav: int, n_sub: int):
+    """``(keys, SELECT expressions, parameters)`` for the ten cutoff values.
+
+    ``percentile_disc(Y, P)`` returns the value at ascending rank ``ceil(P*N)``,
+    so ``P = rank / N`` selects exactly the rank :func:`_wilson_bucket_rank`
+    computed -- the same value ``MIN(... WHERE bucket = k)`` produced, without
+    materialising either ``NTILE`` window. Requires SQLite 3.51+, which this
+    project targets (3.53 is in use).
     """
+    keys, expressions, params = [], [], []
+
+    def add_bucket(key, column, n, bucket):
+        keys.append(key)
+        rank = _wilson_bucket_rank(n, bucket)
+        if rank is None:
+            expressions.append("0")
+        else:
+            expressions.append(f"COALESCE(percentile_disc({column}, ?), 0)")
+            params.append(rank / n)
+
+    for suffix, bucket in _WILSON_CUTOFF_BUCKETS:
+        add_bucket(f"wilson_favorite_{suffix}", "wilson_favorite_score", n_fav, bucket)
+    for suffix, bucket in _WILSON_CUTOFF_BUCKETS:
+        add_bucket(f"wilson_subscription_{suffix}", "wilson_subscription_score", n_sub, bucket)
+
+    # MIN(bucket 100) is the global minimum once 100 buckets exist; with fewer
+    # than 100 scores there is no bucket 100 and the old COALESCE(MIN(...)) was
+    # 0, so a small set's "min" is 0 rather than its real minimum. MAX(bucket 1)
+    # is the global maximum whenever at least one score exists.
+    for key, column, n, aggregate in (
+        ("wilson_favorite_min", "wilson_favorite_score", n_fav, "MIN"),
+        ("wilson_favorite_max", "wilson_favorite_score", n_fav, "MAX"),
+        ("wilson_subscription_min", "wilson_subscription_score", n_sub, "MIN"),
+        ("wilson_subscription_max", "wilson_subscription_score", n_sub, "MAX"),
+    ):
+        keys.append(key)
+        if aggregate == "MIN" and n < 100:
+            expressions.append("0")
+        else:
+            expressions.append(f"COALESCE({aggregate}({column}), 0)")
+    return keys, expressions, params
+
+
+def compute_wilson_cutoffs(db_path: str, filters: list[dict] = None,
+                           subscribed_overlay: str = None,
+                           include_settled: bool = False) -> dict:
+    """Returns percentile cutoff scores for Wilson metrics across items matching filters.
+
+    One pass, ten aggregates: for each score column, the p99, p90 and p50
+    cutoffs (the minimum of NTILE(100) buckets 1, 10 and 50) plus the min and
+    max. The bucket boundaries are computed as exact ranks and read back with
+    ``percentile_disc``, so no ``NTILE`` window is materialised. *Measured
+    2026-09-22* on the 2.5 M-row copy: **2.25 s**, against **13.24 s** for the
+    two-window NTILE form it replaced (best of 2 each; an earlier measurement of
+    the old form in this investigation recorded 9.54 s), with identical values
+    on every key
+    (``tests/test_wilson.py::test_percentile_disc_cutoffs_match_the_ntile_window``).
+
+    ``subscribed_overlay`` follows :func:`search_items`: the overlay constrains
+    the same population the grid shows, so the percentiles must be computed over
+    it too or the colours would describe a different set of rows.
+
+    ``include_settled`` follows :func:`search_items` and defaults to hiding. The
+    percentiles colour the *visible* rows, so computing them over hidden ones
+    would place a visible item's colour against a distribution the owner cannot
+    see -- which is exactly the wrong reading. The population here therefore
+    matches the search's by default; the escape hatch exists for the later
+    surfacing feature, not for the grid.
+    """
+    conn = get_connection(db_path)
     try:
-        cursor = conn.execute(cutoff_sql, params)
-        result = {row["key"]: row["val"] for row in cursor.fetchall()}
-        conn.close()
-        return result
+        where, params = _wilson_population_where(
+            filters, subscribed_overlay, include_settled)
+        n_fav, n_sub = conn.execute(
+            f"SELECT COUNT(w.wilson_favorite_score), COUNT(w.wilson_subscription_score) "
+            f"FROM workshop_items w WHERE {where}",
+            params,
+        ).fetchone()
+
+        keys, expressions, expression_params = _wilson_cutoff_expressions(n_fav, n_sub)
+        row = conn.execute(
+            f"SELECT {', '.join(expressions)} FROM workshop_items w WHERE {where}",
+            expression_params + params,
+        ).fetchone()
+        return {key: row[index] for index, key in enumerate(keys)}
     except Exception:
         logging.exception("compute_wilson_cutoffs failed")
-        conn.close()
         return {}
+    finally:
+        conn.close()
 
 def get_app_tracking(db_path: str, appid: int) -> dict | None:
     """
@@ -4972,6 +5057,155 @@ def raise_translation_priority_for_list(db_path: str, workshop_id: int):
     ]:
         if text and not text.isascii() and not translated:
             queue_field_for_translation(db_path, "item", workshop_id, field, text, 5)
+
+
+def _queue_list_translation_fields(conn, workshop_ids: list[int]) -> None:
+    """The batched body of :func:`raise_translation_priority_for_list`.
+
+    Runs on the caller's connection so the whole page's list flags are one
+    transaction. It does exactly what the per-field loop did: read the six text
+    columns, queue each field that is non-empty, non-ASCII and still untranslated
+    through the same upsert :func:`queue_field_for_translation` performs (bump an
+    existing row's priority only when it is below 5, else insert), and raise the
+    item's ``translation_priority`` to at least 5 once per item rather than once
+    per field -- the ``MAX`` makes the repeated raise equivalent.
+
+    The existing rows are read once for the whole page instead of once per
+    field, and the ``entity_type`` is the literal ``'item'`` the caller always
+    passed.
+    """
+    placeholders = ",".join("?" * len(workshop_ids))
+    rows = conn.execute(
+        f"SELECT workshop_id, title, title_en, short_description, short_description_en, "
+        f"extended_description, extended_description_en FROM workshop_items "
+        f"WHERE workshop_id IN ({placeholders})",
+        workshop_ids,
+    ).fetchall()
+
+    # (workshop_id, field, text), in the per-row loop's order so a test can pin
+    # the queue contents deterministically.
+    pending = []
+    for row in rows:
+        for field, text, translated in (
+            ("title_en", row["title"] or "", row["title_en"]),
+            ("short_description_en", row["short_description"] or "", row["short_description_en"]),
+            ("extended_description_en", row["extended_description"] or "", row["extended_description_en"]),
+        ):
+            if text and not text.isascii() and not translated:
+                pending.append((row["workshop_id"], field, text))
+    if not pending:
+        return
+
+    existing = {
+        (row["entity_id"], row["field"]): (row["id"], row["priority"])
+        for row in conn.execute(
+            f"SELECT id, entity_id, field, priority FROM translation_queue "
+            f"WHERE entity_type = 'item' AND entity_id IN ({placeholders})",
+            workshop_ids,
+        ).fetchall()
+    }
+
+    queued_at = int(time.time())
+    queued_items = set()
+    for workshop_id, field, text in pending:
+        found = existing.get((workshop_id, field))
+        if found is not None:
+            if found[1] < 5:
+                conn.execute(
+                    "UPDATE translation_queue SET priority = 5 WHERE id = ?",
+                    (found[0],),
+                )
+        else:
+            conn.execute(
+                "INSERT INTO translation_queue "
+                "(entity_type, entity_id, field, original_text, priority, queued_at) "
+                "VALUES ('item', ?, ?, ?, 5, ?)",
+                (workshop_id, field, text, queued_at),
+            )
+        queued_items.add(workshop_id)
+
+    if queued_items:
+        item_ids = sorted(queued_items)
+        item_placeholders = ",".join("?" * len(item_ids))
+        conn.execute(
+            f"UPDATE workshop_items SET translation_priority = MAX(translation_priority, 5) "
+            f"WHERE workshop_id IN ({item_placeholders})",
+            item_ids,
+        )
+
+
+def raise_list_priorities(db_path: str, workshop_ids) -> int:
+    """Raise the list-view priorities for a whole page in one transaction.
+
+    ``POST /api/search`` used to call the three per-row raisers
+    (:func:`raise_web_scrape_priority_for_list`,
+    :func:`raise_image_priority_for_list`,
+    :func:`raise_translation_priority_for_list`) plus the image-flag check once
+    for each of the 50 rows it returned, and every one of those opened its own
+    connection, committed and closed -- ~150 connection/commit/close cycles on
+    the request the user waits for. This is the same work on one connection with
+    one commit: one ``UPDATE ... WHERE workshop_id IN (...)`` for
+    ``web_scrape_priority``, one for ``image_priority``, the image-flag UPDATE,
+    and the translation queue's inserts and bumps batched the same way.
+
+    The resulting column values are **identical** to the per-row calls,
+    statement for statement. Each batched UPDATE carries the same predicate and
+    the same expression the per-row one did; the image step runs after the
+    ``image_priority`` list raise in the same connection, so it reads the raised
+    value exactly as the per-row sequence did (a NULL priority stays NULL, since
+    ``MAX(NULL, ...)`` is NULL). See
+    ``tests/test_list_priority_batch.py``, which compares every priority column
+    and the translation queue against the per-row path.
+
+    Returns the number of rows flagged for image download -- the same count
+    ``_ensure_image_flagged`` accumulated for the route's log line.
+    """
+    ids = [int(workshop_id) for workshop_id in workshop_ids]
+    if not ids:
+        return 0
+
+    conn = get_connection(db_path)
+    try:
+        placeholders = ",".join("?" * len(ids))
+
+        conn.execute(
+            f"UPDATE workshop_items SET web_scrape_priority = 5 "
+            f"WHERE workshop_id IN ({placeholders}) "
+            f"AND web_scrape_priority > 0 AND web_scrape_priority < 5",
+            ids,
+        )
+        conn.execute(
+            f"UPDATE workshop_items SET image_priority = 5 "
+            f"WHERE workshop_id IN ({placeholders}) "
+            f"AND image_priority > 0 AND image_priority < 5",
+            ids,
+        )
+
+        rows = conn.execute(
+            f"SELECT workshop_id, preview_url, image_answer, image_priority "
+            f"FROM workshop_items WHERE workshop_id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        flag_ids = [
+            row["workshop_id"] for row in rows
+            if row["preview_url"] and not images.is_resolved(row["image_answer"])
+        ]
+        if flag_ids:
+            flag_placeholders = ",".join("?" * len(flag_ids))
+            # `raise_image_priority(wid, max(image_priority or 1, 5))`, verbatim.
+            conn.execute(
+                f"UPDATE workshop_items "
+                f"SET image_priority = MAX(image_priority, MAX(COALESCE(image_priority, 1), 5)) "
+                f"WHERE workshop_id IN ({flag_placeholders})",
+                flag_ids,
+            )
+
+        _queue_list_translation_fields(conn, ids)
+
+        conn.commit()
+        return len(flag_ids)
+    finally:
+        conn.close()
 
 
 def raise_translation_priority_for_detail(db_path: str, workshop_id: int):

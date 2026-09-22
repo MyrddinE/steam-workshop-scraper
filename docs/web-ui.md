@@ -630,7 +630,7 @@ the page learns to stop buffering at the session cap.
 
 ### `/api/search` — POST
 
-Main search endpoint. Accepts `{filters, subscribed, sort_by, sort_order, offset, limit}`. `subscribed` is the `Subscribed:` overlay value and is ANDed as one predicate outside the builder's group; `any` or a value the build does not know adds nothing. Server-side bumps web/image/translation priorities and re-queries priority fields to include updated values. Returns 50 items with summary fields. `sort_by` accepts the `VALID_SORT_COLS` whitelist, including `own_first_subscribed_at` (**Subscribed at**; descending leaves never-subscribed rows last).
+Main search endpoint. Accepts `{filters, subscribed, sort_by, sort_order, offset, limit}`. `subscribed` is the `Subscribed:` overlay value and is ANDed as one predicate outside the builder's group; `any` or a value the build does not know adds nothing. Server-side bumps web/image/translation priorities for the returned rows in **one connection and one transaction** (`raise_list_priorities`, `src/database.py`) and re-queries priority fields to include updated values. The batch produces column-for-column identical state to the per-row raisers it replaced (`tests/test_list_priority_batch.py` compares every priority column and the translation queue); it exists because the per-row form opened, committed and closed a connection for each raise on each row — **measured 2026-09-22 as 150 commits for a 50-row page**, against 1 after batching. Returns 50 items with summary fields. `sort_by` accepts the `VALID_SORT_COLS` whitelist, including `own_first_subscribed_at` (**Subscribed at**; descending leaves never-subscribed rows last).
 
 ### `/api/item/<id>` — GET
 
@@ -662,9 +662,13 @@ session that has reached its file cap answers 429 with `refused: "session_cap"`,
 any non-2xx answer as "stop buffering" — so a refused trace stops the instrument, never the action it
 was describing. See [Reading a UI trace](#reading-a-ui-trace).
 
+### `/api/search_diagnostic` — GET
+
+Read-only report on the live database's search-sort path, for answering a "sort X is slow" report with a measurement instead of a hypothesis (it opened on the owner's "subscriber score is not indexed"). The route is **inert unless `daemon.capture_web_ui_trace` is on** — it rides the UI-trace switch rather than adding a third capture key — and with the switch off it answers 404 before opening the database. With it on, `src/sort_diagnostic.py` opens the file `mode=ro` (no write, no journal-mode switch, no file creation, safe beside the running daemon) and returns `{rows, indexes: {expected, missing}, score_coverage, sqlite_stat1, plans, timings}`: which `QUERY_INDEXES` indexes are present and which are missing, `EXPLAIN QUERY PLAN` for the real summary query under each `VALID_SORT_COLS` column, the non-NULL fraction of each score column, whether `sqlite_stat1` exists and its rows for those indexes, and the wall-clock first-page and deep-page (offset 50,000) time per sort column. `init_webserver` logs the same summary once at startup, naming a missing index or a temp B-tree plan at WARNING. It writes no tree of its own; the measurements behind it are in [search-filter.md](search-filter.md#sort-indexes-the-subscriber-score-is-slow-investigation).
+
 ### `/api/cutoffs` — POST
 
-Wilson score percentile thresholds. Accepts `{filters, subscribed}` (filters excluding percentile filters). The overlay is included so the percentiles describe the same population the grid shows. Returns `{wilson_favorite_p99, wilson_favorite_p90, ...}`.
+Wilson score percentile thresholds. Accepts `{filters, subscribed}` (filters excluding percentile filters). The overlay is included so the percentiles describe the same population the grid shows. Returns `{wilson_favorite_p99, wilson_favorite_p90, ...}`. Computed in one pass from exact percentile ranks (`percentile_disc`), not two `NTILE(100)` windows — **measured 2026-09-22 as 2.25 s against 13.24 s** on the 2.5 M-row copy, with identical values ([search-filter.md](search-filter.md#compute_wilson_cutoffs-cost-database)).
 
 ### `/api/state` — GET
 

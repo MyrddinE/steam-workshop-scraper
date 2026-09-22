@@ -185,6 +185,20 @@ elision that depends on the caller being careful is not elision. The trace is
 additive — a trace POST that fails, throws or is refused only stops the tracing,
 never the action it describes.
 
+## Sort diagnostic
+
+The same `daemon.capture_web_ui_trace` switch gates a second instrument that
+writes **no files and no tree**, covered here because it rides that switch rather
+than a capture key of its own. With it on, `GET /api/search_diagnostic` returns a
+read-only report on the live database's search-sort path — which query indexes
+exist, the `EXPLAIN QUERY PLAN` for the real query under each sort column, each
+score column's non-NULL coverage, whether `sqlite_stat1` exists, and first/deep
+page timings — and `init_webserver` logs the same summary once at startup. It
+opens the database `mode=ro`, so it is safe beside the running daemon, and it
+exists because a "sort X is slow" report cannot be answered from this
+repository's schema alone. See
+[search-filter.md](search-filter.md#sort-indexes-the-subscriber-score-is-slow-investigation).
+
 ## Crash dumps
 
 An unhandled traceback goes to a terminal nobody is reading, so `src/crash.py`

@@ -62,6 +62,19 @@ back up and down. The callback also trusts `entries[0]` rather than matching the
 Removed from the list above rather than marked resolved. Each is now documented as current
 behaviour, or covered by a test:
 
+### The "Subscribed at" sort had no index
+
+`own_first_subscribed_at` was in `VALID_SORT_COLS` — the **Subscribed at** option in both sort
+dropdowns — but no query index led with it, so every page sorted by it ran `USE TEMP B-TREE FOR
+ORDER BY` over the live set on the request the user waits for: *measured 2026-09-22* as
+0.47/0.48/0.49 s at offsets 0/50,000/200,000 on the 2.5M-row copy, against 0.00/0.02/0.07 s once
+`idx_own_first_subscribed_at` exists. It surfaced while testing the owner's "subscriber score is not
+indexed" report, whose claim about *those* columns was false — both score indexes were added together
+in `8771877` — and it is exactly the failure that report feared, on a different column. The expected
+index set is now the `QUERY_INDEXES` table, and `tests/test_sort_index_invariant.py` proves every
+sortable column has a leading index on both schema paths.
+[search-filter.md](search-filter.md#sort-indexes-the-subscriber-score-is-slow-investigation)
+
 ### The daemon log is never rotated (issue 37)
 
 The log now has a bound, but **not an automatic one**. The owner keeps a persistent `tail` open in another window, and a rotation the daemon chose on a timer or a size threshold would have disrupted that view without warning, so rotation is **wholly manual**: the daemon page of each front end carries a small size readout and a **Rotate Log** button, and nothing rotates on a timer, on a size threshold, or at startup. Pressing it renames the live log to `<log folder>/logs/<stem>-<UTC stamp>.log.gz`, immediately leaves a fresh empty file at the configured path, and compresses the archive on a background thread — the readout reads `Rotating… (<size>)` while a production-sized gzip runs, then `Rotated: logs/<name> (<size>)`. The readout line and the button's label come from one place (`src/log_rotation.py`), so the TUI and the web show the same number and the same words.

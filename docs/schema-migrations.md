@@ -145,6 +145,7 @@ Virtual table (content-sync with `workshop_items`, `content_rowid='workshop_id'`
 | idx_views | views | "Views" sort |
 | idx_wilson_subscription_score | wilson_subscription_score | "Subscriber Score" sort |
 | idx_wilson_favorite_score | wilson_favorite_score | "Favorite Score" sort |
+| idx_own_first_subscribed_at | own_first_subscribed_at | "Subscribed at" sort. Added 2026-09-22 after the sort-column invariant test found the column in `VALID_SORT_COLS` with no index (a full temp B-tree sort on every page); see [search-filter.md](search-filter.md#sort-indexes-the-subscriber-score-is-slow-investigation) |
 | idx_translation_priority | translation_priority | Translation queue scanning |
 | idx_translation_queue_lookup | translation_queue (entity_type, entity_id, field) | Per-field queue lookup and the 22→23 repair's two-column `NOT EXISTS` (that step names the columns' pre-rename spelling; SQLite rewrites the definition in place at 33→34). Created in `_create_legacy_schema` (unversioned, resolving the two column names for whichever side of the rename it finds) and mirrored in `_create_current_schema`, so the index exists when the repair runs |
 | idx_translation_queue_poll | translation_queue (priority DESC, queued_at ASC) | Translation poll (`get_next_batch_for_translation`) ordering. Created in `_ensure_indexes`, which runs after 13→14 renames `dt_queued` to `queued_at` |
