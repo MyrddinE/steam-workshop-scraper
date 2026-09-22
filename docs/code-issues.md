@@ -15,6 +15,33 @@ the production database on 2026-09-12.
 
 ## Open
 
+### The suite had never run on Windows: 24 failures on the first attempt (issue 89)
+
+The owner ran `py -3.14 -m pytest -q --no-cov -p no:cacheprovider` in the project directory on Windows and
+got **24 failed, 2172 passed, 10 skipped** against a Linux baseline of 2205 passed / 4 skipped. The captured
+log is the evidence for every entry below. Most of the 24 are the *tests'* assumptions, not the product's
+behaviour — expected for a suite that has only ever run on one platform, and why each fix is required to be
+platform-independent by construction rather than tuned until green.
+
+- **18 in flight** (brief `/root/.dsh/pending/windows-suite-brief.md`, worktree
+  `/root/worktrees/windows-suite`): seven `test_daemon_control.py` liveness and stop tests that make a fake
+  PID look alive by patching `os.kill`, which the Windows branch of `_pid_alive` (`src/daemon_control.py:165`)
+  never calls — and must not, because `os.kill(pid, 0)` terminates the process on Windows; four `tail_log`
+  tests that assert Python string lengths as byte offsets, which CRLF defeats; two `test_subscription_web.py`
+  tests that assert the non-Windows branch while running on Windows; one `test_workshop_folders.py` test whose
+  empty-content-dirs case falls through to real registry discovery and finds the owner's Steam library; three
+  worker tests that clear the stop flag immediately after `start()` with no handshake; and one
+  `test_schema_version_refusal.py` test defeated by the owner's running daemon holding `.daemon.pid` in the
+  project directory — the log's own captured output shows the exit-3 PID refusal — which makes that test
+  non-hermetic in the same way issue 67 was.
+- **6 held pending the owner**: three `test_webserver.py` assertions on non-ASCII output whose diagnosis
+  depends on the captured log's encoding (the owner is re-capturing it in UTF-8); two `test_crash.py`
+  failures with `OSError: [WinError 6] The handle is invalid` from `target_stream.write(text)` inside
+  Textual's `app.py` — writing the traceback to the original stderr failed, which is either the capture
+  method or a real gap where a failed console write defeats the crash dump; and
+  `test_tui_accessibility.py::test_select_dropdown_contrast`, where `SelectOverlay` is not found, which looks
+  like a Textual version difference between the container and the unpinned 3.14 install.
+
 ### A pass that claims ownership and then throws can still strand the running pass (issue 88)
 
 Ownership of the overlay's module-scope state is taken once the pass commits to running, and handed back
