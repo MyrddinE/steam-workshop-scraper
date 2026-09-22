@@ -134,15 +134,34 @@ def test_daemon_ignores_unqueued_items(db_path, tmp_path):
 # ── the web scraper path ─────────────────────────────────────────────────────
 
 def _run_web_worker_once(db_path, item, scrape_data):
+    """Run the worker through exactly one item, then stop it.
+
+    The item source is exhausted rather than the flag cleared straight after
+    ``start()``: clearing it there can land before the loop's first pass, so the
+    item is never processed -- the Windows failure this pins. After its one item
+    the source clears ``running`` and returns None, so the loop's own check ends
+    the run, and the ``served`` count proves the iteration happened.
+    """
     from src.web_worker import WebScraperThread
 
     worker = WebScraperThread(db_path, ".pauselock")
-    with patch("src.web_worker.get_next_web_scrape_item", return_value=item), \
+    served = 0
+
+    def next_item(*args, **kwargs):
+        nonlocal served
+        if served:
+            worker.running = False
+            return None
+        served += 1
+        return item
+
+    with patch("src.web_worker.get_next_web_scrape_item", side_effect=next_item), \
          patch("src.web_worker.scrape_extended_details", return_value=scrape_data), \
-         patch("time.sleep"):
+         patch("time.sleep"), patch("src.pacing.wait"):
         worker.start()
-        worker.running = False
         worker.join(timeout=5)
+    assert not worker.is_alive(), "the web worker did not stop within the timeout"
+    assert served == 1, "the worker never took the item"
 
 
 def test_web_worker_queues_an_untranslated_description(db_path):

@@ -151,7 +151,7 @@ def test_served_inline_script_is_valid_javascript(web_client, tmp_path):
 
     result = subprocess.run(
         [NODE, "--check", str(script_path)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     assert result.returncode == 0, f"node --check reported invalid JavaScript:\n{result.stderr}"
 
@@ -1637,7 +1637,8 @@ def _extract_function(script: str, name: str) -> str:
 def _run_node(driver: str, tmp_path):
     path = tmp_path / "driver.js"
     path.write_text(driver, encoding="utf-8")
-    result = subprocess.run([NODE, str(path)], capture_output=True, text=True)
+    result = subprocess.run([NODE, str(path)], capture_output=True, text=True,
+                            encoding="utf-8")
     assert result.returncode == 0, f"node driver failed:\n{result.stdout}\n{result.stderr}"
     return json.loads(result.stdout)
 
