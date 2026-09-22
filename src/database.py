@@ -411,7 +411,7 @@ def _compute_percentile_threshold(db_path: str, db_col: str, percentile, base_fi
     where_sql = ""
     params = []
     if base_filters:
-        clauses = []
+        rows = []
         for f in base_filters:
             logic = f.get("logic", "AND").upper()
             field = f.get("field")
@@ -420,22 +420,22 @@ def _compute_percentile_threshold(db_path: str, db_col: str, percentile, base_fi
             if not field or not op:
                 continue
             filter_db_col = FILTER_FIELD_TO_COLUMN.get(field, field)
+            tag_value = None
             if filter_db_col == "tags":
                 if op in ("is", "is_not"):
                     continue
                 clause, clause_params = _build_tag_clause(op, val)
+                if op == "contains":
+                    tag_value = val
             elif filter_db_col == "full_text":
                 continue  # FTS5 virtual column, not a real column
             else:
                 clause, clause_params = _build_single_filter_clause(filter_db_col, op, val)
             if clause:
-                params.extend(clause_params)
-                clauses.append((logic, clause))
-        if clauses:
-            where_sql = "WHERE "
-            for idx, (logic, clause) in enumerate(clauses):
-                where_sql += f" {logic} " if idx > 0 else ""
-                where_sql += clause
+                rows.append((logic, tag_value, clause, clause_params))
+        if rows:
+            group_sql, params = _join_filter_clauses(rows)
+            where_sql = f"WHERE {group_sql}"
 
     sql = f"""
         SELECT COALESCE(MIN({db_col}), 0) FROM (
@@ -463,6 +463,88 @@ def _build_tag_clause(op: str, val) -> tuple[str, list]:
     return ("", [])
 
 
+def _tag_contains_all_clause(tag_values: list[str]) -> tuple[str, list]:
+    """The one driving subquery for an AND of ``contains`` tag rows.
+
+    A correlated ``EXISTS`` per tag can only be *checked* against the rows
+    whatever index the planner picked produces. With several ANDed tags and a
+    sort-index walk whose order does not line up with the filter, almost every
+    probed row misses and the walk approaches a full scan. The items carrying
+    *all* the tags are a fixed property of the data, so naming that set lets the
+    tag junction drive the scan instead.
+
+    This is exactly "has every one of these tag names": an item's matching tag
+    names must number the distinct names asked for. Duplicates collapse first
+    (``A AND A`` is ``A``), or a repeated name would demand a count no item can
+    reach. The ``IN`` uses the same BINARY equality as the per-row
+    ``t.tag_name = ?`` it replaces, so case-sensitivity is unchanged.
+    """
+    distinct = list(dict.fromkeys(tag_values))
+    placeholders = ", ".join("?" for _ in distinct)
+    clause = (
+        "w.workshop_id IN (SELECT wt.workshop_id FROM workshop_tags wt "
+        "JOIN tags t USING(tag_id) WHERE t.tag_name IN ("
+        f"{placeholders}) GROUP BY wt.workshop_id "
+        f"HAVING COUNT(DISTINCT t.tag_name) = {len(distinct)})"
+    )
+    return clause, distinct
+
+
+def _collapse_tag_segment(segment: list[tuple], out: list[tuple]) -> None:
+    """Append one AND-segment's clauses to ``out``, collapsing its tag pair.
+
+    ``segment`` rows are ``(logic, tag_value, clause, params)``; ``tag_value`` is
+    the value of a tag ``contains`` row and ``None`` for every other row. Two or
+    more tag rows in the segment become one driving subquery at the first one's
+    position; a lone tag row keeps its ``EXISTS`` (an AND of one tag has no
+    conjunction to drive, and one common tag is cheapest when the sort index is
+    walked and checked). Adding the collapse *inside* a segment is what keeps an
+    ``OR`` a union: a new segment begins at every ``OR``, so an OR row is never
+    counted.
+    """
+    tag_positions = [i for i, row in enumerate(segment) if row[1] is not None]
+    if len(tag_positions) < 2:
+        out.extend((row[0], row[2], row[3]) for row in segment)
+        return
+    first = tag_positions[0]
+    clause, clause_params = _tag_contains_all_clause(
+        [segment[i][1] for i in tag_positions])
+    collapsed = set(tag_positions)
+    for i, row in enumerate(segment):
+        if i == first:
+            out.append((row[0], clause, clause_params))
+        elif i not in collapsed:
+            out.append((row[0], row[2], row[3]))
+
+
+def _join_filter_clauses(rows: list[tuple]) -> tuple[str, list]:
+    """Join ``(logic, tag_value, clause, params)`` rows into one predicate.
+
+    Rows keep their own ``logic`` (``AND``/``OR``, the first row's ignored), and
+    their order. Each conjunctive segment -- the rows between one ``OR`` and the
+    next -- is handed to :func:`_collapse_tag_segment`. With no collapsible pair
+    the joined string is identical to the pre-collapse join.
+    """
+    out: list[tuple] = []
+    segment: list[tuple] = []
+    for row in rows:
+        if segment and row[0] == "OR":
+            _collapse_tag_segment(segment, out)
+            segment = []
+        segment.append(row)
+    if segment:
+        _collapse_tag_segment(segment, out)
+
+    sql = ""
+    params: list = []
+    for idx, (logic, clause, clause_params) in enumerate(out):
+        if idx:
+            sql += f" {logic} "
+        sql += clause
+        params.extend(clause_params)
+    return sql, params
+
+
 def build_filters_sql(filters: list[dict]) -> tuple[str, list]:
     """Translate a filter list into one SQL predicate, exactly as search does.
 
@@ -488,9 +570,15 @@ def build_filters_sql(filters: list[dict]) -> tuple[str, list]:
     set it is computed over and has no fixed predicate, and the in-memory
     evaluator likewise treats it as matching everything. ``full_text`` filters
     are translated through the FTS index, the same as in a search.
+
+    A conjunction of two or more ``Tags`` ``contains`` rows is collapsed into
+    one driving subquery (:func:`_tag_contains_all_clause`) so the tag set can
+    drive the scan rather than be checked against whatever index the planner
+    walks -- the same rows, a different plan. A lone tag, an ``OR`` and a
+    ``does_not_contain`` keep the per-row ``EXISTS``/``NOT EXISTS``; see
+    docs/search-filter.md.
     """
-    clauses = []
-    params = []
+    rows = []
     for f in filters:
         if not isinstance(f, dict) or f.get("op") == "percentile":
             continue
@@ -503,10 +591,15 @@ def build_filters_sql(filters: list[dict]) -> tuple[str, list]:
         db_col = FILTER_FIELD_TO_COLUMN.get(field, field)
         if db_col not in FILTER_FIELD_TO_COLUMN.values() and db_col not in ("tags", "full_text"):
             continue
+        tag_value = None
         if db_col == "tags":
             if op in ("is", "is_not"):
                 continue
             clause, clause_params = _build_tag_clause(op, val)
+            # Only a `contains` row is collapsible; a `does_not_contain` row
+            # stays a NOT EXISTS and is never part of a counted conjunction.
+            if op == "contains":
+                tag_value = val
         elif db_col == "full_text":
             if op in ("is_empty", "is_not_empty"):
                 clause = f"w.rowid {'IN' if op == 'is_not_empty' else 'NOT IN'} (SELECT rowid FROM workshop_fts)"
@@ -534,15 +627,10 @@ def build_filters_sql(filters: list[dict]) -> tuple[str, list]:
         else:
             clause, clause_params = _build_single_filter_clause(db_col, op, val)
         if clause:
-            params.extend(clause_params)
-            clauses.append((logic, clause))
-    if not clauses:
+            rows.append((logic, tag_value, clause, clause_params))
+    if not rows:
         return "", []
-    sql = ""
-    for idx, (logic, clause) in enumerate(clauses):
-        sql += f" {logic} " if idx > 0 else ""
-        sql += clause
-    return sql, params
+    return _join_filter_clauses(rows)
 
 
 def _ensure_tag_ids(db_path: str, tag_names: list[str]) -> list[int]:
@@ -4722,7 +4810,7 @@ def _wilson_population_where(filters, subscribed_overlay, include_settled):
     if not include_settled:
         where += f" AND {live_fetch_status_predicate('w.fetch_status')}"
     if filters:
-        filter_clauses = []
+        filter_rows = []
         for f in filters:
             if f.get("op") == "percentile":
                 continue
@@ -4734,24 +4822,25 @@ def _wilson_population_where(filters, subscribed_overlay, include_settled):
             if not field or not op:
                 continue
             db_col = FILTER_FIELD_TO_COLUMN.get(field, field)
+            tag_value = None
             if db_col == "tags":
                 if op in ("is", "is_not"):
                     continue
                 clause, clause_params = _build_tag_clause(op, val)
+                if op == "contains":
+                    tag_value = val
             else:
                 clause, clause_params = _build_single_filter_clause(db_col, op, val)
             if clause:
-                params.extend(clause_params)
-                filter_clauses.append((f.get("logic", "AND").upper(), clause))
-        if filter_clauses:
+                filter_rows.append(
+                    (f.get("logic", "AND").upper(), tag_value, clause, clause_params))
+        if filter_rows:
             # The group is parenthesised so the live clause above cannot be
             # absorbed by an OR row inside it: without the parentheses
             # ``live AND a OR b`` lets ``b`` pull a settled row back in.
-            group_sql = ""
-            for idx, (logic, clause) in enumerate(filter_clauses):
-                group_sql += f" {logic} " if idx > 0 else ""
-                group_sql += clause
+            group_sql, group_params = _join_filter_clauses(filter_rows)
             where += f" AND ({group_sql})"
+            params.extend(group_params)
     overlay_clause, overlay_params = subscribed_overlay_clause(subscribed_overlay)
     if overlay_clause:
         where += f" AND ({overlay_clause})"
