@@ -272,7 +272,7 @@ def test_the_open_folder_control_is_rendered_only_on_windows(web_client, monkeyp
 # --- the stamp --------------------------------------------------------------
 
 def test_api_subscribed_stamps_the_subscription_and_clears_the_queue(web_client):
-    """The overlay's dequeue call is also a confirmed-subscription stamp."""
+    """The outcome stamp for a confirmed add: mark it and clear the queue flag."""
     client, db_path = web_client
     insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "fetch_status": 200,
                                     "is_queued_for_subscription": 1})
@@ -303,6 +303,64 @@ def test_api_subscribed_makes_the_marker_subscribed(web_client):
     client.post('/api/subscribed/9')
 
     assert client.get('/api/item/9').get_json()["subscription_state"] == subscription.SUBSCRIBED
+
+
+def test_api_unsubscribed_is_the_removal_outcome_stamp(web_client):
+    """The counterpart of /api/subscribed: clear the subscription, keep history."""
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "fetch_status": 200,
+                                    "own_subscribed": 1, "is_queued_for_subscription": 1,
+                                    "own_first_subscribed_at": 1000})
+
+    assert client.post('/api/unsubscribed/9').get_json() == {"ok": True}
+
+    row = _row(db_path, 9)
+    assert row["own_subscribed"] == 0
+    assert row["is_queued_for_subscription"] == 0
+    assert row["own_first_subscribed_at"] == 1000, "the sticky stamp is the history"
+    assert client.get('/api/item/9').get_json()["subscription_state"] \
+        == subscription.PREVIOUSLY
+
+
+def test_api_unsubscribed_makes_the_marker_previously(web_client):
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "fetch_status": 200,
+                                    "own_subscribed": 1, "own_first_subscribed_at": 1000})
+
+    client.post('/api/unsubscribed/9')
+
+    assert client.get('/api/item/9').get_json()["subscription_state"] \
+        == subscription.PREVIOUSLY
+
+
+def test_api_dequeue_clears_only_the_queue_flag(web_client):
+    """Cancel and Clear Failed must not stamp a subscription or a removal."""
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "fetch_status": 200,
+                                    "is_queued_for_subscription": 1})
+
+    assert client.post('/api/dequeue/9').get_json() == {"ok": True}
+
+    row = _row(db_path, 9)
+    assert row["is_queued_for_subscription"] == 0
+    assert row["own_subscribed"] == 0, "a cancelled add is not a subscription"
+    assert row["own_first_subscribed_at"] is None, \
+        "the sticky stamp must not be written for a row the drain never attempted"
+
+
+def test_api_dequeue_does_not_stamp_a_cancelled_removal_either(web_client):
+    """The removal direction is dequeued without claiming an unsubscribe."""
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 9, "title": "T", "fetch_status": 200,
+                                    "own_subscribed": 1, "is_queued_for_subscription": 1,
+                                    "own_first_subscribed_at": 1000})
+
+    client.post('/api/dequeue/9')
+
+    row = _row(db_path, 9)
+    assert row["is_queued_for_subscription"] == 0
+    assert row["own_subscribed"] == 1, "a cancelled removal is still subscribed"
+    assert row["own_first_subscribed_at"] == 1000
 
 
 def test_toggle_subscription_queue_still_only_flips_the_queue_flag(web_client):
@@ -611,3 +669,20 @@ def test_the_old_queue_buttons_are_gone_from_the_pane():
     assert ">Unqueue</button>" not in html
     # The marker helper is what the pane calls instead.
     assert "showSubscriptionMarker(item)" in html
+
+
+def test_the_overlay_rows_name_the_direction_and_the_official_dequeue():
+    """The drain's rows read the direction; Cancel records no outcome.
+
+    The row carries the derived direction and a verb that reads
+    ``unsubscribing…`` / ``unsubscribed`` for a removal, and Cancel and Clear
+    Failed post the direction-agnostic ``/api/dequeue`` rather than the outcome
+    stamp that used to claim a subscription.
+    """
+    html = TEMPLATE.read_text(encoding="utf-8")
+    assert "data-remove=" in html
+    assert "sub-queue-verb" in html
+    assert "unsubscribing…" in html
+    assert "'unsubscribed' : 'subscribed'" in html
+    assert "fetch('/api/dequeue/' + wid" in html
+    assert "fetch('/api/subscribed/' + wid" not in html

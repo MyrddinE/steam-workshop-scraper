@@ -1075,6 +1075,81 @@ def test_subscribe_item_error_branches_are_logged(subscribe_env, caplog):
     assert "Item 2 has no AppID" in caplog.text
 
 
+# --- /api/subscribe/<id>: the derived removal direction ----------------------
+#
+# The route derives the direction from the row, exactly as the engine does, and
+# delegates a removal whole to the engine: the pre-read guard, the
+# /sharedfiles/unsubscribe shape, the throttle/session-health handling and the
+# mark_own_unsubscribed record all live there.
+
+def _seed_removal(db_path, wid=1, first_seen=1000):
+    """A queued row that is subscribed: the derived removal direction."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "UPDATE workshop_items SET own_subscribed = 1, is_queued_for_subscription = 1, "
+        "own_first_subscribed_at = ? WHERE workshop_id = ?", (first_seen, wid))
+    conn.commit()
+    conn.close()
+
+
+def test_the_route_unsubscribes_a_queued_and_subscribed_row(subscribe_env):
+    db_path, state = subscribe_env
+    _seed_removal(db_path)
+    state["cookies"] = {"sessionid": "TOK",
+                        "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
+    state["page"] = _synthetic_page("PAGE_TOKEN", authenticated=True, toggled=True)
+    state["payload"] = {"success": 1}
+
+    resp = _post_subscribe(app.test_client())
+
+    assert resp.status_code == 200
+    assert resp.get_json()["success"] == 1
+    call = state["calls"][0]
+    assert call["url"] == subscribe_engine.UNSUBSCRIBE_URL
+    assert "include_dependencies" not in call["data"], "the one-field difference"
+    row = _item_row(db_path)
+    assert row["own_subscribed"] == 0
+    assert row["is_queued_for_subscription"] == 0
+    assert row["own_first_subscribed_at"] == 1000, "the sticky stamp is the history"
+
+
+def test_the_route_sends_no_removal_the_page_shows_unsubscribed(subscribe_env):
+    """The pre-read guard: a page with no `toggled` sends nothing and settles."""
+    db_path, state = subscribe_env
+    _seed_removal(db_path)
+    state["cookies"] = {"sessionid": "TOK",
+                        "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
+    state["page"] = _synthetic_page("PAGE_TOKEN", authenticated=True, toggled=False)
+
+    resp = _post_subscribe(app.test_client())
+
+    assert resp.status_code == 200
+    assert resp.get_json()["success"] == 1
+    assert state["calls"] == [], "a blind removal POST is the toggle hazard"
+    row = _item_row(db_path)
+    assert row["own_subscribed"] == 0
+    assert row["is_queued_for_subscription"] == 0
+
+
+def test_a_refused_removal_answers_minus_one_and_stays_queued(subscribe_env):
+    db_path, state = subscribe_env
+    _seed_removal(db_path)
+    state["cookies"] = {"sessionid": "TOK",
+                        "steamLoginSecure": _login_cookie(_FUTURE_EXPIRY)}
+    state["page"] = _synthetic_page("PAGE_TOKEN", authenticated=True, toggled=True)
+    state["payload"] = {"success": 0}
+
+    resp = _post_subscribe(app.test_client())
+
+    body = resp.get_json()
+    assert body["success"] == -1
+    assert body["stays_queued"] is True
+    assert "success=0" in body["message"], "the raw removal answer is named"
+    row = _item_row(db_path)
+    assert row["own_subscribed"] == 1, "a refused removal changes nothing"
+    assert row["is_queued_for_subscription"] == 1
+
+
 def test_subscribe_request_shape_matches_the_scrape_path(subscribe_env):
     """The POST shares the session, the project UA, and the full cookie jar.
 
@@ -3153,6 +3228,8 @@ def test_the_bridge_is_gone_and_the_drain_endpoints_remain(web_client):
 
     # The routes the browser-free flow uses are still mounted.
     assert client.get('/api/subscribed/1').status_code == 405  # POST-only
+    assert client.get('/api/unsubscribed/1').status_code == 405  # POST-only
+    assert client.get('/api/dequeue/1').status_code == 405  # POST-only
     assert client.get('/api/subscribe_throttle').status_code == 200
     assert set(client.get('/api/subscribe_throttle').get_json()) == \
         {"throttled_at", "throttled_id", "retry_after"}
@@ -3173,7 +3250,10 @@ def test_the_bridge_is_gone_and_the_drain_endpoints_remain(web_client):
     assert "fetch('/api/queued')" in html
     assert "fetch('/api/subscribe_failures')" in html
     assert "fetch('/api/subscribe_throttle')" in html
-    assert "fetch('/api/subscribed/'" in html
+    # Cancel and Clear Failed dequeue without recording an outcome; the outcome
+    # stamps are server-side, so the page no longer calls /api/subscribed.
+    assert "fetch('/api/dequeue/'" in html
+    assert "fetch('/api/subscribed/'" not in html
     assert "fetch('/api/subscribe/' + wid" in html
 
 

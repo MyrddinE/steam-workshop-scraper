@@ -1497,7 +1497,7 @@ function renderDetail(item) {
 
 // /api/toggle_subscription_queue answers only {ok: true} and says nothing about which way the
 // flag moved, so read the item back instead of flipping a cached guess. The `s`
-// shortcut and the subscribe drain's /api/subscribed calls change the same flag
+// shortcut and the drain's own recording (either direction) change the same flag
 // without going through this pane, so a guess could name the wrong next action.
 // Rendering from the returned payload (not from a class on the old DOM) is also
 // what lets the 3-second translation poll re-render afterwards without undoing
@@ -2052,15 +2052,22 @@ async function _startAutoSubscribe() {
   const progress = document.getElementById('sub-progress');
   overlay.style.display = 'block';
   progress.textContent = `0 / ${items.length}`;
-  list.innerHTML = items.map(it => `
-    <div class="sub-queue-item" data-wid="${it.workshop_id}">
+  list.innerHTML = items.map(it => {
+    // The direction is on the row so every later reader -- the loop and the
+    // poll -- can word the row without re-deriving it from the marker.
+    const removal = it.subscription_state === 'queued_remove';
+    return `
+    <div class="sub-queue-item" data-wid="${it.workshop_id}"
+         data-remove="${removal ? 1 : 0}">
       <span class="spinner"></span>
       <span class="countdown"></span>
+      <span class="sub-queue-verb">${removal ? 'unsubscribing…' : 'subscribing…'}</span>
       <span>${it.title_en || it.title || 'Untitled'}</span>
       <span class="sub-queue-sub" style="color: ${it.subscription_colour}"
             title="${_escapeHtml(it.subscription_tooltip || '')}">${it.subscription_glyph || ''}</span>
     </div>
-  `).join('');
+  `;
+  }).join('');
 
   // Ensure clear-failed button is hidden on fresh start
   const clearBtn = document.getElementById('sub-clear-failed');
@@ -2097,7 +2104,15 @@ async function _startAutoSubscribe() {
         if (!queuedIds.has(item.workshop_id) && !verified.has(item.workshop_id)) {
           verified.add(item.workshop_id);
           const row = list.querySelector(`[data-wid="${item.workshop_id}"]`);
-          if (row) row.classList.add(failedIds.has(item.workshop_id) ? 'failed' : 'done');
+          if (row) {
+            row.classList.add(failedIds.has(item.workshop_id) ? 'failed' : 'done');
+            const verb = row.querySelector('.sub-queue-verb');
+            if (verb) {
+              verb.textContent = failedIds.has(item.workshop_id) ? 'failed'
+                : (item.subscription_state === 'queued_remove'
+                   ? 'unsubscribed' : 'subscribed');
+            }
+          }
         }
       });
 
@@ -2186,7 +2201,13 @@ async function _startAutoSubscribe() {
       }
       if (countdown) countdown.textContent = '';
       verified.add(item.workshop_id);
+      const verb = row ? row.querySelector('.sub-queue-verb') : null;
       if (row) row.classList.add(data && data.success === 1 ? 'done' : 'failed');
+      if (verb) {
+        verb.textContent = (data && data.success === 1)
+          ? (item.subscription_state === 'queued_remove' ? 'unsubscribed' : 'subscribed')
+          : 'failed';
+      }
       progress.textContent = verified.size + ' / ' + items.length;
       if (!(data && data.success === 1)) {
         console.debug('Subscribe refused for ' + item.workshop_id + ': ' +
@@ -2213,12 +2234,13 @@ document.getElementById('sub-cancel').onclick = () => {
     if (_subPollIv) { clearInterval(_subPollIv); _subPollIv = null; }
     // Dequeue any remaining unverified items so they don't stick -- unless the
     // pass was stopped by throttling, where the whole point is to leave them
-    // queued so the next drain retries them.
+    // queued so the next drain retries them. This is a direction-agnostic
+    // dequeue: it clears the flag and records no outcome, in either direction.
     if (!_subThrottleStopped) {
       var rows = document.querySelectorAll('.sub-queue-item:not(.done)');
       rows.forEach(function(row) {
         var wid = row.getAttribute('data-wid');
-        if (wid) fetch('/api/subscribed/' + wid, {method:'POST'});
+        if (wid) fetch('/api/dequeue/' + wid, {method:'POST'});
         row.classList.add('done');
       });
     }
@@ -2231,7 +2253,10 @@ document.getElementById('sub-clear-failed').onclick = () => {
   var rows = document.querySelectorAll('.sub-queue-item:not(.done)');
   rows.forEach(function(row) {
     var wid = row.getAttribute('data-wid');
-    if (wid) fetch('/api/subscribed/' + wid, {method:'POST'});
+    // A direction-agnostic dequeue: a cancelled row records no outcome, so a
+    // cancelled add is not stamped subscribed and a cancelled removal is not
+    // stamped unsubscribed.
+    if (wid) fetch('/api/dequeue/' + wid, {method:'POST'});
     row.classList.add('done');
   });
 };
