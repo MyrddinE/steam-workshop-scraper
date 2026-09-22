@@ -172,7 +172,9 @@ records with a rising `loads_since_scroll` and no `scroll` event between them
 are the page loading on its own, which is what distinguishes a runaway from the
 user scrolling. The `view_restore` events are the same question for the loop
 that runs on every page load with no action at all: it records each search the
-restore requests, so those searches no longer arrive with no visible cause.
+restore requests, so those searches no longer arrive with no visible cause. That
+loop is **issue 78** — it can issue up to 80 searches per load, which is what the
+owner saw as the grid loading on its own.
 
 **A trace is an instrument, not evidence, and it is denser than a web
 download**, so it is bounded on top of the age sweep (see *Bounds* and
