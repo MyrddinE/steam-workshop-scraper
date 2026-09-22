@@ -24,14 +24,19 @@ behaviour, or covered by a test:
 
 ### The view-restore loop paged through the result set unprompted (issue 78)
 
-`_restoreView` now pages by bounded intent. The scroll pass asks `doSearch(false)` for at most
-`MAX_RESTORE_SCROLL_BATCHES = 5` pages — where one page load used to run a per-pass
-`MAX_RESTORE_BATCHES = 40` twice, appending up to 2,000 items and issuing up to 80 searches with no
-user action — and `_loadUntil` ends the walk as soon as `hasMore` is false. The saved selected item is
-not hunted for at all any more: it is re-opened only when the content the scroll pass loaded already
-holds it, and a `console.debug` names the drop. `tests/test_webserver.py` drives the real
-`_restoreView` and `_loadUntil` against a modelled grid and fails against the pre-change code, which
-ran the selected pass to its full forty batches even for an id that can never appear.
+The loop is **gone**, not bounded. One page load used to run a per-pass `MAX_RESTORE_BATCHES = 40`
+twice, appending up to 2,000 items and issuing up to 80 searches with no user action; it was then
+bounded to `MAX_RESTORE_SCROLL_BATCHES = 5` pages with `_loadUntil` ending the walk as soon as
+`hasMore` was false. The owner's later decision removed the feature outright: scroll and selection
+are the same thing to them, neither should persist, and "changing the view or refreshing should
+return to the top". `_restoreView`, `_loadUntil` and both caps are deleted, and `_saveViewState`
+writes the view *definition* only — filters, sort and the overlay. `loadState` applies the stored
+definition and runs one `doSearch(true)`: one search, one batch, at the top. An older entry's
+`selected` and `scroll` are tolerated on the way in and never read back, and a reset render starts at
+the top with its first item selected and its pane open through the read-only route.
+`tests/test_webserver.py` drives the real `loadState`, a Return and the served controls' reset
+handlers against a modelled grid; each fails against the pre-change code, which paged for the stored
+position and re-opened the stored item.
 [web-ui.md](web-ui.md#state-persistence)
 
 The creator-jump failure the owner reported was collateral: the restore pinned `loading`, and

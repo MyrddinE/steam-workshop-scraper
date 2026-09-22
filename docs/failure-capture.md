@@ -163,18 +163,17 @@ build version) and the ordered events:
 | `observe_next_batch` | the branch taken (already-visible shortcut, observing, skip or reset), `rect.top` beside `window.innerHeight`, the grid geometry, and the cell armed and released |
 | `intersection` | `isIntersecting`, the entry's target and whether it matched `_observedCell`, and the entry count |
 | `list_poll`, `item_poll` | each poll tick, so an endless poll cannot masquerade as scrolling |
-| `jump_to_author`, `pane_open` | a creator jump and its id, and a pane open and its `workshop_id` |
-| `view_restore` | `loadState`, whether a saved view was found, `_restoreView` and each `_loadUntil` pass with the value its `done` predicate returned |
+| `jump_to_author`, `pane_open` | a creator jump and its id, and a pane open with its `workshop_id` and whether it was the automatic read-only reset selection |
+| `view_restore` | removed with the load-time restore (issue 78): nothing pages on load any more, so there is no restore loop to record |
 
 Every event also carries `loads_since_scroll`, and the page resets it on a user
 scroll. That one field answers the question the instrument was built for:
 records with a rising `loads_since_scroll` and no `scroll` event between them
 are the page loading on its own, which is what distinguishes a runaway from the
-user scrolling. The `view_restore` events are the same question for the loop
-that runs on every page load with no action at all: it records each search the
-restore requests, so those searches no longer arrive with no visible cause. That
-loop is **issue 78** — it can issue up to 80 searches per load, which is what the
-owner saw as the grid loading on its own.
+user scrolling. The `view_restore` events that used to show the loop behind that
+runaway are gone with the loop itself: **issue 78** was the load-time restore,
+which could issue up to 80 searches per load, and it was removed rather than
+bounded, so a page load is one search and one batch at the top.
 
 **A trace is an instrument, not evidence, and it is denser than a web
 download**, so it is bounded on top of the age sweep (see *Bounds* and

@@ -62,7 +62,7 @@ Two layers of validation: a capture-phase `blur` event listener on the document 
 
 `doSearch` is the page's one guard against overlapping work: it sets `loading` and clears it on every exit path (`try`/`finally` around `_doSearchBody`), so a rejected `fetch` or `/api/search`'s `{"error": ...}` body at status 500 cannot leave the page wedged — every later search, sort, pagination request and author jump passes through that flag. A body that is not an array is treated as that error rather than iterated as a batch of zero rows; `items.forEach` threw on the route's JSON object and left `loading` set (issue 79, closed).
 
-**A user action supersedes an in-flight search.** Each search carries a generation. A *reset* (a search, a sort, an overlay change or an author jump) that arrives while a search is in flight replaces it, and the older search sees the newer generation and discards its result rather than drawing it over the newer one; a `console.debug` names the supersede. Two page requests still cannot overlap: a non-reset arriving while any search is in flight is dropped, because both would append the same offset. `doSearch` answers `'applied'`, `'superseded'` or `'failed'` so a caller can tell a supersede from a failure — the two need opposite handling, and only a caller that caused no useful result may react to it. This is **defence in depth beside the restore bound, not the fix for the runaway** — the restore no longer pages long enough to hold `loading` for it to matter — but a user action must never be silently discarded, which is what made a creator jump do nothing.
+**A user action supersedes an in-flight search.** Each search carries a generation. A *reset* (a search, a sort, an overlay change or an author jump) that arrives while a search is in flight replaces it, and the older search sees the newer generation and discards its result rather than drawing it over the newer one; a `console.debug` names the supersede. Two page requests still cannot overlap: a non-reset arriving while any search is in flight is dropped, because both would append the same offset. `doSearch` answers `'applied'`, `'superseded'` or `'failed'` so a caller can tell a supersede from a failure — the two need opposite handling, and only a caller that caused no useful result may react to it. A user action must never be silently discarded, which is what made a creator jump do nothing; the unprompted loading that used to hold `loading` for it to matter is gone with the restore loop (issue 78).
 
 Every number the grid and the detail pane show is formatted in the browser: `fmtCount` (three
 significant digits with a K/M suffix) for views and subscription counts, `fmtExact` (grouped exact
@@ -72,13 +72,19 @@ server-side equivalent: no template passes a value through a Jinja number filter
 
 ### State Persistence
 
-The TUI saves filter/sort state to `.tui_state.yaml`, which the web UI reads through `GET /api/state`. That file is the TUI's: it has the TUI's shape (`scroll_y`, `selected_workshop_id`) and is rewritten on the TUI's schedule, so writing the browser's view back into it would have the two front ends overwriting fields the other does not understand. The browser therefore keeps its own view in `localStorage` under `view.state.v1` — filter rows, `sort_by`, `sort_order`, the `Subscribed:` overlay value, the open item and the grid's scroll position.
+The TUI saves filter/sort state to `.tui_state.yaml`, which the web UI reads through `GET /api/state`. That file is the TUI's: it has the TUI's shape (`scroll_y`, `selected_workshop_id`) and is rewritten on the TUI's schedule, so writing the browser's view back into it would have the two front ends overwriting fields the other does not understand. The browser therefore keeps its own **view definition** in `localStorage` under `view.state.v1` — filter rows, `sort_by`, `sort_order` and the `Subscribed:` overlay value. Nothing positional is kept: no open item and no scroll offset.
 
-The entry is versioned and shape-checked like the statistics panel's ordering entry (`_loadViewState`): a wrong `v`, a non-list `filters`, or an unreadable value reads back as "no state" rather than reaching the builder. Fields the current schema no longer has are dropped, a stored value is coerced to the string the value control holds, and a stored `subscribed` value the current build does not know reads back as `any` (no constraint) rather than hiding rows.
+The entry is versioned and shape-checked like the statistics panel's ordering entry (`_loadViewState`): a wrong `v`, a non-list `filters`, or an unreadable value reads back as "no state" rather than reaching the builder. Fields the current schema no longer has are dropped, a stored value is coerced to the string the value control holds, and a stored `subscribed` value the current build does not know reads back as `any` (no constraint) rather than hiding rows. An entry an older browser still holds may carry `selected` and `scroll`; both are tolerated and neither is read back.
 
 **Precedence is one-sided.** A browser that has been to the page before has its own record of what the user was doing, so local state wins outright and `/api/state` is not even fetched. Only when there is no usable entry — a first visit, cleared storage, or a rejected shape — does the page seed from the TUI's saved state.
 
-**Restoring a deep view.** After the first search, `_restoreView` calls `doSearch(false)` — the function that owns `currentOffset` and the infinite-scroll observation — only to rebuild the saved scroll position, then applies that scroll last: `showDetail` focuses the cell and focus can move the grid, so the saved position has to be the final word. The pass is bounded by intent rather than a batch budget: `MAX_RESTORE_SCROLL_BATCHES = 5` pages at most, and `_loadUntil` ends the walk as soon as `hasMore` is false, so a shallow position is restored and a deeper one lands at the top. The saved **selected** item follows a different rule — it is re-opened only when the content the scroll pass loaded already holds it, and a `console.debug` names the drop. The page never pages *for* a selection: an id the filters exclude, or one the search now hides as settled, can never appear, and hunting for it is what made one page load issue dozens of unprompted searches (issue 78, closed). A reset `doSearch` clears the selection because a new result set may not contain it. Writes are suppressed while a restore runs (`_restoringView`), so the page cannot overwrite the state it is reading. Saves happen on a throttled `#results-grid` `scroll` listener, at the end of a reset `doSearch`, when a detail pane opens (`showDetail`), and on `pagehide`.
+**There is no restore.** `loadState` applies the stored view definition and runs one `doSearch(true)`: one search, one batch, at the top. No scroll position and no selected item is restored, and the page never pages on load. A scroll offset describes a place in a result set that a changed search does not reproduce, and re-querying pages to rebuild one costs more than the feature is worth, so both were removed rather than bounded — the loop behind issue 78 is gone, not capped. What a reset *does* do positionally is start the new render at the top with its first cell selected and that cell's detail pane open; see [the reset render](#a-reset-render-selects-the-top-item). Saves happen at the end of a reset `doSearch` and on `pagehide`, and only ever write the view definition.
+
+### A reset render selects the top item
+
+Every reset search — a new search, a sort or overlay change, a filter edit, Return from author mode, a creator jump and the ignore toggle's re-query — re-renders the list from the top. The reset branch of `_doSearchBody` is the one implementation point: it sets `grid.scrollTop = 0`, focuses the batch's first cell with `focus({preventScroll: true})` and opens that cell's detail pane. This is TUI parity — a new list highlights its first row and the pane follows it — and no reset path can forget it because they all funnel through the same branch. The pane is opened through the read-only `GET /api/item/<id>` route, never `POST /api/item/<id>/open`: an automatic pane must not raise detail fetch priorities the way a click does. `preventScroll` matters because focus can move a scroller and the grid has just been put at the top; a plain focus would let the pane's own cell move it. A page append is not a reset: it selects nothing and opens nothing, or scrolling the list would steal the pane from the owner.
+
+**The newest pane open owns the pane.** Making the selection automatic puts two pane opens in flight whenever a view changes twice before the first detail payload returns, and a click racing an automatic pane is the same race. `showDetail` takes a monotonic token (`_detailOpenToken`) and re-checks it after every await — the fetch and the JSON parse — so an older response that lands last does nothing at all: no pane write (not even its error text), no `selected` class, no focus, no `_subscribeDetail` and no `_startDetailPoll`. The loser must not restart the poll the newer open already stopped, or the pane would show the newer item while polling the older one.
 
 ### Wilson Cutoffs
 
@@ -221,14 +227,14 @@ author box (`#author-mode-bar`) naming the creator, with a `Return` button
 assembled, and saving it would overwrite the scraper's stored filter with one they never chose. The
 TUI hides the same button for the same reason.
 
-`Return` restores the view exactly as the jump took it. Before the jump, `_viewSnapshot()` captures
-the filter rows, both sort values, the overlay value, the open item and the grid's scroll position;
-`returnFromAuthor()` puts them back and then restores the item and scroll through `_restoreView`, the
-same routine a reload of a saved view runs. The snapshot is **in memory**, like the TUI's
-`_pre_jump_filters`: `_saveViewState` is a no-op while `_authorMode` is set, so the value in
-`localStorage` stays the view Return restores even if the search or the scroll listener runs in
-between. Returning re-opens the item and puts the scroll back, which the TUI's Return does not; a
-browser can afford it and the mode's point is that a half-restore is worse than none.
+`Return` puts back the view definition the jump replaced. Before the jump, `_viewSnapshot()` captures
+the filter rows, both sort values and the overlay value — nothing positional; `returnFromAuthor()`
+applies them and runs a reset search. There is no item or scroll to restore: the return's own reset
+renders the top of the view and selects its first item, exactly as every reset does, and
+`localStorage` never held a position for the author view to come back to. The snapshot is **in
+memory**, like the TUI's `_pre_jump_filters`: `_saveViewState` is a no-op while `_authorMode` is set,
+so the stored view definition stays the one a reload uses even if a search runs between the jump and
+the Return.
 
 The jump is `async` because the outcome of its search decides whether author mode may stay. `doSearch`
 answers `'applied'`, `'superseded'` or `'failed'`. An **applied** jump owns the grid and does nothing
@@ -627,16 +633,15 @@ monotonic `t` (milliseconds since the page installed the trace) and
 | `intersection` | `is_intersecting`, the entry's `target`, whether it `matched_observed` (`_observedCell`), and `entry_count` |
 | `list_poll`, `item_poll` | each list-poll arming and tick, and each item-update tick, so an endless poll cannot hide among the calls |
 | `jump_to_author` | the `creator` the jump pinned the view to |
-| `pane_open` | the `wid` the detail pane was opened on |
-| `view_restore` | `phase` is `saved_view` (`found`), `load_state`, `enter` (the saved view's `scroll`, `selected`), `load_until_enter`, `done_check` (the value the `done` predicate returned, and the pass number), `load_until_done`, `load_state_done` |
+| `pane_open` | the `wid` the detail pane was opened on, and `read_only` (`true` for the automatic reset selection, `false` for a click) |
 
 **The question it was built to answer**: "is the page loading on its own, or is
 the user scrolling?" Every record carries `loads_since_scroll`; the page resets
 it on a user scroll. So a rising `loads_since_scroll` across `do_search` or
 `fetch` records with **no `scroll` event between them** is the runaway in one
-line, and the `view_restore` events show the loop that runs on every page load
-with no user action — each `done_check` value and every batch it requests —
-rather than leaving those searches to look like they arrived from nowhere.
+line. The loop that produced it — the load-time view restore — has been removed,
+so a page load is now one `do_search` and one `fetch` with no event between them
+that the owner did not cause.
 
 The trace is additive: a trace POST that fails, throws or is refused leaves the
 action it describes behaving exactly as it did, and a refused POST is only how
@@ -652,13 +657,13 @@ Main search endpoint. Accepts `{filters, subscribed, sort_by, sort_order, offset
 
 ### `/api/item/<id>` — GET
 
-Read-only detail fetch. Returns full item data with the BBCode-to-HTML converted description. It applies no priority bumps by design: the detail pane polls this every three seconds while it is open, and applying detail priority here re-armed the fetch queue on every poll, so the daemon re-fetched whatever was on screen indefinitely.
+Read-only detail fetch. Returns full item data with the BBCode-to-HTML converted description. It applies no priority bumps by design: the detail pane polls this every three seconds while it is open, and the automatic pane a reset render opens uses it too — applying detail priority here re-armed the fetch queue on every poll, so the daemon re-fetched whatever was on screen indefinitely.
 
 Both language variants are returned — `description_html` beside `description_html_original`, and `display_title` beside `display_title_original` — so the client's toggle costs no request. The payload also carries `has_translation` (whether `translate_version` is set) so the client does not have to infer it from the text, and `creator_id` (the creator's SteamID64 as a string, so a seventeen-digit ID survives `JSON.parse` and can be fed back into an Author ID filter).
 
 ### `/api/item/<id>/open` — POST
 
-The same detail payload, but applies detail-level priority (web, image, translation and API) first. This is the path the UI takes when a pane opens, and the only one that re-queues the item.
+The same detail payload, but applies detail-level priority (web, image, translation and API) first. This is the path the UI takes when the owner clicks a cell to open its pane, and the only one that re-queues the item. An automatic pane — the top item a reset render selects — uses the read-only `GET /api/item/<id>` above instead, so selecting a list does not queue fetch work nobody asked for.
 
 ### `/api/items` — POST
 
