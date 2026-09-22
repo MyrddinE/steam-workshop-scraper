@@ -297,6 +297,24 @@ selectivity that matters is the cross-correlation between the tag filter and the
 per-column statistic captures that. Only the ~500-row *unfiltered* diagnostic query is symmetric, which
 is why it showed nothing.
 
+**The ratio is a property of the copy, not a law.** The same two paths on a *compacted snapshot of the
+owner's live database* (3,118,337 rows, 228,680 carrying both tags — 7.33%, pulled 2026-09-22) measured:
+
+| access path | cold | warm |
+|---|---|---|
+| per-row correlated `EXISTS` per tag (before) | 5.29 s | 0.85 s |
+| one driving subquery for the conjunction (after) | 6.99 s | 0.83 s |
+
+So on compacted data the walk was *not* pathological: it was 5.3 s cold and 0.85 s warm, and the driving
+form was slightly slower cold and equal warm. The 2.5M copy that showed 66 s → 8 s had a far more
+scattered page layout, and a `VACUUM INTO` snapshot is contiguous by construction. Two consequences a
+future reader should carry: the fix's justification is that the driving form's cost is **bounded** by the
+candidate set while the walk's is **unbounded** — a function of where the filter first matches in the sort
+order and of how scattered that walk's pages are — not that it is always faster; and the owner's 29.9 s
+`POST /api/search` on the live file cannot be attributed to the plan alone, because a compacted copy of
+that same data does not reproduce it. The route's per-item priority writes (150 transactions before the
+batching in item 34) and the live file's physical state are the other measured contributors.
+
 **The rule for a future reader: an AND of tag filters drives the scan.** The filter join
 (`_join_filter_clauses`) splits the filter list into conjunctive segments — a new segment begins at
 every `OR` — and when a segment carries two or more `Tags contains` rows it emits one
