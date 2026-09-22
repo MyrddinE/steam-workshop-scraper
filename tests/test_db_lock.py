@@ -290,9 +290,16 @@ def test_the_subscription_polls_read_is_guarded():
 # --------------------------------------------------------------------------
 
 def _template_function(name):
-    """The text of a top-level JS function in the page, by name."""
+    """The text of a top-level JS function in the page, by name.
+
+    Includes the ``async `` prefix when the function has one, so the extracted
+    text is a complete declaration a node driver can run, not a fragment that
+    happens to start at ``function``.
+    """
     text = WEB_TEMPLATE.read_text(encoding="utf-8")
     start = text.index(f"function {name}(")
+    if text[start - len("async "):start] == "async ":
+        start -= len("async ")
     end = text.index("\n}\n", start) + len("\n}\n")
     return text[start:end]
 
@@ -313,14 +320,19 @@ def test_web_detail_poll_keeps_retrying_after_a_transient_server_error():
 
 
 def test_web_list_poll_keeps_retrying_after_a_transient_server_error():
-    """The grid's marker poll must survive a 500 the same way the TUI's does."""
-    body = _template_function("_startListPoll")
+    """The grid's marker poll must survive a 500 the same way the TUI's does.
+
+    The tick is the top-level `_listPollTick` beside `_startListPoll` -- named
+    so the UI trace can wrap it -- so this reads the tick's body; the property
+    is the one it always was.
+    """
+    body = _template_function("_listPollTick")
     assert "if (!resp.ok)" in body, (
         "the grid poll must branch on a failed response; otherwise resp.json() "
         "throws and the read is treated as a stop"
     )
-    assert body.count("_listPollTimer = setTimeout(tick, delay)") == 1
-    assert body.index("_listPollTimer = setTimeout(tick, delay)") > body.index("catch(e)"), (
+    assert body.count("_listPollTimer = setTimeout(_listPollTick, delay)") == 1
+    assert body.index("_listPollTimer = setTimeout(_listPollTick, delay)") > body.index("catch(e)"), (
         "the re-arm must sit outside the try/catch, so a failed read retries "
         "instead of ending the poll"
     )
@@ -361,7 +373,10 @@ global.fetch = async () => {
   if (calls === 1) return {ok: false, status: 500, statusText: 'ISE', json: async () => ({})};
   return {ok: true, status: 200, json: async () => []};
 };
-const fn = (__FN__);
+// The tick is a top-level function beside `_startListPoll` (named so the UI
+// trace can wrap it), so both are served into the driver.
+__FNS__
+const fn = _startListPoll;
 (async () => {
   fn([], '', '');
   stopped = 0;                            // the arm-time stop is not a tick stop
@@ -380,7 +395,8 @@ const fn = (__FN__);
 def test_web_list_poll_actually_reaches_the_server_again_after_a_500(tmp_path):
     """The property the source check pins, measured on the page's own script."""
     driver = POLL_RETRY_DRIVER.replace(
-        "__FN__", _template_function("_startListPoll"))
+        "__FNS__", "\n".join(_template_function(name)
+                             for name in ("_listPollTick", "_startListPoll")))
     script_path = tmp_path / "driver.js"
     script_path.write_text(driver, encoding="utf-8")
     result = subprocess.run([NODE, str(script_path)], capture_output=True, text=True)
