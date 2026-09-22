@@ -2759,6 +2759,10 @@ async function _startAutoSubscribe() {
   await fetch('/api/pause', {method:'POST'});
 
   _subCanceled = false;
+  // Per-pass like `_subCanceled`: the throttle stop sets it so *this* pass's
+  // Close keeps its unverified rows queued, and it must not outlive the pass or
+  // a later Cancel would skip that dequeue for good.
+  _subThrottleStopped = false;
   // The daemon is paused for the pass, so release it on every exit path: a
   // cancel, a throttle stop, and the normal end.
   const finish = async () => {

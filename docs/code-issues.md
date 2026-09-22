@@ -15,20 +15,24 @@ the production database on 2026-09-12.
 
 ## Open
 
-### A throttled pass leaves the overlay's cancellation dequeue disabled (issue 81)
-
-`_subThrottleStopped` is set when the autosubscribe overlay stops a pass because Steam is throttling, and
-the Cancel handler reads it to decide whether to dequeue the rows the pass never verified: a throttle stop
-deliberately leaves them queued for a later drain, a normal Cancel does not. The flag is module scope and
-is **never reset when a pass starts** — `_subCanceled` is reset there, this one is not — so after any
-throttled pass the page keeps it `true` for the rest of its life, and every later Cancel silently skips
-the dequeue and leaves rows queued. Found 2026-09-22 while implementing the overlay's countdown. See
-[web-ui.md](web-ui.md) for the overlay's cancel and throttle behaviour.
-
 ## Recently closed
 
 Removed from the list above rather than marked resolved. Each is now documented as current
 behaviour, or covered by a test:
+
+### The overlay's throttle flag outlived its pass (issue 81)
+
+`_subThrottleStopped` records that the autosubscribe pass stopped because Steam was throttling, and the
+Close handler reads it to leave that pass's unverified rows queued for a later drain instead of
+dequeuing them. It was module scope and never reset at pass start — `_subCanceled` was reset there,
+this one was not — so after any throttled pass every later Cancel skipped the dequeue and silently left
+rows queued. `_startAutoSubscribe` now clears it beside `_subCanceled`, making it **per-pass**: the
+throttled pass's own Close still keeps its rows queued, and a later pass's Cancel dequeues the rows that
+pass never verified. The throttle stop itself is unchanged — it sets `_subCanceled`, releases the daemon
+and leaves the remaining rows queued. Pinned by `tests/test_subscribe_throttle.py`: two node-driven
+cases run the real `_startAutoSubscribe` and `sub-cancel` handler, one failing against the pre-change
+page because a new pass after a throttled one still skipped the dequeue, the other holding the
+throttled pass's own rows. [web-ui.md](web-ui.md#subscribe-flow)
 
 ### The backup schedule does not survive a daemon restart (issue 82)
 
