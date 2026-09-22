@@ -190,6 +190,42 @@ def is_clickable(state: str) -> bool:
     return state in CLICKABLE_STATES
 
 
+# state -> (action, label) for the detail pane's one subscription control.
+#
+# The control acts on the derived direction, and its wording says what that
+# press does, so no state shows a "Subscribe" button that removes:
+#
+# * an unsubscribed item's ``subscribe`` acts directly (``doSubscribe``);
+# * a subscribed item's ``queue_remove`` only queues its removal -- the owner's
+#   removals are deliberate and recoverable, so the button never unsubscribes
+#   behind one click -- and the marker draws the pending red star;
+# * a ``queued_remove`` item's ``cancel_remove`` cancels the queued removal.
+#
+# Derived here rather than re-derived in the template, so the payload and any
+# future front end read one table.
+SUBSCRIPTION_ACTIONS = {
+    QUEUED_REMOVE: ("cancel_remove", "Cancel Unsubscribe"),
+    DOWNLOADED: ("queue_remove", "Unsubscribe"),
+    SUBSCRIBED: ("queue_remove", "Unsubscribe"),
+    QUEUED: ("subscribe", "Subscribe"),
+    PREVIOUSLY: ("subscribe", "Subscribe"),
+    NEVER: ("subscribe", "Subscribe"),
+}
+
+
+def subscription_action(state: str) -> tuple[str, str]:
+    """``(action, label)`` for the direct subscription control at ``state``.
+
+    ``action`` is ``subscribe`` (act now), ``queue_remove`` (queue the removal)
+    or ``cancel_remove`` (cancel the queued removal); ``label`` is the word the
+    control carries. Raises ``ValueError`` for an unknown state, so a typo
+    cannot silently fall back to "Subscribe".
+    """
+    if state not in SUBSCRIPTION_ACTIONS:
+        raise ValueError(f"unknown subscription state {state!r}")
+    return SUBSCRIPTION_ACTIONS[state]
+
+
 def attach_marker(item: dict) -> dict:
     """Add the whole derived marker to ``item`` in place and return it.
 
@@ -203,6 +239,7 @@ def attach_marker(item: dict) -> dict:
     """
     state = subscription_state(item)
     glyph, colour, css, label = marker_spec(state)
+    action, action_label = subscription_action(state)
     item["subscription_state"] = state
     item["subscription_glyph"] = glyph
     item["subscription_colour"] = colour
@@ -210,4 +247,6 @@ def attach_marker(item: dict) -> dict:
     item["subscription_label"] = label
     item["subscription_tooltip"] = tooltip(state)
     item["subscription_clickable"] = is_clickable(state)
+    item["subscription_action"] = action
+    item["subscription_action_label"] = action_label
     return item

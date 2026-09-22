@@ -211,7 +211,8 @@ def test_a_download_behind_the_web_carries_the_same_marker_both_front_ends(web_c
     marker_keys = [
         "subscription_state", "subscription_glyph", "subscription_colour",
         "subscription_class", "subscription_label", "subscription_tooltip",
-        "subscription_clickable",
+        "subscription_clickable", "subscription_action",
+        "subscription_action_label",
     ]
     assert {key: block[key] for key in marker_keys} == \
         {key: web_item[key] for key in marker_keys}

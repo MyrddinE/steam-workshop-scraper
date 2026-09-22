@@ -306,6 +306,23 @@ are gone, and the pane's `Queue` / `Unqueue` button pair is replaced by the mark
 marker's glyph, colour, CSS class, label, tooltip and clickability all arrive on the payload,
 computed by the server from the shared table, so the page holds no copy of the state vocabulary.
 
+**The pane's one subscription control is worded by direction too.** `subscriptionControl(item)`
+renders a single button (`#btn-subscription`) whose label and action both come from the item's derived
+direction, carried on the payload as `subscription_action` / `subscription_action_label` by the same
+shared table (`SUBSCRIPTION_ACTIONS` in `src/subscription.py`) — so no state can show a **Subscribe**
+button whose press removes:
+
+* `never`, `previously`, `queued` → **Subscribe**, pressing `doSubscribe` (the direct subscribe);
+* `subscribed`, `downloaded` → **Unsubscribe**, pressing `toggleDetailQueue`, which only *queues* the
+  removal. The button never unsubscribes directly: the owner's removals are deliberate and
+  recoverable, and the queue is where they are applied;
+* `queued_remove` → **Cancel Unsubscribe**, pressing `toggleDetailQueue`, which cancels the queued
+  removal.
+
+That is why a subscribed item's press costs no Steam request — it queues, and the marker shows the
+pending red star until the queue is run. A payload that predates the change falls back to
+**Subscribe**, which is the addition direction a queued row meant before the feature.
+
 Clicking the marker calls `toggleDetailQueue(wid)`. `subscribed` used to send nothing — "the only
 action available there would be an unsubscribe, and an accidental unsubscribe is not wanted" — but
 that inertness was deliberately reversed: its click now only queues a removal, and the queue

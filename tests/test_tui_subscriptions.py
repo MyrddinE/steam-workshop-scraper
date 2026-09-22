@@ -138,3 +138,36 @@ async def test_the_queue_button_runs_the_engine_and_shows_progress(mock_config, 
 
     assert "subscribed" in drawn.lower(), "the per-item result must be on screen"
     assert pass_running is False, "the pass must have finished before teardown"
+
+
+@pytest.mark.asyncio
+async def test_the_queue_run_button_and_guidance_are_direction_neutral(mock_config, tmp_path):
+    """The queue holds additions and removals, so the run control names neither.
+
+    A queue of removals must not be run by a button that says Subscribe, and one
+    button cannot name a mixed queue; the rows and the pass tally carry the
+    direction instead.
+    """
+    from src.database import initialize_database, insert_or_update_item
+    db_path = str(tmp_path / "queue_neutral.db")
+    initialize_database(db_path)
+    insert_or_update_item(db_path, {
+        "workshop_id": 1, "title": "T", "fetch_status": 200,
+        "own_subscribed": 1, "is_queued_for_subscription": 1,
+        "own_first_subscribed_at": 1000})
+    config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
+
+    with patch('src.tui.load_config', return_value=config):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+            await pilot.press("l")
+            await pilot.pause(ASYNC_PAUSE)
+            screen = app.screen
+            label = str(screen.query_one("#btn-subscribe-queue", Button).label)
+            status = str(screen.query_one("#subscription-queue-status", Static).render())
+
+    assert "Run Queue" in label, label
+    assert "Subscribe" not in label, \
+        "a removal queue must not be run by a Subscribe button"
+    assert "Run Queue" in status, status

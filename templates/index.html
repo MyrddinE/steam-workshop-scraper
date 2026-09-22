@@ -861,6 +861,27 @@ function _applySub(el, item) {
   el.setAttribute('title', item.subscription_tooltip);
 }
 
+// The detail pane's one subscription control, worded and wired from the item's
+// derived direction (the shared table on the payload). An unsubscribed item's
+// button subscribes directly; a subscribed item's button queues its removal --
+// deliberately recoverable, so a press never unsubscribes behind the owner's
+// back -- and a queued removal's button cancels it. The label always says which
+// of those the press is, so no state shows a "Subscribe" button that removes.
+function subscriptionControl(item) {
+  const action = item.subscription_action || 'subscribe';
+  const label = item.subscription_action_label || 'Subscribe';
+  const onclick = action === 'subscribe'
+    ? `doSubscribe(${item.workshop_id})`
+    : `toggleDetailQueue(${item.workshop_id})`;
+  const title = action === 'subscribe'
+    ? 'Subscribe to this item on Steam now.'
+    : (action === 'cancel_remove'
+       ? 'Cancel the queued removal.'
+       : 'Queue this item for removal; run the subscription queue to apply it.');
+  return `<button id="btn-subscription" onclick="${onclick};return false;"`
+    + ` title="${_escapeHtml(title)}">${label}</button>`;
+}
+
 // Clicking the marker toggles the queue for every state but `downloaded`. The
 // owner reversed the old rule that `subscribed` was inert: its click only queues
 // a removal, and the queue cancels, so an accidental click is recoverable. The
@@ -1486,7 +1507,7 @@ function renderDetail(item) {
     <div class="stat-row"><span class="stat-label">Subscribers:</span> ${fmtCount(subs)} / ${fmtCount(lsubs)}</div>
     <div class="stat-row"><span class="stat-label">Favorites:</span> ${fmtCount(favs)} / ${fmtCount(lfavs)}</div>
     <div class="stat-row"><span class="stat-label">Tags:</span> <small>${tags}</small></div>
-    <p><button onclick="doSubscribe(${item.workshop_id});return false;">Subscribe</button> ${toggle}</p>
+    <p>${subscriptionControl(item)} ${toggle}</p>
     ${notice}
     ${desc ? '<div style="border-left:3px solid var(--pico-muted-border-color);padding-left:.5rem;margin-top:.5rem">'+desc+'</div>' : ''}
   `;

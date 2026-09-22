@@ -491,10 +491,18 @@ would call the same `get_all_creator_ids`.
 
 `s` toggles `is_queued_for_subscription` on the selected item. The flag carries no direction: with it
 set, `own_subscribed` decides — set means a **removal** is queued, clear means an addition — so a
-second `s` on a subscribed item queues its removal and a third cancels it. `l` opens the queue screen
-(`SubscriptionQueueScreen`), which **runs each queued item through `src/subscribe_engine.py` in that
-derived direction** — there are no clickable Steam URLs any more and no browser tabs. Each row is a
-`Static` built with Rich `Text.append`, so a Steam title never reaches a parser (see
+second `s` on a subscribed item queues its removal and a third cancels it. The footer binding's
+description is **fixed at class definition** (`"Queue for Subscription"`, in `app_bindings()`), so it
+cannot name the direction a particular row will take — the same limitation the creator-ignore work
+recorded, where the label that does change with state is a button rather than a binding
+([Ignoring a creator](#ignoring-a-creator-creator-filtered-view) uses `#btn-ignore-creator` for
+exactly this reason). The direction is carried per row instead: the row's marker, its
+`subscribing...` / `unsubscribing...` word while the engine reads it, and its settled status word.
+
+`l` opens the queue screen (`SubscriptionQueueScreen`), which **runs each queued item through
+`src/subscribe_engine.py` in that derived direction** — there are no clickable Steam URLs any more and
+no browser tabs. Each row is a `Static` built with Rich `Text.append`, so a Steam title never reaches
+a parser (see
 [Steam text is escaped before it is rendered](#steam-text-is-escaped-before-it-is-rendered)).
 
 For each item the engine reads the page's server-rendered `#SubscribeItemBtn` and follows the row's
@@ -502,12 +510,15 @@ direction: an addition sends the subscribe POST only when the button says the it
 and records `mark_own_subscribed` from `success: 1`; a removal sends the unsubscribe POST only when
 the button says it *is*, and records `mark_own_unsubscribed` — which clears `own_subscribed` and the
 queue flag and leaves the sticky first-seen stamp, so the row reads `previously`. The confirmation
-read is retired by default and is addition-only. `Subscribe` runs the pass on a worker thread and
-draws each item's outcome in place as it lands. Failures stay queued. Every page read waits the shared
-adaptive web interval, and the pass takes `.pauselock` for its duration and releases it in a `finally`
-— so the daemon's web and image workers pause for the pass and resume even if the engine raises. The
-screen also creates the lock on mount and removes it on unmount, so the queue stays quiet while it is
-open. No live Steam call happens in tests; the engine's fetch and POST seams are patched. See
+read is retired by default and is addition-only. The run button is deliberately direction-neutral
+(**Run Queue**): one press runs a queue that may hold both directions, so a button reading
+`Subscribe` would be wrong for every removal in it, and the row words and the pass tally carry the
+direction instead. It runs the pass on a worker thread and draws each item's outcome in place as it
+lands. Failures stay queued. Every page read waits the shared adaptive web interval, and the pass
+takes `.pauselock` for its duration and releases it in a `finally` — so the daemon's web and image
+workers pause for the pass and resume even if the engine raises. The screen also creates the lock on
+mount and removes it on unmount, so the queue stays quiet while it is open. No live Steam call happens
+in tests; the engine's fetch and POST seams are patched. See
 [data-pipeline.md](data-pipeline.md#subscribe-engine-browser-free) for the engine's semantics and
 [future-plans.md](future-plans.md#retiring-the-subscribe-confirmation-read) for the retirement of the
 confirmation read (step 1, landed).

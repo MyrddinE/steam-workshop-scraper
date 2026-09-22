@@ -3693,6 +3693,7 @@ def test_jump_to_author_enters_single_creator_mode_like_the_tui(web_client, tmp_
 RENDER_DETAIL_DRIVER = """
 const fn = (__FN__);
 const subFn = (__SUB_FN__);
+const subCtrlFn = (__SUB_CTRL__);
 let html = '';
 global.document = { getElementById: () => ({ set innerHTML(v) { html = v; } }) };
 global._showTranslated = true;
@@ -3705,18 +3706,17 @@ global.sizeClass = () => '';
 global.fmtCount = (n) => String(n || 0);
 global._escapeHtml = (s) => String(s == null ? '' : s);
 global.showSubscriptionMarker = subFn;
-// The open-folder control lives in the static bottom bar, so renderDetail only
-// asks a separate helper to enable/disable it; this test is about the pane's own
-// HTML, so the helper is stubbed like the other collaborators above.
+global.subscriptionControl = subCtrlFn;
 global._refreshOpenFolderButton = () => {};
 const base = {
-  workshop_id: 77, creator_steamid: 'Alice', creator_id: '76561198765432109',
+  workshop_id: 77, creator_steamid: '76561198765432109', creator_id: '76561198765432109',
   personaname: 'Alice', has_translation: false,
   display_title_original: 'Mod', title: 'Mod',
   subscription_state: 'never', subscription_glyph: '\\u25cb',
   subscription_colour: '#808080', subscription_class: 'sub-never',
   subscription_label: 'Never subscribed', subscription_tooltip: 'never',
   subscription_clickable: true,
+  subscription_action: 'subscribe', subscription_action_label: 'Subscribe',
 };
 fn(base);
 const never = html;
@@ -3724,7 +3724,8 @@ fn(Object.assign({}, base, {
   subscription_state: 'subscribed', subscription_glyph: '\\u2605',
   subscription_colour: '#ffd700', subscription_class: 'sub-subscribed',
   subscription_label: 'Currently subscribed', subscription_tooltip: 'subscribed',
-  subscription_clickable: false,
+  subscription_clickable: true,
+  subscription_action: 'queue_remove', subscription_action_label: 'Unsubscribe',
 }));
 const subscribed = html;
 fn(Object.assign({}, base, {creator_steamid: null, creator_id: null}));
@@ -3739,16 +3740,19 @@ def test_render_detail_wires_the_author_and_subscription_marker(web_client, tmp_
 
     This runs the served function against a stub pane and inspects the HTML it
     actually builds. The old Queue/Unqueue button pair is gone: the marker is
-    the queue control now, so the pane must not carry a second indicator of the
-    same flag.
+    the queue control now, and the pane's one subscription button takes its word
+    from the payload's derived direction, so a subscribed item says Unsubscribe
+    rather than a Subscribe button whose press removes.
     """
     client, _ = web_client
     script = _served_inline_script(client)
     fn = _extract_function(script, "renderDetail")
     sub_fn = _extract_function(script, "showSubscriptionMarker")
+    sub_ctrl = _extract_function(script, "subscriptionControl")
     result = _run_node(RENDER_DETAIL_DRIVER
                        .replace("__FN__", fn)
-                       .replace("__SUB_FN__", sub_fn), tmp_path)
+                       .replace("__SUB_FN__", sub_fn)
+                       .replace("__SUB_CTRL__", sub_ctrl), tmp_path)
 
     assert "jumpToAuthor('76561198765432109')" in result["never"], \
         "the creator must carry the lossless id into the jump"
@@ -3758,11 +3762,17 @@ def test_render_detail_wires_the_author_and_subscription_marker(web_client, tmp_
     assert ">○</div>" in result["never"]
     assert result["never"].index('data-sub-state="never"') < result["never"].index("<a href="), \
         "the marker must precede the title"
-    # subscribed is not clickable, so the pane carries no action for it.
+    # `subscribed` is clickable now (its press queues the removal), and the
+    # pane's button says so.
     assert 'data-sub-state="subscribed"' in result["subscribed"]
-    assert 'data-sub-clickable="0"' in result["subscribed"]
+    assert 'data-sub-clickable="1"' in result["subscribed"]
     assert ">★</div>" in result["subscribed"]
     assert 'data-sub-clickable="1"' in result["never"]
+    assert ">Subscribe</button>" in result["never"]
+    assert ">Unsubscribe</button>" in result["subscribed"], \
+        "a subscribed item must not offer a Subscribe button"
+    assert "doSubscribe(77)" in result["never"]
+    assert "toggleDetailQueue(77)" in result["subscribed"]
 
     # The affordance this replaced must be gone, not merely hidden.
     for html in result.values():

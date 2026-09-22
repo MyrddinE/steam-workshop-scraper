@@ -1377,10 +1377,12 @@ class SubscriptionQueueScreen(ModalScreen):
         with Vertical(id="subscription-queue-container"):
             yield Label("Subscription Queue", id="subscription-queue-title")
             if not self._items:
-                yield Label("Queue is empty. Press 's' on an item to add it.")
+                yield Label(
+                    "Queue is empty. Press 's' on an item to queue it for "
+                    "subscription, or again on a subscribed item to queue a removal.")
             else:
                 yield Static(
-                    "Press Subscribe to run the queue through the engine. "
+                    "Press Run Queue to run the queue through the engine. "
                     "Row times are estimates.",
                     id="subscription-queue-status",
                 )
@@ -1389,8 +1391,12 @@ class SubscriptionQueueScreen(ModalScreen):
                         self._row_text(item),
                         id=f"sub-queue-item-{item['workshop_id']}",
                     )
+            # Neutral wording on purpose: the queue holds additions and
+            # removals, so a single button cannot name the direction. The rows
+            # and the pass tally carry it instead (the `s` footer binding's
+            # description is fixed at class definition).
             yield Button(
-                "Subscribe", id="btn-subscribe-queue", variant="primary",
+                "Run Queue", id="btn-subscribe-queue", variant="primary",
                 disabled=not self._items,
             )
             yield Button("Close", id="btn-close-subscription-queue")

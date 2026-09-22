@@ -69,6 +69,33 @@ def test_the_item_payload_carries_the_whole_marker(web_client):
     assert item["subscription_label"] == subscription.marker_spec(subscription.NEVER)[3]
     assert item["subscription_tooltip"] == subscription.tooltip(subscription.NEVER)
     assert item["subscription_clickable"] is True
+    assert item["subscription_action"] == "subscribe"
+    assert item["subscription_action_label"] == "Subscribe"
+
+
+def test_the_payload_words_a_queued_removal_as_an_unsubscribe(web_client):
+    """The pane's control must not say Subscribe when its press removes."""
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 8, "title": "T", "fetch_status": 200,
+                                    "own_subscribed": 1, "is_queued_for_subscription": 1})
+
+    item = client.get('/api/item/8').get_json()
+
+    assert item["subscription_state"] == subscription.QUEUED_REMOVE
+    assert item["subscription_action"] == "cancel_remove"
+    assert item["subscription_action_label"] == "Cancel Unsubscribe"
+
+
+def test_the_payload_words_a_plain_subscription_as_an_unsubscribe(web_client):
+    client, db_path = web_client
+    insert_or_update_item(db_path, {"workshop_id": 8, "title": "T", "fetch_status": 200,
+                                    "own_subscribed": 1, "own_first_subscribed_at": 1000})
+
+    item = client.get('/api/item/8').get_json()
+
+    assert item["subscription_state"] == subscription.SUBSCRIBED
+    assert item["subscription_action"] == "queue_remove"
+    assert item["subscription_action_label"] == "Unsubscribe"
 
 
 @pytest.mark.parametrize("columns,state", [
@@ -667,12 +694,59 @@ def test_the_marker_is_inside_the_cell_that_opens_the_pane():
     assert "div.onclick = () => showDetail" in html
 
 
-def test_the_old_queue_buttons_are_gone_from_the_pane():
+def test_the_pane_has_one_direction_aware_control_and_no_queue_button_pair():
+    """The old Queue/Unqueue pair is gone; the marker is still the indicator.
+
+    The pane's one control is rendered by `subscriptionControl`, which takes its
+    word and its handler from the item's derived direction on the payload, so it
+    can say Unsubscribe for a subscribed item without a Queue/Unqueue pair
+    reappearing.
+    """
     html = TEMPLATE.read_text(encoding="utf-8")
-    assert "toggleDetailQueue(${item.workshop_id})" not in html
+    assert ">Queue</button>" not in html
     assert ">Unqueue</button>" not in html
-    # The marker helper is what the pane calls instead.
+    assert "subscriptionControl(item)" in html
+    assert "subscription_action_label" in html
+    # The marker helper is what the pane calls for the indicator.
     assert "showSubscriptionMarker(item)" in html
+
+
+PANE_CONTROL_DRIVER = """
+const _escapeHtml = (s) => String(s);
+const fn = (__FN__);
+const never = fn({workshop_id: 1, subscription_action: 'subscribe',
+                  subscription_action_label: 'Subscribe'});
+const subscribed = fn({workshop_id: 2, subscription_action: 'queue_remove',
+                       subscription_action_label: 'Unsubscribe'});
+const removal = fn({workshop_id: 3, subscription_action: 'cancel_remove',
+                    subscription_action_label: 'Cancel Unsubscribe'});
+// A payload without the new fields (an older block) must fall back safely.
+const legacy = fn({workshop_id: 4});
+console.log(JSON.stringify(
+  {never: never, subscribed: subscribed, removal: removal, legacy: legacy}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_the_pane_control_words_and_wires_the_derived_direction(web_client, tmp_path):
+    """Each state's control says what its press is, and calls the right route.
+
+    An unsubscribed item's press subscribes directly; a subscribed item's press
+    queues its removal; a queued removal's press cancels it. The label comes
+    from the shared table on the payload, never from a literal in the page.
+    """
+    client, _ = web_client
+    fn = _extract_function(_served_inline_script(client), "subscriptionControl")
+    out = _run_node(PANE_CONTROL_DRIVER.replace("__FN__", fn), tmp_path)
+
+    assert "doSubscribe(1)" in out["never"]
+    assert ">Subscribe</button>" in out["never"]
+    assert "toggleDetailQueue(2)" in out["subscribed"], \
+        "a subscribed item's control queues the removal, never acting on Steam"
+    assert ">Unsubscribe</button>" in out["subscribed"]
+    assert "toggleDetailQueue(3)" in out["removal"]
+    assert ">Cancel Unsubscribe</button>" in out["removal"]
+    assert "doSubscribe(4)" in out["legacy"], "an older payload falls back safely"
 
 
 def test_the_overlay_rows_name_the_direction_and_the_official_dequeue():

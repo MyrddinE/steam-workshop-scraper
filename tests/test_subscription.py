@@ -259,6 +259,42 @@ def test_the_subscribed_marker_is_clickable_but_not_a_direct_unsubscribe():
         _item(own_subscribed=1, is_queued_for_subscription=0)) == subscription.SUBSCRIBED
 
 
+# --- the detail pane's one subscription control -----------------------------
+
+def test_the_direct_control_label_follows_the_derived_direction():
+    """No state may show a "Subscribe" button whose next press removes."""
+    assert subscription.subscription_action(subscription.QUEUED_REMOVE) == (
+        "cancel_remove", "Cancel Unsubscribe")
+    for state in (subscription.SUBSCRIBED, subscription.DOWNLOADED):
+        assert subscription.subscription_action(state) == ("queue_remove", "Unsubscribe")
+    for state in (subscription.QUEUED, subscription.PREVIOUSLY, subscription.NEVER):
+        assert subscription.subscription_action(state) == ("subscribe", "Subscribe")
+
+
+def test_every_state_has_a_subscription_action_and_an_unknown_one_is_loud():
+    for state in subscription.STATE_PRECEDENCE:
+        action, label = subscription.subscription_action(state)
+        assert action in ("subscribe", "queue_remove", "cancel_remove")
+        assert label
+    with pytest.raises(ValueError):
+        subscription.subscription_action("nonsense")
+
+
+def test_a_subscribed_item_never_gets_a_subscribe_button():
+    """The lie this replaced: a Subscribe label beside a press that removes."""
+    for state in (subscription.SUBSCRIBED, subscription.DOWNLOADED,
+                  subscription.QUEUED_REMOVE):
+        _action, label = subscription.subscription_action(state)
+        assert label != "Subscribe"
+
+
+def test_attach_marker_carries_the_direct_control():
+    item = subscription.attach_marker(
+        _item(own_subscribed=1, is_queued_for_subscription=1))
+    assert item["subscription_action"] == "cancel_remove"
+    assert item["subscription_action_label"] == "Cancel Unsubscribe"
+
+
 def test_every_css_class_is_distinct():
     assert len({subscription.marker_spec(s)[2] for s in subscription.STATE_PRECEDENCE}) == len(
         subscription.STATE_PRECEDENCE)
