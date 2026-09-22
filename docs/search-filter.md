@@ -184,7 +184,36 @@ FTS5 tokenizes text by whitespace and punctuation (default unicode61 tokenizer).
 
 ### Performance
 
-`LIKE '%text%'` can't use B-tree indexes (leading wildcard defeats the index). FTS5's inverted index finds matching documents in O(log n). On 580K items, a LIKE query could take seconds; FTS5 returns in milliseconds. The FTS5 approach is used exclusively for the "Full Text" field; individual field searches still use LIKE.
+`LIKE '%text%'` cannot use a B-tree index — the leading wildcard defeats it — so the `contains` and
+`does_not_contain` operators scan. `workshop_fts`'s inverted index answers the same kind of question in
+O(log n), and the **Full Text** field is the only one routed through it; every other field's `contains`
+is the scan.
+
+*Measured 2026-09-21* on the pulled production snapshot (2,528,304 rows, 2.83 GB, warm page cache, this
+container): `title LIKE '%genshin%'` returned 18,041 rows in **0.27 s**,
+`extended_description LIKE '%genshin%'` returned 253 in **0.11 s**, and the FTS5 equivalent returned
+24,060 documents in under **0.01 s**. An earlier version of this section claimed a LIKE query "could
+take seconds" at 580K items; at more than four times that size it is a few hundred milliseconds. So the
+scan is not a present-tense problem — but it is linear in the library and sensitive to the page cache,
+where the FTS index is neither.
+
+If substring search ever does become a bottleneck, the options in order of how much meaning they
+preserve:
+
+1. **Leave it.** The scan stays below the interaction threshold at this size.
+2. **A trigram FTS5 index** (`tokenize='trigram'`) — the only option that keeps `contains` meaning
+   "substring" while answering it from an index: SQLite uses a trigram index for `LIKE`/`GLOB` patterns
+   of three characters or more. It costs a second index, kept current by the same triggers, which on a
+   2.8 GB library is real storage.
+3. **Route `contains` through the existing `workshop_fts`**, which changes the operator's meaning from
+   substring to whole-token matching — a product decision, not an optimisation.
+
+**Not verified here: the index's current integrity.** `INSERT INTO workshop_fts(workshop_fts)
+VALUES('integrity-check')` is the tool, but it writes to the index's shadow tables and the pulled
+snapshot is opened read-only, so it could not be run. The index was found drifted once — 640,471
+documents against 1,725,544 items, 62.9% of the library invisible to Full Text — and migration 14→15
+rebuilt it and installed the sync triggers that have maintained it since. Run that one statement
+against a writable copy to confirm it today.
 
 ---
 
