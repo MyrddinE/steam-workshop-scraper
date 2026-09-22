@@ -58,7 +58,11 @@ Two layers of validation: a capture-phase `blur` event listener on the document 
 2. Results are rendered as `.grid-cell` divs inside `#results-grid`
 3. Each cell shows: preview image, or "pending"/"no image" when nothing has been recorded, or — when the server has already answered for that preview — the answer itself drawn in red at half the cell's height (a `404`, a `410`, or the content type it served instead). Plus title (2-line clamp), file size (color-coded via `sizeClass`), and Wilson subscriber/favorite scores (color-coded via `wClass`)
 4. A pending marker in the corner names the stage the item is waiting on, by speed, colour and — on hover — a `title`: image rotates at 1x and is vivid green, translation 4x slower and mid green, the web scrape 16x slower and grey. `_pendingStage` picks the **fastest** stage that is pending, so a marker about to clear is never hidden behind a slower one, and the slow grey marker — which may stay for hours — is the quietest thing on the cell. `_applyPending` sets one `pending-<stage>` class, clearing the others, and writes the stage's wording onto the marker's `title`. The durations, colours and wording are mirrored from `src/pending.py`, and `tests/test_pending.py` fails if any of them disagree — the wording is kept in the shared table rather than the template, because the TUI draws the same state and a page-local description could drift from it. `api_priority` is deliberately not a stage: a list only shows items the API has already returned, so a pending refresh is not content anyone is waiting on.
-4. `_observeNextBatch()` handles infinite scroll: it releases the previous batch's observation, then watches the first cell of the batch just rendered — or, when that cell is already on screen, asks for the next page at once
+4. `_observeNextBatch()` handles infinite scroll: it releases the previous batch's observation, then watches the first cell of the batch just rendered — or, when that cell is already inside the grid's own scroll box, asks for the next page at once
+
+`doSearch` is the page's one guard against overlapping work: it sets `loading` and clears it on every exit path (`try`/`finally` around `_doSearchBody`), so a rejected `fetch` or `/api/search`'s `{"error": ...}` body at status 500 cannot leave the page wedged — every later search, sort, pagination request and author jump passes through that flag. A body that is not an array is treated as that error rather than iterated as a batch of zero rows; `items.forEach` threw on the route's JSON object and left `loading` set (issue 79, closed).
+
+**A user action supersedes an in-flight search.** Each search carries a generation. A *reset* (a search, a sort, an overlay change or an author jump) that arrives while a search is in flight replaces it, and the older search sees the newer generation and discards its result rather than drawing it over the newer one; a `console.debug` names the supersede. Two page requests still cannot overlap: a non-reset arriving while any search is in flight is dropped, because both would append the same offset. `doSearch` answers `'applied'`, `'superseded'` or `'failed'` so a caller can tell a supersede from a failure — the two need opposite handling, and only a caller that caused no useful result may react to it. This is **defence in depth beside the restore bound, not the fix for the runaway** — the restore no longer pages long enough to hold `loading` for it to matter — but a user action must never be silently discarded, which is what made a creator jump do nothing.
 
 Every number the grid and the detail pane show is formatted in the browser: `fmtCount` (three
 significant digits with a K/M suffix) for views and subscription counts, `fmtExact` (grouped exact
@@ -74,7 +78,7 @@ The entry is versioned and shape-checked like the statistics panel's ordering en
 
 **Precedence is one-sided.** A browser that has been to the page before has its own record of what the user was doing, so local state wins outright and `/api/state` is not even fetched. Only when there is no usable entry — a first visit, cleared storage, or a rejected shape — does the page seed from the TUI's saved state.
 
-**Restoring a deep view.** After the first search, `_restoreView` keeps calling `doSearch(false)` — the function that owns `currentOffset` and the infinite-scroll observation — until the grid is tall enough for the saved scroll position and the selected item is present, re-opens that item, then applies the scroll last: `showDetail` focuses the cell and focus can move the grid, so the saved position has to be the final word. Paging is capped at `MAX_RESTORE_BATCHES` per pass, and that cap is **not** the protection it reads as: `_restoreView` runs two passes, so one page load can issue up to 80 searches and append up to 2,000 items with no user action, and the pass that waits for the selected item has no early exit when that item can never appear — an id the filters exclude, or one the search now hides as settled — so it runs to the cap every time. That is **issue 78**, open: the loop, not the sentinel, is what the owner saw as the grid loading on its own, and because `doSearch` drops a call while one is in flight it is also why a creator jump can do nothing. A reset `doSearch` clears the selection because a new result set may not contain it. Writes are suppressed while a restore runs (`_restoringView`), so the page cannot overwrite the state it is reading. Saves happen on a throttled `#results-grid` `scroll` listener, at the end of a reset `doSearch`, when a detail pane opens (`showDetail`), and on `pagehide`.
+**Restoring a deep view.** After the first search, `_restoreView` calls `doSearch(false)` — the function that owns `currentOffset` and the infinite-scroll observation — only to rebuild the saved scroll position, then applies that scroll last: `showDetail` focuses the cell and focus can move the grid, so the saved position has to be the final word. The pass is bounded by intent rather than a batch budget: `MAX_RESTORE_SCROLL_BATCHES = 5` pages at most, and `_loadUntil` ends the walk as soon as `hasMore` is false, so a shallow position is restored and a deeper one lands at the top. The saved **selected** item follows a different rule — it is re-opened only when the content the scroll pass loaded already holds it, and a `console.debug` names the drop. The page never pages *for* a selection: an id the filters exclude, or one the search now hides as settled, can never appear, and hunting for it is what made one page load issue dozens of unprompted searches (issue 78, closed). A reset `doSearch` clears the selection because a new result set may not contain it. Writes are suppressed while a restore runs (`_restoringView`), so the page cannot overwrite the state it is reading. Saves happen on a throttled `#results-grid` `scroll` listener, at the end of a reset `doSearch`, when a detail pane opens (`showDetail`), and on `pagehide`.
 
 ### Wilson Cutoffs
 
@@ -87,17 +91,20 @@ The entry is versioned and shape-checked like the statistics panel's ordering en
 ### `_observeNextBatch`
 
 After each `doSearch` batch, `doSearch` passes the batch's first cell — the cell it built for index 0 — to `_observeNextBatch`:
-- It releases whatever cell the observer was watching before, so an older batch's cell, still in the DOM, cannot fire a second time when it scrolls back into view
-- If the first cell is already within the viewport → triggers `doSearch(false)` immediately (nothing is observed)
-- If it is below the viewport → `_scrollObserver.observe(firstCell)`
+- It releases whatever cell the observer was watching before, before any other test, so an older batch's cell, still in the DOM, cannot fire a second time when it scrolls back into view — and so the reset path's `_observeNextBatch(null)` actually drops the node the grid just detached
+- If the first cell is inside the grid's own scroll box → records the batch and schedules `doSearch(false)` on the next tick (nothing is observed); arming the same batch again while that load is pending is a no-op
+- If it is outside that box → `_scrollObserver.observe(firstCell)`
+- With `hasMore` false nothing is armed and nothing is scheduled
+
+The reference box is **the grid, not the window**. `#results-grid` is `overflow-y: auto` with `flex: 1; min-height: 0`, so it clips its own content: a cell below its visible bottom can still sit inside a tall window, and measuring the cell against `window.innerHeight` asked for a page the user could not see, one after another. `_observeNextBatch` compares the cell's rect against `grid.getBoundingClientRect()` — below the grid's top edge and above its bottom edge (issue 80, closed).
 
 Nothing is inserted into the grid, so infinite scroll consumes no grid cell and no later cell shifts column.
 
 ### `IntersectionObserver`
 
-A single observer watches the newest batch's first cell. When that cell enters the viewport, it fires `doSearch(false)`. No `rootMargin` — the cell is the first unseen item, so the observer fires exactly when it scrolls into view.
+A single observer watches the newest batch's first cell. When that cell enters the grid, it fires `doSearch(false)`. No `rootMargin` — the cell is the first unseen item, so the observer fires exactly when it scrolls into view.
 
-The observer is created once at page load. `_observeNextBatch` `unobserve`s the previous batch's cell and then `_scrollObserver.observe(firstCell)` each time a batch renders. The observer guards `currentOffset > 0` to prevent firing before the initial search.
+The observer is created once at page load, **rooted at `#results-grid`** (`root: document.getElementById('results-grid')`), so it measures against the box the user actually sees rather than the window. Its callback matches the entry's `target` against `_observedCell` and acts only on that record: a callback can carry records for targets observed earlier, so `entries[0]` was not necessarily the armed cell, and a released cell's record decided loads. `_observeNextBatch` `unobserve`s the previous batch's cell and then `_scrollObserver.observe(firstCell)` each time a batch renders. The observer guards `currentOffset > 0` to prevent firing before the initial search.
 
 When `doSearch(reset=true)` clears the grid (`innerHTML = ''`), the observed cell detaches with the grid content, so the reset path calls `_observeNextBatch(null)` to drop the observation; the fresh batch's first cell is observed by the `_observeNextBatch` call at the end of `doSearch`.
 
@@ -222,6 +229,17 @@ same routine a reload of a saved view runs. The snapshot is **in memory**, like 
 `localStorage` stays the view Return restores even if the search or the scroll listener runs in
 between. Returning re-opens the item and puts the scroll back, which the TUI's Return does not; a
 browser can afford it and the mode's point is that a half-restore is worse than none.
+
+The jump is `async` because the outcome of its search decides whether author mode may stay. `doSearch`
+answers `'applied'`, `'superseded'` or `'failed'`. An **applied** jump owns the grid and does nothing
+further. A **superseded** jump was replaced by a newer action (a sort, an overlay change, another
+search) that already ran with the author row in place, so the screen is correct and the jump does
+nothing — restoring the pre-jump snapshot would re-run a reset that discards the action the user just
+took. A **failed** jump (rejected fetch, non-array body, a thrown render) cleared the grid with its
+reset and never drew a result set, so it puts the `_preJumpView` snapshot back through the same
+`returnFromAuthor()` path Return uses, with a `console.warn` so a snap-back is visible. The failure the
+owner saw ("the inability to click to an author") was the restore loop holding `loading` so the jump's
+search was dropped; it was a symptom of the runaway, not a fault in the jump.
 
 `creatorId` comes from the payload's `creator_id`, which is a string. A SteamID64 is seventeen digits
 — beyond the range a JavaScript number represents exactly — so a numeric field would round in
@@ -603,7 +621,7 @@ monotonic `t` (milliseconds since the page installed the trace) and
 | `click` | `id`, `wid`, `label` of the clicked control |
 | `scroll` | `scroll_top`, `scroll_height`, `client_height`, throttled to one record per settle window |
 | `sort_change`, `overlay_change` | `id` and the new `value` |
-| `do_search` | `phase` is `enter`, `dropped` or `done`; entry holds `reset`, `offset`, `filters` (count), `sort_by`, `sort_order`, `overlay`; `dropped` names the `loading` guard that swallowed it; `done` holds `batch`, `offset`, `has_more`, `loading` |
+| `do_search` | `phase` is `enter`, `superseded`, `dropped` or `done`; entry holds `reset`, `offset`, `filters` (count), `sort_by`, `sort_order`, `overlay`; `superseded` is a reset arriving while a search is in flight (it replaces it), `dropped` is a page request arriving then (two would append the same offset); `done` holds `outcome` (`applied`, `superseded` or `failed`), `batch`, `offset`, `has_more`, `loading` |
 | `fetch` | `method`, `path`, `body` (a summary: `{kind: "search", filters, subscribed, sort_by, offset}`, `{kind: "ids", ids}`, or a key list — never the whole payload), `ms`, `status`, and `items` (the response array's length) where cheap |
 | `observe_next_batch` | `branch` (`already_visible`, `observe`, `skip` or `reset`), `rect_top` beside `inner_height`, `scroll_top`/`client_height`, and the cell `released`/`armed` |
 | `intersection` | `is_intersecting`, the entry's `target`, whether it `matched_observed` (`_observedCell`), and `entry_count` |
