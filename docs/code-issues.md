@@ -15,28 +15,6 @@ the production database on 2026-09-12.
 
 ## Open
 
-### The backup schedule does not survive a daemon restart (issue 82)
-
-Found 2026-09-22, asking why the outbox's only database snapshot was four days old while the daemon had
-been up and down across that period.
-
-`BackupThread` decides when to snapshot from `self._next_due`, set in `__init__` to `now +
-interval_seconds` and held **in memory only** — the name appears nowhere else in the source, and nothing
-records when the last snapshot was taken. Every daemon start therefore defers the first scheduled snapshot
-by a full `backup_interval_seconds`, so a daemon restarted more often than once per interval never reaches
-its due time at all. It is silent about it: the log shows another `Backup thread started (interval=…)` and
-nothing about the deferral.
-
-The fallback is the closing snapshot (`Daemon._closing_snapshot`), which is not a schedule: it runs only on
-a graceful stop **and only when every worker exited inside `SHUTDOWN_BUDGET_SECONDS`**. A worker
-overrunning that budget skips it with a warning; a crash or a kill skips it without one.
-
-The consequence is that the snapshot in the outbox can be arbitrarily stale while every indication the
-owner has says backups are enabled, and a pull then collects it as though it were current. This is not the
-free-space refusal or a verification failure — both have their own log lines and neither is this defect.
-See [failure-capture.md](failure-capture.md) for the backup's retention and [threading.md](threading.md)
-for the worker lifecycle.
-
 ### A throttled pass leaves the overlay's cancellation dequeue disabled (issue 81)
 
 `_subThrottleStopped` is set when the autosubscribe overlay stops a pass because Steam is throttling, and
@@ -51,6 +29,21 @@ the dequeue and leaves rows queued. Found 2026-09-22 while implementing the over
 
 Removed from the list above rather than marked resolved. Each is now documented as current
 behaviour, or covered by a test:
+
+### The backup schedule does not survive a daemon restart (issue 82)
+
+`BackupThread` now records the moment of each successful snapshot in the daemon state file beside the
+database (`.daemon_state.yaml`, section `backup`, key `last_snapshot_at`) — written only after the copy
+verified and the manifest published it, so a failed snapshot leaves the previous record — and derives the
+next due time from it on start: a record that is missing, unparseable or older than
+`backup_interval_seconds` takes a snapshot after a short grace, one inside the interval waits out the
+remainder. A daemon restarted more often than the interval therefore snapshots at least once per interval
+instead of never, and a restart loop cannot take more than one copy per interval; the start line logs the
+last snapshot's age and the next due time. The closing snapshot is unchanged. Pinned by
+`tests/test_backup.py` — a record an interval old snapshots shortly after start, a recent one waits out
+the remainder, a missing or corrupt one is treated as overdue, a failed snapshot leaves the record
+untouched, and a simulated restart loop takes one snapshot per interval — each failing against the
+pre-change code. [failure-capture.md](failure-capture.md#retention)
 
 ### The web overlay's row timer replaced its countdown with an elapsed readout
 

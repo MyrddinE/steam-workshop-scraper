@@ -463,8 +463,13 @@ class Daemon:
         self.backup_interval_seconds = float(daemon_config.get("backup_interval_seconds") or 0)
         self._backup_worker = None
         if self.outbox_dir and self.backup_interval_seconds > 0:
+            # The daemon's own store, not a new one: the store's read-modify-write
+            # lock must be shared with the pacing writers, or a backup record and
+            # a delay update could clobber each other. The record it keeps is what
+            # lets the schedule survive a restart.
             self._backup_worker = BackupThread(
-                self.db_path, self.outbox_dir, self.backup_interval_seconds)
+                self.db_path, self.outbox_dir, self.backup_interval_seconds,
+                state_store=self.state_store)
             logging.info(
                 "Database backup enabled: outbox=%s interval=%ss",
                 self.outbox_dir, self.backup_interval_seconds)

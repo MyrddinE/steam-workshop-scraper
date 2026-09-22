@@ -5,10 +5,11 @@ import logging
 import os
 import sqlite3
 import types
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 from src import backup
 from src.backup import (
@@ -19,6 +20,7 @@ from src.backup import (
     update_manifest,
     verify_snapshot,
 )
+from src.daemon_state import StateStore, state_path_for
 from src.database import get_connection, initialize_database, insert_or_update_item
 
 
@@ -556,4 +558,259 @@ def test_snapshot_now_refusal_returns_none_and_logs_once(monkeypatch, db_path, t
 
     assert caplog.text.count("Database backup failed (scrape loop unaffected)") == 1
     assert not os.path.exists(worker.dest_path)
+
+
+# ── the schedule survives a restart ──────────────────────────────────────────
+#
+# `_next_due` used to live only in memory, so every daemon start deferred the
+# first snapshot by a fresh `backup_interval_seconds`; a daemon restarted more
+# often than that never snapshotted at all. The moment a snapshot verified and
+# was published is now recorded in the daemon state file beside the database,
+# and the next due time is derived from it on start. The clock is driven here
+# rather than slept on, so these pin timing without waiting for it.
+
+# Read back through literal section/key names, not the module's constants, so
+# the test states the on-disk contract instead of echoing the implementation.
+_BACKUP_STATE_SECTION = "backup"
+_BACKUP_STATE_KEY = "last_snapshot_at"
+_STARTUP_GRACE_SECONDS = 5.0
+
+
+class _FakeClock:
+    """A clock the test owns; ``sleep`` advances it instead of blocking."""
+
+    def __init__(self, now: float = 1_700_000_000.0):
+        self.now = now
+
+    def time(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _iso(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+
+
+def _state_file(db_path: str) -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(db_path)), ".daemon_state.yaml")
+
+
+def _stored_record(db_path: str):
+    """The recorded last-snapshot time, read straight from the YAML file."""
+    path = _state_file(db_path)
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as handle:
+        document = yaml.safe_load(handle) or {}
+    section = document.get(_BACKUP_STATE_SECTION) or {}
+    return section.get(_BACKUP_STATE_KEY) if isinstance(section, dict) else None
+
+
+def _seed_record(db_path: str, timestamp: float) -> None:
+    StateStore(state_path_for(db_path)).save(
+        {_BACKUP_STATE_SECTION: {_BACKUP_STATE_KEY: _iso(timestamp)}})
+
+
+def _drive(worker: BackupThread, clock: _FakeClock, until: float) -> None:
+    """Run the worker's loop on ``clock`` until the clock reaches ``until``."""
+    original_sleep = clock.sleep
+
+    def sleep_and_stop(seconds: float) -> None:
+        clock.now += seconds
+        if clock.now >= until:
+            worker.running = False
+
+    clock.sleep = sleep_and_stop
+    try:
+        worker.run()
+    finally:
+        clock.sleep = original_sleep
+
+
+def _count_snapshots(monkeypatch, clock: _FakeClock) -> list:
+    """Wrap the real snapshot call, recording the fake-clock moment of each."""
+    moments: list = []
+    real = backup.snapshot_database
+
+    def counted(db, dest):
+        moments.append(clock.now)
+        return real(db, dest)
+
+    monkeypatch.setattr(backup, "snapshot_database", counted)
+    return moments
+
+
+def _populate(db_path) -> None:
+    insert_or_update_item(db_path, {"workshop_id": 1, "title": "A", "api_fetched_at": 1})
+
+
+def _raise_boom(*_args, **_kwargs):
+    raise RuntimeError("boom")
+
+
+def test_a_successful_snapshot_records_when_it_happened(monkeypatch, db_path, tmp_path):
+    """The record is the schedule's memory, so a success must leave one."""
+    _populate(db_path)
+    clock = _FakeClock()
+    monkeypatch.setattr(backup, "time", clock)
+    worker = BackupThread(db_path, str(tmp_path / "outbox"), 3600)
+
+    assert worker.snapshot_now() is not None
+
+    record = _stored_record(db_path)
+    assert record is not None
+    assert datetime.fromisoformat(record).timestamp() == clock.now
+
+
+def test_a_record_one_interval_old_snapshots_shortly_after_start(monkeypatch, db_path, tmp_path):
+    """A record that is already overdue must not wait a fresh interval.
+
+    This is the defect: `_next_due` was `start + interval`, ignoring the record,
+    so this thread would not snapshot until a full interval after start.
+    """
+    _populate(db_path)
+    clock = _FakeClock()
+    monkeypatch.setattr(backup, "time", clock)
+    interval = 3600
+    _seed_record(db_path, clock.now - interval)
+    outbox = str(tmp_path / "outbox")
+    worker = BackupThread(db_path, outbox, interval)
+
+    _drive(worker, clock, clock.now + 10)
+
+    assert os.path.isfile(os.path.join(outbox, "db", "workshop-backup.db")), (
+        "the record is one interval old, so the snapshot is due at once (after the grace), "
+        "not a fresh interval after start")
+    assert _stored_record(db_path) is not None
+
+
+def test_a_recent_record_waits_out_the_remainder(monkeypatch, db_path, tmp_path):
+    """Inside the interval the daemon waits the remainder; it does not snapshot at once."""
+    _populate(db_path)
+    clock = _FakeClock()
+    monkeypatch.setattr(backup, "time", clock)
+    interval = 3600
+    last = clock.now - 100
+    _seed_record(db_path, last)
+    outbox = str(tmp_path / "outbox")
+    moments = _count_snapshots(monkeypatch, clock)
+
+    early = BackupThread(db_path, outbox, interval)
+    _drive(early, clock, clock.now + 20)
+    assert moments == [], "a recent record is not a reason to take a snapshot at start"
+
+    later = BackupThread(db_path, outbox, interval)
+    _drive(later, clock, last + interval + 5)
+    assert moments, "once the interval since the record passes, the remainder is all that is left"
+    assert moments[0] <= last + interval + _STARTUP_GRACE_SECONDS
+
+
+def test_a_missing_record_is_overdue(monkeypatch, db_path, tmp_path):
+    """No record at all is the first-run case and must snapshot after the grace."""
+    _populate(db_path)
+    clock = _FakeClock()
+    monkeypatch.setattr(backup, "time", clock)
+    outbox = str(tmp_path / "outbox")
+    worker = BackupThread(db_path, outbox, 3600)
+
+    _drive(worker, clock, clock.now + 10)
+
+    assert os.path.isfile(os.path.join(outbox, "db", "workshop-backup.db"))
+
+
+def test_a_corrupt_record_is_treated_as_no_record(monkeypatch, db_path, tmp_path):
+    """An unparseable value is corruption, not an error: it means "overdue"."""
+    _populate(db_path)
+    clock = _FakeClock()
+    monkeypatch.setattr(backup, "time", clock)
+    with open(_state_file(db_path), "w", encoding="utf-8") as handle:
+        handle.write(f"{_BACKUP_STATE_SECTION}:\n  {_BACKUP_STATE_KEY}: not-a-timestamp\n")
+    outbox = str(tmp_path / "outbox")
+    worker = BackupThread(db_path, outbox, 3600)
+
+    _drive(worker, clock, clock.now + 10)
+
+    assert os.path.isfile(os.path.join(outbox, "db", "workshop-backup.db"))
+
+
+def test_an_unreadable_record_is_treated_as_no_record(monkeypatch, db_path, tmp_path):
+    """A state file that cannot even be parsed behaves like a missing one."""
+    _populate(db_path)
+    clock = _FakeClock()
+    monkeypatch.setattr(backup, "time", clock)
+    with open(_state_file(db_path), "wb") as handle:
+        handle.write(b"\x00\xffnot yaml at all: [")
+    outbox = str(tmp_path / "outbox")
+    worker = BackupThread(db_path, outbox, 3600)
+
+    _drive(worker, clock, clock.now + 10)
+
+    assert os.path.isfile(os.path.join(outbox, "db", "workshop-backup.db"))
+
+
+def test_a_far_future_record_is_treated_as_corruption(monkeypatch, db_path, tmp_path):
+    """A timestamp beyond the interval cannot be a real snapshot; ignore it."""
+    _populate(db_path)
+    clock = _FakeClock()
+    monkeypatch.setattr(backup, "time", clock)
+    _seed_record(db_path, clock.now + 10 * 365 * 24 * 3600)
+    outbox = str(tmp_path / "outbox")
+    worker = BackupThread(db_path, outbox, 3600)
+
+    _drive(worker, clock, clock.now + 10)
+
+    assert os.path.isfile(os.path.join(outbox, "db", "workshop-backup.db"))
+
+
+def test_a_failed_snapshot_leaves_the_record_untouched(monkeypatch, db_path, tmp_path):
+    """Only a published snapshot may move the record; a failure must not look like one."""
+    _populate(db_path)
+    clock = _FakeClock()
+    monkeypatch.setattr(backup, "time", clock)
+    interval = 3600
+    outbox = str(tmp_path / "outbox")
+    worker = BackupThread(db_path, outbox, interval)
+
+    # A real success first, so the record is known to be written on success.
+    assert worker.snapshot_now() is not None
+    assert _stored_record(db_path) is not None
+
+    # Now make it overdue and let the snapshot fail. The record must stay put,
+    # so the next start still sees the backup as due.
+    seeded = _iso(clock.now - interval)
+    _seed_record(db_path, clock.now - interval)
+    monkeypatch.setattr(backup, "snapshot_database", _raise_boom)
+    failing = BackupThread(db_path, outbox, interval)
+    _drive(failing, clock, clock.now + 20)
+
+    assert _stored_record(db_path) == seeded
+
+
+def test_a_restart_loop_takes_one_snapshot_per_interval(monkeypatch, db_path, tmp_path):
+    """Restarts shorter than the interval must neither starve nor multiply copies.
+
+    The old code took none at all here (every restart waited a fresh interval
+    that never arrived); the record makes the interval absolute across restarts,
+    while a restart the moment it elapses waits out only the remainder.
+    """
+    _populate(db_path)
+    clock = _FakeClock()
+    monkeypatch.setattr(backup, "time", clock)
+    interval = 3600
+    outbox = str(tmp_path / "outbox")
+    moments = _count_snapshots(monkeypatch, clock)
+
+    start = clock.now
+    span = 4 * interval
+    while clock.now < start + span:
+        worker = BackupThread(db_path, outbox, interval)
+        _drive(worker, clock, clock.now + 100)  # restarted every 100 s
+
+    # At least one per interval (no starvation) and no two closer than the interval.
+    assert len(moments) >= span // interval
+    assert all(b - a >= interval for a, b in zip(moments, moments[1:])), moments
+    assert moments[0] <= start + _STARTUP_GRACE_SECONDS
+    assert _stored_record(db_path) is not None
 

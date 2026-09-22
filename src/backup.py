@@ -10,8 +10,9 @@ good (opens, ``PRAGMA quick_check`` returns ``ok``, non-empty, and its
 ``workshop_items`` row count matches the source). A failed backup therefore can
 never destroy the last known-good copy.
 
-Stdlib only, and deliberately cross-platform: this runs on Windows in
-production, so there are no POSIX-only calls, no ``fcntl`` and no ``SIGALRM``.
+Stdlib plus the project's cross-platform daemon-state store, and deliberately
+cross-platform: this runs on Windows in production, so there are no POSIX-only
+calls, no ``fcntl`` and no ``SIGALRM``.
 """
 
 import hashlib
@@ -24,8 +25,23 @@ import threading
 import time
 from datetime import datetime, timezone
 
+from src.daemon_state import StateStore, state_path_for
+
 # Name of the snapshot inside the outbox, relative to ``<outbox_dir>/db``.
 DB_SNAPSHOT_REL_PATH = "db/workshop-backup.db"
+
+# The daemon state section that remembers when the backup last succeeded. It
+# sits beside the database with every other worker's restart-surviving state
+# rather than in the outbox: it is this daemon's schedule, not an artifact to
+# pull, and the store's atomic read-modify-write is already shared with the
+# pacing writers. Deriving the due time from it is what stops a restart from
+# deferring the next snapshot by a fresh interval (issue 82).
+BACKUP_SECTION = "backup"
+LAST_SNAPSHOT_KEY = "last_snapshot_at"
+
+# How long after start an overdue (or first) snapshot waits, so migrations and
+# startup settling finish before a full copy of the database is taken.
+STARTUP_GRACE_SECONDS = 5.0
 
 # Suffix appended to a destination path to build the same-directory temp file.
 _TEMP_SUFFIX = ".tmp"
@@ -59,6 +75,11 @@ class BackupError(Exception):
 def _utc_now_iso() -> str:
     """Current UTC time as an ISO-8601 string."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _iso_from_epoch(when: float) -> str:
+    """A wall-clock time as an ISO-8601 UTC string, for the start decision line."""
+    return datetime.fromtimestamp(when, timezone.utc).isoformat()
 
 
 def _remove_quietly(path: str) -> None:
@@ -522,16 +543,33 @@ class BackupThread(threading.Thread):
     stop it by setting ``running = False`` then joining. The loop sleeps in
     short increments so a shutdown request is honoured promptly instead of
     waiting out the whole interval.
+
+    The schedule outlives the process. The moment a snapshot verified and was
+    published is written to the daemon state file beside the database
+    (:data:`BACKUP_SECTION`), and :meth:`run` derives the next due time from that
+    record: a record older than the interval (or no record at all) takes one
+    after :data:`STARTUP_GRACE_SECONDS`, and one inside the interval waits out
+    the remainder. A daemon restarted more often than the interval therefore no
+    longer starves the backup, while a restart loop cannot take more than one
+    full copy per interval. This is deliberately *not* "snapshot on every
+    start": that would take a full database copy per restart.
     """
 
-    def __init__(self, db_path: str, outbox_dir: str, interval_seconds: float):
+    def __init__(self, db_path: str, outbox_dir: str, interval_seconds: float,
+                 state_store: StateStore | None = None):
         super().__init__(daemon=True)
         self.db_path = db_path
         self.outbox_dir = outbox_dir
         self.interval_seconds = max(1.0, float(interval_seconds))
         self.running = True
         self.dest_path = os.path.join(outbox_dir, *DB_SNAPSHOT_REL_PATH.split("/"))
-        self._next_due = time.time() + self.interval_seconds
+        # The daemon hands over its own store so the lock guarding the store's
+        # read-modify-write is shared with the pacing writers; a standalone
+        # worker derives the identical path and keeps its own lock.
+        self.state_store = (state_store if state_store is not None
+                            else StateStore(state_path_for(db_path)))
+        # Derived by :meth:`run` from the persisted record; ``None`` until then.
+        self._next_due = None
 
     def snapshot_now(self):
         """Take one snapshot and publish it. Never raises.
@@ -544,6 +582,10 @@ class BackupThread(threading.Thread):
             metadata = snapshot_database(self.db_path, self.dest_path)
             entry = build_db_manifest_entry(self.outbox_dir, self.dest_path, metadata)
             update_manifest(self.outbox_dir, entry)
+            # Only now, after the copy verified and the manifest published it,
+            # may the record move: a failed snapshot that left the record fresh
+            # would claim protection the outbox does not have.
+            self._record_successful_snapshot()
             logging.info(
                 "Database backup published to %s (%s bytes, %s rows)",
                 self.dest_path, metadata["bytes"], metadata["rows"],
@@ -553,11 +595,77 @@ class BackupThread(threading.Thread):
             logging.error("Database backup failed (scrape loop unaffected): %s", exc)
             return None
 
-    def run(self):
+    def _read_last_snapshot_at(self):
+        """The recorded time of the last successful snapshot, or ``None``.
+
+        Never raises: a missing section, a value of the wrong type, an
+        unparseable timestamp or an unreadable file all mean the same thing to
+        the schedule -- no usable record, so the snapshot is overdue.
+        """
+        try:
+            section = self.state_store.load().get(BACKUP_SECTION)
+            if not isinstance(section, dict):
+                return None
+            raw = section.get(LAST_SNAPSHOT_KEY)
+            if not isinstance(raw, str):
+                return None
+            moment = datetime.fromisoformat(raw)
+            if moment.tzinfo is None:
+                # A hand-edited value without an offset is read as UTC rather
+                # than the machine's local zone, so it cannot shift silently.
+                moment = moment.replace(tzinfo=timezone.utc)
+            return moment.timestamp()
+        except (ValueError, TypeError, OSError, OverflowError) as exc:
+            logging.warning(
+                "Ignoring the unusable backup record in %s (%s); treating the "
+                "snapshot as due.", self.state_store.path, exc)
+            return None
+
+    def _record_successful_snapshot(self) -> None:
+        """Remember when this snapshot succeeded. Never raises.
+
+        A record that cannot be written costs one extra snapshot after the next
+        restart, which is the safe direction; letting the write escape would
+        make a backup problem look like a scrape problem.
+        """
+        try:
+            stamp = _iso_from_epoch(time.time())
+            self.state_store.save({BACKUP_SECTION: {LAST_SNAPSHOT_KEY: stamp}})
+        except Exception as exc:  # pragma: no cover - StateStore.save never raises
+            logging.warning("Could not record the successful database snapshot: %s", exc)
+
+    def _plan_start(self) -> float:
+        """Log the start decision and return the next due wall-clock time."""
+        now = time.time()
+        last = self._read_last_snapshot_at()
+        # A record beyond the interval in the future cannot be a real snapshot;
+        # treating it as the truth would postpone the next one indefinitely (and
+        # is how a corrupt far-future date would otherwise starve the backup).
+        if last is not None and last - now > self.interval_seconds:
+            logging.warning(
+                "Ignoring the backup record in %s: it is %ss in the future, which "
+                "is not a snapshot this daemon took.", self.state_store.path,
+                f"{last - now:.0f}")
+            last = None
+        if last is None or now - last >= self.interval_seconds:
+            age = "has no record" if last is None else f"was {now - last:.0f}s ago"
+            due = now + STARTUP_GRACE_SECONDS
+            logging.info(
+                "Backup thread started (interval=%ss, outbox=%s); the last snapshot "
+                "%s, taking one in %ss at %s",
+                self.interval_seconds, self.outbox_dir, age,
+                STARTUP_GRACE_SECONDS, _iso_from_epoch(due))
+            return due
+        due = last + self.interval_seconds
         logging.info(
-            "Backup thread started (interval=%ss, outbox=%s)",
-            self.interval_seconds, self.outbox_dir,
-        )
+            "Backup thread started (interval=%ss, outbox=%s); the last snapshot "
+            "was %ss ago, next due in %ss at %s",
+            self.interval_seconds, self.outbox_dir, f"{now - last:.0f}",
+            f"{due - now:.0f}", _iso_from_epoch(due))
+        return due
+
+    def run(self):
+        self._next_due = self._plan_start()
         while self.running:
             remaining = self._next_due - time.time()
             if remaining <= 0:

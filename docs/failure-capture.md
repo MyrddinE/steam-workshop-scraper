@@ -426,6 +426,20 @@ The outbox holds two kinds of thing, and they are cleaned differently.
   `os.replace` publish all happen in `<outbox_dir>/db/` itself, so the source
   database and the outbox may live on different drives and no cross-volume move
   is relied on.
+  The **schedule is persisted**, so a restart cannot defer the next snapshot.
+  The moment a snapshot verified and was published is recorded in the daemon
+  state file beside the database (`.daemon_state.yaml`, section `backup`, key
+  `last_snapshot_at`), and only on success: a failed snapshot leaves the
+  previous record, so the next start still sees the backup as due. On start the
+  backup thread derives the due time from that record — missing, unparseable or
+  older than `backup_interval_seconds` takes one after a short grace, inside the
+  interval waits out the remainder — and logs the last snapshot's age and the
+  next due time. A daemon restarted more often than the interval therefore still
+  snapshots at least once per interval, while a restart loop cannot take more
+  than one copy per interval. The record is this daemon's schedule rather than a
+  pullable artifact, which is why it lives beside the database instead of in the
+  outbox; the closing snapshot (`Daemon._maybe_final_snapshot`) is unchanged and
+  updates the record too when it runs.
 
 Removing a capture also drops its `manifest.json` entry in the same operation
 (`backup.remove_manifest_entries`), and the pull tool does the same when it moves
