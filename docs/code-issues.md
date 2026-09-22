@@ -15,6 +15,18 @@ the production database on 2026-09-12.
 
 ## Open
 
+### A re-entered autosubscribe pass leaks the previous pass's verification poll (issue 83)
+
+`_startAutoSubscribe` arms `_subPollIv = setInterval(...)` without clearing a live handle. The first
+Cancel click deliberately leaves that poll running — only Close clears it — so starting a new pass while a
+cancelled pass's poll is still alive overwrites the handle and the old interval keeps running. Its own
+completion branch calls `clearInterval(_subPollIv)` on what is now the **new** handle, so it can stop the
+new pass's poll, and it keeps re-reading the queue on behalf of its own stale `items` list while doing so.
+
+Found 2026-09-22 during the issue-81 state audit, and deliberately left alone there: it is a re-entrancy
+leak, not stale state changing what a later Close does, so it is a separate entry rather than part of that
+fix. See [web-ui.md](web-ui.md) for the overlay's poll and cancel behaviour.
+
 ## Recently closed
 
 Removed from the list above rather than marked resolved. Each is now documented as current
