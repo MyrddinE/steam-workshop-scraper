@@ -153,6 +153,12 @@ takes the operator and value and no column name. Operators:
 
 The `is` and `is_not` operators are intentionally skipped for tags (tag matching is always exact via `contains`/`does_not_contain`).
 
+A single `contains` row is the clause above. When several `contains` rows are ANDed, the join level
+(`_join_filter_clauses`, called by `build_filters_sql`, `_compute_percentile_threshold` and
+`_wilson_population_where`) replaces the whole conjunction with one driving subquery — see
+[The tag conjunction drives the scan](#the-tag-conjunction-drives-the-scan-issue-84). The function
+itself is unchanged, because a lone tag keeps this `EXISTS`.
+
 ### `_build_fts_clause` (database)
 
 Builds WHERE clauses using the FTS5 virtual table `workshop_fts`. This is only used when the user selects the "Full Text" field.
@@ -258,6 +264,68 @@ When `tags` is present in the item data dict, the function:
 3. Calls `_ensure_tag_ids` to get/create IDs
 4. Deletes existing `workshop_tags` rows for the item, then inserts new ones
 5. Tags are removed from the INSERT column list (they're not a workshop_items column anymore)
+
+### The tag conjunction drives the scan (issue 84)
+
+`Tags contains` renders one correlated `EXISTS` over the junction per row, so an AND of them can only
+be *checked* against the rows whatever index the planner walks. Following the sort index means four
+index probes per row until the limit is met, and when the filter is sparse along that sort order —
+which is exactly what the tag conjunction is — the walk approaches a full scan. Measured on the
+2.5 M-row copy (`/tmp/v35-normal.db`, 2,528,304 rows) with the owner's filter set — Tags *Mature*
+**AND** Tags *Video* **AND** File Size > 100000000 **AND** Subscribed is_not *previously*, sorted
+`wilson_subscription_score DESC LIMIT 50` — and with the query's pages dropped per run by
+`posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)` rather than dropping system caches:
+
+| access path | cold | warm |
+|---|---|---|
+| per-row correlated `EXISTS` per tag (before) | 65.94 s | 1.37 s |
+| one driving subquery for the conjunction (after) | 7.79 s | 0.79 s |
+
+A second paired run measured 61.41 s / 1.38 s against 7.62 s / 0.74 s, and the shipped builder's own
+query — not the hand-substituted clause — measured 6.07 s cold / 0.89 s warm; the cold ratio is stable
+near 8× and the absolute spread is the page path, not the plan.
+
+The candidate set the driving form works from is the 219,078 items carrying **both** tags — 8.67% of the
+copy — a fixed property of the data. The per-row form's cost is instead a function of where in the
+score order the filter first matches: its plan is `SCAN w USING INDEX idx_wilson_subscription_score`
+with one `CORRELATED SCALAR SUBQUERY` per tag, and near the top of that order almost nothing matches.
+The driving plan is `SEARCH w USING INTEGER PRIMARY KEY (rowid=?)` fed by a `LIST SUBQUERY`, then a
+temp B-tree sort; the score index is not scanned for the tags at all.
+
+`ANALYZE` does not help. It changes the cold/warm *spread* but not the plan shape, because the
+selectivity that matters is the cross-correlation between the tag filter and the sort order, and no
+per-column statistic captures that. Only the ~500-row *unfiltered* diagnostic query is symmetric, which
+is why it showed nothing.
+
+**The rule for a future reader: an AND of tag filters drives the scan.** The filter join
+(`_join_filter_clauses`) splits the filter list into conjunctive segments — a new segment begins at
+every `OR` — and when a segment carries two or more `Tags contains` rows it emits one
+`_tag_contains_all_clause` in their place:
+
+```sql
+w.workshop_id IN (SELECT wt.workshop_id FROM workshop_tags wt JOIN tags t USING(tag_id)
+                  WHERE t.tag_name IN (?, ...) GROUP BY wt.workshop_id
+                  HAVING COUNT(DISTINCT t.tag_name) = N)
+```
+
+That is exactly "has every one of these tag names": duplicate names are deduplicated before the count
+(`A AND A` is `A`, so counting the rows would demand a count no item can reach), and the
+`IN`/`COUNT(DISTINCT ...)` pair uses the same BINARY, case-sensitive equality as the `t.tag_name = ?`
+it replaces. The shapes left on the old form, deliberately:
+
+- A **single** tag keeps its correlated `EXISTS`: it has no conjunction to drive, and one common tag is
+  cheapest as a check when the sort index already matches it. Collapsing it would materialise a
+  possibly-huge tag set to answer a question the index walk answers immediately.
+- An **OR** of tag rows stays a union of `EXISTS`; a union is not a conjunction, so there is no count
+  to take.
+- A **`does_not_contain`** row stays a `NOT EXISTS` and is never counted into a conjunction.
+- A **mix** keeps the existing parenthesised grouping, so each row's `logic` still means what it meant;
+  only the all-AND segments are touched.
+
+The same translation serves `search_items`, the metrics coverage query and the Wilson cutoff
+population, so all three pick the same access path. A fixture with overlapping tag sets compares the
+two clause forms row-for-row across every shape and asserts the owner's shape plans the `LIST SUBQUERY`
+rather than the score index (`tests/test_search_filter.py`).
 
 ---
 
