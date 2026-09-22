@@ -2040,6 +2040,15 @@ async function toggleIgnoredItem(wid) {
 }
 
 let _detailPollWid = null, _detailPollTimer = null;
+// The newest pane open owns the pane. Every `showDetail` takes the next token
+// and re-checks it after each await, so a response that lands after a newer
+// open has started does nothing at all -- no pane write, no `selected` class,
+// no focus, no subscription, no poll. Automatic selection on every reset makes
+// this reachable without a click (two quick sort changes), and a click racing
+// an automatic pane is the same race; without the guard the older response
+// wins when it lands last, and the pane describes an item the grid no longer
+// shows.
+let _detailOpenToken = 0;
 
 function _detailNeedsPoll(item) {
   return (item.translation_priority || 0) > 0;
@@ -2085,6 +2094,7 @@ async function showDetail(wid, opts) {
   // automatic selection must not queue fetch work nobody requested, and the
   // route that bumps priority is POST /api/item/<id>/open.
   const readOnly = !!(opts && opts.readOnly);
+  const token = ++_detailOpenToken;
   _stopDetailPoll();
   const pane = document.getElementById('detail-pane');
   pane.innerHTML = '<p>Loading...</p>';
@@ -2095,11 +2105,15 @@ async function showDetail(wid, opts) {
     const resp = readOnly
       ? await fetch('/api/item/' + wid)
       : await fetch('/api/item/' + wid + '/open', {method: 'POST'});
+    // A newer open owns the pane now, so this response is stale: discard it
+    // rather than write the item, its error, or anything downstream.
+    if (token !== _detailOpenToken) return;
     if (!resp.ok) {
       pane.innerHTML = `<p>Error loading item ${wid}: ${resp.status} ${resp.statusText}</p>`;
       return;
     }
     const item = await resp.json();
+    if (token !== _detailOpenToken) return;
     if (item.error) { pane.innerHTML = '<p>Item not found.</p>'; return; }
 
   // The pane is a subscriber while it displays this id, and the payload it was
@@ -2113,7 +2127,11 @@ async function showDetail(wid, opts) {
   // to move a scroller -- opening the pane must not move the grid it selects in.
   if (cell) { cell.classList.add('selected'); cell.focus({preventScroll: true}); }
   _startDetailPoll(wid, item);
-  } catch(e) { pane.innerHTML = '<p>Error loading detail: ' + e.message + '</p>'; }
+  } catch(e) {
+    // A stale failure must not overwrite the newer pane's content either.
+    if (token !== _detailOpenToken) return;
+    pane.innerHTML = '<p>Error loading detail: ' + e.message + '</p>';
+  }
 }
 
 async function doUpdateVisible() {

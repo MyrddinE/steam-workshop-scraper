@@ -2377,6 +2377,9 @@ RESET_RENDER_DRIVER = """
 const realDoSearch = (__SEARCH__);
 const bodyFn = (__BODY__);
 const showDetailFn = (__SHOWDETAIL__);
+// The page's module-scope pane-open token; the extracted `showDetail` closes
+// over it.
+let _detailOpenToken = 0;
 const out = {panePaths: [], focus: [], searches: []};
 const report = console.log;
 global.console = {debug: () => {}, warn: () => {}, error: () => {}, log: report};
@@ -2541,6 +2544,135 @@ def test_a_reset_render_selects_the_top_item_through_the_read_only_route(web_cli
         assert reset["selected"] == ["7"], f"{name}: the first cell must be selected"
 
 
+# ── an older pane open must not overwrite a newer one ────────────────────────
+#
+# Automatic selection on every reset made a race reachable without a click: two
+# quick resets each open their own top item, and if the older fetch resolves
+# last it lands on the pane after the newer one. `showDetail` takes a monotonic
+# token and re-checks it after each await, so the loser does nothing at all --
+# no pane write, no error text, no `selected` class, no focus, no
+# `_subscribeDetail`, no `_startDetailPoll`. A click racing an automatic pane is
+# the same race, so the driver opens the older pane the automatic (read-only)
+# way and the newer one as a click.
+
+DETAIL_STALE_DRIVER = """
+const showDetailFn = (__SHOWDETAIL__);
+// The page's module-scope token; the extracted `showDetail` closes over it.
+let _detailOpenToken = 0;
+const out = {paths: [], stops: 0, subscribed: [], starts: [], dispatched: [],
+             paneContent: null, focus: [], cells: []};
+const report = console.log;
+global.console = {debug: () => {}, warn: () => {}, error: () => {}, log: report};
+global._stopDetailPoll = () => { out.stops += 1; };
+global._subscribeDetail = (wid) => { out.subscribed.push(wid); };
+global._startDetailPoll = (wid) => { out.starts.push(wid); };
+global.dispatchItemUpdate = (item) => {
+  out.dispatched.push(item && item.workshop_id);
+  out.paneContent = item && item.workshop_id;
+};
+const paneEl = {innerHTML: ''};
+function makeCell(wid) {
+  const classes = new Set(['grid-cell']);
+  const cell = {
+    attrs: {'data-wid': String(wid)},
+    classList: {
+      add: (c) => classes.add(c),
+      remove: (c) => classes.delete(c),
+      contains: (c) => classes.has(c),
+    },
+    getAttribute: function(k) { return this.attrs[k]; },
+    focus: function(opts) {
+      out.focus.push([wid, opts && opts.preventScroll ? 'preventScroll' : 'none']);
+    },
+  };
+  out.cells.push(cell);
+  return cell;
+}
+const cells = [makeCell(7), makeCell(8)];
+global.document = {
+  getElementById: (id) => (id === 'detail-pane' ? paneEl : null),
+  querySelectorAll: () => cells.slice(),
+  querySelector: (sel) => {
+    const m = /data-wid="(\\d+)"/.exec(sel);
+    if (!m) return null;
+    return cells.find((c) => c.getAttribute('data-wid') === m[1]) || null;
+  },
+};
+const pending = [];
+global.fetch = (url) => new Promise((resolve) => {
+  pending.push({url: String(url), resolve: resolve});
+});
+function resp(wid) {
+  return {ok: true, status: 200, statusText: 'OK',
+          json: async () => ({workshop_id: wid, title: 'item-' + wid})};
+}
+function snapshot() {
+  return {
+    paneContent: out.paneContent,
+    subscribed: out.subscribed.slice(),
+    starts: out.starts.slice(),
+    dispatched: out.dispatched.slice(),
+    focus: out.focus.slice(),
+    selected: cells.filter((c) => c.classList.contains('selected'))
+      .map((c) => c.getAttribute('data-wid')),
+    stops: out.stops,
+  };
+}
+const showDetail = showDetailFn;
+(async () => {
+  // The older automatic pane (sort A's top item), then a click on the newer
+  // grid's other cell. Neither has resolved yet.
+  const older = showDetail(7, {readOnly: true});
+  const newer = showDetail(8);
+  out.paths = pending.map((p) => p.url);
+
+  // The newer fetch lands first and owns the pane.
+  pending[1].resolve(resp(8));
+  await newer;
+  out.afterNewer = snapshot();
+
+  // The older fetch lands last; it must change nothing.
+  pending[0].resolve(resp(7));
+  await older;
+  out.afterOlder = snapshot();
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_an_older_pane_open_cannot_overwrite_a_newer_one(web_client, tmp_path):
+    """The newest pane open owns the pane; an older response is discarded.
+
+    Two overlapping opens whose *older* fetch resolves last: the pane content,
+    the `selected` cell, the focus, the subscription and the running poll must
+    all belong to the newer item, and the older open must do nothing after its
+    await -- not even restart a poll for the item it lost
+    (`_stopDetailPoll()` already ran at the top of the newer open).
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = DETAIL_STALE_DRIVER.replace(
+        "__SHOWDETAIL__", _extract_function(script, "showDetail"))
+    out = _run_node(driver, tmp_path)
+
+    assert out["paths"] == ["/api/item/7", "/api/item/8/open"], \
+        "the older open is automatic/read-only; the newer is a click"
+
+    newer = out["afterNewer"]
+    assert newer["paneContent"] == 8, "the newer item is what the pane holds"
+    assert newer["subscribed"] == [8], "the pane is subscribed to the newer item"
+    assert newer["starts"] == [8], "the newer item's poll is the one running"
+    assert newer["selected"] == ["8"], "the newer cell is the selected one"
+    assert newer["focus"] == [[8, "preventScroll"]], "the newer cell holds focus"
+    assert out["stops"] == 2, \
+        "each open stops the previous poll synchronously; a stale one may not restart"
+
+    older = out["afterOlder"]
+    assert older == newer, \
+        "the older response must change nothing: pane, selection, focus, subscription or poll"
+
+
 
 # ── a load and a Return persist nothing positional ──────────────────────────
 
@@ -2551,6 +2683,9 @@ const saveViewFn = (__SAVEVIEW__);
 const doSearchFn = (__SEARCH__);
 const bodyFn = (__BODY__);
 const showDetailFn = (__SHOWDETAIL__);
+// The page's module-scope pane-open token; the extracted `showDetail` closes
+// over it.
+let _detailOpenToken = 0;
 const returnFn = (__RETURN__);
 const out = {searchPaths: [], panePaths: [], focus: [], paneOpens: []};
 const report = console.log;
