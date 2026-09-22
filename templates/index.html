@@ -854,7 +854,7 @@ function _applySub(el, item) {
   el.setAttribute('data-wid', item.workshop_id);
   el.style.color = item.subscription_colour;
   // The glyph is real text, not CSS content, so the reader (and a test) can see
-  // which of the four states a row is in.
+  // which of the six states a row is in.
   el.textContent = item.subscription_glyph;
   // title is an HTML attribute, so the tooltip travels through the same escape
   // the rest of the pane's text uses.

@@ -1,15 +1,19 @@
-"""The subscription marker's web side: the payload, the endpoint, and the click.
+"""The subscription marker's web side: the payload, the endpoints, and the click.
 
-Three things are pinned here, all of which the old two-indicator shape got
+Four things are pinned here, all of which the old two-indicator shape got
 wrong:
 
 * the read endpoints carry the marker's state and its whole appearance, computed
   from `src/subscription.py`, so the page owns no copy of the glyph/colour table;
-* ``POST /api/subscribed`` stamps the subscription as well as clearing the queue
-  flag -- it is the confirmation the Web UI's subscribe overlay posts for the
-  rows it leaves behind, and it used to throw the subscription fact away;
-* the marker's click routes the three actionable states through the existing
-  toggle route and sends nothing for ``subscribed``.
+* ``POST /api/subscribed`` and ``POST /api/unsubscribed`` are the outcome stamps:
+  each writes its own state and clears the queue flag, and the removal stamp
+  leaves the sticky first-seen time so the marker reads ``previously``;
+* ``POST /api/dequeue`` is the direction-agnostic dequeue Cancel and Clear Failed
+  post -- it clears the flag and records no outcome, where the old
+  ``/api/subscribed`` call claimed a subscription for a row never attempted;
+* the marker's click routes every actionable state through the existing toggle
+  route and sends nothing for ``downloaded`` (the owner reversed ``subscribed``'s
+  old inertness, because its click only queues a removal).
 
 The click and the template are exercised by running the served JavaScript under
 node, so the assertions are about what the page actually builds rather than what
