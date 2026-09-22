@@ -34,6 +34,8 @@ from tests.conftest import restore_pre_rename_table_names
 CREATOR_COLUMNS = {
     "steamid", "personaname", "personaname_en",
     "api_fetched_at", "translated_at", "translation_priority",
+    # v39's owner creator-ignore flag.
+    "ignored_at",
 }
 APP_DISCOVERY_COLUMNS = {
     "appid", "filter_text", "required_tags",
@@ -71,7 +73,7 @@ def _seed_both_tables(db_path) -> None:
 
 
 def test_a_fresh_database_reaches_the_expected_version_under_the_new_names(db_path):
-    assert EXPECTED_VERSION == 38
+    assert EXPECTED_VERSION == 39
     assert _version(db_path) == EXPECTED_VERSION
 
     names = _table_names(db_path)

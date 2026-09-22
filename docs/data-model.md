@@ -113,6 +113,11 @@ One row per Steam creator whose profile has been fetched, keyed by `steamid`.
 | `api_fetched_at` | STATE (ours) | Our clock: when the profile was last refreshed. |
 | `translated_at` | TRANSLATED/STATE | Our wall-clock time of the last translation. This is **not** a Steam version key: creators have no `steam_updated_at`. |
 | `translation_priority` | QUEUE | Translation queue mirror, exactly as on `workshop_items`: raised by `queue_field_for_translation` in the same transaction as the `translation_queue` row and zeroed by the translator when the creator's last queue row is deleted. A priority above `0` therefore means the creator has at least one queued field. Migration 27→28 queued the flags that had no row behind them and cleared the ones with nothing left to translate. |
+| `ignored_at` | STATE (ours) | Our clock: when the owner flagged this creator as ignored, or NULL when they did not. A timestamp rather than a boolean so the decision's clock is recorded, the same shape as the other owner-set stamps. Set and cleared by `ignore_creator` / `unignore_creator` (through the one toggle `toggle_creator_ignored`), and the ignore test everywhere is `ignored_at IS NOT NULL`. It is in the `CREATOR_COLUMNS` upsert whitelist so the column is known, but a profile refresh never writes it: `_build_user_record` carries no such key and the conflict update touches only the keys the record holds. Migration 38→39 adds it, defaulting every existing creator to not ignored. |
+
+A flagged creator is the owner's **creator-scoped** ignore, described under
+[Queue Priorities](#queue-priorities) below: it settles every item of theirs and stops the profile
+being refreshed.
 
 ## `app_discovery`
 
@@ -202,6 +207,23 @@ ignored, cannot revive it. Migration 37→38 cleared the flags those writers had
 (issue 74). This matters because the API fetch poll excludes settled rows, so `_settle_api_failure`
 and `ignore_item` — which clear all four flags and delete the item's `translation_queue` rows —
 never run for such a row again and nothing else would clear them.
+
+**Ignoring a creator is the item marker applied through `creator_steamid`.** Flagging a creator
+(`ignore_creator`, the same `-2` the item marker uses) settles every item of theirs that is not
+dead in one transaction — the status, all four queue priorities and the items' `translation_queue`
+rows — so a creator's whole catalogue leaves the library at once. It is a **two-way toggle with no
+provenance**: `unignore_creator` clears the flag and restores every item of theirs currently at
+`-2`, by the **same rule** `unignore_item` applies (`_RESTORE_IGNORED_ITEM_ASSIGNMENTS` is one
+assignment list both use: a fetched row returns to `200`, a never-fetched one returns to NULL and is
+queued for an API fetch, and one with no description gets its web-scrape priority back). Because no
+column distinguishes an item's own ignore from an inherited one, un-ignoring a creator also restores
+items that were ignored individually — the owner's accepted simplification, and the reason the
+direction is immediately reversible from the same control. A **dead** item (`fetch_status = -1`) is
+outside both directions in every clause: dead stays dead, or un-ignoring a creator would resurrect
+items Steam says do not exist. New items are attributed at the API merge, which is the only place a
+creator is known (discovery's page response carries the `publishedfileid` alone): an item whose
+merged `creator_steamid` is flagged is written settled with no web, image or translation stage
+queued, and the profile refresh skips a flagged creator so it stops being refreshed.
 
 **The two statuses are one question, and the pair is stated once.** `DEAD_FETCH_STATUS = -1`,
 `IGNORED_FETCH_STATUS = -2` and `SETTLED_FETCH_STATUSES = (-1, -2)` in `src/database.py` are the

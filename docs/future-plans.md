@@ -652,42 +652,31 @@ work starts, not guessed. [tui.md](tui.md), [web-ui.md](web-ui.md), [data-pipeli
 
 ## Ignoring a creator
 
-**Status: decided, not yet briefed.** Owner request, 2026-09-21. Scheduled after the ignored-item work
-(stages 1–2), because all of it touches both front ends.
+**Status: Landed.** Owner request, 2026-09-21; implemented after the ignored-item work (stages 1–2),
+which it builds on rather than restates.
 
-Flagging a creator as ignored should make every one of their workshop items ignored, and any new item
-from that creator ignored immediately as it is scraped. The `creators` table has no status column
-today — `steamid`, `personaname`, `personaname_en`, `api_fetched_at`, `translated_at`,
-`translation_priority` — so this needs one plus a migration, and `CREATOR_COLUMNS`, which is the
-upsert whitelist, has to move with it.
+The `creators` table gained `ignored_at` (a timestamp; migration 38→39), and `CREATOR_COLUMNS` moved
+with it. `ignore_creator` settles every non-dead item of the creator at `fetch_status = -2` — all
+four priorities zero, their `translation_queue` rows deleted — and `unignore_creator` clears the flag
+and restores their `-2` items by `unignore_item`'s **shared** assignment list. The flag is a two-way
+toggle with no provenance, so un-ignoring also restores items ignored individually; a dead item
+(`-1`) is untouched in both directions. `toggle_creator_ignored` is the one toggle rule and
+`creator_ignore_label` the one wording, both in `src/database.py`, so the web control and the TUI
+action cannot disagree.
 
-**The owner's decisions.** The flag is a **two-way toggle**, not a one-way cascade: un-ignoring a
-creator un-ignores their items, so the change is immediately reversible from the same place. There is
-therefore no provenance column — an item's own ignore is not distinguished from an inherited one, so
-un-ignoring a creator also restores any of their items that were ignored individually. Items the API
-has settled as dead (`fetch_status = -1`) stay dead in both directions; only ignored rows move. The
-trigger is a button in the creator-scoped view — the web's author mode, whose Return button
-(`templates/index.html:156`) is the neighbour to sit near but not beside, and the TUI's
-`btn-jump-author` filtered view (`src/tui.py:3163`) — and it takes effect immediately and reverses
-immediately. An ignored creator's profile **stops being refreshed**, so the staleness sweep must skip
-it.
+New items are attributed at the API merge, the only place a creator is known (discovery's page
+response carries the `publishedfileid` alone): `_process_item` writes an item from an ignored creator
+settled and queues no web scrape, image or translation stage, and the creator staleness sweep skips
+an ignored creator so their profile stops being refreshed. The detail request is spent before
+attribution — the page response does not carry the creator — which the docstrings state honestly.
 
-**New items can only be attributed at the API merge.** Discovery's page response carries the
-`publishedfileid` alone (`src/daemon.py:1633`), so the creator is learned from the detail fetch, where
-`_merge_and_clean_api_data` remaps the API's `creator` to `creator_steamid` (`src/daemon.py:642`). The
-queue would spend that request anyway on an unfetched item, so the cost is bounded — but the ignore
-necessarily lands after it, before the web scrape, image and translation stages are queued, which is
-the part that actually saves work.
-
-**What the brief still has to work out.** The per-row restore rule is the item toggle's, already
-settled for the ignored-item work: a row that had been fetched returns to `200`, one that never was
-returns to NULL and is queued for an API fetch, and a restored row with no description gets its
-web-scrape priority back. The creator-scoped view has to be identifiable as "the creator being viewed"
-in both front ends — the web's author mode knows it and the TUI's creator filter does — so the button
-acts on that rather than on whatever item happens to be selected. The flag needs a migration (the next
-free number) and `CREATOR_COLUMNS` moving with it, and the API merge is where a new item from an
-ignored creator is stamped ignored before the web scrape, image and translation stages are queued.
-[data-model.md](data-model.md), [tui.md](tui.md), [web-ui.md](web-ui.md)
+Both front ends carry the trigger in the creator-scoped view, near the Return control but not beside
+it: the web's author bar button (`#btn-ignore-creator`, with `GET`/`POST
+/api/creator/<steamid>/ignore`) and the TUI's button in the `btn-jump-author` filtered view. Each
+labels itself with the next move and re-queries the view after the toggle, because every item of the
+creator moves at once. The behaviour is described in [data-model.md](data-model.md#creators),
+[data-pipeline.md](data-pipeline.md), [tui.md](tui.md#ignoring-a-creator-creator-filtered-view) and
+[web-ui.md](web-ui.md#the-creator-ignore-toggle).
 
 ---
 

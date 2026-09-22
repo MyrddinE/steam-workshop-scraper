@@ -2659,6 +2659,8 @@ __DOM__
 let _selectedWid = 222;
 let _authorMode = false;
 let _preJumpView = null;
+let _authorCreator = null;
+let _creatorRefreshes = 0;
 let _snapshotSubscribed = null;
 let _appliedFilters = [];
 let _appliedOverlay = null;
@@ -2692,6 +2694,10 @@ function _syncSubscribedOverlay() { _syncs += 1; }
 function doSearch(reset) { _searches.push(reset); return Promise.resolve(); }
 function _restoreView(state) { _restoreViewState = state; return Promise.resolve(); }
 function showDetail(wid) { _detailOpened.push(wid); return Promise.resolve(); }
+// The creator-ignore label read, stubbed: it is exercised on its own in the
+// creator-toggle driver below, and what the author tests want from the jump is
+// that entering the mode asks for the label once.
+function _refreshCreatorIgnoreControl() { _creatorRefreshes += 1; return Promise.resolve(); }
 __VIEWSNAPSHOT__
 __SETAUTHORMODEUI__
 
@@ -2699,6 +2705,7 @@ let _syncs = 0;
 const _elements = {
   'author-mode-bar': fakeEl('div'),
   'author-mode-name': fakeEl('span'),
+  'btn-ignore-creator': fakeEl('button'),
   // The page replaces the builder by setting `innerHTML = ''` and mounting
   // fresh rows. The fake element cannot reach this driver's row list from its
   // own setter, so the clear is mirrored in the trap.
@@ -2771,7 +2778,8 @@ __INITAUTHORLIST__;
     name: _elements['author-mode-name'].textContent,
     saveVisible: _elements['btn-save-filter'].style.display,
     rowsVisible: _elements['filter-rows'].style.display,
-    searchResets: _searches.slice()
+    searchResets: _searches.slice(),
+    creatorRefreshes: _creatorRefreshes
   };
 
   await returnFromAuthor();
@@ -2854,6 +2862,8 @@ def test_entering_author_mode_from_an_item_overrides_filters_and_keeps_the_sort(
     assert jump["saveVisible"] == "none", "Save Filter is hidden in single-creator mode"
     assert jump["rowsVisible"] == "none", "the old rows are replaced, not merely overlaid"
     assert jump["searchResets"] == [True], "the jump re-runs the search once"
+    assert jump["creatorRefreshes"] == 1, \
+        "entering the mode reads the creator's ignore state once, to label the toggle"
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
@@ -3508,6 +3518,9 @@ global._setAuthorModeUi = (on, creator) => {
   elements['author-mode-name'].textContent = on ? String(creator) : '';
   elements['btn-save-filter'].style.display = on ? 'none' : '';
 };
+// The creator-ignore label read is exercised in test_creator_ignore_web.py;
+// here it only has to be defined, because the real jump fires it.
+global._refreshCreatorIgnoreControl = () => Promise.resolve();
 global._viewSnapshot = () => ({
   filters: global.getFilters(),
   sort_by: elements['sort-by'].value, sort_order: elements['sort-order'].value,

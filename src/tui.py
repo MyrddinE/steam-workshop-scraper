@@ -13,7 +13,7 @@ from textual.widgets import Header, Footer, Input, ListView, ListItem, Static, L
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.worker import Worker, WorkerState
-from src.database import search_items, get_all_creator_ids, SchemaVersionError, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, raise_api_priority_for_list, raise_api_priority_for_detail, get_subscription_states, get_items_by_ids, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES, normalise_subscribed_value, live_fetch_status_predicate, toggle_ignored_item, IGNORED_FETCH_STATUS
+from src.database import search_items, get_all_creator_ids, SchemaVersionError, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, raise_api_priority_for_list, raise_api_priority_for_detail, get_subscription_states, get_items_by_ids, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES, normalise_subscribed_value, live_fetch_status_predicate, toggle_ignored_item, IGNORED_FETCH_STATUS, creator_is_ignored, creator_ignore_label, toggle_creator_ignored
 from src.analysis import view_window_analysis
 from src import metrics
 from src import db_poll
@@ -2607,6 +2607,11 @@ class ScraperApp(App):
         # Filters that the last "Jump to Author" replaced, kept in memory so the
         # Return button can put them back without depending on a state file read.
         self._pre_jump_filters: list[dict] | None = None
+        # The creator the single-creator view is pinned to, or None outside it.
+        # The creator-ignore control acts on this, never on the highlighted row:
+        # after the toggle the view may be empty (every item settled), so there
+        # is no row left to read a creator from.
+        self.author_mode_creator = None
         
         # UI State recovery
         # We use a hidden file to avoid cluttering the working directory
@@ -2724,6 +2729,7 @@ class ScraperApp(App):
     def on_mount(self) -> None:
         """Initialize the UI and recover state."""
         self.query_one("#btn-return", Button).display = False
+        self.query_one("#btn-ignore-creator", Button).display = False
         # Recover sorting and filters
         if self._initial_state:
             try:
@@ -2940,6 +2946,12 @@ class ScraperApp(App):
         search_container = Vertical(
             search_builder,
             Horizontal(
+                # The creator-scoped ignore toggle. It is shown only in
+                # single-creator mode, and it sits at the far end of the row from
+                # Return (Search between them) so a press meant for Return cannot
+                # land on it. It acts on the creator being viewed, not on the
+                # highlighted item; its label names the next move.
+                Button("Ignore creator", id="btn-ignore-creator", variant="error"),
                 Button("Search", id="btn-search", variant="primary"),
                 Button("Save Filter for Scraper", id="btn-save-filter", variant="default"),
                 Button("Return", id="btn-return", variant="warning"),
@@ -3177,6 +3189,9 @@ class ScraperApp(App):
         elif event.button.id == "btn-return":
             self.action_return_from_author_mode()
 
+        elif event.button.id == "btn-ignore-creator":
+            await self.action_toggle_creator_ignored()
+
         elif event.button.id == "btn-jump-author" and self.current_item_creator:
             # Save state before switching to single creator mode
             if not self.is_author_mode:
@@ -3190,8 +3205,17 @@ class ScraperApp(App):
                 ).get_filters()
 
             self.is_author_mode = True
+            self.author_mode_creator = self.current_item_creator
             self.query_one("#btn-save-filter", Button).display = False
             self.query_one("#btn-return", Button).display = True
+            # Label the creator toggle from the stored flag. This is the view's
+            # own answer to "which creator is being viewed": the highlighted
+            # row can change (or vanish, once the toggle settles every item), so
+            # the action reads this attribute rather than `current_item_creator`.
+            ignore_btn = self.query_one("#btn-ignore-creator", Button)
+            ignore_btn.display = True
+            ignore_btn.label = creator_ignore_label(
+                creator_is_ignored(self.db_path, self.author_mode_creator))
 
             builder = self.query_one("#search-builder", SearchBuilder)
 
@@ -3247,8 +3271,10 @@ class ScraperApp(App):
         self._pre_jump_filters = None
 
         self.is_author_mode = False
+        self.author_mode_creator = None
         self.query_one("#btn-save-filter", Button).display = True
         self.query_one("#btn-return", Button).display = False
+        self.query_one("#btn-ignore-creator", Button).display = False
 
         if filters is None:
             self.save_state()
@@ -3263,6 +3289,33 @@ class ScraperApp(App):
             self.run_worker(self.execute_search())
 
         self.call_after_refresh(after_restore)
+
+    async def action_toggle_creator_ignored(self) -> None:
+        """Toggle the owner's ignore flag on the creator the view is pinned to.
+
+        The creator-scoped view is the ``btn-jump-author`` filtered result list,
+        and it knows its creator from :attr:`author_mode_creator`, which the jump
+        sets from the highlighted row and Return clears. That attribute is used
+        rather than ``current_item_creator`` because the highlighted row is not
+        stable here: after an ignore settles every one of the creator's items the
+        re-query below leaves the list empty, so there may be no row left to read
+        a creator from -- while the button must still be pressable to reverse it.
+
+        ``toggle_creator_ignored`` owns the direction and ``creator_ignore_label``
+        owns the wording, both in ``src/database``, so this button and the web
+        route cannot disagree about what a second press does or says. The write
+        is a whole-view change -- every item of the creator settles or comes back
+        -- so the results are re-queried rather than patched in place, unlike the
+        single-row ``i`` toggle.
+        """
+        if not self.is_author_mode or not self.author_mode_creator:
+            return
+        ignored = toggle_creator_ignored(self.db_path, self.author_mode_creator)
+        button = self.query_one("#btn-ignore-creator", Button)
+        button.label = creator_ignore_label(ignored)
+        verb = "Ignored" if ignored else "Un-ignored"
+        self.notify(f"{verb} creator {self.author_mode_creator}.")
+        await self.execute_search()
 
     async def action_save_filter_for_scraper(self) -> None:
         builder = self.query_one("#search-builder", SearchBuilder)

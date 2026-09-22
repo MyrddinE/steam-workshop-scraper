@@ -28,6 +28,8 @@ from src.database import (
     USER_PRIORITY_FLOOR,
     WORKSHOP_ITEM_COLUMNS,
     DEAD_FETCH_STATUS,
+    IGNORED_FETCH_STATUS,
+    creator_is_ignored,
     live_fetch_status_predicate,
 )
 from src.steam_api import (
@@ -1048,13 +1050,30 @@ class Daemon:
         merged_data = self._merge_and_clean_api_data(api_data, merged_data, item_id, now_ts)
         display_title = merged_data.get('title_en') or merged_data.get('title', 'Unknown Title')
 
+        # Wilson scoring is a pure computation over the fetched counts, not a
+        # queue stage, so it runs before the ignored-creator branch: a settled
+        # item keeps the scores that describe it, and un-ignoring restores a row
+        # the percentiles can colour correctly instead of one with NULL scores
+        # that nothing will refresh (its `api_fetched_at` is already stamped).
+        self._score_wilson(merged_data)
+
+        # Attribution for a new item can only happen here. Discovery's page
+        # response carries the `publishedfileid` alone, so the creator is first
+        # known once this item's own detail request has returned -- the request
+        # is spent before anything can know the creator was ignored. What the
+        # flag saves is the work *after* it: an item from an ignored creator is
+        # written settled and none of the web scrape, image or translation
+        # stages below is queued for it.
+        if self._creator_is_ignored(merged_data.get("creator_steamid")):
+            self._settle_ignored_creator_item(merged_data, item_id)
+            return None
+
         # Capture the pre-fetch priority. The dependent stages filter it down to
         # the part a user asked for -- see user_requested_priority -- so the
         # daemon's own bookkeeping priorities (backlog, retry, discovery) cannot
         # promote an item the enrichment filters excluded above one they selected.
         inherited_priority = stored_item.get("api_priority", 0)
 
-        self._score_wilson(merged_data)
         outcome = self._raise_scrape_and_image_priorities(merged_data, stored_item, item_id, inherited_priority)
 
         merged_data["fetch_status"] = 200
@@ -1088,6 +1107,48 @@ class Daemon:
         # per-item method no longer makes an HTTP call here; nothing about the
         # delay is touched, because the request already succeeded.
         return self._creator_to_refresh(merged_data, outcome.enriched)
+
+    def _creator_is_ignored(self, creator_steamid) -> bool:
+        """Whether the owner flagged this item's creator as ignored.
+
+        A missing, empty or unparseable creator value is not ignored: only a
+        creator the owner actually flagged settles their items. The read is
+        `creator_is_ignored` in ``src/database.py``, so the daemon's answer and
+        the flag the front ends draw are the same question.
+        """
+        if not creator_steamid:
+            return False
+        return creator_is_ignored(self.db_path, creator_steamid)
+
+    def _settle_ignored_creator_item(self, merged_data: dict, item_id: int) -> None:
+        """Persist a fetched item whose creator the owner flagged as ignored.
+
+        The item is written settled exactly as the owner's item marker writes
+        one -- ``fetch_status = IGNORED_FETCH_STATUS``, all four queue priorities
+        zero, and its ``translation_queue`` rows deleted on the same connection
+        (``clear_translation_queue=True``) -- so it is in no queue and the
+        translation poll cannot hand out work for it. None of the web scrape,
+        image or translation stages is queued, and the item is not proposed for
+        a creator refresh either; the caller returns before all of them.
+
+        The merged content is kept, including the ``api_fetched_at`` the merge
+        just stamped: the detail request succeeded, and recording that is what
+        lets ``unignore_creator`` restore the row to ``200`` rather than make it
+        fetch again. The request itself cannot be saved -- discovery's page
+        response carries the ``publishedfileid`` alone, so the creator is only
+        known after this item's own detail fetch has been spent. What the flag
+        saves is every stage after it.
+        """
+        merged_data["fetch_status"] = IGNORED_FETCH_STATUS
+        merged_data["api_priority"] = 0
+        merged_data["web_scrape_priority"] = 0
+        merged_data["image_priority"] = 0
+        merged_data["translation_priority"] = 0
+        insert_or_update_item(self.db_path, merged_data, clear_translation_queue=True)
+        logging.info(
+            f"[A:{item_id}] creator {merged_data.get('creator_steamid')} is ignored; "
+            "item written ignored with no downstream work queued."
+        )
 
     def _settle_api_failure(self, merged_data: dict, item_id: int, api_status: int,
                             previous_priority: int) -> None:
@@ -1287,7 +1348,9 @@ class Daemon:
         The rules are unchanged from the per-item version -- only enriched items
         propose creators, a user row younger than `creator_staleness_days` is left
         alone, and a creator the API does not return is left for a later cycle --
-        but the request count drops from one per item to one per batch.
+        but the request count drops from one per item to one per batch. One rule
+        is added: a creator the owner flagged as ignored is skipped outright, so
+        their profile stops being refreshed.
         """
         if not creator_ids:
             return
@@ -1310,6 +1373,11 @@ class Daemon:
             seen.add(creator_id)
             try:
                 existing_user = get_creator(self.db_path, creator_id)
+                # An ignored creator's profile stops being refreshed: the owner
+                # asked for nothing more from this creator, and a persona
+                # refresh is the one request that would still be spent on them.
+                if existing_user and existing_user.get("ignored_at"):
+                    continue
                 if existing_user and existing_user.get("api_fetched_at"):
                     if now - existing_user["api_fetched_at"] < stale_after:
                         continue
