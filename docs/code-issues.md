@@ -39,11 +39,19 @@ are now fixed**, and each fix is platform-independent by construction rather tha
   assertions were a decoding bug — `assert 'â—‹' == '○'` — the node drivers' UTF-8 stdout read with the
   Windows codepage by `_run_node`'s `subprocess.run(..., text=True)` with no `encoding=`, fixed there and in
   seven other `tests/` files that carried the same latent bug.
-- **Open — the two `test_crash.py` failures**, `OSError: [WinError 6] The handle is invalid`. This one is
-  ours, and it is dispatched: Textual renders the traceback to `sys.__stderr__` (`textual/app.py:790`,
-  written at `:2100`), and when that handle is invalid the `OSError` escapes `_handle_exception` instead of
-  Textual's re-raise of the app's own error — the dump is written first (`src/tui.py:2644`), so no evidence
-  is lost, but the handler's stated contract is broken.
+- **Fixed and merged as `cd519f3`** — the two `test_crash.py` failures, `OSError: [WinError 6] The handle is
+  invalid`. This one was ours, and the mechanism was not what the brief guessed: Textual's
+  `_handle_exception` only records `_exception`/`_return_code` and queues the renderable — the write to
+  `sys.__stderr__` happens later, in `_print_error_renderables` on the exit path, after the driver has
+  closed, which is why a guard around the delegate call alone can never see it (the worker measured this;
+  `textual 8.2.8`, write at `textual/app.py:2100`). Both are guarded now (`src/tui.py:2644`, `:2673`): the
+  console failure is logged as `Console traceback render failed` with its traceback and the queued
+  renderables dropped, so the exit path cannot raise them again, while the app's own error still reaches the
+  caller and the dump is still written first. On a working console the output and its timing are unchanged,
+  which is why the queue is not flushed early. *Verified*: a new failing-first
+  `test_a_broken_console_does_not_defeat_the_handler` forces the stream's `write` to raise and fails against
+  the unmodified code with the `OSError` defeating `pytest.raises(RuntimeError)`; it asserts the original
+  error propagates, the dump survives, Textual's bookkeeping is untouched and the failure is logged. [failure-capture.md](failure-capture.md)
 - **Open — held for the owner:** `test_tui_accessibility.py::test_select_dropdown_contrast`, where
   `SelectOverlay` is not found and the palette screen is, which looks like a Textual version difference
   between the container and the unpinned 3.14 install — one `py -3.14 -m pip show textual pytest` settles
