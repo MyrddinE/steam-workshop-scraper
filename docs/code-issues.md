@@ -15,55 +15,24 @@ the production database on 2026-09-12.
 
 ## Open
 
-### The suite had never run on Windows (issue 89)
+### Two Textual-timing tests fail intermittently (issue 90)
 
-The owner's first Windows run (`py -3.14 -m pytest -q --no-cov -p no:cacheprovider` in the project
-directory) failed **24 tests** against a Linux baseline of 2205 passed / 4 skipped. The captured log is the
-evidence for every entry below: mix of the *tests'* platform assumptions and three genuine gaps. **Twenty-one
-are now fixed**, and each fix is platform-independent by construction rather than tuned until green.
+Two tests have each failed once on an otherwise green suite, both by asserting on a widget before Textual has
+mounted it, and both passed on re-run:
 
-- **Fixed and merged as `6faaff1`** (tests only, 12 files; brief `/root/.dsh/pending/windows-suite-brief.md`):
-  seven `test_daemon_control.py` liveness and stop tests that made a fake PID look alive by patching
-  `os.kill`, which the Windows branch of `_pid_alive` (`src/daemon_control.py:165`) never calls — and must
-  not, because `os.kill(pid, 0)` terminates the process on Windows; they now patch `_pid_alive` and keep
-  their teeth with an `os.kill` that raises. Four `tail_log` tests that asserted Python string lengths as
-  byte offsets, which CRLF defeats, now read the expected offset off the file's real bytes. Two
-  `test_subscription_web.py` tests that asserted the non-Windows branch while running on Windows now inject
-  the platform through the file's own seam, so both halves run on every host. One `test_workshop_folders.py`
-  test whose empty-content-dirs case let the real Windows registry answer now injects an empty `discover`.
-  Three worker tests that cleared the stop flag immediately after `start()` — a race Windows can lose — now
-  end the run by exhausting the item source, with `served == 1` keeping the iteration non-vacuous. One
-  `test_schema_version_refusal.py` test was non-hermetic the way issue 67 was: a daemon running in the
-  project directory held `.daemon.pid`, so the runner refused with exit 3 before the schema guard (the log
-  shows the refusal); it now isolates `daemon_runner.PID_FILE`. And the three `test_webserver.py` non-ASCII
-  assertions were a decoding bug — `assert 'â—‹' == '○'` — the node drivers' UTF-8 stdout read with the
-  Windows codepage by `_run_node`'s `subprocess.run(..., text=True)` with no `encoding=`, fixed there and in
-  seven other `tests/` files that carried the same latent bug.
-- **Fixed and merged as `cd519f3`** — the two `test_crash.py` failures, `OSError: [WinError 6] The handle is
-  invalid`. This one was ours, and the mechanism was not what the brief guessed: Textual's
-  `_handle_exception` only records `_exception`/`_return_code` and queues the renderable — the write to
-  `sys.__stderr__` happens later, in `_print_error_renderables` on the exit path, after the driver has
-  closed, which is why a guard around the delegate call alone can never see it (the worker measured this;
-  `textual 8.2.8`, write at `textual/app.py:2100`). Both are guarded now (`src/tui.py:2644`, `:2673`): the
-  console failure is logged as `Console traceback render failed` with its traceback and the queued
-  renderables dropped, so the exit path cannot raise them again, while the app's own error still reaches the
-  caller and the dump is still written first. On a working console the output and its timing are unchanged,
-  which is why the queue is not flushed early. *Verified*: a new failing-first
-  `test_a_broken_console_does_not_defeat_the_handler` forces the stream's `write` to raise and fails against
-  the unmodified code with the `OSError` defeating `pytest.raises(RuntimeError)`; it asserts the original
-  error propagates, the dump survives, Textual's bookkeeping is untouched and the failure is logged. [failure-capture.md](failure-capture.md)
-- **Open — held for the owner:** `test_tui_accessibility.py::test_select_dropdown_contrast`, where
-  `SelectOverlay` is not found and the palette screen is, which looks like a Textual version difference
-  between the container and the unpinned 3.14 install — one `py -3.14 -m pip show textual pytest` settles
-  whether it is drift and whether the fix is pinning or the test.
+- `tests/test_tui_accessibility.py::test_select_dropdown_contrast` failed on the owner's **first** Windows run
+  with `NoMatches: No nodes match 'SelectOverlay' on CommandPalette(id='--command-palette', ...)` — the
+  palette screen was up where the select overlay was expected — and passed on the **second** Windows run
+  (2201 passed, 10 skipped, zero failures) with nothing else changed. So it is not the Textual version drift
+  the first failure suggested, unless the environment moved between the two runs.
+- `tests/test_item_update_path.py::test_a_download_written_behind_the_tui_reaches_the_row_and_the_pane` failed
+  once in a container full-suite run with `IndexError` in `_list_row_markup`
+  (`list_view.children[index].query(Label)[1]`), immediately after `pilot.pause(ASYNC_PAUSE)`. That file is
+  untouched by the batch that was being merged, and it passed 3/3 standalone and green on re-run.
 
-**What the running daemon does and does not explain (measured 2026-09-22).** The owner confirmed the daemon
-was running, which accounts for the non-hermetic `test_schema_version_refusal.py` failure on its own: the log
-shows the runner refusing on the daemon's `.daemon.pid`, exit 3, before the schema guard that test is about.
-It does **not** account for the three worker/translation failures — planting a `.pauselock` in the project
-directory and re-running those three in the container leaves them passing, because the worker's pause gate
-(`src/web_worker.py:445`) exits on the stop flag and falls through to process one item anyway, so an ambient
-lock cannot starve a one-iteration test. They stay classified as the missing handshake.
+Both are the same shape: a fixed `pilot.pause(...)` treated as if it guaranteed the render, then a query or an
+index that assumes it. Dispatched off-peak to reproduce by looping, then to wait on the state each test
+actually asserts rather than lengthening the pause.
 
 ### A pass that claims ownership and then throws can still strand the running pass (issue 88)
 
@@ -95,6 +64,45 @@ residue of the same mechanism. See [web-ui.md](web-ui.md).
 
 Removed from the list above rather than marked resolved. Each is now documented as current
 behaviour, or covered by a test:
+
+### The suite had never run on Windows (issue 89)
+
+The owner's first Windows run failed **24 tests** against a Linux baseline of 2205 passed / 4 skipped. The
+second, after the batch landed and with no daemon running, was **2201 passed, 10 skipped, zero failures**.
+Twenty-two were fixed, none by weakening an assertion, and each platform-independent by construction:
+
+- **`6faaff1`** (tests only, 12 files): seven liveness/stop tests that faked a live PID by patching `os.kill`,
+  which the Windows branch of `_pid_alive` (`src/daemon_control.py:165`) never calls — and must not, because
+  `os.kill(pid, 0)` terminates on Windows; they now patch `_pid_alive` and keep their teeth with an `os.kill`
+  that raises. Four `tail_log` tests that asserted Python string lengths as byte offsets, which CRLF defeats,
+  now read the offset off the file's real bytes. Two open-folder tests that asserted the non-Windows branch
+  while running on Windows now inject the platform through the file's own seam. One status-note test whose
+  empty-content-dirs case let the real Windows registry answer now injects an empty `discover`. Three worker
+  tests that cleared the stop flag straight after `start()` — a race Windows can lose — now end the run by
+  exhausting the item source. One schema-refusal test was non-hermetic the way issue 67 was: a daemon in the
+  project directory held `.daemon.pid`, so the runner refused with exit 3 before the schema guard. And the
+  three non-ASCII webserver assertions were a decoding bug — `assert 'â—‹' == '○'` — the node drivers' UTF-8
+  stdout read with the Windows codepage by `_run_node`'s `subprocess.run(..., text=True)` with no `encoding=`,
+  fixed there and in seven other `tests/` files carrying the same latent bug.
+- **`cd519f3`** (product): the two `test_crash.py` failures, `OSError: [WinError 6] The handle is invalid`. The
+  mechanism was not what the brief guessed — Textual's `_handle_exception` only records `_exception` and
+  `_return_code` and queues the renderable; the write to `sys.__stderr__` happens later, in
+  `_print_error_renderables` on the exit path, after the driver has closed (`textual 8.2.8`,
+  `textual/app.py:2100`). Both are guarded now (`src/tui.py:2644`, `:2673`): the console failure is logged as
+  `Console traceback render failed` and the queued renderables dropped, while the app's own error still
+  reaches the caller and the dump is still written first. [failure-capture.md](failure-capture.md)
+
+The collection arithmetic confirms the owner's second run is current: they passed no `--deselect`, so their
+2211 collected is this checkout's 2210 (one deselected) plus the live-contract test, and the five passes that
+differ from the Linux run are the POSIX-only tests that skip on Windows.
+
+**What the running daemon did and did not explain (measured).** It accounted for the non-hermetic
+schema-refusal failure on its own — the first log shows the runner refusing on the daemon's `.daemon.pid`, exit
+3, before the schema guard. It did **not** account for the three worker/translation failures: planting a
+`.pauselock` in the project directory and re-running those three in the container leaves them passing, because
+the worker's pause gate (`src/web_worker.py:445`) exits on the stop flag and falls through to process one item
+anyway, so an ambient lock cannot starve a one-iteration test. They were the missing handshake, now fixed.
+
 
 ### A still-draining pass could clear a newer pass's timer handles (issue 86)
 
