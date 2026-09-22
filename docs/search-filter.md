@@ -315,6 +315,16 @@ order and of how scattered that walk's pages are — not that it is always faste
 that same data does not reproduce it. The route's per-item priority writes (150 transactions before the
 batching in item 34) and the live file's physical state are the other measured contributors.
 
+**That question is now closed by the owner's own measurement (2026-09-22, live file).** A cold refresh
+sorted by Subscriber Score — the same page the HAR recorded at 80.3 s, with `POST /api/search` 29.89 s and
+`POST /api/cutoffs` 28.28 s — takes **about one second** on the shipped build, under Python 3.14 with the
+official SQLite DLL. It is an end-to-end observation rather than a per-request breakdown, so it does not
+say which share belongs to which change; what it does settle is that the live file's physical state was
+*not* the blocker, and that the remaining cost was in the parts since removed — the per-item priority
+transactions, the uncached cutoffs query, and the `NTILE` fallback that the percentile builtin replaced.
+A `VACUUM`/`REINDEX` of the live database is therefore not indicated. The trace switch (`/api/ui_trace`,
+see [web-ui.md](web-ui.md)) is what splits a future regression into its requests.
+
 **The rule for a future reader: an AND of tag filters drives the scan.** The filter join
 (`_join_filter_clauses`) splits the filter list into conjunctive segments — a new segment begins at
 every `OR` — and when a segment carries two or more `Tags contains` rows it emits one
