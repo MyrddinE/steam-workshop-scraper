@@ -43,6 +43,7 @@ def _spans(markup: str):
     ({"own_subscribed": 1, "steam_download_seen_at": 1000}, subscription.DOWNLOADED),
     ({"own_subscribed": 1, "own_first_subscribed_at": 1000}, subscription.SUBSCRIBED),
     ({"is_queued_for_subscription": 1}, subscription.QUEUED),
+    ({"own_subscribed": 1, "is_queued_for_subscription": 1}, subscription.QUEUED_REMOVE),
     ({"own_first_subscribed_at": 1000}, subscription.PREVIOUSLY),
     ({}, subscription.NEVER),
 ])
@@ -75,6 +76,7 @@ async def test_the_tui_list_row_draws_each_state(tmp_path, columns, state):
     ({"own_subscribed": 1, "steam_download_seen_at": 1000}, subscription.DOWNLOADED),
     ({"own_subscribed": 1, "own_first_subscribed_at": 1000}, subscription.SUBSCRIBED),
     ({"is_queued_for_subscription": 1}, subscription.QUEUED),
+    ({"own_subscribed": 1, "is_queued_for_subscription": 1}, subscription.QUEUED_REMOVE),
     ({"own_first_subscribed_at": 1000}, subscription.PREVIOUSLY),
     ({}, subscription.NEVER),
 ])
@@ -327,6 +329,21 @@ def test_the_queue_row_builder_draws_the_downloaded_state():
     plain, spans = str(line), [span.style for span in line.spans]
     assert subscription.glyph(subscription.DOWNLOADED) in plain
     assert subscription.colour(subscription.DOWNLOADED) in spans
+
+
+def test_the_queue_row_builder_draws_the_queued_removal_state():
+    """The queue screen must draw the empty red star for a pending removal."""
+    removal = {
+        "workshop_id": 5, "title": "Item",
+        "own_subscribed": 1, "is_queued_for_subscription": 1,
+        "own_first_subscribed_at": 1000,
+    }
+    line = SubscriptionQueueScreen._row_text(removal)
+    plain, spans = str(line), [span.style for span in line.spans]
+    assert subscription.glyph(subscription.QUEUED_REMOVE) in plain
+    assert subscription.colour(subscription.QUEUED_REMOVE) in spans
+    assert subscription.colour(subscription.SUBSCRIBED) not in spans, \
+        "a queued removal must not draw the plain subscribed star"
 
 
 # --- opening a downloaded item's folder (Windows only) ----------------------

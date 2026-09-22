@@ -1,6 +1,6 @@
 """Whether the owner is, or ever was, subscribed to a workshop item.
 
-One question -- "does *this account* subscribe to this item?" -- has five
+One question -- "does *this account* subscribe to this item?" -- has six
 answers, and both front ends must give the same one for the same row. The TUI
 draws a Textual markup label and the web draws a positioned element with a CSS
 class, so the mapping from state to appearance lives here, once, and each front
@@ -8,8 +8,10 @@ end renders from it. A contract test holds `templates/index.html` to this table,
 because two front ends that disagree about why a marker looks the way it does is
 worse than either being wrong alone.
 
-The five states, and the precedence between them:
+The six states, and the precedence between them:
 
+* ``queued_remove`` -- the owner is subscribed *and* the queue entry points at a
+  removal (``is_queued_for_subscription`` and ``own_subscribed`` both set).
 * ``downloaded`` -- the owner is subscribed *and* Steam has the item on disk
   (``own_subscribed`` and the local ``steam_download_seen_at`` latch both set).
 * ``subscribed`` -- the owner is subscribed right now (``own_subscribed``).
@@ -18,11 +20,16 @@ The five states, and the precedence between them:
   (``own_first_subscribed_at`` set, ``own_subscribed`` clear).
 * ``never``      -- none of the above.
 
-When the flags disagree the order is ``downloaded > subscribed > queued >
-previously > never``: a downloaded subscription is the strongest statement the
-table can make, a confirmed subscription beats a queue entry for the same item
-(there is nothing left to queue), and the sticky first-seen timestamp outranks
-never having seen anything.
+The queue flag carries no direction of its own; the direction is **derived**,
+because that keeps every existing queued row meaning what it always meant and
+needs no schema change: with the flag set, a subscribed row is a removal and an
+unsubscribed one is an addition. When the flags disagree the order is
+``queued_remove > downloaded > subscribed > queued > previously > never``: a
+queued removal outranks the subscription it is about (otherwise the queue entry
+would be invisible and the removal could never be seen to be pending), a
+downloaded subscription is the strongest statement the table can make, a queue
+entry for an unsubscribed item is the addition it always was, and the sticky
+first-seen timestamp outranks never having seen anything.
 
 **``downloaded`` requires both flags.** ``steam_download_seen_at`` is a local latch --
 only ``src.workshop_folders`` writes it and only the subscription walk clears it
@@ -50,26 +57,33 @@ from __future__ import annotations
 
 # The shared vocabulary. Exported so the front ends and the tests name the same
 # strings rather than re-typing literals.
+QUEUED_REMOVE = "queued_remove"
 DOWNLOADED = "downloaded"
 SUBSCRIBED = "subscribed"
 QUEUED = "queued"
 PREVIOUSLY = "previously"
 NEVER = "never"
 
-# Precedence, strongest first. The first state whose flag is set wins, which is
-# what makes "subscribed + queued" draw the confirmed subscription and not the
-# queue entry.
-STATE_PRECEDENCE = (DOWNLOADED, SUBSCRIBED, QUEUED, PREVIOUSLY, NEVER)
+# Precedence, strongest first. The first state whose flag is set wins. A queued
+# removal comes first because it is the only state the queue flag can be in
+# beside a live subscription -- "subscribed + queued" is a pending removal now,
+# not the confirmed subscription it used to draw.
+STATE_PRECEDENCE = (QUEUED_REMOVE, DOWNLOADED, SUBSCRIBED, QUEUED, PREVIOUSLY, NEVER)
 
 # state -> (glyph, colour, CSS class, human label). The CSS class is what the
 # web element carries; the colour is the same value the TUI interpolates into
 # its markup, so both read "solid yellow" or "green" identically.
+#
+# `queued_remove` is the empty star (`QUEUED`'s glyph) in red: the owner asked
+# for an empty red star outline, and colour is the only thing separating it from
+# the green ☆ of a queued addition.
 #
 # `downloaded` is a solid `★` in a deeper green than `queued`'s #2ecc40. The
 # glyph says "subscribed" (a filled star, like `subscribed`) and the colour says
 # "settled" -- the two greens are deliberately different values in this one
 # table, so neither front end has to decide how to distinguish them.
 MARKER_SPECS = {
+    QUEUED_REMOVE: ("\u2606", "#e74c3c", "sub-queued-remove", "About to unsubscribe"),
     DOWNLOADED: ("\u2605", "#00a651", "sub-downloaded", "Subscribed, and downloaded"),
     SUBSCRIBED: ("\u2605", "#ffd700", "sub-subscribed", "Currently subscribed"),
     QUEUED: ("\u2606", "#2ecc40", "sub-queued", "About to subscribe"),
@@ -83,6 +97,7 @@ MARKER_SPECS = {
 # not imply a complete history: it is a claim about what we have observed, and
 # spelling that out is the honest wording the owner asked for.
 MARKER_TOOLTIPS = {
+    QUEUED_REMOVE: "Queued to unsubscribe.",
     DOWNLOADED: "You are subscribed to this item and Steam has downloaded it.",
     SUBSCRIBED: "You are subscribed to this item.",
     QUEUED: "Queued to subscribe.",
@@ -99,24 +114,34 @@ MARKER_TOOLTIPS = {
     ),
 }
 
-# Which states the web marker acts on. `subscribed` deliberately does not: the
-# only action would be an unsubscribe, and an accidental unsubscribe is not
-# wanted. `downloaded` is the same subscription seen from disk, so it is inert
-# too; its action (opening the folder) is a separate button and key.
-CLICKABLE_STATES = (QUEUED, PREVIOUSLY, NEVER)
+# Which states the web marker acts on. The old table deliberately left
+# `subscribed` out: "the only action would be an unsubscribe, and an accidental
+# unsubscribe is not wanted." The owner has reversed that. The action on a
+# subscribed item is no longer an unsubscribe at all -- it only queues a removal,
+# and the queue is cancelled by a second click -- so an accidental click is
+# recoverable and the marker becomes a control for the new `queued_remove` state
+# as well as for itself. `downloaded` is the same subscription seen from disk and
+# stays inert; its action (opening the folder) is a separate button and key.
+CLICKABLE_STATES = (QUEUED, QUEUED_REMOVE, SUBSCRIBED, PREVIOUSLY, NEVER)
 
 
 def subscription_state(item: dict) -> str:
     """The state to draw for ``item``, resolving the precedence.
 
-    ``downloaded`` needs *both* the subscription flag and the local latch: a
-    timestamp left behind by a cleared subscription must not claim the green
-    star. Below that, ``subscribed`` wins over a stale queue flag (there is
-    nothing pending for an item that is already subscribed), a queue flag wins
-    over the sticky first-seen timestamp, and a set ``own_first_subscribed_at``
-    is what makes the difference between ``previously`` and ``never`` --
-    including when ``own_subscribed`` has since been cleared.
+    ``queued_remove`` is the derived direction: the queue flag alone cannot say
+    which way it points, so a queued row that is subscribed is a removal and a
+    queued row that is not is an addition. It is tested before ``downloaded``
+    because a subscribed item can also have the download latch, and the pending
+    removal must stay visible over the green star. Below it, ``downloaded``
+    needs *both* the subscription flag and the local latch: a timestamp left
+    behind by a cleared subscription must not claim the green star, and
+    ``subscribed`` wins over an unsubscribed queue entry, a queue flag wins over
+    the sticky first-seen timestamp, and a set ``own_first_subscribed_at`` is
+    what makes the difference between ``previously`` and ``never`` -- including
+    when ``own_subscribed`` has since been cleared.
     """
+    if item.get("is_queued_for_subscription") and item.get("own_subscribed"):
+        return QUEUED_REMOVE
     if item.get("own_subscribed") and item.get("steam_download_seen_at"):
         return DOWNLOADED
     if item.get("own_subscribed"):

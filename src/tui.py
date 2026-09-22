@@ -2853,7 +2853,8 @@ class ScraperApp(App):
             data = getattr(child, "item_data", None)
             if not data:
                 continue
-            if subscription.subscription_state(data) != subscription.QUEUED:
+            if subscription.subscription_state(data) not in (
+                    subscription.QUEUED, subscription.QUEUED_REMOVE):
                 continue
             workshop_id = data.get("workshop_id")
             if workshop_id is not None:
@@ -3360,8 +3361,10 @@ class ScraperApp(App):
             self.dispatch_item_update(fresh)
 
         # A row queued from the keyboard is watched too: the web grid starts its
-        # poll on the transition into `queued` for the same reason.
-        if fresh and subscription.subscription_state(fresh) == subscription.QUEUED:
+        # poll on the transition into `queued` for the same reason, and the
+        # removal direction (`queued_remove`) lands the same way.
+        if fresh and subscription.subscription_state(fresh) in (
+                subscription.QUEUED, subscription.QUEUED_REMOVE):
             self._start_subscription_poll()
 
         # Move to next item

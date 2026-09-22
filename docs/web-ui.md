@@ -275,17 +275,24 @@ not something a person types or remembers. The parity position is stated in [tui
 
 `renderDetail` draws the owner's subscription marker immediately before the title, and the grid
 cell draws the same marker at its top-right. The subscription-queue overlay draws it on each row
-too, from the same `/api/queued` payload. It has five states, resolved by
+too, from the same `/api/queued` payload. It has six states, resolved by
 `subscription.subscription_state(item)` and rendered from the one table in `src/subscription.py`
 (which the TUI reads too — see [tui.md](tui.md)):
 
 | State | Glyph | Colour | Meaning | Click |
 |---|---|---|---|---|
+| `queued_remove` | ☆ | red | the owner is subscribed and queued for removal | un-queues |
 | `downloaded` | ★ | deep green | the owner is subscribed and Steam has the item on disk | nothing |
-| `subscribed` | ★ | solid yellow | the owner is subscribed now | nothing |
+| `subscribed` | ★ | solid yellow | the owner is subscribed now | queues a removal |
 | `queued` | ☆ | green | queued to subscribe | un-queues |
 | `previously` | ☆ | yellow | we have seen the owner subscribed, and they are not now | queues |
 | `never` | ○ | gray | never seen subscribed | queues |
+
+The queue flag carries no direction of its own: `queued_remove` is **derived**, because a queued
+row that is subscribed is a removal and a queued row that is not is an addition. That keeps every
+existing queued row meaning what it always meant and needs no schema change. `queued_remove`
+outranks `downloaded` and `subscribed`, because the pending removal must stay visible over the
+subscription it is about.
 
 `downloaded` requires **both** `own_subscribed` and the local `steam_download_seen_at` latch, so a timestamp
 left behind by a cleared subscription cannot claim the green star. The latch is written only by
@@ -298,17 +305,20 @@ are gone, and the pane's `Queue` / `Unqueue` button pair is replaced by the mark
 marker's glyph, colour, CSS class, label, tooltip and clickability all arrive on the payload,
 computed by the server from the shared table, so the page holds no copy of the state vocabulary.
 
-Clicking the marker calls `toggleDetailQueue(wid)`, except for `subscribed`, which sends nothing —
-the only action available there would be an unsubscribe, and an accidental unsubscribe is not
-wanted. `toggleDetailQueue` POSTs the existing `/api/toggle_subscription_queue/<id>` route, which flips the
-database flag and answers only `{ok: true}`. Since the route does not report which way the flag
-moved, the client reads the item back through the read-only `/api/item/<id>` route and re-renders
-the pane and the matching cell's marker (`_applySub`) from that payload — the same path the `s`
-shortcut takes. A read-back rather than a locally flipped guess is deliberate: the `s` shortcut and
-the subscribe drain's `/api/subscribed` calls change the same flag behind the pane's back, so a
-guess could show the wrong state. Rendering from the item payload is also what lets the 3-second
-translation poll re-render the pane without reverting the toggle. A failed request alerts and leaves
-the pane alone.
+Clicking the marker calls `toggleDetailQueue(wid)`. `subscribed` used to send nothing — "the only
+action available there would be an unsubscribe, and an accidental unsubscribe is not wanted" — but
+that inertness was deliberately reversed: its click now only queues a removal, and the queue
+cancels, so an accidental click is recoverable. The new `queued_remove` state is clickable for the
+same reason: a second click cancels the queued removal. `downloaded` stays inert — its action is
+the separate open-folder button and key. `toggleDetailQueue` POSTs the existing
+`/api/toggle_subscription_queue/<id>` route, which flips the database flag and answers only
+`{ok: true}`. Since the route does not report which way the flag moved, the client reads the item
+back through the read-only `/api/item/<id>` route and re-renders the pane and the matching cell's
+marker (`_applySub`) from that payload — the same path the `s` shortcut takes. A read-back rather
+than a locally flipped guess is deliberate: the `s` shortcut and the drain's own recording change
+the same flag behind the pane's back, so a guess could show the wrong state. Rendering from the
+item payload is also what lets the 3-second translation poll re-render the pane without reverting
+the toggle. A failed request alerts and leaves the pane alone.
 
 The click is not the only writer. A subscribe can land behind a rendered cell through
 `POST /api/subscribed/<id>` (this page's cancel/clear calls) or through the

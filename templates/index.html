@@ -826,13 +826,14 @@ function _applyPending(el, item) {
 
 // ── the owner's subscription marker ──────────────────────────────────────────
 //
-// Four states (subscribed / queued / previously / never), with glyph, colour,
-// tooltip and clickability all computed by the server from src/subscription.py
-// and carried on the payload. The page deliberately holds no table of its own:
-// the TUI draws the same four states from the same module, and a contract test
-// holds this template to it. `subscription_state` is only used to set the
-// data attribute the click reads, because a handler needs to know whether the
-// click does anything without re-parsing its own text.
+// Six states (queued_remove / downloaded / subscribed / queued / previously /
+// never), with glyph, colour, tooltip and clickability all computed by the
+// server from src/subscription.py and carried on the payload. The page
+// deliberately holds no table of its own: the TUI draws the same states from the
+// same module, and a contract test holds this template to it.
+// `subscription_state` is only used to set the data attribute the click reads,
+// because a handler needs to know whether the click does anything without
+// re-parsing its own text.
 function showSubscriptionMarker(item) {
   return `<div class="grid-sub" data-sub-state="${item.subscription_state}"`
     + ` data-sub-clickable="${item.subscription_clickable ? 1 : 0}"`
@@ -860,9 +861,12 @@ function _applySub(el, item) {
   el.setAttribute('title', item.subscription_tooltip);
 }
 
-// Clicking the marker toggles the queue for the three states that have an
-// action. `subscribed` sends nothing: the only action available would be an
-// unsubscribe, and an accidental unsubscribe is not wanted.
+// Clicking the marker toggles the queue for every state but `downloaded`. The
+// owner reversed the old rule that `subscribed` was inert: its click only queues
+// a removal, and the queue cancels, so an accidental click is recoverable. The
+// new `queued_remove` state is clickable for the same reason -- a second click
+// cancels the queued removal. `downloaded` stays inert because its action is the
+// separate open-folder button and key.
 function onSubMarkerClick(event, el) {
   // The cell underneath opens the detail pane, so a click on the marker must
   // stop propagating or a queue toggle would also open the pane.
@@ -969,7 +973,8 @@ function _listNeedsPoll(items) {
   for (const item of items) {
     // A stage spinner moves on its own; a subscription marker moves when a
     // subscribe lands, which the database records and only this poll re-reads.
-    if (_pendingStage(item) !== null || item.subscription_state === 'queued') return true;
+    if (_pendingStage(item) !== null || item.subscription_state === 'queued'
+        || item.subscription_state === 'queued_remove') return true;
   }
   return false;
 }
@@ -993,7 +998,8 @@ function _startListPoll(filters, sortBy, sortOrder) {
       grid.querySelectorAll('.grid-cell[data-wid]').forEach(el => {
         const sub = el.querySelector('.grid-sub');
         if (el.classList.contains('has-spinner') ||
-            (sub && sub.getAttribute('data-sub-state') === 'queued')) {
+            (sub && (sub.getAttribute('data-sub-state') === 'queued' ||
+                     sub.getAttribute('data-sub-state') === 'queued_remove'))) {
           pending.push(parseInt(el.getAttribute('data-wid'), 10));
         }
       });
@@ -1522,7 +1528,7 @@ async function toggleDetailQueue(wid) {
     // pane's help: the subscribe lands in the database. The list poll re-reads
     // such a cell at its fastest, and a row queued after the search rendered was
     // never seen by _listNeedsPoll, so the transition starts it.
-    if (item.subscription_state === 'queued') _startListPoll([], '', '');
+    if (item.subscription_state === 'queued' || item.subscription_state === 'queued_remove') _startListPoll([], '', '');
   } catch (e) { console.debug('Queue state refresh failed', e); }
 }
 
@@ -1708,7 +1714,7 @@ async function refreshItemState(wid) {
     const item = await resp.json();
     if (item.error) return;
     dispatchItemUpdate(item);
-    if (item.subscription_state === 'queued') _startListPoll([], '', '');
+    if (item.subscription_state === 'queued' || item.subscription_state === 'queued_remove') _startListPoll([], '', '');
   } catch (e) { console.debug('Item state refresh failed', e); }
 }
 
