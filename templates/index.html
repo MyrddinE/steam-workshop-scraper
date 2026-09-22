@@ -2506,6 +2506,137 @@ let _subPollIv = null;
 let _subScheduleIv = null;
 let _subCanceled = false;
 let _subThrottleStopped = false;
+// The live pass's estimate inputs, or null when no pass is drawing figures:
+// `{seed, observed, currentStartedAt, count, done}`. Seeded from
+// `/api/subscribe_pace` and dropped with the pass.
+let _subEstimate = null;
+
+// ── the subscription estimate ─────────────────────────────────────────────
+//
+// The overlay counts **down**: every row's figure is the estimated seconds
+// until that row *completes*, and the figure beside the progress count is the
+// same arithmetic over the whole batch. The arithmetic is the TUI's
+// (`SubscriptionQueueScreen._estimated_item_seconds` and `_estimate_remaining`)
+// so the two front ends cannot disagree: one running mean over the items the
+// pass has finished, seeded with the delay-derived guess, where the seed counts
+// as one virtual observation -- so the first real item moves the mean a lot and
+// later ones less. Nothing is persisted and no history is consulted.
+//
+// The one deliberate difference from the TUI is the `+ 1`: the TUI prices only
+// the items *ahead* of a row (time to reach it), while the owner asked the
+// overlay for time to *complete* the row, so the row's own cost is included.
+// For the row being asked about now (`index === done`) that makes the figure
+// its remaining cost, which is what replaces the old elapsed counter.
+//
+// The core functions are pure and take the current item's elapsed time as an
+// argument, so the arithmetic is unit-testable under node with no DOM and no
+// clock inside it.
+function _subItemSeconds(seedSeconds, observedSeconds) {
+  let total = Number(seedSeconds) || 0;
+  for (let i = 0; i < observedSeconds.length; i++) {
+    total += Number(observedSeconds[i]) || 0;
+  }
+  return total / (1 + observedSeconds.length);
+}
+
+function _subRowRemainingSeconds(itemSeconds, index, done, elapsedCurrent) {
+  return Math.max(1, Math.ceil((index - done + 1) * itemSeconds - elapsedCurrent));
+}
+
+function _subBatchRemainingSeconds(itemSeconds, count, done, elapsedCurrent) {
+  return Math.max(0, Math.ceil((count - done) * itemSeconds - elapsedCurrent));
+}
+
+// The row's drawn figure, or null for a row that is already done. A settled row
+// carries no countdown, the same rule the TUI's `_row_display` applies.
+function _subRowFigure(itemSeconds, index, done, elapsedCurrent) {
+  if (index < done) return null;
+  return '~' + _subRowRemainingSeconds(itemSeconds, index, done, elapsedCurrent) + 's';
+}
+
+// Minutes and seconds above a minute, plain seconds below, so a long batch does
+// not read as a five-hundred-second number.
+function _subFormatDuration(seconds) {
+  const whole = Math.max(0, Math.ceil(seconds));
+  if (whole > 60) {
+    const minutes = Math.floor(whole / 60);
+    return '~' + minutes + 'm ' + (whole - minutes * 60) + 's';
+  }
+  return '~' + whole + 's';
+}
+
+// The current item's elapsed cost, from the clock started around its awaited
+// call; zero when no call is in flight.
+function _subElapsedCurrent() {
+  if (!_subEstimate || _subEstimate.currentStartedAt === null) return 0;
+  return Math.max(0, (Date.now() - _subEstimate.currentStartedAt) / 1000);
+}
+
+// The seed, read fresh through the route rather than cached: the delay is
+// adaptive daemon state and a throttle can double it mid-pass, so the 1 s poll
+// re-reads it exactly as the TUI re-reads it per redraw.
+async function _subSeedSeconds() {
+  try {
+    const resp = await fetch('/api/subscribe_pace');
+    const pace = await resp.json();
+    return Number(pace.seed_seconds) || 0;
+  } catch (e) {
+    console.debug('subscribe_pace read failed', e);
+    return 0;
+  }
+}
+
+// One writer for the progress line, so a tally write elsewhere cannot drop the
+// batch figure. With no live estimate it draws the bare count.
+function _subRenderProgress(done, count) {
+  const progress = document.getElementById('sub-progress');
+  if (!progress) return;
+  let text = done + ' / ' + count;
+  if (_subEstimate) {
+    _subEstimate.done = done;
+    _subEstimate.count = count;
+    const itemSeconds = _subItemSeconds(_subEstimate.seed, _subEstimate.observed);
+    const remaining = _subBatchRemainingSeconds(
+      itemSeconds, count, done, _subElapsedCurrent());
+    text += ' · ' + _subFormatDuration(remaining) + ' left';
+  }
+  progress.textContent = text;
+}
+
+// Every figure off the screen. Called on every way a pass can end -- Cancel,
+// the throttle stop, Clear Failed and the loop's own completion -- so no stale
+// countdown survives it.
+function _clearSubEstimates() {
+  const list = document.getElementById('sub-queue-list');
+  if (list) {
+    list.querySelectorAll('.sub-queue-item .countdown').forEach(function (el) {
+      el.textContent = '';
+    });
+  }
+  const progress = document.getElementById('sub-progress');
+  if (progress && _subEstimate) {
+    progress.textContent = _subEstimate.done + ' / ' + _subEstimate.count;
+  }
+  _subEstimate = null;
+}
+
+// The one tick: redraw every row's figure and the batch figure. The current
+// item's elapsed is measured from the moment its own call started (not from the
+// pass), which is what makes its figure fall as that call runs.
+function _subTickEstimates(list, verified, count) {
+  if (!_subEstimate) return;
+  const done = verified.size;
+  const itemSeconds = _subItemSeconds(_subEstimate.seed, _subEstimate.observed);
+  const elapsedCurrent = _subElapsedCurrent();
+  const rows = list.querySelectorAll('.sub-queue-item');
+  rows.forEach(function (row, index) {
+    const countdown = row.querySelector('.countdown');
+    if (!countdown) return;
+    countdown.textContent = _subRowFigure(itemSeconds, index, done, elapsedCurrent) || '';
+  });
+  _subRenderProgress(done, count);
+}
+
 
 // Drain the queue through `/api/subscribe/<id>`, one item at a time.
 //
@@ -2561,7 +2692,11 @@ async function _startAutoSubscribe() {
     await fetch('/api/resume', {method:'POST'});
   };
 
-  const startTime = Date.now();
+  // The estimate is for this pass only: seed it from the shared delay and draw
+  // the batch figure before the first call starts.
+  _subEstimate = {seed: await _subSeedSeconds(), observed: [], currentStartedAt: null,
+                  count: items.length, done: 0};
+  _subRenderProgress(0, items.length);
   const verified = new Set();
 
   // Poll for the marker — the loop below marks each call's own answer, but the
@@ -2570,12 +2705,17 @@ async function _startAutoSubscribe() {
   // this pass's back.
   _subPollIv = setInterval(async () => {
     try {
-      const [qresp, fresp] = await Promise.all([
+      const [qresp, fresp, presp] = await Promise.all([
         fetch('/api/queued'),
-        fetch('/api/subscribe_failures')
+        fetch('/api/subscribe_failures'),
+        fetch('/api/subscribe_pace')
       ]);
       const queued = await qresp.json();
       const failures = await fresp.json();
+      const pace = await presp.json();
+      // A throttle can double the delay mid-pass, so the seed is re-read here
+      // rather than held from the pass's start.
+      if (_subEstimate) _subEstimate.seed = Number(pace.seed_seconds) || 0;
       const queuedIds = new Set(queued.map(q => q.workshop_id));
       const failedIds = new Set(failures);
       items.forEach(item => {
@@ -2594,7 +2734,7 @@ async function _startAutoSubscribe() {
         }
       });
 
-      progress.textContent = verified.size + ' / ' + items.length;
+      _subRenderProgress(verified.size, items.length);
 
       if (verified.size >= items.length) {
         clearInterval(_subPollIv);
@@ -2634,6 +2774,9 @@ async function _startAutoSubscribe() {
       _subThrottleStopped = true;
       _subCanceled = true;
       if (_subPollIv) { clearInterval(_subPollIv); _subPollIv = null; }
+      // The throttle stop ends the pass, so it takes every figure off the
+      // screen before the message replaces the progress line.
+      _clearSubEstimates();
       // The release is written here as well as in the drain's own `finally`,
       // because this early stop happens with the pass still mid-loop and
       // leaving the daemon paused is the failure mode that matters.
@@ -2650,13 +2793,10 @@ async function _startAutoSubscribe() {
   }
 
   // The schedule is one awaited request per item and nothing else: no timer
-  // spaces them, because the route's own page read is the interval.
+  // spaces them, because the route's own page read is the interval. The timer
+  // only redraws the countdowns.
   _subScheduleIv = setInterval(() => {
-    const done = verified.size;
-    const row = list.querySelectorAll('.sub-queue-item')[done];
-    const countdown = row ? row.querySelector('.countdown') : null;
-    if (!countdown) return;
-    countdown.textContent = Math.floor((Date.now() - startTime) / 1000) + 's';
+    _subTickEstimates(list, verified, items.length);
   }, 250);
 
   try {
@@ -2664,7 +2804,12 @@ async function _startAutoSubscribe() {
       if (_subCanceled) break;
       const row = list.querySelector(`[data-wid="${item.workshop_id}"]`);
       const countdown = row ? row.querySelector('.countdown') : null;
-      if (countdown) countdown.textContent = '…';
+      // The current row's figure counts its own remaining cost down from the
+      // seed/mean, so its clock starts when its call does. The measurement is
+      // around the awaited fetch itself; the trace switch's fetch wrapper only
+      // observes a call and hands back the same promise, so it cannot change
+      // what is measured here.
+      if (_subEstimate) _subEstimate.currentStartedAt = Date.now();
       // Sequential on purpose: the next page read must not start until this
       // call has returned, or the two reads overlap on one shared interval.
       let data = null;
@@ -2677,6 +2822,13 @@ async function _startAutoSubscribe() {
       } catch (e) {
         console.debug('Subscribe call failed', e);
       }
+      // A finished item's whole cost is the call's wall-clock duration,
+      // success or refusal -- a refusal still spent the pass that time.
+      if (_subEstimate) {
+        _subEstimate.observed.push(
+          Math.max(0, (Date.now() - _subEstimate.currentStartedAt) / 1000));
+        _subEstimate.currentStartedAt = null;
+      }
       if (countdown) countdown.textContent = '';
       verified.add(item.workshop_id);
       const verb = row ? row.querySelector('.sub-queue-verb') : null;
@@ -2686,7 +2838,7 @@ async function _startAutoSubscribe() {
           ? (item.subscription_state === 'queued_remove' ? 'unsubscribed' : 'subscribed')
           : 'failed';
       }
-      progress.textContent = verified.size + ' / ' + items.length;
+      _subRenderProgress(verified.size, items.length);
       if (!(data && data.success === 1)) {
         console.debug('Subscribe refused for ' + item.workshop_id + ': ' +
                       ((data && data.message) || status + ' ' + statusText));
@@ -2695,6 +2847,9 @@ async function _startAutoSubscribe() {
     }
   } finally {
     if (_subScheduleIv) { clearInterval(_subScheduleIv); _subScheduleIv = null; }
+    // The estimate is only for a live pass; drop it with the pass so no stale
+    // countdown is left on the row or the progress line.
+    _clearSubEstimates();
     // Released even if the loop threw: leaving the daemon paused would be worse
     // than any single failed subscribe.
     await finish();
@@ -2706,10 +2861,14 @@ document.getElementById('sub-cancel').onclick = () => {
     _subCanceled = true;
     clearInterval(_subScheduleIv);
     _subScheduleIv = null;
+    // Cancel ends the pass, so it takes every figure off the screen now rather
+    // than waiting for the in-flight call to return.
+    _clearSubEstimates();
     document.getElementById('sub-cancel').textContent = 'Close';
   } else {
     // Second click (Close): dismiss overlay
     if (_subPollIv) { clearInterval(_subPollIv); _subPollIv = null; }
+    _clearSubEstimates();
     // Dequeue any remaining unverified items so they don't stick -- unless the
     // pass was stopped by throttling, where the whole point is to leave them
     // queued so the next drain retries them. This is a direction-agnostic
@@ -2728,6 +2887,9 @@ document.getElementById('sub-cancel').onclick = () => {
 };
 
 document.getElementById('sub-clear-failed').onclick = () => {
+  // Clearing the failed rows ends what is left of the pass's tail, so the
+  // countdowns go with them rather than freezing on screen.
+  _clearSubEstimates();
   var rows = document.querySelectorAll('.sub-queue-item:not(.done)');
   rows.forEach(function(row) {
     var wid = row.getAttribute('data-wid');

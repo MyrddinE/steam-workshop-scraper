@@ -557,8 +557,10 @@ seeded with the delay-derived guess. The seed is one virtual observation, which 
 moves the mean a lot and later ones less; the mean is not persisted, no history is consulted, and
 there is no rolling window — the pass in front of the screen is the only evidence used. The delay is
 still read fresh on every tick, so a throttle that doubles the engine's `WebInterval` mid-pass moves
-the seed the mean is built on. This differs from the web overlay's countdown on purpose; see
-[web-ui.md](web-ui.md#subscribe-feature) for why the two cover different flows.
+the seed the mean is built on. The web overlay prices an item from the same seed and the same running
+mean, but counts down to each row's **completion** rather than to its turn — it adds the row's own
+cost — so the two figures are the same arithmetic with that one deliberate difference; see
+[web-ui.md](web-ui.md#queued-row-timing-a-countdown-to-completion).
 
 ### Ignoring an item (i key)
 

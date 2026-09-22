@@ -405,7 +405,7 @@ do this from a Steam tab is **removed**: the userscript, the `autosubscribe=true
 `/api/sessionid` and the bridge's outcome reports are gone, and nothing in the page opens a tab or
 looks for an extension any more. What the drain still reads (`/api/queued`,
 `/api/subscribe_failures`, `/api/subscribe_throttle`) stays mounted because it is the browser-free
-flow's own bookkeeping; see [the drain](#queued-row-timing-and-why-it-differs-from-the-tuis). The
+flow's own bookkeeping; see [the drain](#queued-row-timing-a-countdown-to-completion). The
 removal is recorded in
 [future-plans.md](future-plans.md#removing-the-browser-bridge-from-the-subscribe-path).
 
@@ -576,24 +576,56 @@ records one. The budget is per account or address and refills over minutes.
 awaits `/api/subscribe/<id>` for each item before starting the next. The route's page read is gated on
 the shared web interval and its POST is exempt, so the interval is already paid once per item inside
 the call; a second client-side delay would pay it twice, and firing the items without awaiting would
-run two gated reads concurrently against one shared interval. This is why the row timer shows elapsed
-time for the row being asked about rather than a countdown to a scheduled tab.
+run two gated reads concurrently against one shared interval.
 
-### Queued-row timing, and why it differs from the TUI's
+### Queued-row timing: a countdown to completion
 
-The autosubscribe overlay keeps one timer (`_subScheduleIv`) whose only job is to tick an elapsed
-figure on the row currently being asked about; the row's outcome is written from the route's own
-answer. There is deliberately **no schedule of opens**: the drain awaits each
-`/api/subscribe/<id>` and the route's page read pays the shared interval, so the POST it sends is
-exempt and a row's cost is one gated read — the same shape the TUI's queue has, now that the engine's
-confirmation read is retired by default (`src/subscribe_engine.py`; `VERIFY_AFTER_SUBSCRIBE = True`
-restores the second read). Nothing in the page spaces the requests: the route reads the configured
-delay itself, fresh per call, so a throttle's doubling mid-pass moves the pacing without the page
-knowing, and a second client-side delay would pay the interval twice per item.
+The overlay counts **down**. Each row's `.countdown` span carries the estimated seconds until that row
+*completes*, and the line above the list carries the same figure for the whole batch beside the
+progress count (`3 / 12 · ~1m 20s left`; minutes and seconds above a minute, plain seconds below).
 
-The web delay is not injected into the page at all: the tab flow was its only consumer, so
-`WEB_DELAY` went with the bridge rather than staying behind as a number nothing reads, and the delay
-itself now lives in the daemon state file rather than in `config.yaml`.
+An earlier version of this section recorded the opposite as deliberate: it said the row timer showed
+*elapsed* time for the row being asked about rather than a countdown, on the ground that a tab-open
+schedule had been replaced by an awaited route call. That was the regression, not a decision the owner
+made. The overlay's first implementation counted down (`138f759`); the conversion to the server route
+(`5e78553`) deleted the `openAt` schedule and the countdown branch, kept the internal `elapsed`
+variable that had only existed to compare against `openAt`, and displayed it — seconds since the pass
+began, on the row being asked about, with the rows still waiting left blank. The owner reported the
+count-up and asked for the estimate to adapt to the time an item is expected to take; that estimator
+had landed in the TUI, and the overlay's flow is now the same shape (one awaited route call per item),
+so it applies here directly.
+
+**The seed.** An item pays one gated page read on the default path, two while
+`subscribe_engine.VERIFY_AFTER_SUBSCRIBE` restores the retired confirmation read, so the guess starts
+at that many times the shared persisted web delay. The page cannot see that delay — it lives in the
+daemon state file, not `config.yaml` — so it reads it through `GET /api/subscribe_pace`, which calls
+`src.web_worker.configured_web_delay`, the same owner the TUI's estimator uses. The route reads the
+delay **fresh on every call**, and the pass re-reads the seed at start and on the existing 1 s poll,
+because a throttle can double the delay mid-pass.
+
+**The formula.** The client prices an item with the TUI's arithmetic
+(`SubscriptionQueueScreen._estimated_item_seconds`): one running mean over the items the pass has
+finished, seeded with the delay-derived guess as **one virtual observation**, so the first observed
+item moves the mean a lot and later ones less. Each finished item's cost is the wall-clock duration of
+its awaited `/api/subscribe/<id>` call, success or refusal — a refusal still spent the pass that time —
+which is the call's whole cost and the web's equivalent of the TUI's per-item callback measurement. The
+250 ms `_subScheduleIv` tick redraws every row from that mean and from the current call's own elapsed
+time; a row already done carries no figure.
+
+**The difference from the TUI.** The TUI prices the items *ahead* of a row, so its figure is time to
+*reach* the row; the owner asked the overlay for time to *complete* the row, so the web's row figure
+includes the row's own remaining cost. For the row currently being asked about that is exactly its
+remaining cost, which is what replaces the old elapsed counter. The batch figure prices the same
+remaining work as the last row — the two differ only once the batch is overdue, where the batch
+settles at zero while a row's own figure clamps at one second. Like the TUI's, nothing here is
+persisted: the estimate is drawn
+only while a pass is live, and Cancel, the throttle stop, Clear Failed and normal completion each
+clear every figure, so a finished or stopped pass leaves no countdown on screen. The one writer for
+the progress line is `_subRenderProgress`, so a tally write elsewhere cannot drop the batch figure.
+
+Nothing in the page spaces the requests: the route reads the configured delay itself, fresh per call,
+so a throttle's doubling mid-pass moves the pacing without the page knowing, and a second client-side
+delay would pay the interval twice per item.
 The TUI screen's own description is in [tui.md](tui.md#subscription-queue-sl-keys).
 
 ---
@@ -704,6 +736,18 @@ Deletes every pending item — those with no status or a 404 status and no succe
 ### `/api/save_filter` — POST
 
 Saves the current enrichment filters to `app_discovery` for the configured AppID. The body is `getFilters()` — the builder's rows only. The `Subscribed:` overlay is view state and is deliberately not written here, so what the scraper enriches with stays the set the builder shows. When no target AppID is configured it answers **400** with `{"error": "No target AppID configured"}`; the client shows that message and only reports success on a 2xx, so a rejected save is never presented as a stored one.
+
+### `/api/subscribe_pace` — GET
+
+The subscription overlay's estimate seed. It answers
+`{"web_delay_seconds": <float>, "seed_seconds": <float>}`, where the delay is the shared persisted web
+interval (`configured_web_delay`, the same owner the TUI's estimator reads) and the seed is that delay
+times the number of gated page reads an item pays — one by default, two while
+`subscribe_engine.VERIFY_AFTER_SUBSCRIBE` restores the confirmation read. The delay is daemon state the
+page cannot otherwise see, and the route reads it **fresh on every call** because a throttle can double
+it mid-pass. The overlay re-reads it at pass start and on its 1 s poll; the countdown it seeds is
+described under [queued-row timing](#queued-row-timing-a-countdown-to-completion). `/api/queued` is
+unchanged — it still returns a bare array the overlay iterates.
 
 ### `/api/subscribe/<id>` — POST
 
