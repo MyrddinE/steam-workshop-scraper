@@ -23,6 +23,7 @@ from src.database import (
     initialize_database,
     insert_or_update_item,
     mark_own_subscribed,
+    mark_own_unsubscribed,
     toggle_subscription_queue,
 )
 from src.tui import DetailsPane, ScraperApp, SubscriptionQueueScreen, app_bindings
@@ -465,3 +466,49 @@ async def test_the_queue_row_marker_follows_the_pass_outcome(tmp_path):
     assert subscription.glyph(subscription.QUEUED) in before
     assert subscription.glyph(subscription.SUBSCRIBED) in after, after
     assert subscription.glyph(subscription.QUEUED) not in after, after
+
+
+@pytest.mark.asyncio
+async def test_the_queue_pass_reports_a_removal_and_draws_the_red_star(tmp_path):
+    """A queued removal runs through the same screen, worded as a removal.
+
+    The row draws the owner's empty red star before the pass, moves to
+    `previously` when the removal is recorded, and the pass tally names the
+    removal rather than counting it as a subscribe.
+    """
+    db_path = str(tmp_path / "queue_remove.db")
+    initialize_database(db_path)
+    insert_or_update_item(db_path, {
+        "workshop_id": 5, "title": "Item", "fetch_status": 200,
+        "own_subscribed": 1, "is_queued_for_subscription": 1,
+        "own_first_subscribed_at": 1000})
+    config = {"database": {"path": db_path}, "logging": {"level": "INFO"}}
+
+    def fake_pass(items, **kwargs):
+        outcomes = []
+        for item in items:
+            mark_own_unsubscribed(db_path, item["workshop_id"])
+            outcome = subscribe_engine.SubscribeOutcome(
+                item["workshop_id"], subscribe_engine.UNSUBSCRIBED)
+            outcomes.append(outcome)
+            kwargs["on_result"](outcome)
+        return outcomes
+
+    with patch('src.tui.load_config', return_value=config), \
+         patch('src.subscribe_engine.run_subscription_pass', side_effect=fake_pass):
+        app = ScraperApp()
+        async with app.run_test() as pilot:
+            await pilot.pause(ASYNC_PAUSE)
+            await pilot.press("l")
+            await pilot.pause(ASYNC_PAUSE)
+            screen = app.screen
+            before = str(screen.query_one("#sub-queue-item-5", Static).render())
+            await pilot.click("#btn-subscribe-queue")
+            await pilot.pause(ASYNC_PAUSE * 3)
+            after = str(screen.query_one("#sub-queue-item-5", Static).render())
+            status = str(screen.query_one("#subscription-queue-status", Static).render())
+
+    assert subscription.glyph(subscription.QUEUED_REMOVE) in before, before
+    assert subscription.glyph(subscription.PREVIOUSLY) in after, after
+    assert "1 unsubscribed" in status, status
+    assert "0 subscribed" in status, status

@@ -489,22 +489,25 @@ would call the same `get_all_creator_ids`.
 
 ### Subscription Queue (s/l keys)
 
-`s` toggles `is_queued_for_subscription` on the selected item. `l` opens the queue screen
-(`SubscriptionQueueScreen`), which **subscribes each queued item through `src/subscribe_engine.py`** —
-there are no clickable Steam URLs any more and no browser tabs. Each row is a `Static` built with Rich
-`Text.append`, so a Steam title never reaches a parser (see
+`s` toggles `is_queued_for_subscription` on the selected item. The flag carries no direction: with it
+set, `own_subscribed` decides — set means a **removal** is queued, clear means an addition — so a
+second `s` on a subscribed item queues its removal and a third cancels it. `l` opens the queue screen
+(`SubscriptionQueueScreen`), which **runs each queued item through `src/subscribe_engine.py` in that
+derived direction** — there are no clickable Steam URLs any more and no browser tabs. Each row is a
+`Static` built with Rich `Text.append`, so a Steam title never reaches a parser (see
 [Steam text is escaped before it is rendered](#steam-text-is-escaped-before-it-is-rendered)).
 
-For each item the engine reads the page's server-rendered `#SubscribeItemBtn`, sends the subscribe POST
-only when the button says the item is not subscribed, and records the subscription from the POST's own
-`success: 1` — the confirmation read is retired by default. `Subscribe`
-runs the pass on a worker thread and draws each item's outcome in place as it lands; a recorded
-subscribe writes `mark_own_subscribed`, which clears `is_queued_for_subscription`. Failures stay queued.
-Every page read waits the shared adaptive web interval, and the pass takes
-`.pauselock` for its duration and releases it in a `finally` — so the daemon's web and image workers
-pause for the pass and resume even if the engine raises. The screen also creates the lock on mount and
-removes it on unmount, so the queue stays quiet while it is open. No live Steam call happens in tests;
-the engine's fetch and POST seams are patched. See
+For each item the engine reads the page's server-rendered `#SubscribeItemBtn` and follows the row's
+direction: an addition sends the subscribe POST only when the button says the item is not subscribed
+and records `mark_own_subscribed` from `success: 1`; a removal sends the unsubscribe POST only when
+the button says it *is*, and records `mark_own_unsubscribed` — which clears `own_subscribed` and the
+queue flag and leaves the sticky first-seen stamp, so the row reads `previously`. The confirmation
+read is retired by default and is addition-only. `Subscribe` runs the pass on a worker thread and
+draws each item's outcome in place as it lands. Failures stay queued. Every page read waits the shared
+adaptive web interval, and the pass takes `.pauselock` for its duration and releases it in a `finally`
+— so the daemon's web and image workers pause for the pass and resume even if the engine raises. The
+screen also creates the lock on mount and removes it on unmount, so the queue stays quiet while it is
+open. No live Steam call happens in tests; the engine's fetch and POST seams are patched. See
 [data-pipeline.md](data-pipeline.md#subscribe-engine-browser-free) for the engine's semantics and
 [future-plans.md](future-plans.md#retiring-the-subscribe-confirmation-read) for the retirement of the
 confirmation read (step 1, landed).
@@ -513,15 +516,18 @@ confirmation read (step 1, landed).
 outcome and rendered through `src/subscription.py`, the same table the list row and the detail pane
 use. Before that the row changed only its status word and the final tally: every row drew the green
 `queued` outline whatever happened, including a row whose subscribe had just been confirmed. A
-confirmed subscribe moves that row to the yellow ★; an outcome that leaves the item queued (throttled,
-refused, a disagreement) leaves it on the green ☆, which is what `mark_own_subscribed` not being called
-means. `get_subscription_queue_items` now carries the three subscription columns so the screen can draw that state
-rather than assuming it.
+confirmed subscribe moves that row to the yellow ★; a queued removal draws the red ☆
+(`queued_remove`), and a settled removal moves the row to `previously`. An outcome that leaves the
+item queued (throttled, refused, a disagreement) leaves it on the green ☆, which is what neither
+completion write being called means. `get_subscription_queue_items` now carries the subscription
+columns so the screen can draw that state rather than assuming it.
 
 **Watching the queue drain.** While the pass runs, the screen ticks four times a second (the web
 overlay's cadence) and gives every row still waiting an estimated whole number of seconds until the
-engine reaches it, shown as `~24s`; the row the engine is reading now carries `subscribing...` in place
-of a countdown, and a reported outcome drops the countdown and keeps its status word. The estimate is
+engine reaches it, shown as `~24s`; the row the engine is reading now carries `subscribing...` or
+`unsubscribing...` — chosen from its own derived direction — in place of a countdown, and a reported
+outcome drops the countdown and keeps its status word (`subscribed` / `unsubscribed`, or the refusal).
+A settled outcome of either direction is green; one that stays queued is yellow. The estimate is
 deliberately an estimate, not a promise: the pass can be refused, throttled or cancelled after it is
 drawn, and the screen's own status line says so.
 

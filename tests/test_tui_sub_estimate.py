@@ -256,6 +256,31 @@ def test_the_current_item_is_distinct_and_has_no_countdown(tmp_path):
     assert screen._row_display(2, 0.0) == (None, None, None)
 
 
+def test_the_current_row_words_the_derived_direction(tmp_path):
+    """The current-item word follows the row's direction, not the subscribe path."""
+    config = _delay_config(tmp_path, 12.0)
+    screen = _screen(tmp_path, config)
+    screen._items = [
+        {"workshop_id": 1, "title": "One",
+         "own_subscribed": 1, "is_queued_for_subscription": 1},
+        {"workshop_id": 2, "title": "Two",
+         "own_subscribed": 0, "is_queued_for_subscription": 1},
+    ]
+    screen._pass_running = True
+    screen._pass_started_at = time.monotonic()
+
+    assert screen._row_display(0, 0.0)[1] == "unsubscribing..."
+
+    # Once the removal lands the next row -- an addition -- takes the word, and
+    # the settled removal draws green because it left the queue by being carried
+    # out.
+    screen._outcomes[1] = subscribe_engine.SubscribeOutcome(
+        1, subscribe_engine.UNSUBSCRIBED)
+    assert screen._row_display(0, 0.0)[1] == "unsubscribed"
+    assert screen._row_display(0, 0.0)[2] == "green"
+    assert screen._row_display(1, 0.0)[1] == "subscribing..."
+
+
 def test_one_redraw_reads_the_shared_delay_once(tmp_path, monkeypatch):
     """A redraw of N rows must not re-read the delay N times.
 

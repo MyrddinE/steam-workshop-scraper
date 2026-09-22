@@ -1125,18 +1125,20 @@ class _EstimateBasis(NamedTuple):
 
 
 class SubscriptionQueueScreen(ModalScreen):
-    """The subscription queue: the engine subscribes each queued item.
+    """The subscription queue: the engine subscribes or unsubscribes each item.
 
     The screen used to draw a clickable Steam URL per item and leave the actual
     subscribe to a human with a browser. It now runs each item through
-    ``src.subscribe_engine``, which reads the item page's own subscribe button,
-    sends the POST only when the button says the item is not subscribed, and
-    records the subscription from the POST's own answer -- the confirmation read
-    is retired by default, and setting ``VERIFY_AFTER_SUBSCRIBE = True`` in the
-    engine restores it. There are no browser tabs and no URLs to click; per-item
-    progress and failures are shown in place, and a subscribe the engine records
-    clears ``is_queued_for_subscription`` (through ``mark_own_subscribed``, which
-    the engine calls).
+    ``src.subscribe_engine``, which reads the item page's own subscribe button
+    and follows the row's derived direction: an addition sends the subscribe POST
+    only when the button says the item is not subscribed; a removal sends the
+    unsubscribe POST only when the button says it is. The subscription is
+    recorded from the POST's own answer -- the confirmation read is retired by
+    default, and setting ``VERIFY_AFTER_SUBSCRIBE = True`` in the engine restores
+    it for additions. There are no browser tabs and no URLs to click; per-item
+    progress and failures are shown in place, and a settled item leaves the queue
+    through the engine's own write (``mark_own_subscribed`` for an addition,
+    ``mark_own_unsubscribed`` for a removal).
 
     The ``.pauselock`` is created on mount and removed on unmount, so the daemon
     stays quiet while the queue is open; the pass itself takes and releases the
@@ -1160,8 +1162,11 @@ class SubscriptionQueueScreen(ModalScreen):
     # Four ticks a second, the web overlay's cadence.
     _ESTIMATE_TICK_SECONDS = 0.25
     # The word a row carries while the engine is reading it, in place of a
-    # countdown: the item being processed is visibly not one still waiting.
+    # countdown: the item being processed is visibly not one still waiting. The
+    # queue has two directions, so the word follows the row's own state -- a
+    # queued removal must not read "subscribing...".
     _CURRENT_LABEL = "subscribing..."
+    _CURRENT_REMOVE_LABEL = "unsubscribing..."
 
     def __init__(self, db_path: str, pause_lock_file: str, config: dict | None = None):
         super().__init__()
@@ -1302,20 +1307,27 @@ class SubscriptionQueueScreen(ModalScreen):
 
         The engine takes the queue in order, so the item it is reading now is
         the one after the outcomes already reported. That row carries the
-        ``subscribing...`` word instead of a countdown, which is what makes it
-        distinct from the rows still waiting; a reported outcome keeps its
-        status word and drops the countdown. ``basis`` is the redraw's shared
-        estimate inputs; with none, the countdown is read fresh.
+        ``subscribing...`` or ``unsubscribing...`` word instead of a countdown,
+        chosen from the row's own derived direction, which is what makes it
+        distinct from the rows still waiting; a reported outcome keeps its status
+        word and drops the countdown. A settled outcome is green whether it was
+        an addition or a removal -- both left the queue by being carried out --
+        and an outcome that stays queued (throttled, refused, a disagreement) is
+        yellow. ``basis`` is the redraw's shared estimate inputs; with none, the
+        countdown is read fresh.
         """
         item = self._items[index]
         outcome = self._outcomes.get(item["workshop_id"])
         if outcome is not None:
-            colour = "green" if outcome.is_subscribed else "yellow"
+            colour = "yellow" if outcome.stays_queued else "green"
             return None, subscribe_engine.status_label(outcome.status), colour
         if not self._pass_running:
             return None, None, None
         if index == len(self._outcomes):
-            return None, self._CURRENT_LABEL, "cyan"
+            label = (self._CURRENT_REMOVE_LABEL
+                     if subscription.subscription_state(item) == subscription.QUEUED_REMOVE
+                     else self._CURRENT_LABEL)
+            return None, label, "cyan"
         return f"~{self._estimate_remaining(index, elapsed, basis)}s", None, None
 
     def _render_rows(self) -> None:
@@ -1394,7 +1406,7 @@ class SubscriptionQueueScreen(ModalScreen):
         self._pass_started_at = time.monotonic()
         self.query_one("#btn-subscribe-queue", Button).disabled = True
         self.query_one("#subscription-queue-status", Static).update(
-            "Subscribing... (start times are estimates)")
+            "Working the queue... (start times are estimates)")
         self._start_estimate_timer()
         self._render_rows()
 
@@ -1492,10 +1504,12 @@ class SubscriptionQueueScreen(ModalScreen):
             button = self.query_one("#btn-subscribe-queue", Button)
             button.disabled = not self._items
             outcomes = event.worker.result if event.state == WorkerState.SUCCESS else []
-            done = sum(1 for o in outcomes if o.is_subscribed)
-            remaining = len(outcomes) - done
+            subscribed = sum(1 for o in outcomes if o.is_subscribed)
+            unsubscribed = sum(1 for o in outcomes if o.is_unsubscribed)
+            remaining = len(outcomes) - subscribed - unsubscribed
             self.query_one("#subscription-queue-status", Static).update(
-                f"Pass finished: {done} subscribed, {remaining} left queued."
+                f"Pass finished: {subscribed} subscribed, "
+                f"{unsubscribed} unsubscribed, {remaining} left queued."
                 if outcomes else "Pass finished with no results."
             )
 
