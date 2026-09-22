@@ -655,6 +655,7 @@ RENDER_SUBSCRIBED_AT_DRIVER = """
 const fn = (__FN__);
 const subFn = (__SUB_FN__);
 const subCtrlFn = (__SUB_CTRL__);
+const hintFn = (__HINT__);
 let html = '';
 global.document = { getElementById: () => ({ set innerHTML(v) { html = v; } }) };
 global._showTranslated = true;
@@ -666,9 +667,11 @@ global.fmtSize = () => '1 MB';
 global.sizeClass = () => '';
 global.fmtCount = (n) => String(n || 0);
 global._escapeHtml = (s) => String(s == null ? '' : s);
+global._hintKey = hintFn;
 global.showSubscriptionMarker = subFn;
 global.subscriptionControl = subCtrlFn;
 global._refreshOpenFolderButton = () => {};
+global._refreshIgnoreButton = () => {};
 const base = {
   workshop_id: 77, creator_steamid: 'Alice', creator_id: '76561198765432109',
   personaname: 'Alice', has_translation: false,
@@ -697,7 +700,8 @@ def test_web_detail_pane_shows_subscribed_at_only_when_set(web_client, tmp_path)
               .replace("__FN__", _extract_function(script, "renderDetail"))
               .replace("__SUB_FN__", _extract_function(script, "showSubscriptionMarker"))
               .replace("__SUB_CTRL__",
-                       _extract_function(script, "subscriptionControl")))
+                       _extract_function(script, "subscriptionControl"))
+              .replace("__HINT__", _extract_function(script, "_hintKey")))
     out = _run_node(driver, tmp_path)
 
     assert "Subscribed at:" in out["dated"]

@@ -1830,10 +1830,10 @@ def test_the_ignore_route_toggles_the_marker(web_client):
 
 GRID_KEY_DRIVER = """
 const fn = (__FN__);
-const calls = {toggle: [], focus: [], prevented: 0};
+const calls = {toggle: [], queue: [], focus: [], prevented: 0};
 global.toggleIgnoredItem = (wid) => calls.toggle.push(wid);
+global.toggleDetailQueue = (wid) => calls.queue.push(wid);
 global._focusGridCell = (cells, nextIdx) => calls.focus.push(nextIdx);
-global.toggleDetailQueue = () => {};
 global._startAutoSubscribe = () => {};
 global.openFolder = () => {};
 function cell(wid) {
@@ -1852,18 +1852,26 @@ global.getComputedStyle = () => ({gridTemplateColumns: '1fr 1fr'});
 function press(key) {
   fn({key: key, preventDefault: () => { calls.prevented += 1; }});
 }
-press('i');
+press('i');           // the first cell: ignore 11, advance to cell 1
 focused = 2;
-press('i');
+press('i');           // the last cell: ignore 33, step back to cell 1
 focused = 1;
-press('s');
+press('s');           // the middle cell: queue 22, advance to cell 2
+focused = 2;
+press('s');           // the last cell: queue 33, step back to cell 1
 console.log(JSON.stringify(calls));
 """
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
 def test_the_grid_i_key_toggles_the_focused_cell_and_advances(web_client, tmp_path):
-    """`i` acts on the focused cell and then moves on; the last cell steps back."""
+    """`i` and `s` both act on the focused cell and then advance identically.
+
+    The last cell has no next, so both step back to the previous one -- the
+    advance the arrow keys use, through the shared `_focusGridCell` helper. `s`
+    used to return without moving, which is the one place the web diverged from
+    the TUI's own `s`.
+    """
     client, _ = web_client
     script = _served_inline_script(client)
     calls = _run_node(
@@ -1871,9 +1879,10 @@ def test_the_grid_i_key_toggles_the_focused_cell_and_advances(web_client, tmp_pa
         tmp_path)
 
     assert calls["toggle"] == [11, 33], "the focused cell's own data-wid"
-    assert calls["focus"] == [1, 1], \
-        "from the first cell forward, from the last cell back"
-    assert calls["prevented"] == 3, "`i`, `i` and `s` all preventDefault"
+    assert calls["queue"] == [22, 33], "`s` toggles the focused cell's queue"
+    assert calls["focus"] == [1, 1, 2, 1], \
+        "`i` and `s` advance, and both step back from the last cell"
+    assert calls["prevented"] == 4, "`i`, `i`, `s` and `s` all preventDefault"
 
 
 FOCUS_DRIVER = """
@@ -4932,6 +4941,7 @@ RENDER_DETAIL_DRIVER = """
 const fn = (__FN__);
 const subFn = (__SUB_FN__);
 const subCtrlFn = (__SUB_CTRL__);
+const hintFn = (__HINT__);
 let html = '';
 global.document = { getElementById: () => ({ set innerHTML(v) { html = v; } }) };
 global._showTranslated = true;
@@ -4943,9 +4953,11 @@ global.fmtSize = () => '1 MB';
 global.sizeClass = () => '';
 global.fmtCount = (n) => String(n || 0);
 global._escapeHtml = (s) => String(s == null ? '' : s);
+global._hintKey = hintFn;
 global.showSubscriptionMarker = subFn;
 global.subscriptionControl = subCtrlFn;
 global._refreshOpenFolderButton = () => {};
+global._refreshIgnoreButton = () => {};
 const base = {
   workshop_id: 77, creator_steamid: '76561198765432109', creator_id: '76561198765432109',
   personaname: 'Alice', has_translation: false,
@@ -4990,7 +5002,9 @@ def test_render_detail_wires_the_author_and_subscription_marker(web_client, tmp_
     result = _run_node(RENDER_DETAIL_DRIVER
                        .replace("__FN__", fn)
                        .replace("__SUB_FN__", sub_fn)
-                       .replace("__SUB_CTRL__", sub_ctrl), tmp_path)
+                       .replace("__SUB_CTRL__", sub_ctrl)
+                       .replace("__HINT__", _extract_function(script, "_hintKey")),
+                       tmp_path)
 
     assert "jumpToAuthor('76561198765432109')" in result["never"], \
         "the creator must carry the lossless id into the jump"
@@ -5006,8 +5020,8 @@ def test_render_detail_wires_the_author_and_subscription_marker(web_client, tmp_
     assert 'data-sub-clickable="1"' in result["subscribed"]
     assert ">★</div>" in result["subscribed"]
     assert 'data-sub-clickable="1"' in result["never"]
-    assert ">Subscribe</button>" in result["never"]
-    assert ">Unsubscribe</button>" in result["subscribed"], \
+    assert "><u>S</u>ubscribe</button>" in result["never"]
+    assert ">Un<u>s</u>ubscribe</button>" in result["subscribed"], \
         "a subscribed item must not offer a Subscribe button"
     assert "doSubscribe(77)" in result["never"]
     assert "toggleDetailQueue(77)" in result["subscribed"]

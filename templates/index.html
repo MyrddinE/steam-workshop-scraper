@@ -211,8 +211,10 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
       <button id="btn-delete-never-fetched" onclick="doDeleteNeverFetched()" title="Delete items that were never successfully fetched">Delete Never Fetched</button>
       {% if open_folder_enabled %}
       <button id="btn-open-folder" onclick="openFolderFromDetail()" disabled
-              title="Only a subscribed item Steam has downloaded can be opened.">Open Folder (not downloaded)</button>
+              title="Only a subscribed item Steam has downloaded can be opened."><u>O</u>pen Folder (not downloaded)</button>
       {% endif %}
+      <button id="btn-ignore-item" onclick="toggleIgnoredItemFromDetail()" disabled
+              title="Ignore this item: it is hidden from the list and skipped by the scraper."><u>I</u>gnore</button>
     </div>
   </div>
 </main>
@@ -1312,6 +1314,26 @@ function _applySub(el, item) {
   el.setAttribute('title', item.subscription_tooltip);
 }
 
+// Underline the key that fires a control, for the three web-only hints the
+// owner asked for (`o`, `s` and `i`). One helper, so the marking rule cannot
+// differ between the surfaces that show it. The *first* occurrence of the key
+// letter is marked -- that is what puts the mark on the `s` of `Unsubscribe`
+// rather than on the label's leading `U` -- and a label with no such letter
+// carries the key in brackets instead, so the hint is never silently absent.
+// Every character of the label is escaped before the markup is attached: the
+// subscription label is built by the server (`subscription_action_label`), so
+// nothing server-provided may be interpolated raw.
+function _hintKey(label, key) {
+  const text = String(label == null ? '' : label);
+  const at = text.toLowerCase().indexOf(String(key).toLowerCase());
+  if (at === -1) {
+    return _escapeHtml(text) + ' (' + _escapeHtml(String(key).toUpperCase()) + ')';
+  }
+  return _escapeHtml(text.slice(0, at))
+    + '<u>' + _escapeHtml(text.charAt(at)) + '</u>'
+    + _escapeHtml(text.slice(at + 1));
+}
+
 // The detail pane's one subscription control, worded and wired from the item's
 // derived direction (the shared table on the payload). An unsubscribed item's
 // button subscribes directly; a subscribed item's button queues its removal --
@@ -1330,7 +1352,7 @@ function subscriptionControl(item) {
        ? 'Cancel the queued removal.'
        : 'Queue this item for removal; run the subscription queue to apply it.');
   return `<button id="btn-subscription" onclick="${onclick};return false;"`
-    + ` title="${_escapeHtml(title)}">${label}</button>`;
+    + ` title="${_escapeHtml(title)}">${_hintKey(label, 's')}</button>`;
 }
 
 // Clicking the marker toggles the queue for every state but `downloaded`. The
@@ -1360,10 +1382,29 @@ function _refreshOpenFolderButton(item) {
   if (!btn) return;
   const green = !!item && item.subscription_state === 'downloaded';
   btn.disabled = !green;
-  btn.textContent = green ? 'Open Folder' : 'Open Folder (not downloaded)';
+  // The hint is markup, so the update path writes innerHTML; the label is the
+  // page's own literal, and `_hintKey` escapes whatever it is given.
+  btn.innerHTML = _hintKey(green ? 'Open Folder' : 'Open Folder (not downloaded)', 'o');
   btn.title = green
     ? "Open this item's workshop folder in Explorer on the machine running the server."
     : 'Only a subscribed item Steam has downloaded can be opened.';
+}
+
+// The item-level ignore toggle, beside Open Folder in `#detail-buttons`. The
+// pane is the first place that names the ignored state -- the grid only strikes
+// the title -- so the button's label and tooltip follow the same payload field
+// the grid's `ignored` class follows (`IGNORED_FETCH_STATUS`), redrawn whenever
+// `renderDetail` is. Its press goes through `toggleIgnoredItem`, the one
+// function the `i` key uses, so the key and the button cannot diverge.
+function _refreshIgnoreButton(item) {
+  const btn = document.getElementById('btn-ignore-item');
+  if (!btn) return;
+  const ignored = !!item && item.fetch_status === IGNORED_FETCH_STATUS;
+  btn.disabled = !item;
+  btn.innerHTML = _hintKey(ignored ? 'Unignore' : 'Ignore', 'i');
+  btn.title = ignored
+    ? 'Restore this item: the list and the scraper see it again.'
+    : 'Ignore this item: it is hidden from the list and skipped by the scraper.';
 }
 
 async function openFolder(wid) {
@@ -1380,6 +1421,12 @@ async function openFolder(wid) {
 
 function openFolderFromDetail() {
   if (_currentDetail) openFolder(_currentDetail.workshop_id);
+}
+
+// The `#btn-ignore-item` press: the pane's item, through the same toggle the
+// `i` key runs, so the two cannot show different states.
+function toggleIgnoredItemFromDetail() {
+  if (_currentDetail) toggleIgnoredItem(_currentDetail.workshop_id);
 }
 
 // ── one item-update path: the per-item subscription registry ─────────────────
@@ -1969,9 +2016,10 @@ function renderDetail(item) {
     ${notice}
     ${desc ? '<div style="border-left:3px solid var(--pico-muted-border-color);padding-left:.5rem;margin-top:.5rem">'+desc+'</div>' : ''}
   `;
-  // The folder control lives in the static bottom bar, so it follows whichever
-  // item the pane is showing.
+  // The folder control and the ignore toggle live in the static bottom bar, so
+  // they follow whichever item the pane is showing.
   _refreshOpenFolderButton(item);
+  _refreshIgnoreButton(item);
 }
 
 // /api/toggle_subscription_queue answers only {ok: true} and says nothing about which way the
@@ -2429,8 +2477,8 @@ document.addEventListener('blur', e => {
   } catch (err) { console.debug('Blur handler error', err); /* must never break the page */ }
 }, true);
 
-// Move focus to a cell and open its detail pane. The arrow keys and the `i`
-// shortcut both advance through this one helper, so a keystroke cannot invent a
+// Move focus to a cell and open its detail pane. The arrow keys and the `s`/`i`
+// shortcuts all advance through this one helper, so a keystroke cannot invent a
 // second focus scheme.
 function _focusGridCell(cells, nextIdx) {
   if (nextIdx < 0 || nextIdx >= cells.length) return;
@@ -2440,7 +2488,37 @@ function _focusGridCell(cells, nextIdx) {
   showDetail(parseInt(cell.getAttribute('data-wid'), 10));
 }
 
+{% if open_folder_enabled %}
+// `o` is an app-level binding in the TUI, and app-level here. A grid cell holds
+// focus for most of the session, but the detail surface -- the pane holds the
+// subscription button, `#detail-buttons` holds Open Folder, and the pane's own
+// subscription press leaves focus there -- holds it too, and the key must press
+// that button's action from there. A filter input is deliberately not a detail
+// surface: `o` typed into one is the input's own character, not a request to
+// open a folder. Returning true says the shortcut acted, so `_onGridKeydown`
+// does not run its grid handler as well: one keypress, one action, never two.
+function _openFolderShortcut(e) {
+  const active = document.activeElement;
+  const grid = document.getElementById('results-grid');
+  const onCell = !!active && grid.contains(active)
+    && active.classList.contains('grid-cell');
+  const pane = document.getElementById('detail-pane');
+  const bar = document.getElementById('detail-buttons');
+  const inDetail = !!active
+    && ((pane && pane.contains(active)) || (bar && bar.contains(active)));
+  if (!onCell && !inDetail) return false;
+  e.preventDefault();
+  if (onCell) openFolder(parseInt(active.getAttribute('data-wid'), 10));
+  else openFolderFromDetail();
+  return true;
+}
+{% endif %}
+
 function _onGridKeydown(e) {
+  {% if open_folder_enabled %}
+  if ((e.key === 'o' || e.key === 'O') && _openFolderShortcut(e)) return;
+  {% endif %}
+
   const grid = document.getElementById('results-grid');
   if (!grid.contains(document.activeElement)) return;
   if (!document.activeElement.classList.contains('grid-cell')) return;
@@ -2455,14 +2533,18 @@ function _onGridKeydown(e) {
     // the same read-back path as a click on it: the old local `queued` class
     // flip could disagree with the server, and it drew a second indicator.
     toggleDetailQueue(wid);
+    // Then advance exactly as `i` does -- the TUI's own `s` moves the list index
+    // too. The last cell has no next, so it steps back to the previous one.
+    _focusGridCell(cells, idx < cells.length - 1 ? idx + 1 : idx - 1);
     return;
   }
 
   if (e.key === 'i' || e.key === 'I') {
     e.preventDefault();
     // Ignoring leaves the row where it is: no re-query runs, so the focused
-    // cell is redrawn in place with the ignored style, then focus moves on like
-    // `s`. The last cell has no next, so it steps back to the previous one.
+    // cell is redrawn in place with the ignored style, then focus moves on the
+    // same way `s` now does. The last cell has no next, so it steps back to the
+    // previous one.
     toggleIgnoredItem(wid);
     _focusGridCell(cells, idx < cells.length - 1 ? idx + 1 : idx - 1);
     return;
@@ -2473,15 +2555,6 @@ function _onGridKeydown(e) {
     _startAutoSubscribe();
     return;
   }
-
-  {% if open_folder_enabled %}
-  if (e.key === 'o' || e.key === 'O') {
-    e.preventDefault();
-    // The focused cell's item, the same one `s` acts on.
-    openFolder(wid);
-    return;
-  }
-  {% endif %}
 
   let nextIdx = idx;
   if (e.key === 'ArrowRight') nextIdx = idx + 1;

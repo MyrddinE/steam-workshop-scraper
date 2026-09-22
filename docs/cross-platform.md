@@ -98,6 +98,21 @@ that discovery cannot see (a network drive, a moved folder); its entries are
 added to whatever discovery found, never instead of it. See
 [config-security.md](config-security.md).
 
+**The TUI's Explorer window comes forward; the web's may not.** The TUI's `o`
+brings the folder's window to the front because the TUI process received the
+last input event, so Windows permits it to call `SetForegroundWindow`. The web
+server is a background process that received no input — the keystroke or click
+happened in the browser, and the POST arrives without the server ever being the
+foreground process. Windows permits `SetForegroundWindow` only for a caller that
+is the foreground process, has received the last input event, was started by the
+foreground process, or when no window is currently in the foreground, and
+`AllowSetForegroundWindow` may only be called by a process that already
+qualifies. None of those holds for the server, so a folder the web page opens
+can stay behind the browser. The owner accepted that as an OS restriction; the
+difference is recorded here and in
+[web-ui.md](web-ui.md#opening-the-downloaded-items-folder-windows-only), and no
+code attempts to force the foreground.
+
 ---
 
 ## `tail -f` for Log Viewing

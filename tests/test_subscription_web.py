@@ -298,6 +298,8 @@ def test_the_open_folder_control_is_rendered_only_on_windows(web_client, monkeyp
     assert '<button id="btn-open-folder"' in on
     assert "e.key === 'o'" in on
     assert "open_folder_enabled" not in on
+    assert "><u>O</u>pen Folder (not downloaded)</button>" in on, \
+        "the initial render carries the `o` hint, disabled variant included"
 
 
 # --- the stamp --------------------------------------------------------------
@@ -716,7 +718,8 @@ def test_the_pane_has_one_direction_aware_control_and_no_queue_button_pair():
 
 
 PANE_CONTROL_DRIVER = """
-const _escapeHtml = (s) => String(s);
+const _escapeHtml = (__ESC__);
+const _hintKey = (__HINT__);
 const fn = (__FN__);
 const never = fn({workshop_id: 1, subscription_action: 'subscribe',
                   subscription_action_label: 'Subscribe'});
@@ -740,16 +743,21 @@ def test_the_pane_control_words_and_wires_the_derived_direction(web_client, tmp_
     from the shared table on the payload, never from a literal in the page.
     """
     client, _ = web_client
-    fn = _extract_function(_served_inline_script(client), "subscriptionControl")
-    out = _run_node(PANE_CONTROL_DRIVER.replace("__FN__", fn), tmp_path)
+    script = _served_inline_script(client)
+    out = _run_node(PANE_CONTROL_DRIVER
+                    .replace("__ESC__", _extract_function(script, "_escapeHtml"))
+                    .replace("__HINT__", _extract_function(script, "_hintKey"))
+                    .replace("__FN__", _extract_function(script, "subscriptionControl")),
+                    tmp_path)
 
     assert "doSubscribe(1)" in out["never"]
-    assert ">Subscribe</button>" in out["never"]
+    assert "><u>S</u>ubscribe</button>" in out["never"], \
+        "the `s` hint marks the label's own key letter"
     assert "toggleDetailQueue(2)" in out["subscribed"], \
         "a subscribed item's control queues the removal, never acting on Steam"
-    assert ">Unsubscribe</button>" in out["subscribed"]
+    assert ">Un<u>s</u>ubscribe</button>" in out["subscribed"]
     assert "toggleDetailQueue(3)" in out["removal"]
-    assert ">Cancel Unsubscribe</button>" in out["removal"]
+    assert ">Cancel Un<u>s</u>ubscribe</button>" in out["removal"]
     assert "doSubscribe(4)" in out["legacy"], "an older payload falls back safely"
 
 
@@ -768,3 +776,275 @@ def test_the_overlay_rows_name_the_direction_and_the_official_dequeue():
     assert "'unsubscribed' : 'subscribed'" in html
     assert "fetch('/api/dequeue/' + wid" in html
     assert "fetch('/api/subscribed/' + wid" not in html
+
+
+# --- the web-only key hints for `o`, `s` and `i` ----------------------------
+#
+# The TUI lists every binding in its footer, so the hints are web-only, and only
+# for the three keys whose labels the web page owns. One helper builds all of
+# them, so the marking rule cannot differ per surface; the subscription label is
+# server-provided, so the helper escapes the whole label before it attaches any
+# markup of its own.
+
+HINT_KEY_DRIVER = """
+const _escapeHtml = (__ESC__);
+const fn = (__FN__);
+console.log(JSON.stringify({
+  open: fn('Open Folder', 'o'),
+  unsubscribe: fn('Unsubscribe', 's'),
+  unignore: fn('Unignore', 'i'),
+  escaped: fn('<b>Open</b>', 'o'),
+  amp: fn('Tom & Jerry', 'o'),
+  absent: fn('Remove', 's'),
+}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_the_key_hint_marks_the_first_key_letter_and_escapes(web_client, tmp_path):
+    """One helper marks the first occurrence of the key in an escaped label.
+
+    `Unsubscribe` must mark its own `s`, not the leading `U` a naive
+    "first letter" rule would pick. A label with no such letter gets the key in
+    brackets, so the hint is never silently absent. And because the subscription
+    label is built on the server, a `<` in it must come out escaped rather than
+    as live markup.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    out = _run_node(HINT_KEY_DRIVER
+                    .replace("__ESC__", _extract_function(script, "_escapeHtml"))
+                    .replace("__FN__", _extract_function(script, "_hintKey")),
+                    tmp_path)
+
+    assert out["open"] == "<u>O</u>pen Folder"
+    assert out["unsubscribe"] == "Un<u>s</u>ubscribe", \
+        "the mark goes on the key letter, not the label's first letter"
+    assert out["unignore"] == "Un<u>i</u>gnore"
+    assert out["escaped"] == "&lt;b&gt;<u>O</u>pen&lt;/b&gt;", \
+        "a server-provided `<` must not become live markup"
+    assert out["amp"] == "T<u>o</u>m &amp; Jerry"
+    assert out["absent"] == "Remove (S)", \
+        "a label without the key letter carries the key in brackets"
+
+
+OPEN_FOLDER_LABEL_DRIVER = """
+const _escapeHtml = (__ESC__);
+const _hintKey = (__HINT__);
+const fn = (__FN__);
+const btn = {disabled: null, innerHTML: '', textContent: '', title: ''};
+global.document = {getElementById: (id) => (id === 'btn-open-folder' ? btn : null)};
+fn({workshop_id: 7, subscription_state: 'downloaded'});
+const green = {label: btn.innerHTML, disabled: btn.disabled, title: btn.title};
+fn({workshop_id: 7, subscription_state: 'subscribed'});
+const grey = {label: btn.innerHTML, disabled: btn.disabled, title: btn.title};
+console.log(JSON.stringify({green: green, grey: grey}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_the_open_folder_button_keeps_its_hint_in_both_states(web_client, tmp_path):
+    """The update path writes the hint markup, disabled variant included.
+
+    The button is visible-but-disabled for anything not downloaded, and the
+    owner's point is discoverability *with* the reason, so the disabled label
+    keeps its hint too. The update path therefore writes `innerHTML` through the
+    one helper rather than the old plain `textContent`.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    out = _run_node(OPEN_FOLDER_LABEL_DRIVER
+                    .replace("__ESC__", _extract_function(script, "_escapeHtml"))
+                    .replace("__HINT__", _extract_function(script, "_hintKey"))
+                    .replace("__FN__",
+                             _extract_function(script, "_refreshOpenFolderButton")),
+                    tmp_path)
+
+    assert out["green"]["label"] == "<u>O</u>pen Folder"
+    assert out["grey"]["label"] == "<u>O</u>pen Folder (not downloaded)", \
+        "the disabled variant keeps its hint"
+    assert out["green"]["disabled"] is False and out["grey"]["disabled"] is True
+    assert out["green"]["title"] != out["grey"]["title"]
+
+
+OPEN_FOLDER_KEY_DRIVER = """
+const _openFolderShortcut = (__HELPER__);
+const fn = (__FN__);
+const calls = {opened: [], fromDetail: 0, prevented: 0};
+const cell = {
+  classList: {contains: (c) => c === 'grid-cell'},
+  getAttribute: (n) => (n === 'data-wid' ? '11' : null),
+};
+const paneChild = {};
+const filterInput = {};
+const pane = {contains: (el) => el === paneChild};
+const bar = {contains: () => false};
+const grid = {contains: (el) => el === cell, querySelectorAll: () => [cell]};
+let active = cell;
+global.document = {
+  getElementById: (id) => (id === 'results-grid' ? grid
+    : id === 'detail-pane' ? pane : bar),
+  get activeElement() { return active; },
+};
+global.openFolder = (wid) => calls.opened.push(wid);
+global.openFolderFromDetail = () => { calls.fromDetail += 1; };
+global.toggleDetailQueue = () => {};
+global.toggleIgnoredItem = () => {};
+global._focusGridCell = () => {};
+global._startAutoSubscribe = () => {};
+function press() { fn({key: 'o', preventDefault: () => { calls.prevented += 1; }}); }
+
+press();
+const onCell = {opened: calls.opened.slice(), fromDetail: calls.fromDetail};
+active = paneChild;
+press();
+const inPane = {opened: calls.opened.slice(), fromDetail: calls.fromDetail};
+active = filterInput;
+press();
+console.log(JSON.stringify({onCell: onCell, inPane: inPane, prevented: calls.prevented,
+                            opened: calls.opened, fromDetail: calls.fromDetail}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_the_o_key_opens_the_focused_cell_or_the_panes_item_once(web_client, monkeypatch,
+                                                                 tmp_path):
+    """`o` is app-level: the focused cell's item, or the pane's, exactly once.
+
+    The pane carries the subscription button and `#detail-buttons` carries Open
+    Folder, so focus is routinely inside the detail surface. The key must route
+    there without also pressing a grid cell -- one keypress, one action. A filter
+    input is deliberately not a detail surface: `o` typed into one is that
+    input's character, not a request to open a folder.
+    """
+    client, db_path = web_client
+    _enable_open_folder(monkeypatch, db_path, tmp_path / "content", lambda path: None)
+    script = _served_inline_script(client)
+    out = _run_node(OPEN_FOLDER_KEY_DRIVER
+                    .replace("__HELPER__", _extract_function(script, "_openFolderShortcut"))
+                    .replace("__FN__", _extract_function(script, "_onGridKeydown")),
+                    tmp_path)
+
+    assert out["onCell"] == {"opened": [11], "fromDetail": 0}, \
+        "a focused cell opens its own item"
+    assert out["inPane"] == {"opened": [11], "fromDetail": 1}, \
+        "the pane opens the item it shows, and the cell is not acted on as well"
+    assert out["prevented"] == 2, \
+        "the shortcut acts twice, and leaves an unrelated input's key alone"
+    assert out["opened"] == [11] and out["fromDetail"] == 1, \
+        "each press opened exactly one folder"
+
+
+IGNORE_BUTTON_ROUTE_DRIVER = """
+global.toggleIgnoredItem = (__TOGGLE__);
+const wrap = (__WRAP__);
+const keyFn = (__KEY__);
+const calls = {posts: []};
+global.dispatchItemUpdate = () => {};
+global.alert = () => {};
+global._focusGridCell = () => {};
+global.toggleDetailQueue = () => {};
+global._startAutoSubscribe = () => {};
+global._currentDetail = {workshop_id: 7};
+global.fetch = async (url) => {
+  calls.posts.push(url);
+  if (url.indexOf('/api/item/') === 0) {
+    return {ok: true, status: 200, statusText: 'OK',
+            json: async () => ({workshop_id: 7, fetch_status: -2})};
+  }
+  return {ok: true, status: 200, statusText: 'OK', json: async () => ({ok: true})};
+};
+const cell = {
+  classList: {contains: (c) => c === 'grid-cell'},
+  getAttribute: (n) => (n === 'data-wid' ? '7' : null),
+};
+global.document = {
+  getElementById: () => ({contains: () => true, querySelectorAll: () => [cell]}),
+  get activeElement() { return cell; },
+};
+(async () => {
+  keyFn({key: 'i', preventDefault: () => {}});
+  await new Promise((r) => setTimeout(r, 0));
+  const afterKey = calls.posts.slice();
+  calls.posts.length = 0;
+  wrap();
+  await new Promise((r) => setTimeout(r, 0));
+  console.log(JSON.stringify({afterKey: afterKey, afterButton: calls.posts.slice()}));
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_the_item_ignore_button_posts_the_same_route_as_the_i_key(web_client, tmp_path):
+    """The pane's ignore control and the `i` key run the one toggle function.
+
+    Both paths are driven through the real read-back, so the routes they post are
+    the assertion: the key's focused cell and the pane's item both hit
+    ``/api/ignore/<id>`` and then read the item back, and they cannot diverge
+    because the button calls the same `toggleIgnoredItem` the key does.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    out = _run_node(IGNORE_BUTTON_ROUTE_DRIVER
+                    .replace("__TOGGLE__", _extract_function(script, "toggleIgnoredItem"))
+                    .replace("__WRAP__",
+                             _extract_function(script, "toggleIgnoredItemFromDetail"))
+                    .replace("__KEY__", _extract_function(script, "_onGridKeydown")),
+                    tmp_path)
+
+    assert out["afterKey"] == ['/api/ignore/7', '/api/item/7']
+    assert out["afterButton"] == out["afterKey"], \
+        "the detail button must post exactly the route the `i` key posts"
+
+
+IGNORE_BUTTON_LABEL_DRIVER = """
+const IGNORED_FETCH_STATUS = -2;
+const _escapeHtml = (__ESC__);
+const _hintKey = (__HINT__);
+const fn = (__FN__);
+const btn = {disabled: null, innerHTML: '', title: ''};
+global.document = {getElementById: (id) => (id === 'btn-ignore-item' ? btn : null)};
+fn({workshop_id: 7, fetch_status: -2});
+const ignored = {label: btn.innerHTML, title: btn.title, disabled: btn.disabled};
+fn({workshop_id: 7, fetch_status: 200});
+const normal = {label: btn.innerHTML, title: btn.title, disabled: btn.disabled};
+console.log(JSON.stringify({ignored: ignored, normal: normal}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_the_pane_ignore_button_names_and_marks_both_directions(web_client, tmp_path):
+    """The pane's ignore control is the pane's own ignored-state readout.
+
+    Today only the grid shows the ignored state, as a strike on the title; the
+    button is the pane's first indication of it, so its label and tooltip must
+    follow the same payload field the grid's class follows.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    out = _run_node(IGNORE_BUTTON_LABEL_DRIVER
+                    .replace("__ESC__", _extract_function(script, "_escapeHtml"))
+                    .replace("__HINT__", _extract_function(script, "_hintKey"))
+                    .replace("__FN__", _extract_function(script, "_refreshIgnoreButton")),
+                    tmp_path)
+
+    assert out["normal"]["label"] == "<u>I</u>gnore"
+    assert out["ignored"]["label"] == "Un<u>i</u>gnore"
+    assert out["normal"]["disabled"] is False and out["ignored"]["disabled"] is False
+    assert out["ignored"]["title"] != out["normal"]["title"], \
+        "the tooltip must say which direction the press is"
+
+
+def test_the_item_ignore_button_is_a_detail_buttons_control(web_client, monkeypatch,
+                                                            tmp_path):
+    """The pane's toggle is a real button beside Open Folder, not grid-only."""
+    client, db_path = web_client
+    _enable_open_folder(monkeypatch, db_path, tmp_path / "content", lambda path: None)
+    html = client.get('/').data.decode()
+    start = html.index('<div id="detail-buttons">')
+    bar = html[start:html.index('</div>', start)]
+    assert 'id="btn-ignore-item"' in bar, \
+        "the toggle belongs to the pane's button bar, where Open Folder lives"
+    assert 'id="btn-open-folder"' in bar
+    assert "toggleIgnoredItemFromDetail()" in bar
+    assert "<u>I</u>gnore" in bar, "the button carries the `i` hint"
