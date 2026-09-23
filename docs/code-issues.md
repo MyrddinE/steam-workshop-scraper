@@ -15,6 +15,37 @@ the production database on 2026-09-12.
 
 ## Open
 
+### A pytest run destroyed the production config.yaml (issue 91)
+
+The owner's real `config.yaml` came back from a test run with `api.key: TEST_KEY`, and with `database.path`,
+`daemon.backup_dir`, `daemon.outbox_dir`, `daemon.target_appids`, `web.port` and
+`steam.workshop_content_dirs` replaced by the values of whichever test wrote last. A live Steam API key was
+lost — data loss, not a nuisance. *Reproduced safely* by running the suite from a scratch CWD holding a
+sentinel `config.yaml`: 48 tests passed and the file came back rewritten with test values (`api.key` survived
+only because that sentinel run's configs happened not to carry one; the owner's did).
+
+Two causes, both real. `save_config` (`src/config.py:168`) deep-merges the **entire in-memory config** over
+the file on disk, and all three of its callers are persisting *derived* values — an auto-assigned `web.port`
+(`src/tui.py:3666`, fired whenever the config has no port, which is every test that starts the web server),
+the daemon's missing staleness defaults (`src/daemon.py:437`) and a refreshed browser cookie
+(`src/daemon.py:591`) — so persisting one key rewrites every key the caller happens to hold. And the suite
+never redirects those writes: the app's defaults are CWD-relative, so a test whose config points at `tmp_path`
+still writes the file beside whatever `config.yaml` the CWD holds. The inventory seeds are `config.yaml`,
+`.tui_state.yaml` (`src/tui.py:2645`), `.daemon.pid` (`src/daemon_runner.py:96`), `.pauselock` (the literal in
+`src/webserver.py:1067`), the default `workshop.db` (the `workshop.db-shm/wal` sidecars in the checkout are
+its fingerprints), `scraper.log`, and `.daemon_state.yaml` / `.cutoffs_cache.json` wherever a test passes a
+repo-relative database path; 35 test files mention the bare names, and several read repo-relative files
+(`Path("templates/index.html")` in `test_pending.py` and `test_subscribe_throttle.py`, `Path("src/tui.py")` in
+`test_daemon_manager_screen.py`) so a per-test working directory has to be paired with a `REPO_ROOT` helper.
+
+This is the third defect of one family — issue 67 built the app from the checkout's database, issue 89's schema
+test was decided by the daemon's `.daemon.pid` — and the first that destroyed something the operator cannot
+regenerate. Dispatched (brief `/root/.dsh/pending/test-hermeticity-brief.md`): a per-test working directory
+plus a session **canary that fails the run if the checkout changed at all**, with every violation it finds
+fixed; and a targeted config writer that can only touch the keys it owns, so no embedder can clobber a secret
+again. **Until it lands the suite must not be run in the project directory** — `save_config` returns early when
+the path does not exist, so running it from a scratch directory with no `config.yaml` cannot clobber one.
+
 ### The item-update render race never reproduced (issue 90, watch-only)
 
 Two Textual-timing tests each failed once on an otherwise green suite, and looping them in fresh processes
