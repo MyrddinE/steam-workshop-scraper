@@ -4332,6 +4332,7 @@ let _subCanceled = false;
 let _subThrottleStopped = false;
 let _subPassToken = 0;
 let _subPassLive = false;
+let _subPageId = 'test-page';
 // The pass's estimate inputs and the pure estimator the page defines. The
 // arithmetic itself is exercised in tests/test_web_sub_estimate.py; here they
 // only have to exist, and to read the pace the stub fetch reports, so the drain

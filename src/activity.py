@@ -29,6 +29,20 @@ holder still wants. An interval that is still open is read up to "now", so a
 pause *in progress* still lets the rate be computed from the active time before
 it.
 
+**The lock names its owner.** The file is one small JSON record --
+``{"owner", "pid", "acquired_at", "source"}`` -- written atomically (a temp file
+in the same directory, then :func:`os.replace`), so a reader never sees a
+half-written record. Release is scoped: ``end_pause`` removes the file and closes
+the interval only when the caller owns it, so one pass cannot free another's
+pause, while a *legacy* file -- missing, empty or unparseable, and therefore
+unnamed -- stays releasable by anyone, because an upgrade must not lock anyone
+out. ``begin_pause`` never steals a held lock; it self-heals one whose recorded
+pid is known dead, exactly as the worker polls do through
+:func:`reclaim_if_owner_gone`, so a holder that crashed cannot stop the daemon's
+web and image work for good. Liveness comes from the platform-correct seam in
+``src.daemon_control`` rather than ``os.kill`` here: on Windows a signal-0 probe
+terminates the process it asks about.
+
 What is deliberately **not** recorded here is the discovery inflow into the API
 queue. ``first_seen_at`` is our clock, but it is not indexed on ``workshop_items``
 and a window count over it would be a full scan of a multi-million-row table;
@@ -38,8 +52,10 @@ the API queue's net rate subtracts the staleness sweep only.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import tempfile
 import time
 
 from src.daemon_state import StateStore, state_path_for
@@ -109,25 +125,146 @@ def _merged_seconds(intervals: list[tuple[int, int]], window_start: int, now: in
 # --------------------------------------------------------------------------
 
 
+def _pid_alive(pid: int) -> bool | None:
+    """Whether a pid is alive, through the platform-correct seam.
+
+    ``src.daemon_control._pid_alive`` owns the single implementation --
+    ``OpenProcess`` on Windows, ``os.kill`` on POSIX -- and is imported lazily
+    here so this module keeps its light import set and the seam can be replaced
+    in a test without touching ``os.kill``, which the Windows branch never
+    calls and must not.
+    """
+    from src.daemon_control import _pid_alive as daemon_pid_alive
+    return daemon_pid_alive(pid)
+
+
+def lock_owner(lock_path: str) -> dict | None:
+    """The lock's record, or None when no record can be read.
+
+    A tolerant reader: the file may be missing, empty (the pre-owner format), a
+    half-written leftover, or hand-edited. A result of ``None``, a record with
+    no ``owner``, and a record with no ``pid`` are all *legacy* for the callers
+    here -- unnamed, so releasable by anyone and never reclaimed on liveness.
+    """
+    try:
+        with open(lock_path, encoding="utf-8") as handle:
+            raw = handle.read()
+    except OSError:
+        return None
+    try:
+        record = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(record, dict):
+        return None
+    owner = record.get("owner")
+    acquired_at = record.get("acquired_at")
+    source = record.get("source")
+    return {
+        "owner": owner if isinstance(owner, str) and owner else None,
+        "pid": _as_int(record.get("pid")),
+        "acquired_at": acquired_at if isinstance(acquired_at, (int, float)) else None,
+        "source": source if isinstance(source, str) else None,
+    }
+
+
+def _write_lock(lock_path: str, owner: str | None, source: str,
+                now: int | None) -> bool:
+    """Write the lock record atomically; False when the filesystem refuses it."""
+    directory = os.path.dirname(lock_path)
+    payload = {
+        "owner": owner,
+        "pid": os.getpid(),
+        "acquired_at": _now(now),
+        "source": str(source),
+    }
+    temp_path = None
+    try:
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        handle_fd, temp_path = tempfile.mkstemp(
+            dir=directory or ".", prefix=".pauselock.", suffix=".tmp")
+        with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        # Match the mode a plain `open(path, "w")` used to leave, so the lock
+        # does not become owner-only just because it is now written via mkstemp.
+        try:
+            os.chmod(temp_path, 0o644)
+        except OSError:
+            pass
+        os.replace(temp_path, lock_path)
+        return True
+    except OSError as exc:
+        logging.warning("Failed to create pause lock file %s: %s", lock_path, exc)
+        if temp_path is not None:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        return False
+
+
+def reclaim_if_owner_gone(lock_path: str, db_path: str | None = None, *,
+                          now: int | None = None) -> bool:
+    """Remove the lock and close its interval when the recorded pid is dead.
+
+    A holder that crashed must not stop the daemon's web and image work for
+    good, so both worker polls call this before sleeping. The lock is left alone
+    when the pid is alive *or* liveness is unknown (``_pid_alive`` returns
+    ``None``), and a legacy lock -- one with no pid to judge -- is never
+    reclaimed. Each reclaim logs at WARNING, naming the dead pid and the owner:
+    a stranded lock is a bug worth seeing.
+    """
+    record = lock_owner(lock_path)
+    if record is None or record.get("pid") is None:
+        return False
+    pid = record["pid"]
+    if _pid_alive(pid) is not False:
+        return False
+    logging.warning(
+        "Reclaiming pause lock %s: owner %s (pid %s) is no longer running",
+        lock_path, record.get("owner") or "unnamed", pid)
+    try:
+        if os.path.exists(lock_path):
+            os.remove(lock_path)
+    except OSError as exc:
+        logging.warning("Failed to remove stale pause lock file %s: %s",
+                        lock_path, exc)
+        return False
+    if db_path is not None:
+        try:
+            _close_interval(db_path, now)
+        except Exception as exc:
+            logging.warning("Could not record pause end: %s", exc)
+    return True
+
+
 def begin_pause(lock_path: str, db_path: str | None = None, *,
-                source: str = "pauselock", now: int | None = None) -> bool:
+                source: str = "pauselock", owner: str | None = None,
+                now: int | None = None) -> bool:
     """Create the pause lock, recording an interval on the absent -> present edge.
 
     Returns whether an interval was opened. Called by every writer of
     ``.pauselock`` in place of the bare ``open(lock_path, "w")``; a lock that is
-    already held opens nothing, so a nested holder does not double-count.
+    already held opens nothing, so a nested holder -- the engine inside the TUI
+    screen -- does not double-count. A held lock is never stolen; the one
+    exception is a lock whose recorded pid is *known dead*, which is reclaimed
+    first so the acquisition self-heals exactly as the worker polls do.
     """
     existed = os.path.exists(lock_path)
-    try:
-        directory = os.path.dirname(lock_path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        with open(lock_path, "w"):
-            pass
-    except OSError as exc:
-        logging.warning("Failed to create pause lock file %s: %s", lock_path, exc)
+    if existed:
+        record = lock_owner(lock_path)
+        # No record, no owner or no pid means a legacy (unnamed) lock: it is
+        # held and left alone. Two writers must not silently swap owners.
+        if record is None or record.get("owner") is None or record.get("pid") is None:
+            return False
+        if not reclaim_if_owner_gone(lock_path, db_path, now=now):
+            return False
+        # The dead holder's lock is gone and its interval closed; this call is
+        # now the absent -> present edge and opens the one interval it owns.
+    if not _write_lock(lock_path, owner, source, now):
         return False
-    if existed or db_path is None:
+    if db_path is None:
         return False
     try:
         return _open_interval(db_path, source, now)
@@ -139,13 +276,24 @@ def begin_pause(lock_path: str, db_path: str | None = None, *,
 
 
 def end_pause(lock_path: str, db_path: str | None = None, *,
-              now: int | None = None) -> bool:
+              owner: str | None = None, now: int | None = None) -> bool:
     """Remove the pause lock, closing any open interval.
 
-    Returns whether an interval was closed. The close is attempted even when the
-    file is already gone: an interval left open in the record while the file is
-    absent would otherwise be subtracted until it swallowed the whole window.
+    Release is scoped to the caller's owner: a named lock belonging to someone
+    else is left in place and the refusal is logged at INFO naming both owners,
+    so an investigation has a trail. A legacy (unnamed) lock is releasable by
+    anyone, and a missing file stays an idempotent success -- the close is
+    attempted even then, because an interval left open while the file is absent
+    would otherwise be subtracted until it swallowed the whole window.
     """
+    record = lock_owner(lock_path)
+    if record is not None:
+        held = record.get("owner")
+        if held is not None and held != owner:
+            logging.info(
+                "Pause lock %s is owned by %s, not %s; leaving it in place",
+                lock_path, held, owner or "unnamed")
+            return False
     try:
         if os.path.exists(lock_path):
             os.remove(lock_path)

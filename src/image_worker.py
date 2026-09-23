@@ -8,6 +8,7 @@ import threading
 import requests
 from datetime import datetime, timezone
 from src import capture, images, pacing
+from src import activity
 from src.database import get_next_image_item, insert_or_update_item, get_image_path, live_fetch_status_predicate
 
 # Re-exported so this module still reads as the place the downloader's formats
@@ -74,7 +75,11 @@ class ImageDownloadThread(threading.Thread):
         os.makedirs("images", exist_ok=True)
 
         while self.running:
+            # The existence check is the fast path; the record is read only
+            # while the file is there, so a holder that crashed cannot strand
+            # the daemon (src/activity.py).
             while os.path.exists(self.pause_lock_file) and self.running:
+                activity.reclaim_if_owner_gone(self.pause_lock_file, self.db_path)
                 time.sleep(1)
 
             item = None

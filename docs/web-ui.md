@@ -624,35 +624,42 @@ records one. The budget is per account or address and refills over minutes.
 
 **The page's throttle flag is per-pass.** `_subThrottleStopped` is what the Close handler reads to keep
 the stopped pass's unverified rows queued rather than dequeuing them, and `_startAutoSubscribe` clears
-it, beside `_subCanceled`, when the pass takes ownership (`templates/index.html:2759`,
-`templates/index.html:2763`). A pass that stopped for throttling therefore only changes what *its own*
+it, beside `_subCanceled`, when the pass takes ownership (`templates/index.html:2770`,
+`templates/index.html:2774`). A pass that stopped for throttling therefore only changes what *its own*
 Close does: the rows stay queued for the next drain. A later, normal pass clears the flag, and its
 Cancel dequeues again as usual. A stale pass's throttle check still stops that pass, but writes nothing
 — only the newest pass may set the flag, clear the handles, drop the estimate or release the pause
-(`templates/index.html:2948`). The throttle stop itself is unchanged — it sets `_subCanceled`, releases
+(`templates/index.html:2967`). The throttle stop itself is unchanged — it sets `_subCanceled`, releases
 the daemon and leaves the remaining rows queued.
 
 **A pass owns the module-scope state; the newest pass's token is the owner.** A pass takes ownership
 only once it has **committed to running**: `_subPassToken` (`templates/index.html:2591`) is incremented
-after `/api/queued` has returned a non-empty list (`templates/index.html:2755`), not before it. A pass
-that aborts at the queue read — the empty-queue return (`templates/index.html:2746`) or a rejected read
+after `/api/queued` has returned a non-empty list (`templates/index.html:2762`), not before it. A pass
+that aborts at the queue read — the empty-queue return (`templates/index.html:2753`) or a rejected read
 — therefore leaves the running pass's token, handles, estimate and daemon pause untouched. Taking the
 token above that read would make an aborting pass invalidate a running one, whose `finally` would then
 skip its clears and its pause release, leaving the daemon paused and the countdown tick registered. The
 claim is also handed back when the `/api/pause` rejects: the pass saves the prior token, live flag and
-per-pass flags and restores them (`templates/index.html:2811`), and a predecessor's handles are not
-cleared until the pause has succeeded (`templates/index.html:2847`), so a pass that never ran does not
-disturb a predecessor that is still running. The handback covers the ordinary rejection only: if the
-predecessor finished inside that same await its `finally` has already skipped, so the token it gets back
-cannot make it release the `.pauselock`, and a throw in the start window between the claim and the pause's
-`try` leaves the claim taken — both recorded as issue 88 in [code-issues.md](code-issues.md). Once the
-token is taken, a new pass started from the grid
-cell that still holds focus (`l`) supersedes any earlier pass immediately — including one that is still
-draining. The code after each later await re-checks the token — after the pause and the pace read,
-before it arms anything (`templates/index.html:2823`, `templates/index.html:2854`) — the poll's tick
-returns if its own pass was superseded (`templates/index.html:2885`), and the `finally` clears the
-handles, drops `_subEstimate` and releases the daemon pause **only when it still holds the newest
-token** (`templates/index.html:3030`). That is what makes a still-draining predecessor unable to stop a
+per-pass flags and restores them (`templates/index.html:2831`), and a predecessor's handles are not
+cleared until the pause has succeeded (`templates/index.html:2866`), so a pass that never ran does not
+disturb a predecessor that is still running.
+
+**The pause is owned, so its release is not token-guarded.** Every pause and resume from this page
+carries an owner, `"<pageId>:<passToken>"` — one page id per load, so two tabs never collide
+(`templates/index.html:2603`) — and `src/activity.py` scopes `end_pause` to it. A pass releasing its own
+pause is therefore always correct, superseded or not, and a pass that never acquired frees nothing, so
+the `finally` calls `finish()` unconditionally (`templates/index.html:3064`) and only the handle clears
+and the estimate drop stay behind the token guard. That is what closes issue 88's two stranded-claim
+windows: a predecessor that finished inside a rejected pause's await releases its own lock from its own
+`finally`, and an aborted successor's release is a no-op. The handback of the JS state is unchanged.
+Once the token is taken, a new pass started from the grid cell that still holds focus (`l`) supersedes
+any earlier pass immediately — including one that is still draining. The code after each later await
+re-checks the token — after the pause and the pace read,
+before it arms anything (`templates/index.html:2842`, `templates/index.html:2873`) — the poll's tick
+returns if its own pass was superseded (`templates/index.html:2904`), and the `finally` clears the
+handles and drops `_subEstimate` **only when it still holds the newest token**
+(`templates/index.html:3052`), while the pause release is owner-scoped rather than token-guarded. That
+is what makes a still-draining predecessor unable to stop a
 successor's 1 s verification poll, clear its 250 ms schedule tick or drop its countdown: clearing the
 module-scope handles used to reach whatever pass owned them by then. The handle that is actually live
 at a new pass's start is the poll — the first Cancel deliberately leaves the cancelled pass's poll
@@ -667,10 +674,10 @@ by `_subScheduleIv` being armed, but that happens only *after* `_startAutoSubscr
 await while the overlay is drawn before it: a click landing inside that await saw a null handle, took
 the Close branch, hid the overlay and resumed the daemon while the pass it was pressed against armed its
 schedule and drained rows with nothing on screen. The handler now reads `_subPassLive`
-(`templates/index.html:3049`), set as the overlay is drawn and before the pause await
-(`templates/index.html:2768`) and cleared when the newest pass ends or bails, and the pass re-checks
+(`templates/index.html:3074`), set as the overlay is drawn and before the pause await
+(`templates/index.html:2779`) and cleared when the newest pass ends or bails, and the pass re-checks
 `_subCanceled` after the pause await and after the pace read — before it arms the schedule or drains a
-row (`templates/index.html:2829`, `templates/index.html:2855`). A pass cancelled in either window arms
+row (`templates/index.html:2848`, `templates/index.html:2874`). A pass cancelled in either window arms
 nothing, drains nothing and releases the pause once; the overlay stays up for Close, exactly as a pass
 cancelled mid-drain leaves it.
 

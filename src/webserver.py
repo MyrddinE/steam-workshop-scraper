@@ -1060,19 +1060,38 @@ def api_open_folder(workshop_id):
     return jsonify(result), status
 
 
+def _pause_owner_from_request() -> str | None:
+    """The owner a pause/resume caller sends, or None for an anonymous caller.
+
+    The page sends ``{"owner": "<pageId>:<passToken>"}`` in a JSON body, so a
+    pass can release only the lock it took and two tabs cannot collide; the
+    form/query fallback keeps a hand-rolled call workable. An unnamed call is
+    tolerated: it takes an unnamed lock, which any caller may release.
+    """
+    payload = request.get_json(silent=True)
+    owner = payload.get("owner") if isinstance(payload, dict) else None
+    if not isinstance(owner, str) or not owner:
+        owner = (request.form.get("owner") if request.form else None) \
+            or request.args.get("owner")
+    return owner if isinstance(owner, str) and owner else None
+
+
 @app.route('/api/pause', methods=['POST'])
 def api_pause():
     # Creating the lock is also how the pause interval is recorded for the
-    # drain estimate's active-time rate; see src/activity.py.
-    activity.begin_pause('.pauselock', _db_path, source="web_subscribe")
+    # drain estimate's active-time rate; see src/activity.py. The caller's owner
+    # is stored in the lock record, so it can release only its own pause.
+    activity.begin_pause('.pauselock', _db_path, source="web_subscribe",
+                         owner=_pause_owner_from_request())
     return jsonify({"ok": True})
 
 
 @app.route('/api/resume', methods=['POST'])
 def api_resume():
     # Idempotent resume: an absent pause lock is the desired end state, so
-    # `end_pause` is a no-op success when it is already gone.
-    activity.end_pause('.pauselock', _db_path)
+    # `end_pause` is a no-op success when it is already gone. The owner scopes
+    # the release, so a tab that does not hold the lock frees nothing.
+    activity.end_pause('.pauselock', _db_path, owner=_pause_owner_from_request())
     return jsonify({"ok": True})
 
 

@@ -8,6 +8,7 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, queue_field_for_translation, translation_is_current, live_fetch_status_predicate
+from src import activity
 from src import pacing
 from src import session_health
 from src.daemon_state import StateStore, state_path_for
@@ -441,8 +442,11 @@ class WebScraperThread(threading.Thread):
     def run(self):
         logging.info("Web scraper thread started.")
         while self.running:
-            # Only the web thread pauses when TUI locks
+            # Only the web thread pauses when TUI locks. The existence check is
+            # the fast path; the record is read only while the file is there, so
+            # a holder that crashed cannot strand the daemon (src/activity.py).
             while os.path.exists(self.pause_lock_file) and self.running:
+                activity.reclaim_if_owner_gone(self.pause_lock_file, self.db_path)
                 time.sleep(1)
 
             item = None

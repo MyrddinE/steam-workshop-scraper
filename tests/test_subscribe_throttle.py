@@ -174,6 +174,7 @@ let _subThrottleStopped = false;
 let _subEstimate = null;
 let _subPassToken = 0;
 let _subPassLive = false;
+let _subPageId = 'test-page';
 
 let _timerId = 0;
 global.setInterval = function() { return ++_timerId; };
@@ -389,6 +390,7 @@ let _subThrottleStopped = false;
 let _subEstimate = null;
 let _subPassToken = 0;
 let _subPassLive = false;
+let _subPageId = 'test-page';
 
 // Timers are registered but never fire on their own. `fireInterval` invokes a
 // still-registered interval's callback and says whether it ran, which is how
@@ -656,6 +658,7 @@ let _subThrottleStopped = false;
 let _subEstimate = null;
 let _subPassToken = 0;
 let _subPassLive = false;
+let _subPageId = 'test-page';
 
 // Timers are registered but never fire on their own; the test fires the
 // schedule by hand, which is what makes "the estimate still ticks" observable.
@@ -773,7 +776,12 @@ global.fetch = async function(url, opts) {
   if (u === '/api/subscribe_pace') return okJson({seed_seconds: 1});
   if (u === '/api/subscribe_failures') return okJson([]);
   if (u === '/api/pause') return okJson({ok: true});
-  if (u === '/api/resume') { resumes.push(1); return okJson({ok: true}); }
+  if (u === '/api/resume') {
+    let owner = 'unnamed';
+    try { owner = JSON.parse(opts.body).owner; } catch (e) {}
+    resumes.push(owner);
+    return okJson({ok: true});
+  }
   if (u === '/api/subscribe_throttle') {
     throttleCalls += 1;
     // The first check is pass one's; it is throttled, so both of that stale
@@ -827,6 +835,7 @@ const runPass = (__START__);
   const schedAfterPass1 = _subScheduleIv;
   const estimateSurvived = _subEstimate === estimateB;
   const resumesAfterPass1 = resumes.length;
+  const resumeOwnersAfterPass1 = resumes.slice();
   const liveSchedulesAfterPass1 = liveIntervals(250);
 
   // The 250 ms schedule tick is what redraws the countdowns; a stale pass that
@@ -848,6 +857,7 @@ const runPass = (__START__);
     sched_after_pass1: schedAfterPass1,
     estimate_survived: estimateSurvived,
     resumes_after_pass1: resumesAfterPass1,
+    resume_owners_after_pass1: resumeOwnersAfterPass1,
     live_schedules_after_pass1: liveSchedulesAfterPass1,
     schedule_tick_ran: tick.ran,
     countdowns_after_tick: countdownsAfterTick,
@@ -879,8 +889,14 @@ def test_a_stale_pass_leaves_a_newer_passs_poll_schedule_and_estimate_alone(web_
     Against the pre-change page the first pass's throttle stop clears
     `_subPollIv` (already the second pass's) and drops `_subEstimate`, and its
     `finally` clears `_subScheduleIv`, so the second pass is left with no poll,
-    no schedule tick and no estimate -- and the stale pass also resumed the
-    daemon pause the second pass owns.
+    no schedule tick and no estimate.
+
+    The pause release is the one clear that is **not** guarded any more: with
+    owner-scoped release a superseded pass releasing its own pause is always
+    correct, so the stale pass now frees its own lock and only its own. Against
+    the pre-change page this test's resume-owner assertion sees no call at all
+    (`resumes_after_pass1: 0`); after the change the stale pass's `finally`
+    releases `test-page:1` while leaving pass two's lock alone.
     """
     client, _ = web_client
     out = _overlay_stale_pass_scenario(client, tmp_path)
@@ -898,9 +914,13 @@ def test_a_stale_pass_leaves_a_newer_passs_poll_schedule_and_estimate_alone(web_
     assert all(out["countdowns_after_tick"]), (
         "the newer pass's estimate must still draw figures; got "
         f"{out['countdowns_after_tick']}")
-    assert out["resumes_after_pass1"] == 0, (
-        "a stale pass must not release the daemon pause the newer pass owns; "
-        f"got {out['resumes_after_pass1']} resume call(s)")
+    assert out["resume_owners_after_pass1"] == ["test-page:1"], (
+        "a superseded pass releases its own owned pause -- and only its own -- "
+        "from its own finally; got "
+        f"{out['resume_owners_after_pass1']} resume call(s)")
+    assert out["resumes_after_pass1"] == 1, (
+        "the stale pass must release exactly its own pause; got "
+        f"{out['resumes_after_pass1']} resume call(s)")
 
 
 # --- a Cancel click landing inside the `/api/pause` await --------------------
@@ -925,6 +945,7 @@ let _subThrottleStopped = false;
 let _subEstimate = null;
 let _subPassToken = 0;
 let _subPassLive = false;
+let _subPageId = 'test-page';
 
 let _timerId = 0;
 const _timers = new Map();
@@ -1153,6 +1174,7 @@ let _subThrottleStopped = false;
 let _subEstimate = null;
 let _subPassToken = 0;
 let _subPassLive = false;
+let _subPageId = 'test-page';
 
 // Timers are registered but never fire on their own; this scenario only asks
 // which handles are still registered.
@@ -1396,6 +1418,7 @@ let _subThrottleStopped = false;
 let _subEstimate = null;
 let _subPassToken = 0;
 let _subPassLive = false;
+let _subPageId = 'test-page';
 
 let _timerId = 0;
 const _timers = new Map();
@@ -1625,3 +1648,262 @@ def test_a_rejected_pause_hands_ownership_back_to_the_running_pass(web_client, t
     assert out["live_after_pass1"] is False, (
         f"the running pass must end as the live pass; got "
         f"{out['live_after_pass1']}")
+
+
+# --- issue 88: a predecessor finishing inside a rejected pause's await --------
+#
+# With owner-scoped release, a pass releasing **its own** pause is always
+# correct, even when it has been superseded -- so the resume in
+# `_startAutoSubscribe`'s `finally` is no longer guarded by the pass token and
+# the page's `finish()` calls `/api/resume` unconditionally. That is what closes
+# issue 88's stranded-claim window: pass one is still draining when pass two
+# claims the token and awaits `/api/pause`; pass two's pause rejects, and pass
+# one finishes inside that same await, by which time pass one is stale. Its
+# `finally` used to skip the resume because of the token guard, leaving the
+# `.pauselock` with no holder. Now pass one frees its own lock from its own
+# `finally`, and pass two -- which never acquired -- frees nothing.
+#
+# The stub models the server's ownership rules: `begin_pause` never steals a
+# held lock, and `end_pause` removes the lock only for the owner it is given.
+# A legacy, unnamed owner would match anyone; the page always sends one.
+
+OVERLAY_PREDECESSOR_FINISHES_IN_REJECTED_PAUSE_DRIVER = r"""
+__ESTIMATOR__
+// A plain string escape, not the behaviour under test.
+function _escapeHtml(text) { return String(text); }
+
+let _subPollIv = null;
+let _subScheduleIv = null;
+let _subCanceled = false;
+let _subThrottleStopped = false;
+let _subEstimate = null;
+let _subPassToken = 0;
+let _subPassLive = false;
+let _subPageId = 'test-page';
+
+let _timerId = 0;
+global.setInterval = function() { return ++_timerId; };
+global.clearInterval = function() {};
+global.setTimeout = function() { return ++_timerId; };
+global.clearTimeout = function() {};
+
+function makeRow(wid) {
+  const classes = ['sub-queue-item'];
+  const countdown = {textContent: ''};
+  const verb = {textContent: ''};
+  return {
+    dataset: {wid: String(wid)}, style: {}, textContent: '',
+    classList: {
+      add: function(name) { if (classes.indexOf(name) === -1) classes.push(name); },
+      contains: function(name) { return classes.indexOf(name) !== -1; }
+    },
+    getAttribute: function(k) { return k === 'data-wid' ? String(wid) : null; },
+    querySelector: function(sel) {
+      if (sel === '.countdown') return countdown;
+      if (sel === '.sub-queue-verb') return verb;
+      return null;
+    }
+  };
+}
+const rows = [11, 22].map(makeRow);
+const list = {
+  innerHTML: '',
+  querySelector: function(sel) {
+    const m = sel.match(/\[data-wid="(\d+)"\]/);
+    if (!m) return null;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].getAttribute('data-wid') === m[1]) return rows[i];
+    }
+    return null;
+  },
+  querySelectorAll: function(sel) {
+    if (sel === '.sub-queue-item') return rows.slice();
+    if (sel === '.sub-queue-item .countdown') {
+      return rows.map(function(r) { return r.querySelector('.countdown'); });
+    }
+    return [];
+  }
+};
+const elements = {
+  'sub-queue-modal': {style: {}},
+  'sub-queue-list': list,
+  'sub-progress': {textContent: ''},
+  'sub-cancel': {textContent: '', onclick: null},
+  'sub-clear-failed': {textContent: '', style: {}}
+};
+global.document = {
+  getElementById: function(id) { return elements[id] || null; },
+  querySelectorAll: function(sel) {
+    if (sel === '.sub-queue-item:not(.done)') {
+      return rows.filter(function(r) { return !r.classList.contains('done'); });
+    }
+    return [];
+  }
+};
+global.alert = function() {};
+
+// The served click handler, wired onto the stub exactly as the page wires it.
+__CANCEL__
+
+const queuedNow = [
+  {workshop_id: 11, title: 'A', subscription_state: 'queued',
+   subscription_colour: '#0f0', subscription_tooltip: 'a', subscription_glyph: 'x'},
+  {workshop_id: 22, title: 'B', subscription_state: 'queued',
+   subscription_colour: '#0f0', subscription_tooltip: 'b', subscription_glyph: 'x'}
+];
+
+function okJson(body) {
+  return {ok: true, status: 200, statusText: 'OK', json: async function() { return body; }};
+}
+
+// The simulated `.pauselock`: whoever `begin_pause` first recorded holds it
+// (the server never steals a held lock), and `end_pause` removes it only for
+// that owner. `resumes` records every owner the page asked to release.
+let pauseHolders = [];
+const resumes = [];
+const pauseOwners = [];
+let pass1StartedResolve = null;
+const pass1Started = new Promise(function(resolve) { pass1StartedResolve = resolve; });
+let releasePass1 = null;
+let pass2PauseRejects = false;
+let pauseStartedResolve = null;
+const pauseStarted = new Promise(function(resolve) { pauseStartedResolve = resolve; });
+let releasePause = null;
+
+function _ownerOf(opts) {
+  // A page before this change sends no body at all: that is an unnamed caller,
+  // which the server would treat as a legacy (releasable-by-anyone) lock.
+  if (!opts || !opts.body) return 'unnamed';
+  try { return JSON.parse(opts.body).owner || 'unnamed'; } catch (e) { return 'unnamed'; }
+}
+
+global.fetch = async function(url, opts) {
+  const u = String(url);
+  if (u === '/api/queued') return okJson(queuedNow.slice());
+  if (u === '/api/subscribe_pace') return okJson({seed_seconds: 1});
+  if (u === '/api/subscribe_failures') return okJson([]);
+  if (u === '/api/pause') {
+    pauseOwners.push(_ownerOf(opts));
+    if (pass2PauseRejects) {
+      // Pass two is held exactly inside its pause await, then rejected.
+      pauseStartedResolve();
+      await new Promise(function(resolve) { releasePause = resolve; });
+      throw new Error('pause unavailable');
+    }
+    // begin_pause never steals a held lock: the first owner keeps it.
+    if (pauseHolders.length === 0) pauseHolders.push(_ownerOf(opts));
+    return okJson({ok: true});
+  }
+  if (u === '/api/resume') {
+    const owner = _ownerOf(opts);
+    resumes.push(owner);
+    pauseHolders = pauseHolders.filter(function(held) { return held !== owner; });
+    return okJson({ok: true});
+  }
+  if (u === '/api/subscribe_throttle') return okJson({throttled_at: 0, retry_after: 300});
+  if (u.indexOf('/api/subscribe/') === 0) {
+    if (pass1StartedResolve !== null && _subPassToken === 1) {
+      pass1StartedResolve();
+      await new Promise(function(resolve) { releasePass1 = resolve; });
+      pass1StartedResolve = null;
+    }
+    return {ok: true, status: 200, statusText: 'OK',
+            json: async function() { return {success: 1}; }};
+  }
+  return okJson({ok: true});
+};
+
+const runPass = (__START__);
+
+(async function() {
+  // Pass one starts and holds its first subscribe call, owning the pause.
+  const pass1 = runPass();
+  await pass1Started;
+  const holdersAfterPass1Pause = pauseHolders.slice();
+
+  // Pass two claims the token and awaits a pause that will reject.
+  pass2PauseRejects = true;
+  const pass2 = runPass();
+  await pauseStarted;
+  const holdersAfterPass2Pause = pauseHolders.slice();
+  const pass2PauseOwner = pauseOwners[pauseOwners.length - 1];
+
+  // Pass one finishes inside pass two's pause await -- it is stale by then.
+  releasePass1();
+  await pass1;
+  const resumesAfterPass1 = resumes.slice();
+  const holdersAfterPass1 = pauseHolders.slice();
+
+  // The rejected pause then resolves as a throw; pass two hands ownership back.
+  releasePause();
+  let pass2Error = null;
+  try {
+    await pass2;
+  } catch (e) {
+    pass2Error = e.message;
+  }
+
+  console.log(JSON.stringify({
+    holders_after_pass1_pause: holdersAfterPass1Pause,
+    holders_after_pass2_pause: holdersAfterPass2Pause,
+    pass2_pause_owner: pass2PauseOwner,
+    resume_owners_after_pass1: resumesAfterPass1,
+    holders_after_pass1: holdersAfterPass1,
+    pass2_error: pass2Error,
+    holders_after_rejection: pauseHolders.slice()
+  }));
+})();
+"""
+
+
+def _overlay_predecessor_in_rejected_pause_scenario(client, tmp_path):
+    script = _served_inline_script(client)
+    helpers = "\n".join(
+        _extract_function(script, name)
+        for name in ("_subItemSeconds", "_subBatchRemainingSeconds", "_subFormatDuration",
+                     "_subElapsedCurrent", "_subSeedSeconds", "_subRenderProgress",
+                     "_clearSubEstimates"))
+    driver = (OVERLAY_PREDECESSOR_FINISHES_IN_REJECTED_PAUSE_DRIVER
+              .replace("__ESTIMATOR__", helpers)
+              .replace("__START__", _extract_function(script, "_startAutoSubscribe"))
+              .replace("__CANCEL__", _extract_cancel_onclick(script)))
+    return _run_node(driver, tmp_path)
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_a_predecessor_finishing_inside_a_rejected_pause_await_releases_its_own_lock(
+        web_client, tmp_path):
+    """Issue 88's stranded window, driven through the served page.
+
+    Pass one owns the pause; pass two claims the token and awaits `/api/pause`;
+    pass one finishes inside that await and is superseded; pass two's pause then
+    rejects and hands the token back. Against the pre-change page pass one's
+    `finally` skips the resume because of the token guard, so the simulated
+    `.pauselock` still has a holder (`['test-page:1']`) and no resume carries
+    pass one's owner. After the change pass one releases its own lock and the
+    holder set is empty -- the daemon is resumed -- while pass two, which never
+    acquired, frees nothing.
+    """
+    client, _ = web_client
+    out = _overlay_predecessor_in_rejected_pause_scenario(client, tmp_path)
+
+    assert out["resume_owners_after_pass1"] == ["test-page:1"], (
+        "the superseded predecessor must release its own lock from its own "
+        f"finally; got {out['resume_owners_after_pass1']}")
+    assert out["holders_after_pass1"] == [], (
+        "the abandoned claim must not strand `.pauselock`; got "
+        f"{out['holders_after_pass1']}")
+    assert out["holders_after_pass1_pause"] == ["test-page:1"], (
+        "pass one's pause must own the lock; got "
+        f"{out['holders_after_pass1_pause']}")
+    assert out["holders_after_pass2_pause"] == ["test-page:1"], (
+        "begin_pause must not steal a held lock; got "
+        f"{out['holders_after_pass2_pause']}")
+    assert out["pass2_pause_owner"] == "test-page:2", (
+        "the second pass must send its own owner; got "
+        f"{out['pass2_pause_owner']!r}")
+    assert out["pass2_error"] == "pause unavailable", \
+        "the second pass must still fail on the rejected pause"
+    assert out["holders_after_rejection"] == [], (
+        "the daemon must end resumed; got "
+        f"{out['holders_after_rejection']}")

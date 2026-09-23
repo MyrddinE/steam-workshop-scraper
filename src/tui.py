@@ -1,6 +1,7 @@
 import json
 import logging
 import math
+import os
 import time
 from functools import partial
 from textual.app import App, ComposeResult
@@ -1173,6 +1174,10 @@ class SubscriptionQueueScreen(ModalScreen):
         self.db_path = db_path
         self.pause_lock_file = pause_lock_file
         self.config = config or {}
+        # One owner per screen instance: the lock record names it, so the
+        # engine's own PauseLock cannot release the screen's pause and a stale
+        # screen cannot release a newer one's (src/activity.py).
+        self._pause_owner = f"tui-screen:{os.getpid()}"
         self._items: list[dict] = []
         self._pass_running = False
         # workshop_id -> SubscribeOutcome, in the order the pass reports them.
@@ -1195,13 +1200,15 @@ class SubscriptionQueueScreen(ModalScreen):
         than the wall clock; see ``src/activity.py``.
         """
         activity.begin_pause(self.pause_lock_file, self.db_path,
-                             source="tui_subscription_queue")
+                             source="tui_subscription_queue",
+                             owner=self._pause_owner)
 
     def on_unmount(self) -> None:
         """Remove the pause lock file when the screen is unmounted."""
         self._closing = True
         self._stop_estimate_timer()
-        activity.end_pause(self.pause_lock_file, self.db_path)
+        activity.end_pause(self.pause_lock_file, self.db_path,
+                           owner=self._pause_owner)
 
     @staticmethod
     def _row_text(item: dict, status: str | None = None, colour: str | None = None,
