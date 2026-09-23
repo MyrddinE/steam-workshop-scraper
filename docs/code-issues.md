@@ -15,24 +15,34 @@ the production database on 2026-09-12.
 
 ## Open
 
-### Two Textual-timing tests fail intermittently (issue 90)
+### The item-update render race never reproduced (issue 90, watch-only)
 
-Two tests have each failed once on an otherwise green suite, both by asserting on a widget before Textual has
-mounted it, and both passed on re-run:
+Two Textual-timing tests each failed once on an otherwise green suite, and looping them in fresh processes
+separated them cleanly. **Do not re-dispatch this entry** — the first half is fixed, and the second has no
+reproduction to work from; it is recorded so a future sighting has a recipe, not because there is anything to
+do.
 
-- `tests/test_tui_accessibility.py::test_select_dropdown_contrast` failed on the owner's **first** Windows run
-  with `NoMatches: No nodes match 'SelectOverlay' on CommandPalette(id='--command-palette', ...)` — the
-  palette screen was up where the select overlay was expected — and passed on the **second** Windows run
-  (2201 passed, 10 skipped, zero failures) with nothing else changed. So it is not the Textual version drift
-  the first failure suggested, unless the environment moved between the two runs.
-- `tests/test_item_update_path.py::test_a_download_written_behind_the_tui_reaches_the_row_and_the_pane` failed
-  once in a container full-suite run with `IndexError` in `_list_row_markup`
-  (`list_view.children[index].query(Label)[1]`), immediately after `pilot.pause(ASYNC_PAUSE)`. That file is
-  untouched by the batch that was being merged, and it passed 3/3 standalone and green on re-run.
-
-Both are the same shape: a fixed `pilot.pause(...)` treated as if it guaranteed the render, then a query or an
-index that assumes it. Dispatched off-peak to reproduce by looping, then to wait on the state each test
-actually asserts rather than lengthening the pause.
+- **The select test was a test bug, and is fixed** (`f3b3b86`). `test_select_dropdown_contrast` failed on the
+  owner's first Windows run with `NoMatches: No nodes match 'SelectOverlay' on CommandPalette(...)`, and
+  looping it here reproduced **32 failures in 160 fresh-process iterations (20%)** — every one that exact
+  error, and the paired palette test never failed, so nothing leaked between tests. The cause was confirmed
+  by a diagnostic rather than inferred: `Pilot.click` aims at `widget.region.offset`, not the centre, and the
+  search builder's rows mount asynchronously, so the first `Select` is queryable before layout gives it a
+  region. At `Region(0, 0, 0, 0)` the aim is the screen origin — the Header's command-palette icon — so the
+  click opened the palette and the screen the assertion queried held no overlay (24/24 under load, versus
+  23/40 with a real region of `Region(2, 2, 15, 1)`). That is a harness bug, not a product race: no user can
+  click a widget that has not been laid out. The test now waits, bounded and loud on timeout, for the widget
+  to be under its own click point before clicking (`wait_for` and `click_lands_on` in
+  `tests/test_tui_accessibility.py`), with the assertion after the click unchanged and no pause lengthened:
+  0 failures in 320 post-fix iterations, including a run concurrent with an 8-way load loop. It also explains
+  the first Windows failure and the clean re-run — a 20% race, not version drift.
+- **The item-update test did not reproduce and is untouched.** `test_a_download_written_behind_the_tui_reaches_the_row_and_the_pane`
+  failed once in a container full-suite run with `IndexError` in `_list_row_markup`
+  (`list_view.children[index].query(Label)[1]`) right after `pilot.pause(ASYNC_PAUSE)`. **400 fresh-process
+  iterations — 160 at 4-way load, then 240 at 8-way alongside a 4-way loop, 12 pytest processes — produced
+  zero failures**, so its fixed pause stands and no change was made. A fix without a reproduction would be a
+  guess. If it is seen again, loop it with fresh processes at that load band before touching it; a rarer race
+  could still be hiding at these counts.
 
 ### A pass that claims ownership and then throws can still strand the running pass (issue 88)
 
