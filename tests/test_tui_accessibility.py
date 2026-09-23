@@ -1,5 +1,8 @@
+import time
+
 import pytest
 from textual.color import Color
+from textual.errors import NoWidget
 from textual.widgets import Label, Button, Select, ListItem, ListView, Markdown
 from src.database import initialize_database
 from src.tui import ScraperApp, DetailsPane
@@ -51,6 +54,42 @@ def is_readable(widget):
     # Very simple check: brightness difference should be significant
     diff = abs(fg.brightness - bg.brightness)
     return diff > 0.3 # 0.3 is a loose threshold for basic visibility
+
+async def wait_for(pilot, predicate, description, timeout=5.0):
+    """Wait until ``predicate()`` holds, pumping the app's message loop.
+
+    A bounded wait on the state a test actually depends on, rather than a fixed
+    pause that only guesses how long that state takes. On timeout it raises
+    naming what never arrived, so a regression fails loudly instead of being
+    retried away.
+    """
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"timed out after {timeout:.1f}s waiting for {description}"
+            )
+        await pilot.pause(0.02)
+
+def click_lands_on(app, widget) -> bool:
+    """Whether ``Pilot.click(widget)`` will land on that widget.
+
+    ``Pilot.click`` aims at ``widget.region.offset``, not its centre. A widget
+    that is mounted but not yet laid out reports ``Region(0, 0, 0, 0)``, so the
+    aim becomes the screen origin -- the Header's command-palette icon -- and
+    the click opens the palette instead. This resolves the point the same way
+    the pilot does, so it is true exactly when the click cannot miss.
+    """
+    region = widget.region
+    if not region.area:
+        return False
+    try:
+        under, _ = app.get_widget_at(region.x, region.y)
+    except NoWidget:
+        # The point exists but is not in the compositor's map yet; the next
+        # layout pass will place it.
+        return False
+    return under is widget or under in widget.walk_children()
 
 @pytest.mark.asyncio
 async def test_main_ui_contrast(mock_config):
@@ -133,6 +172,19 @@ async def test_select_dropdown_contrast(mock_config):
     # Hermeticity guard, as above.
     assert app.config["database"] == mock_config["database"]
     async with app.run_test() as pilot:
+        select = app.query_one(Select)
+        # The search builder's rows mount asynchronously, so the first Select
+        # can be queryable before the first layout has given it a region.
+        # `Pilot.click` aims at `widget.region.offset`, and an unlaid-out
+        # widget's Region(0, 0, 0, 0) makes that the screen origin -- the
+        # Header's command-palette icon -- so the click opened the palette and
+        # the screen queried below held no SelectOverlay. Wait for the widget to
+        # be under its own click point before clicking it.
+        await wait_for(
+            pilot,
+            lambda: click_lands_on(app, select),
+            "the first Select to be laid out under its own click point",
+        )
         await pilot.click(Select)
         await pilot.pause(ASYNC_PAUSE)
         
