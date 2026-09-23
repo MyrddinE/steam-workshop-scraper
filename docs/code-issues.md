@@ -43,6 +43,14 @@ do.
   zero failures**, so its fixed pause stands and no change was made. A fix without a reproduction would be a
   guess. If it is seen again, loop it with fresh processes at that load band before touching it; a rarer race
   could still be hiding at these counts.
+- **A third sighting, same family, seen once under contamination.** `test_subscription_tui.py::test_the_tui_detail_pane_draws_each_state_before_the_title[columns1-subscribed]`
+  — another fixed-`pilot.pause` render assertion, this one on the detail pane's marker after the list index
+  moves — failed once in a full-suite run, passed **5/5 in isolation**, and the same tree passed the whole
+  suite (`2231 passed, 4 skipped, 1 deselected`) on a quiet box. The run that failed it overlapped a second
+  full suite in the same checkout, which is the load condition that makes exactly this shape flaky (and the
+  foreground's own process mistake, recorded in the queue note). So it is a sighting, not a diagnosis: if it
+  recurs without a concurrent run, treat it like the select test — loop it in fresh processes, then wait on
+  the state the assertion needs instead of the clock. Do not fix it on one contaminated observation.
 
 ## Recently closed
 
