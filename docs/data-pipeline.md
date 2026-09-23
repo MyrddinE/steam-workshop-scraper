@@ -813,7 +813,10 @@ upgrade does not lock anyone out. A file whose recorded pid is **known dead** is
 reclaimed (the lock removed and its interval closed, logged at WARNING); both
 worker polls call `reclaim_if_owner_gone` before sleeping, and `begin_pause`
 self-heals the same way, so a holder that crashed cannot stop the daemon's web
-and image work for good.
+and image work for good. That ownership is **one holder per lock**: `begin_pause` does not steal a live
+owner's, so a second pass started while the first is still draining does not register and the pause is
+released when the *first* pass ends rather than the last. Guaranteeing the quiet account across
+overlapping passes would need a claim set here rather than a single owner.
 
 The pause is applied **per queue, because the pause is per queue**: only the web
 and image workers poll `.pauselock` (`src/web_worker.py`, `src/image_worker.py`),

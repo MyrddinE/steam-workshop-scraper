@@ -44,36 +44,45 @@ do.
   guess. If it is seen again, loop it with fresh processes at that load band before touching it; a rarer race
   could still be hiding at these counts.
 
-### A pass that claims ownership and then throws can still strand the running pass (issue 88)
-
-Ownership of the overlay's module-scope state is taken once the pass commits to running, and handed back
-when `/api/pause` rejects (`templates/index.html:2811`). Two windows remain where a claim is taken and
-then abandoned without a handback, and in both the predecessor is stale by then, so its `finally`
-(`templates/index.html:3030`) skips the handle clears and the `/api/resume`:
-
-- **the pause rejects *and* the predecessor finishes inside that same await.** Restoring the predecessor's
-  token no longer helps, because its `finally` has already run and skipped. The `.pauselock` beside the
-  database then survives with no holder, and the daemon's web and image workers stay paused until
-  something calls `end_pause` — the overlay's Cancel-then-Close, or the TUI's subscription screen. The
-  window is one localhost round-trip, so a transport failure is needed to open it at all;
-- **a throw between the claim and the pause's `try`.** The start-window DOM writes
-  (`templates/index.html:2762-2792`) run there, so a page whose markup lost one of the modal elements
-  would throw with the claim taken.
-
-Left open rather than patched because every available fix trades one failure for another. Making the claim
-provisional until the pause resolves lets a predecessor's `finally` resume a pause the successor then owns.
-Releasing the pause inside the handback is worse than it looks: `/api/resume` removes `.pauselock`
-unconditionally (`src/webserver.py:1075`), the file has three writers — the TUI's subscription screen holds
-the same lock — so a pass that never successfully paused could release someone else's pause. The clean
-close is to give the lock an owner rather than to keep patching the claim: tag `.pauselock` with whoever
-took it, so a web pass can release only its own and a stranded claim can be reclaimed. That changes the
-pause mechanism itself, not this overlay. Issues 86 and 87 are fixed and pinned regardless; this is the
-residue of the same mechanism. See [web-ui.md](web-ui.md).
-
 ## Recently closed
 
 Removed from the list above rather than marked resolved. Each is now documented as current
 behaviour, or covered by a test:
+
+### A superseded pass could strand the pause lock (issue 88)
+
+Ownership of the overlay's module-scope state is taken once a pass commits to running, and handed back when
+`/api/pause` rejects. Two windows remained where a claim was taken and then abandoned, and in both the
+predecessor was stale, so its `finally` skipped the handle clears and the `/api/resume`:
+
+- the pause rejects *and* the predecessor finishes inside that same await — restoring the predecessor's token
+  could not help, because its `finally` had already run and skipped, so `.pauselock` survived with no holder;
+- a throw between the claim and the pause's `try`, which the start-window DOM writes can raise.
+
+Neither could be fixed inside the overlay, because every available fix traded one failure for another: a
+provisional claim lets a predecessor resume a pause the successor owns, and releasing inside the handback was
+unsafe while `/api/resume` removed `.pauselock` unconditionally — the TUI's subscription screen holds the same
+file — so a pass that never paused could release someone else's pause.
+
+So the lock itself was given an owner (`c7c18e8`, together with the stranded-lock crash case). Release is
+scoped to the holder, which makes an **unconditional** release correct: a superseded pass releasing its own
+pause frees only its own, and a pass that never acquired frees nothing. The page's `finally` therefore calls
+`/api/resume` with its own owner and the token guard around it is gone — the guards on the handles, the
+estimate and `_subPassLive` stay — closing both windows; and a lock whose recorded pid is dead is reclaimed
+by either worker poll or by the next acquisition, so a crash while paused no longer stops the daemon's web and
+image work for good. *Verified*: the scenario is driven through the real `_startAutoSubscribe` in
+`tests/test_subscribe_throttle.py` —
+`test_a_predecessor_finishing_inside_a_rejected_pause_await_releases_its_own_lock` fails against the
+pre-change page (`resume_owners_after_pass1: []`) and passes after — and the stale-pass test now asserts the
+stale pass releases exactly its own owner once, the new model's correct behaviour. [web-ui.md](web-ui.md),
+[data-pipeline.md](data-pipeline.md)
+
+**One consequence worth knowing.** There is one owner per lock and `begin_pause` does not steal a live
+holder's, so a second pass started while the first is still draining never registers: the pause is released
+when the *first* pass ends rather than the last. The pre-owner code held it until the newest pass finished,
+because the release was token-guarded. If the quiet account must be guaranteed across overlapping passes, the
+record wants a **claim set** rather than a single owner; nothing else about the mechanism changes.
+
 
 ### The suite had never run on Windows (issue 89)
 
