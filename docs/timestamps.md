@@ -92,7 +92,10 @@ The dot-prefixed `.pauselock` intervals are therefore recorded in
 `.daemon_state.yaml` beside the database (`src/activity.py`) — the same
 transient, restart-surviving store as the pacing backoff and the session warning
 — rather than in the versioned schema, because they describe a condition that
-passes and the clocks table above is about the item rows. The drain metric reads
+passes and the clocks table above is about the item rows. The lock file itself
+carries its holder as a small JSON record (`owner`, `pid`, `acquired_at`,
+`source`), so only the owner can close the interval it opened and a lock whose
+pid is dead is reclaimed. The drain metric reads
 that record and subtracts the paused time from the rate window
 ([data-pipeline.md](data-pipeline.md#active-time-not-wall-clock)). The API
 queue's rate additionally subtracts the staleness sweep's recorded rowcount,

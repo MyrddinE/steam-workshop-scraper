@@ -517,7 +517,12 @@ direction instead. It runs the pass on a worker thread and draws each item's out
 lands. Failures stay queued. Every page read waits the shared adaptive web interval, and the pass
 takes `.pauselock` for its duration and releases it in a `finally` — so the daemon's web and image
 workers pause for the pass and resume even if the engine raises. The screen also creates the lock on
-mount and removes it on unmount, so the queue stays quiet while it is open. No live Steam call happens
+mount and removes it on unmount, so the queue stays quiet while it is open. The screen's lock is
+owned by `tui-screen:<pid>` and the engine's `PauseLock` by `subscribe-engine:<pid>`, and release is
+scoped to the owner (`src/activity.py`), so the engine entering the screen's lock can no longer
+release it on the way out — the screen holds the pause until it unmounts. A lock whose recorded pid
+is dead is reclaimed by the workers and on acquisition, so a crashed holder does not leave the
+daemon paused. No live Steam call happens
 in tests; the engine's fetch and POST seams are patched. See
 [data-pipeline.md](data-pipeline.md#subscribe-engine-browser-free) for the engine's semantics and
 [future-plans.md](future-plans.md#retiring-the-subscribe-confirmation-read) for the retirement of the

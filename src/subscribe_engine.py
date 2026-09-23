@@ -1056,28 +1056,34 @@ class PauseLock:
     """The ``.pauselock`` file as a context manager.
 
     The daemon's web and image workers poll this path; holding it is what makes
-    a subscribe pass run against a quiet account. ``__exit__`` removes the file
-    whatever happened, so an engine that raises still releases the daemon.
+    a subscribe pass run against a quiet account. ``__exit__`` releases the
+    daemon whatever happened, so an engine that raises still releases the pass.
 
-    ``db_path`` is optional but should be given by a caller that has it: the
-    interval the lock is held for is recorded beside the database so the drain
-    estimate can subtract paused time (``src/activity.py``). The file's own
-    absent/present edge is the signal, so this nests under the TUI screen's lock
-    without opening a second interval.
+    Release is scoped to this lock's own owner, so an engine nested inside the
+    TUI screen's pause does **not** release the screen's lock; the screen holds
+    it until it unmounts. ``db_path`` is optional but should be given by a
+    caller that has it: the interval the lock is held for is recorded beside the
+    database so the drain estimate can subtract paused time
+    (``src/activity.py``). The file's own absent/present edge is the signal, so
+    this nests under the TUI screen's lock without opening a second interval.
     """
 
     def __init__(self, path: str, db_path: str | None = None,
-                 source: str = "subscribe_engine"):
+                 source: str = "subscribe_engine", owner: str | None = None):
         self.path = path
         self.db_path = db_path
         self.source = source
+        # One owner per lock instance: named in the lock record so this pass can
+        # release only the pause it took.
+        self.owner = owner if owner is not None else f"subscribe-engine:{os.getpid()}"
 
     def __enter__(self):
-        activity.begin_pause(self.path, self.db_path, source=self.source)
+        activity.begin_pause(self.path, self.db_path, source=self.source,
+                             owner=self.owner)
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        activity.end_pause(self.path, self.db_path)
+        activity.end_pause(self.path, self.db_path, owner=self.owner)
         return False
 
 

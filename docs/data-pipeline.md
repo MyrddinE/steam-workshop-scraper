@@ -798,6 +798,23 @@ engine's `PauseLock` — may nest without the same paused second being subtracte
 twice; an interval still open is counted up to now, so a pause *in progress*
 still leaves the rate computable from the active time before it.
 
+**The lock is a record with an owner.** `.pauselock` holds one small JSON object
+— `{"owner", "pid", "acquired_at", "source"}` (`src/activity.py`) — written
+atomically (a temp file in the same directory, then `os.replace`), so a reader
+never sees a half-written record. Each of the three writers passes its own owner:
+the TUI screen `tui-screen:<pid>`, the engine's `PauseLock`
+`subscribe-engine:<pid>`, and the web overlay `"<pageId>:<passToken>"`, one page
+id per load so two tabs never collide. Release is scoped to that owner:
+`end_pause` removes the file and closes the interval only for the holder, and a
+refused release is logged naming both owners, so the engine nesting inside the
+screen can no longer release the screen's pause. A **legacy** lock — missing,
+empty or unparseable, and therefore unnamed — stays releasable by anyone, so an
+upgrade does not lock anyone out. A file whose recorded pid is **known dead** is
+reclaimed (the lock removed and its interval closed, logged at WARNING); both
+worker polls call `reclaim_if_owner_gone` before sleeping, and `begin_pause`
+self-heals the same way, so a holder that crashed cannot stop the daemon's web
+and image work for good.
+
 The pause is applied **per queue, because the pause is per queue**: only the web
 and image workers poll `.pauselock` (`src/web_worker.py`, `src/image_worker.py`),
 while the API fetch loop and the translator are not gated by it. Subtracting the

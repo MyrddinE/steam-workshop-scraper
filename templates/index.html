@@ -2595,6 +2595,13 @@ let _subPassToken = 0;
 // fall through to the Close branch and hide the overlay while the pass it was
 // pressed against carried on (issue 87).
 let _subPassLive = false;
+// One pause-lock owner per page load, suffixed with the pass token when a call
+// is made on a pass's behalf (`"<pageId>:<passToken>"`, sent to `/api/pause`
+// and `/api/resume`). Two tabs therefore never share an owner, and each pass
+// releases only the `.pauselock` it took: `src/activity.py` scopes `end_pause`
+// to the owner it is given. A legacy, unnamed lock stays releasable by anyone.
+const _subPageId = 'web-page:' + Date.now().toString(36) + ':' +
+  Math.random().toString(36).slice(2, 10);
 
 // ── the subscription estimate ─────────────────────────────────────────────
 //
@@ -2753,6 +2760,10 @@ async function _startAutoSubscribe() {
   const previous = {token: _subPassToken, live: _subPassLive,
                     canceled: _subCanceled, throttled: _subThrottleStopped};
   const passToken = ++_subPassToken;
+  // This pass's pause-lock owner. It is what both the pause and the resume
+  // carry, so a superseded pass releasing its own pause can never free a
+  // successor's, and a pass that never acquired cannot free anyone's.
+  const passOwner = _subPageId + ':' + passToken;
   // Per-pass flags, reset before the pause await rather than after it: a Cancel
   // click landing while an await is in flight must survive it, or the cancelled
   // pass carries on arming and draining (issue 87).
@@ -2795,9 +2806,14 @@ async function _startAutoSubscribe() {
   document.getElementById('sub-cancel').textContent = 'Cancel';
 
   // The daemon is paused for the pass, so release it on every exit path: a
-  // cancel, a throttle stop, and the normal end.
+  // cancel, a throttle stop, and the normal end. The release carries this
+  // pass's owner, so it can only ever free this pass's own lock -- which is
+  // why it is safe to call unconditionally, superseded or not.
   const finish = async () => {
-    await fetch('/api/resume', {method:'POST'});
+    await fetch('/api/resume', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({owner: passOwner}),
+    });
   };
 
   // A rejected pause leaves no pass committed to running. Hand ownership back
@@ -2806,7 +2822,10 @@ async function _startAutoSubscribe() {
   // The handback is skipped if a newer pass has claimed in the meantime -- that
   // pass owns everything then.
   try {
-    await fetch('/api/pause', {method:'POST'});
+    await fetch('/api/pause', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({owner: passOwner}),
+    });
   } catch (e) {
     if (passToken === _subPassToken) {
       _subPassToken = previous.token;
@@ -2954,8 +2973,12 @@ async function _startAutoSubscribe() {
       _clearSubEstimates();
       // The release is written here as well as in the drain's own `finally`,
       // because this early stop happens with the pass still mid-loop and
-      // leaving the daemon paused is the failure mode that matters.
-      await fetch('/api/resume', {method:'POST'});
+      // leaving the daemon paused is the failure mode that matters. It carries
+      // this pass's owner, so a stale pass's own check frees only its own lock.
+      await fetch('/api/resume', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({owner: passOwner}),
+      });
       await finish();
       const cancelBtn = document.getElementById('sub-cancel');
       if (cancelBtn) cancelBtn.textContent = 'Close';
@@ -3022,21 +3045,23 @@ async function _startAutoSubscribe() {
       if (await _checkSubThrottle()) break;
     }
   } finally {
-    // Only the newest pass clears the handles, drops the estimate and releases
-    // the pause. A predecessor still draining when a successor starts is stale
-    // and must leave all three to the successor (issue 86): clearing the
-    // module-scope handles here used to stop the newer pass's verification poll
-    // and estimate, and resume a daemon pause the newer pass owns.
+    // Only the newest pass clears the handles and drops the estimate. A
+    // predecessor still draining when a successor starts is stale and must
+    // leave both to the successor (issue 86): clearing the module-scope handles
+    // here used to stop the newer pass's verification poll and estimate.
     if (passToken === _subPassToken) {
       _subPassLive = false;
       if (_subScheduleIv) { clearInterval(_subScheduleIv); _subScheduleIv = null; }
       // The estimate is only for a live pass; drop it with the pass so no stale
       // countdown is left on the row or the progress line.
       _clearSubEstimates();
-      // Released even if the loop threw: leaving the daemon paused would be worse
-      // than any single failed subscribe.
-      await finish();
     }
+    // The pause release is *not* guarded by the token. Release is scoped to the
+    // owner, so a superseded pass releasing its own pause is always correct,
+    // and a pass that never acquired frees nothing. Guarding it was what left
+    // the `.pauselock` stranded when a predecessor finished inside a rejected
+    // pause's await (issue 88).
+    await finish();
   }
 }
 
@@ -3069,7 +3094,13 @@ document.getElementById('sub-cancel').onclick = () => {
         row.classList.add('done');
       });
     }
-    fetch('/api/resume', {method:'POST'});
+    // The safety net for a pass that ended outside its own `finally`. The
+    // owner is the newest token this page claimed, the only lock this page can
+    // still own; an unnamed legacy lock is releasable by any owner too.
+    fetch('/api/resume', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({owner: _subPageId + ':' + _subPassToken}),
+    });
     document.getElementById('sub-queue-modal').style.display = 'none';
   }
 };
