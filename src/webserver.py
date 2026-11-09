@@ -4,6 +4,7 @@ import json
 import os
 import re
 import logging
+from urllib.parse import urlsplit
 from flask import Flask, request, jsonify, render_template, send_from_directory
 from src.database import search_items, get_item_details, get_db_stats, get_all_creator_ids, save_enrichment_filters, compute_wilson_cutoffs, raise_list_priorities, raise_web_scrape_priority_for_detail, raise_translation_priority_for_detail, raise_image_priority_for_detail, raise_image_priority, get_connection, toggle_subscription_queue, toggle_ignored_item, mark_own_subscribed, mark_own_unsubscribed, dequeue_subscription, get_subscription_queue_items, SEARCH_FILTER_SCHEMA, raise_api_priority_for_detail, delete_never_fetched_items, live_fetch_status_predicate, IGNORED_FETCH_STATUS, creator_is_ignored, creator_ignore_label, toggle_creator_ignored, read_schema_version
 from src.analysis import view_window_analysis
@@ -13,16 +14,17 @@ from src import cutoffs_cache
 from src import images
 from src import log_rotation
 from src import metrics
+from src import network
 from src import pending
 from src import session_health
+from src import session_refresh
 from src import sort_diagnostic
 from src import subscribe_engine
 from src import subscription
 from src import web_scraper
 from src import workshop_folders
-from src.config import configured_outbox_dir, login_secure_value, save_config
+from src.config import configured_outbox_dir
 from src.daemon_control import DaemonController
-from src.firefox_cookies import steam_login_secure
 from src.web_worker import configured_web_delay
 
 app = Flask(__name__, template_folder='../templates')
@@ -84,6 +86,11 @@ def init_webserver(db_path: str, config: dict, config_path: str = "config.yaml",
     _db_path = db_path
     _config = config
     _config_path = config_path
+    # The shared network helpers resolve the proxy from, and save credentials to,
+    # this exact file. Both front ends and the daemon are started with a path;
+    # without this the scrape path kept reading the literal `config.yaml` in its
+    # working directory and never saw the cookie Recheck had saved.
+    network.set_config_path(config_path)
     _images_dir = os.path.join(os.path.dirname(os.path.abspath(db_path)), "images")
     # One locator for this server process. It resolves the Steam libraries once
     # and only re-resolves on a miss, so the open-folder route costs one
@@ -411,52 +418,96 @@ def api_session():
     """Whether the saved Steam login is still working, for the header warning.
 
     Read-only and cheap: one small YAML file beside the database. The UI polls
-    it, so it must stay a file read -- no request to Steam belongs here.
+    it, so it must stay a file read -- no request to Steam belongs here. The
+    proxy record travels with it because the same header drives both prompts:
+    a 407 is not a login problem, and showing the sign-in banner for one sends
+    the operator to a page that cannot help.
     """
     problem = session_health.read(_db_path) or {}
+    proxy = network.read_auth_required(_db_path) or {}
     return jsonify({
         "problem": bool(problem),
         "detail": problem.get("detail"),
         "detected_at": problem.get("detected_at"),
         "login_url": session_health.LOGIN_URL,
+        "proxy": {
+            "problem": bool(proxy),
+            "url": proxy.get("url") or "",
+            "detail": proxy.get("detail"),
+            "detected_at": proxy.get("detected_at"),
+        },
     })
 
 
 @app.route('/api/session/recheck', methods=['POST'])
 def api_session_recheck():
-    """Re-read the login cookie from the browser after the operator signs in.
+    """Read the browser's cookie, verify it with Steam, and persist it.
 
-    The browser is the source the daemon itself prefers, so this is the same
-    lookup rather than a second opinion. A cookie that is not locally expired is
-    saved and clears the warning; the daemon re-reads config.yaml per request and
-    per batch, so it picks the value up without a restart.
-
-    Clearing on an unexpired cookie rather than on a successful request is
-    deliberate: proving it would mean spending a request now, when the next
-    scrape or reconcile is about to make one anyway and will correct the warning
-    if Steam still refuses. Telling the operator the truth sooner is worth more
-    than a guarantee this route cannot cheaply give.
+    The verification is the point. Reading the local cookie store and trusting
+    the token's own expiry could not tell a revoked session, a cookie from
+    another profile, or a proxy refusing every request from a good login; the
+    warning cleared while every task still failed. ``session_refresh`` makes the
+    signed-in page the authority and keeps the warning when the check cannot
+    prove a session.
     """
-    fresh = steam_login_secure(refresh=True) or login_secure_value(_config)
+    try:
+        result = session_refresh.refresh_login(_config, _config_path, _db_path)
+    except Exception as exc:
+        logging.exception("[Session] login verification failed")
+        return jsonify({"ok": False, "problem": True,
+                        "detail": f"the login check failed unexpectedly: {exc}"}), 500
+    status = 500 if result.get("save_failed") else 200
+    return jsonify(result), status
 
-    reason = session_health.evaluate_login(fresh)
-    if reason:
-        session_health.record_rejected(_db_path, reason)
-        return jsonify({"ok": False, "problem": True, "detail": reason})
 
-    if fresh != login_secure_value(_config):
-        _config.setdefault("session", {})["login_secure"] = fresh
-        try:
-            save_config(_config_path, _config)
-        except Exception as exc:
-            detail = f"a fresh login cookie was found but could not be saved ({exc})"
-            session_health.record_rejected(_db_path, detail)
-            logging.warning("[Session] %s", detail)
-            return jsonify({"ok": False, "problem": True, "detail": detail}), 500
+@app.route('/api/proxy_credentials', methods=['POST'])
+def api_proxy_credentials():
+    """Save the credentials an authenticating HTTP proxy asks for.
 
-    session_health.record_accepted(_db_path)
-    logging.info("[Session] login cookie re-read from the browser; the warning is cleared")
-    return jsonify({"ok": True, "problem": False})
+    The 407 is recorded by whichever worker saw it; this is the operator's
+    answer. Only the ``proxy`` section is written (``network.save_credentials``
+    passes exactly that to ``save_config``), so the entry cannot rewrite the
+    rest of the config the way issue 91 records. The proxy problem is cleared
+    immediately; the next request through the proxy either works or records the
+    problem again, which is the feedback the page's poll shows.
+    """
+    data = request.get_json(silent=True) or {}
+    raw_url = str(data.get("url") or "").strip()
+    username = str(data.get("username") or "")
+    password = str(data.get("password") or "")
+
+    if not raw_url:
+        raw_url = network.proxy_url_for("https://steamcommunity.com", _config)
+    if not raw_url:
+        return jsonify({"ok": False, "detail":
+                        "No proxy URL was detected. Enter the proxy URL."}), 400
+
+    candidate = raw_url if "://" in raw_url else "http://" + raw_url
+    parsed = urlsplit(candidate)
+    if parsed.scheme.lower() not in ("http", "https"):
+        return jsonify({"ok": False, "detail":
+                        "The proxy URL must start with http:// or https://."}), 400
+    if not parsed.hostname:
+        return jsonify({"ok": False, "detail":
+                        "The proxy URL has no host."}), 400
+    if (not username or not password) and not (parsed.username and parsed.password):
+        return jsonify({"ok": False, "detail":
+                        "Enter both the proxy username and password."}), 400
+
+    try:
+        section = session_refresh.save_proxy_credentials(
+            _config_path, candidate, username, password,
+            config=_config, db_path=_db_path)
+    except ValueError as exc:
+        return jsonify({"ok": False, "detail":
+                        f"The proxy URL is not valid: {exc}"}), 400
+    except Exception as exc:
+        logging.warning("[Proxy] could not save credentials: %s", exc)
+        return jsonify({"ok": False, "detail":
+                        f"Could not save the proxy credentials: {exc}"}), 500
+
+    return jsonify({"ok": True,
+                    "url": network.display_proxy(section.get("url") or candidate)})
 
 
 @app.route('/api/delete_never_fetched_items', methods=['POST'])

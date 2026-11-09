@@ -5,6 +5,7 @@ import re
 import threading
 from datetime import datetime, timezone
 from openai import OpenAI
+from src import network
 from src.database import get_connection, get_next_batch_for_translation
 from src.wordlist import WORDS
 
@@ -149,10 +150,29 @@ def _validate_openai_api_key(config: dict) -> str | None:
 
 
 def _create_openai_client(openai_config: dict) -> OpenAI:
-    return OpenAI(
-        api_key=openai_config.get("api_key"),
-        base_url=openai_config.get("endpoint", "https://api.openai.com/v1")
-    )
+    """Build the OpenAI client, carrying the configured proxy when there is one.
+
+    The openai package uses ``httpx2`` (its httpx fork), whose client takes one
+    proxy URL rather than the mapping ``requests`` uses. A proxy saved for the
+    Steam requests is the same network path, so the translator uses it too;
+    otherwise a 407 would leave every batch retrying a connection it can never
+    make. ``trust_env`` is off when an explicit proxy is passed, so the
+    environment cannot replace it.
+    """
+    base_url = openai_config.get("endpoint", "https://api.openai.com/v1")
+    client_kwargs = {
+        "api_key": openai_config.get("api_key"),
+        "base_url": base_url,
+    }
+    proxy_url = network.proxy_url_with_credentials(base_url)
+    if proxy_url:
+        try:
+            import httpx2
+            client_kwargs["http_client"] = httpx2.Client(
+                proxy=proxy_url, trust_env=False)
+        except Exception as exc:  # noqa: BLE001 - a missing optional client is not fatal
+            logging.debug("Could not configure the proxy for the OpenAI client: %s", exc)
+    return OpenAI(**client_kwargs)
 
 
 def is_ascii(text: str) -> bool:

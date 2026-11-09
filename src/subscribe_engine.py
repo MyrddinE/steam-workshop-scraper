@@ -129,7 +129,7 @@ import os
 import re
 from dataclasses import dataclass
 
-from src import activity, capture, pacing, session_health, web_scraper
+from src import activity, capture, network, pacing, session_health, web_scraper
 from src.config import warn_retired_key
 from src.database import (
     get_connection,
@@ -580,7 +580,8 @@ def _post_captured(url: str, form: dict, cookies: dict, workshop_id: int,
     """
     session = session if session is not None else web_scraper._get_session()
     headers = subscribe_headers(workshop_id)
-    resp = session.post(url, data=form, cookies=cookies, headers=headers, timeout=15)
+    resp = session.post(url, data=form, cookies=cookies, headers=headers,
+                        timeout=15, proxies=network.proxies_for(url))
     if capture.web_download_capture_active():
         capture.record_web_download(
             capture.SUBSCRIBE_KIND, workshop_id, url,

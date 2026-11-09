@@ -49,9 +49,16 @@ def _login_cookie(expires_at):
 # --- fixtures from the real captures ----------------------------------------
 
 def _capture_bodies():
-    if not LIVE_CAPTURES.is_dir():
+    # The directory can exist but be unreadable (a root-only live tree on a
+    # shared machine). That is the "captures are not available here" case the
+    # tests are meant to skip, so an OSError must not become a collection-time
+    # failure.
+    try:
+        if not LIVE_CAPTURES.is_dir():
+            return []
+        return sorted(LIVE_CAPTURES.glob("*.body"))
+    except OSError:
         return []
-    return sorted(LIVE_CAPTURES.glob("*.body"))
 
 
 def _capture_with_state(state):

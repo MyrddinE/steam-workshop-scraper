@@ -14,7 +14,13 @@ The system follows a decoupled, specialized architecture:
 2. **The TUI (`src/tui.py`)**: A consumer-facing interface for querying the database.
 3. **The Database (`src/database.py`)**: A shared SQLite persistence layer.
 4. **The Translator (`src/translator.py`)**: A background service for language translation.
-5. **Data Sources**: A hybrid approach using the official Steam Web API for metadata and discovery,
+5. **The Network Layer (`src/network.py`)**: Resolves the HTTP proxy, carries its credentials, and
+   records a 407 so the front ends can ask for them instead of mistaking a proxy refusal for a dead
+   Steam login.
+6. **Login Refresh (`src/session_refresh.py`)**: Reads the browser's Steam cookie, verifies it with
+   one authenticated page read, and only then persists it and clears the warning. Shared by the web
+   UI's Recheck route and the TUI's automatic recheck.
+7. **Data Sources**: A hybrid approach using the official Steam Web API for metadata and discovery,
    plus HTML scraping for the fields the API does not expose.
 
 ## Components

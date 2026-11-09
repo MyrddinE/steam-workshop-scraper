@@ -11,6 +11,7 @@ from src.daemon_control import (
 from src.database import SchemaVersionError
 from src.webserver import app, init_webserver
 from src import crash
+from src import network
 
 
 def main():
@@ -23,6 +24,7 @@ def main():
     config_path = "config.yaml"
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
+    network.set_config_path(config_path)
 
     try:
         config = load_config(config_path)

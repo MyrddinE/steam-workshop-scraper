@@ -380,6 +380,8 @@ class Daemon:
                  expect_pid_file: bool = False):
         self.config = config
         self.config_path = config_path
+        from src import network
+        network.set_config_path(config_path)
         self.running = True
         
         # Implement default fallbacks

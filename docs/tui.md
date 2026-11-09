@@ -67,6 +67,34 @@ residual risk.
 
 ---
 
+## Login and Proxy Prompts
+
+`ScraperApp._check_network_problems` is the TUI half of the automatic recovery.
+It runs every five seconds and reads the two records a worker may have written
+beside the database:
+
+* **A session problem** (`session_health.read`) opens
+  `https://steamcommunity.com/my/` in the default browser once per recorded
+  `detected_at`. That page is the one the scraper itself reads, so signing in
+  there mints the cookie the browser profile holds; the daemon refreshes its
+  copy before the next reconcile and on a gated scrape. The TUI also starts its
+  own five-second `session_refresh.refresh_login` loop for five minutes, so the
+  TUI process's firefox-cookie cache is refreshed too, not only the daemon's.
+* **A proxy problem** (`network.read_auth_required`) pushes
+  `ProxyCredentialsScreen`, a modal with the proxy URL, username and password.
+  Saving writes only the `proxy` section of `config.yaml`, clears the record,
+  and the workers retry with the new credential; no restart is needed because
+  both read the config per request. "Later" postpones the prompt for ten
+  minutes, and a new recorded problem (a different `detected_at` or URL) opens
+  it again.
+
+The prompt is modal, so a proxy that blocks every request cannot be ignored
+accidentally, but it is not a crash: the daemon keeps the affected item queued
+and waits rather than decaying it or growing a pacing delay. The web UI shows
+the same two conditions through `#session-warning` and `#proxy-modal`.
+
+---
+
 ## Search Builder
 
 ### `SearchBuilder` (container)

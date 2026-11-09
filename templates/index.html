@@ -116,6 +116,19 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
    stop updating and nothing else on the page looks wrong. */
 #session-warning { flex-shrink: 0; display: none; align-items: center; flex-wrap: wrap; gap: .5rem; padding: .35rem .75rem; background: #7f1d1d; color: #fff; font-size: .82rem; }
 #session-warning a[role="button"], #session-warning button { width: auto; margin: 0; padding: .15rem .6rem; font-size: .78rem; }
+#session-warning-hint { font-size: .78rem; opacity: .9; }
+/* The proxy prompt. A 407 stops every Steam request before Steam sees it, so
+   this is a blocking condition rather than a login warning; the operator can
+   put it off with "Later", but the page says what is wrong and asks for the
+   credential the proxy demands. */
+#proxy-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.85); z-index: 10000; overflow-y: auto; padding: 2rem; }
+#proxy-modal article { max-width: 34rem; margin: 3rem auto; }
+#proxy-modal label { display: block; margin: .6rem 0 .15rem; }
+#proxy-modal input { margin-bottom: .25rem; }
+#proxy-detail { color: var(--pico-muted-color); }
+#proxy-error { color: #fca5a5; min-height: 1.2rem; font-size: .85rem; }
+#proxy-actions { display: flex; gap: .5rem; margin-top: .75rem; }
+#proxy-actions button { width: auto; margin: 0; }
 @media (max-width: 768px) {
   main { flex-direction: column; }
   #right-pane { flex: 0 0 auto; border-left: none; border-top: 1px solid var(--pico-muted-border-color); padding-left: 0; padding-top: .5rem; }
@@ -139,8 +152,31 @@ main { flex: 1; display: flex; gap: .5rem; padding: .5rem; overflow: hidden; }
      second button re-reads the browser's copy without waiting for the daemon. -->
 <div id="session-warning" role="alert">
   <span id="session-warning-text"></span>
+  <span id="session-warning-hint"></span>
   <a id="session-warning-login" href="https://steamcommunity.com/my/" target="_blank" rel="noopener" role="button">Sign in to Steam</a>
   <button id="session-warning-recheck" class="secondary">Recheck</button>
+</div>
+<!-- A 407 is not a Steam login failure: the proxy refused the CONNECT before
+     Steam was reached. The prompt saves the credential to config.yaml, which
+     both the daemon and this server read on their next request. -->
+<div id="proxy-modal" role="dialog" aria-modal="true" aria-labelledby="proxy-title">
+  <article>
+    <header><strong id="proxy-title">HTTP proxy authentication required</strong></header>
+    <p id="proxy-detail">The HTTP proxy refused the request with 407 Proxy Authentication Required. Enter the proxy username and password so the app can authenticate to it.</p>
+    <form id="proxy-form">
+      <label for="proxy-url">Proxy URL</label>
+      <input id="proxy-url" name="url" placeholder="http://proxy.example:8080" autocomplete="off">
+      <label for="proxy-username">Username</label>
+      <input id="proxy-username" name="proxy-username" autocomplete="off">
+      <label for="proxy-password">Password</label>
+      <input id="proxy-password" name="proxy-password" type="password" autocomplete="off">
+      <p id="proxy-error" role="alert"></p>
+      <div id="proxy-actions">
+        <button id="proxy-save" type="submit">Save and retry</button>
+        <button id="proxy-cancel" type="button" class="secondary">Later</button>
+      </div>
+    </form>
+  </article>
 </div>
 <main>
   <div id="results-pane">
@@ -3151,37 +3187,223 @@ async function _refreshDaemonStatus() {
 // the subscriptions silently stop updating. The fact is written by a worker
 // thread in another process, so it is polled rather than pushed; half a minute
 // is far more often than it can change.
+//
+// The poll also drives the two automatic actions: a dead login opens the sign-in
+// page once and rechecks every few seconds until it works, and a proxy 407 opens
+// the credential prompt instead (signing in cannot fix a proxy).
 let _sessionWarningIv = null;
 const SESSION_WARNING_POLL_MS = 30000;
+const SESSION_AUTO_RECHECK_MS = 5000;
+const SESSION_AUTO_RECHECK_WINDOW_MS = 5 * 60 * 1000;
+let _sessionAutoRecheckIv = null;
+let _sessionAutoRecheckDeadline = 0;
+let _sessionRecheckInFlight = false;
+let _proxyPromptOpen = false;
+let _proxyPromptSnoozedUntil = 0;
+let _proxyProblemKey = null;
+
+function _sessionProblemKey(s) {
+  return String((s && (s.detected_at || s.detail)) || '');
+}
+
+function _stopAutoRecheck() {
+  if (_sessionAutoRecheckIv) {
+    clearInterval(_sessionAutoRecheckIv);
+    _sessionAutoRecheckIv = null;
+  }
+}
+
+function _startAutoRecheck() {
+  if (_sessionAutoRecheckIv) return;
+  _sessionAutoRecheckDeadline = Date.now() + SESSION_AUTO_RECHECK_WINDOW_MS;
+  _sessionAutoRecheckIv = setInterval(async () => {
+    if (Date.now() > _sessionAutoRecheckDeadline) { _stopAutoRecheck(); return; }
+    await _recheckSession(true);
+  }, SESSION_AUTO_RECHECK_MS);
+}
+
+function _autoOpenSignIn(s) {
+  const key = _sessionProblemKey(s);
+  if (!key) return;
+  if (sessionStorage.getItem('dsh.signInOpenedFor') === key) {
+    _startAutoRecheck();
+    return;
+  }
+  sessionStorage.setItem('dsh.signInOpenedFor', key);
+  let win = null;
+  // A named target reuses the sign-in tab a previous problem opened instead of
+  // stacking a new one. `noopener` is deliberately not passed to window.open:
+  // browsers return null for a noopener window, which is indistinguishable from
+  // a blocked popup, so the return value would always read as "blocked". The
+  // opener is severed on the returned window instead.
+  try { win = window.open(s.login_url, 'dsh-steam-signin'); }
+  catch(e) { win = null; }
+  const hint = document.getElementById('session-warning-hint');
+  if (!win) {
+    if (hint) hint.textContent = '(Your browser blocked the sign-in tab; use the link.)';
+    // The page may already be open in another tab, or the profile may update
+    // anyway; keep checking even when the automatic tab was blocked.
+    _startAutoRecheck();
+    return;
+  }
+  try { win.opener = null; } catch(e) { /* cross-origin window; already isolated */ }
+  if (hint) hint.textContent = '';
+  _startAutoRecheck();
+}
+
+function _showSessionWarning(s) {
+  const el = document.getElementById('session-warning');
+  if (!el) return;
+  const proxy = s.proxy || {};
+  if (proxy.problem) {
+    el.style.display = 'none';
+    _showProxyDialog(proxy);
+    return;
+  }
+  _proxyProblemKey = null;
+  _proxyPromptSnoozedUntil = 0;
+  _hideProxyDialog();
+  if (!s.problem) {
+    el.style.display = 'none';
+    _stopAutoRecheck();
+    sessionStorage.removeItem('dsh.signInOpenedFor');
+    return;
+  }
+  document.getElementById('session-warning-text').textContent =
+    'Steam login problem — ' + (s.detail || 'the saved cookie was not accepted') + '.';
+  document.getElementById('session-warning-hint').textContent = '';
+  const link = document.getElementById('session-warning-login');
+  if (link && s.login_url) link.href = s.login_url;
+  el.style.display = 'flex';
+  _autoOpenSignIn(s);
+}
 
 async function _refreshSessionWarning() {
   try {
     const resp = await fetch('/api/session');
     const s = await resp.json();
-    const el = document.getElementById('session-warning');
-    if (!el) return;
-    if (!s.problem) { el.style.display = 'none'; return; }
-    document.getElementById('session-warning-text').textContent =
-      'Steam login problem — ' + (s.detail || 'the saved cookie was not accepted') + '.';
-    const link = document.getElementById('session-warning-login');
-    if (link && s.login_url) link.href = s.login_url;
-    el.style.display = 'flex';
+    _showSessionWarning(s);
   } catch(e) { console.debug('Session warning poll error', e); /* keep polling */ }
 }
 
-async function _recheckSession() {
+async function _recheckSession(auto) {
+  if (_sessionRecheckInFlight) return;
+  _sessionRecheckInFlight = true;
   const btn = document.getElementById('session-warning-recheck');
-  if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+  if (!auto && btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+  let data = null;
   try {
-    await fetch('/api/session/recheck', {method: 'POST'});
-  } catch(e) { console.debug('Session recheck failed', e); /* the poll reports the state */ }
-  if (btn) { btn.disabled = false; btn.textContent = 'Recheck'; }
-  // The recheck's own response is deliberately ignored: the banner has one
-  // source of truth and re-reading it is what keeps it that way.
+    const resp = await fetch('/api/session/recheck', {method: 'POST'});
+    data = await resp.json();
+  } catch(e) {
+    console.debug('Session recheck failed', e); /* the poll reports the state */
+  }
+  _sessionRecheckInFlight = false;
+  if (!auto && btn) { btn.disabled = false; btn.textContent = 'Recheck'; }
+  if (data && data.proxy_auth_required) {
+    _stopAutoRecheck();
+    _showProxyDialog({problem: true, url: data.proxy_url || '',
+                      detail: data.detail, detected_at: null});
+    return;
+  }
+  if (data && data.ok) {
+    _stopAutoRecheck();
+    sessionStorage.removeItem('dsh.signInOpenedFor');
+  }
   await _refreshSessionWarning();
 }
 
-document.getElementById('session-warning-recheck').onclick = _recheckSession;
+function _showProxyDialog(proxy) {
+  const modal = document.getElementById('proxy-modal');
+  if (!modal) return;
+  const key = String(proxy.detected_at || proxy.url || '');
+  if (key && key !== _proxyProblemKey) {
+    _proxyProblemKey = key;
+    _proxyPromptSnoozedUntil = 0;
+  }
+  if (Date.now() < _proxyPromptSnoozedUntil) return;
+  const urlInput = document.getElementById('proxy-url');
+  if (!_proxyPromptOpen && urlInput) urlInput.value = proxy.url || '';
+  const detail = document.getElementById('proxy-detail');
+  if (detail) {
+    detail.textContent = proxy.detail ||
+      'The HTTP proxy refused the request with 407 Proxy Authentication Required.';
+  }
+  modal.style.display = 'block';
+  if (!_proxyPromptOpen) {
+    _proxyPromptOpen = true;
+    const password = document.getElementById('proxy-password');
+    if (password) password.value = '';
+    const target = (urlInput && !urlInput.value) ? urlInput
+                 : document.getElementById('proxy-username');
+    if (target) target.focus();
+  }
+}
+
+function _hideProxyDialog() {
+  const modal = document.getElementById('proxy-modal');
+  if (modal && modal.style.display !== 'none') modal.style.display = 'none';
+  const password = document.getElementById('proxy-password');
+  if (password) password.value = '';
+  _proxyPromptOpen = false;
+}
+
+async function _saveProxyCredentials(event) {
+  if (event) event.preventDefault();
+  const errorEl = document.getElementById('proxy-error');
+  const url = document.getElementById('proxy-url').value.trim();
+  const username = document.getElementById('proxy-username').value;
+  const password = document.getElementById('proxy-password').value;
+  if (!url) {
+    if (errorEl) errorEl.textContent = 'Enter the proxy URL.';
+    return;
+  }
+  if (!username || !password) {
+    if (errorEl) errorEl.textContent = 'Enter both the proxy username and password.';
+    return;
+  }
+  const save = document.getElementById('proxy-save');
+  if (save) save.disabled = true;
+  try {
+    const resp = await fetch('/api/proxy_credentials', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url: url, username: username, password: password}),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) {
+      if (errorEl) errorEl.textContent =
+        data.detail || 'The proxy credentials were not saved.';
+      return;
+    }
+    if (errorEl) errorEl.textContent = '';
+    document.getElementById('proxy-password').value = '';
+    _hideProxyDialog();
+    _proxyPromptSnoozedUntil = 0;
+    await _refreshSessionWarning();
+  } catch(e) {
+    if (errorEl) errorEl.textContent = 'Could not reach the server: ' + e;
+  } finally {
+    if (save) save.disabled = false;
+  }
+}
+
+document.getElementById('session-warning-recheck').onclick = () => _recheckSession(false);
+document.getElementById('session-warning-login').addEventListener(
+  'click', () => _startAutoRecheck());
+document.getElementById('proxy-form').addEventListener('submit', _saveProxyCredentials);
+document.getElementById('proxy-cancel').addEventListener('click', () => {
+  _proxyPromptSnoozedUntil = Date.now() + 10 * 60 * 1000;
+  _hideProxyDialog();
+});
+// A background tab throttles the five-second interval, so recheck as soon as
+// the operator comes back from the sign-in tab. The interval is the fallback.
+window.addEventListener('focus', () => {
+  if (_sessionAutoRecheckIv) _recheckSession(true);
+});
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && _sessionAutoRecheckIv) _recheckSession(true);
+});
 
 // The daemon writes SGR colour escapes into its log file -- the "ignored"
 // marker on a rejected discovery is red. A plain text node cannot show them, so

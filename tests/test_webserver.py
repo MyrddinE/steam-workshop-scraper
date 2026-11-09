@@ -5822,3 +5822,115 @@ def test_concurrent_cutoffs_requests_do_not_corrupt_the_cache(web_client, monkey
         document = json.load(handle)
     assert set(document) == {"key", "computed_at", "cutoffs"}
     assert document["cutoffs"] == {key: 0.5 for key in CUTOFF_KEYS}
+
+
+# ── the automatic sign-in and proxy prompt ───────────────────────────────────
+#
+# Both behaviours live only in the served page. The driver builds the smallest
+# DOM the functions touch, records window.open and fetch calls, and runs the
+# real functions extracted from the template.
+
+AUTO_SESSION_DRIVER = """
+const opened = [];
+const fetchCalls = [];
+const calls = [];
+const elements = {};
+function _el(id) {
+  if (!elements[id]) {
+    elements[id] = {
+      style: {}, value: '', textContent: '', disabled: false,
+      focus() { calls.push('focus:' + id); },
+      addEventListener() {},
+    };
+  }
+  return elements[id];
+}
+global.document = {getElementById: _el};
+const _store = {};
+global.sessionStorage = {
+  getItem(k) { return Object.prototype.hasOwnProperty.call(_store, k) ? _store[k] : null; },
+  setItem(k, v) { _store[k] = String(v); },
+  removeItem(k) { delete _store[k]; },
+};
+global.window = {open(url) { opened.push(url); return {}; }};
+global.setInterval = () => 1;
+global.clearInterval = () => {};
+let _sessionAutoRecheckIv = null;
+let _sessionAutoRecheckDeadline = 0;
+let _sessionRecheckInFlight = false;
+let _proxyPromptOpen = false;
+let _proxyPromptSnoozedUntil = 0;
+let _proxyProblemKey = null;
+const SESSION_AUTO_RECHECK_MS = 5000;
+const SESSION_AUTO_RECHECK_WINDOW_MS = 300000;
+globalThis._refreshSessionWarning = async () => { calls.push('refresh'); };
+
+const _showSessionWarning = (__SHOW__);
+const _saveProxyCredentials = (__SAVE__);
+
+(async () => {
+  _showSessionWarning({problem: true, detected_at: 7, detail: 'expired',
+                       login_url: 'https://steamcommunity.com/my/'});
+  _showSessionWarning({problem: true, detected_at: 7, detail: 'expired',
+                       login_url: 'https://steamcommunity.com/my/'});
+  const firstOpened = opened.length;
+
+  _showSessionWarning({problem: false, detected_at: 7,
+                       login_url: 'https://steamcommunity.com/my/',
+                       proxy: {problem: true, url: 'http://proxy.example:8080',
+                               detail: 'proxy auth required'}});
+  const proxyDisplay = _el('proxy-modal').style.display;
+
+  _el('proxy-url').value = 'http://proxy.example:8080';
+  _el('proxy-username').value = 'operator';
+  _el('proxy-password').value = 's3cret';
+  global.fetch = async (path, opts) => {
+    fetchCalls.push({path: path, body: opts && opts.body});
+    return {ok: true, json: async () => ({ok: true})};
+  };
+  await _saveProxyCredentials({preventDefault() {}});
+
+  console.log(JSON.stringify({
+    opened: opened,
+    firstOpened: firstOpened,
+    proxyDisplay: proxyDisplay,
+    fetchCalls: fetchCalls,
+    modalAfter: _el('proxy-modal').style.display,
+    passwordAfter: _el('proxy-password').value,
+  }));
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_the_page_opens_the_sign_in_once_and_asks_for_proxy_credentials(web_client, tmp_path):
+    """A dead login opens one sign-in tab; a 407 opens the credential prompt.
+
+    The sign-in tab is opened once per recorded problem, not once per poll, and
+    the proxy prompt posts the three fields the server saves.
+    """
+    client, _ = web_client
+    script = _served_inline_script(client)
+    helpers = "\n".join(
+        f"const {name} = ({_extract_function(script, name)});"
+        for name in ("_sessionProblemKey", "_stopAutoRecheck", "_startAutoRecheck",
+                     "_autoOpenSignIn", "_showProxyDialog", "_hideProxyDialog"))
+    driver = AUTO_SESSION_DRIVER.replace(
+        "const _showSessionWarning = (__SHOW__);",
+        helpers + "\nconst _showSessionWarning = (__SHOW__);")
+    driver = driver.replace(
+        "__SHOW__", _extract_function(script, "_showSessionWarning"))
+    driver = driver.replace(
+        "__SAVE__", _extract_function(script, "_saveProxyCredentials"))
+
+    out = _run_node(driver, tmp_path)
+
+    assert out["firstOpened"] == 1, "the same problem must not open a tab per poll"
+    assert out["opened"] == ["https://steamcommunity.com/my/"]
+    assert out["proxyDisplay"] == "block"
+    assert out["fetchCalls"][0]["path"] == "/api/proxy_credentials"
+    body = json.loads(out["fetchCalls"][0]["body"])
+    assert body == {"url": "http://proxy.example:8080",
+                    "username": "operator", "password": "s3cret"}
+    assert out["modalAfter"] == "none"
+    assert out["passwordAfter"] == ""

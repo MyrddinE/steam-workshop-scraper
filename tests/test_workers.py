@@ -666,6 +666,10 @@ def test_classify_scrape_names_every_outcome():
         dict(MISS, body='<title>Steam Community :: Error</title><div id="AgeCheck">x</div>')
     ) is ScrapeOutcome.GATED
     assert classify_scrape(MISS) is ScrapeOutcome.UNKNOWN
+    assert classify_scrape(
+        dict(MISS, proxy_auth_required=True,
+             proxy_url="http://proxy.example:8080")
+    ) is ScrapeOutcome.PROXY_AUTH_REQUIRED
     assert classify_scrape(None) is ScrapeOutcome.UNKNOWN
     # A 5xx is a server fault with no attributable cause, whatever the body says.
     assert classify_scrape(
@@ -675,6 +679,27 @@ def test_classify_scrape_names_every_outcome():
     assert classify_scrape(
         dict(MISS, http_status=503, body="<h3>That item does not exist.</h3>")
     ) is ScrapeOutcome.UNKNOWN
+
+
+def test_a_proxy_407_leaves_the_item_queued_and_records_the_problem(db_path):
+    """The proxy is not the item's fault and not a pacing signal."""
+    from src import network
+    from src.database import insert_or_update_item
+    from src.web_worker import WebScraperThread
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
+    worker = WebScraperThread(db_path, ".pauselock")
+    proxy_result = dict(MISS, proxy_auth_required=True,
+                        proxy_url="http://proxy.example:8080",
+                        detail=network.AUTH_REQUIRED_DETAIL)
+
+    worker = _run_web_worker(db_path, {"workshop_id": 1}, proxy_result, worker=worker)
+
+    assert _web_scrape_priority(db_path) == 5, "the item stays in the queue"
+    assert worker.web_failures == 0
+    assert worker.web_delay == WEB_DELAY_DEFAULT
+    recorded = network.read_auth_required(db_path)
+    assert recorded["url"] == "http://proxy.example:8080"
 
 
 def test_a_404_does_not_grow_the_delay_and_clears_the_queue(db_path):

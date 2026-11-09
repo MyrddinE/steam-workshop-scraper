@@ -53,7 +53,7 @@ import math
 import re
 import time
 
-from src import capture, pacing, session_cookie, session_health, web_scraper
+from src import capture, network, pacing, session_cookie, session_health, web_scraper
 from src.database import apply_own_subscriptions
 from src.web_worker import configured_web_delay
 
@@ -172,6 +172,7 @@ def _fetch_page(appid: int, page: int, config: dict, keep_running=None) -> str:
         cookies=cookies,
         headers=headers,
         timeout=15,
+        proxies=network.proxies_for(url, config),
     )
     if capture.web_download_capture_active():
         capture.record_web_download(
@@ -318,8 +319,8 @@ def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
         logging.warning(
             "Subscription reconcile for appid %s skipped: %s. Steam answers an expired "
             "cookie with its sign-in page, so no page was requested and no flag was "
-            "changed. Sign in to Steam in the browser the daemon reads cookies from, "
-            "then restart the daemon so it picks the refreshed cookie up.",
+            "changed. Sign in to Steam in the browser the daemon reads cookies from; "
+            "the app will recheck automatically.",
             appid, reason,
         )
         return None
@@ -340,8 +341,8 @@ def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
                                            now=seen_at)
             logging.warning(
                 "Subscription reconcile for appid %s stopped: %s. No flag was changed. "
-                "Sign in to Steam in the browser the daemon reads cookies from, then "
-                "restart the daemon so it picks the refreshed cookie up.",
+                "Sign in to Steam in the browser the daemon reads cookies from; the "
+                "app will recheck automatically.",
                 appid, exc,
             )
             return None
@@ -376,6 +377,7 @@ def reconcile_own_subscriptions(db_path: str, appid: int, config: dict,
         # over. Cleared here rather than only on a complete read because this is
         # the first point where the session is demonstrably working.
         session_health.record_accepted(db_path)
+        network.clear_auth_required(db_path)
 
         if len(ids) < declared_total:
             # Unsubscribing mid-walk renumbers the pages, so a short read is

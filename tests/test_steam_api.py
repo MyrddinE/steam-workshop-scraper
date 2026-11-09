@@ -311,3 +311,24 @@ def test_batch_of_zero_ids_makes_no_request():
 def test_batch_ceiling_is_a_named_constant():
     """The per-request id ceiling is a documented constant, not a literal."""
     assert STEAM_API_MAX_IDS_PER_REQUEST == 100
+
+
+def test_a_proxy_407_is_recorded_as_a_proxy_problem(monkeypatch):
+    """The API queue is one of the first places a 407 shows up; say so once."""
+    from src import network, steam_api
+
+    recorded = {}
+    monkeypatch.setattr(steam_api, "_rate_limit", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        steam_api.requests, "post",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            requests.exceptions.ProxyError(
+                "Tunnel connection failed: 407 Proxy Authentication Required")))
+    monkeypatch.setattr(
+        "src.network.record_auth_required_from_config",
+        lambda proxy_url=None, detail=None, config=None: recorded.update(
+            {"url": proxy_url, "detail": detail}))
+
+    assert get_workshop_details_batch([1], "TEST_KEY") is None
+    assert recorded["url"] == network.proxy_url_for(
+        "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/")

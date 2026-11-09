@@ -3,6 +3,7 @@ import logging
 import math
 import os
 import time
+import webbrowser
 from functools import partial
 from textual.app import App, ComposeResult
 from textual import on, events
@@ -17,11 +18,14 @@ from textual.worker import Worker, WorkerState
 from src.database import search_items, get_all_creator_ids, SchemaVersionError, get_item_details, save_enrichment_filters, delete_never_fetched_items, toggle_subscription_queue, get_subscription_queue_items, compute_wilson_cutoffs, raise_web_scrape_priority_for_list, raise_web_scrape_priority_for_detail, raise_translation_priority_for_list, raise_translation_priority_for_detail, raise_image_priority_for_list, raise_image_priority_for_detail, get_connection, SEARCH_FILTER_SCHEMA, ALL_FILTER_FIELDS, raise_api_priority_for_list, raise_api_priority_for_detail, get_subscription_states, get_items_by_ids, SUBSCRIBED_FIELD, SUBSCRIBED_VALUES, normalise_subscribed_value, live_fetch_status_predicate, toggle_ignored_item, IGNORED_FETCH_STATUS, creator_is_ignored, creator_ignore_label, toggle_creator_ignored
 from src.analysis import view_window_analysis
 from src import metrics
+from src import network
 from src import db_poll
 from src import activity
 from src import images
 from src import item_updates
 from src import pending
+from src import session_health
+from src import session_refresh
 from src import subscription
 from src import subscribe_engine
 from src import crash
@@ -2334,6 +2338,107 @@ def app_bindings(platform: str | None = None) -> list[tuple[str, str, str]]:
     return bindings
 
 
+class ProxyCredentialsScreen(ModalScreen):
+    """Ask for the credentials an authenticating HTTP proxy demands.
+
+    The prompt is driven by the 407 record a worker writes to the daemon state
+    file, not by a request this screen makes. Saving writes only the ``proxy``
+    section of ``config.yaml`` (``src.network.save_credentials``), clears the
+    record, and leaves the daemon to retry: both workers read the config on the
+    next attempt, so the new credential takes effect without a restart.
+    """
+
+    CSS = """
+    ProxyCredentialsScreen {
+        align: center middle;
+    }
+    #proxy-dialog {
+        width: 76;
+        height: auto;
+        border: thick $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    #proxy-detail {
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+    #proxy-dialog .field-label {
+        margin-top: 1;
+    }
+    #proxy-error {
+        color: $error;
+        height: auto;
+        margin-top: 1;
+    }
+    #proxy-actions {
+        height: auto;
+        margin-top: 1;
+    }
+    #proxy-actions Button {
+        margin-right: 1;
+    }
+    """
+
+    def __init__(self, config_path: str, db_path: str, url: str = "",
+                 detail: str = "", config: dict | None = None):
+        super().__init__()
+        self.config_path = config_path
+        self.db_path = db_path
+        self.proxy_url = url or ""
+        self.detail = detail or network.AUTH_REQUIRED_DETAIL
+        self.config = config
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="proxy-dialog"):
+            yield Label("[b]HTTP proxy authentication required[/b]")
+            yield Label(self.detail, id="proxy-detail")
+            yield Label("Proxy URL", classes="field-label")
+            yield Input(value=self.proxy_url, id="proxy-url",
+                        placeholder="http://proxy.example:8080")
+            yield Label("Username", classes="field-label")
+            yield Input(id="proxy-username", placeholder="proxy username")
+            yield Label("Password", classes="field-label")
+            yield Input(id="proxy-password", password=True,
+                        placeholder="proxy password")
+            yield Static("", id="proxy-error")
+            with Horizontal(id="proxy-actions"):
+                yield Button("Save and retry", id="proxy-save", variant="primary")
+                yield Button("Later", id="proxy-cancel")
+
+    def _set_error(self, message: str) -> None:
+        self.query_one("#proxy-error", Static).update(message)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "proxy-cancel":
+            self.dismiss(False)
+            return
+        if event.button.id != "proxy-save":
+            return
+        url = self.query_one("#proxy-url", Input).value.strip()
+        username = self.query_one("#proxy-username", Input).value
+        password = self.query_one("#proxy-password", Input).value
+        if not url:
+            self._set_error("Enter the proxy URL.")
+            return
+        if not username or not password:
+            self._set_error("Enter both the proxy username and password.")
+            return
+        candidate = url if "://" in url else "http://" + url
+        if candidate.split("://", 1)[0].lower() not in ("http", "https"):
+            self._set_error("The proxy URL must start with http:// or https://.")
+            return
+        try:
+            session_refresh.save_proxy_credentials(
+                self.config_path, candidate, username, password,
+                config=self.config, db_path=self.db_path)
+        except Exception as exc:  # noqa: BLE001 - report to the person asking
+            logging.warning("Could not save proxy credentials: %s", exc)
+            self._set_error(f"Could not save the credentials: {exc}")
+            return
+        self.dismiss(True)
+
+
 class ScraperApp(App):
     """A Terminal GUI for searching the Steam Workshop database."""
 
@@ -2581,6 +2686,7 @@ class ScraperApp(App):
         super().__init__()
         self.theme = "textual-dark"
         self.config_path = config_path
+        network.set_config_path(config_path)
         
         try:
             self.config = load_config(config_path)
@@ -2620,6 +2726,18 @@ class ScraperApp(App):
         # is still queued. Armed only while such a row exists, and disarmed by
         # its own tick when none does; see `_start_subscription_poll`.
         self._sub_poll_timer = None
+        # The proxy/session watcher. The daemon records a 407 or a dead login in
+        # the state file beside the database; this process polls that record and
+        # opens the proxy prompt or the sign-in page without the operator having
+        # to notice the warning first.
+        self._network_problem_timer = None
+        self._proxy_prompt_open = False
+        self._proxy_prompt_for = None
+        self._proxy_prompt_snoozed_until = 0.0
+        self._signin_opened_for = None
+        self._session_recheck_timer = None
+        self._session_recheck_deadline = 0.0
+        self._session_recheck_running = False
         # The one item-update path: every component displaying an item
         # subscribes here, and every update this process receives is handed to
         # it through `dispatch_item_update`. See `src/item_updates.py` and
@@ -2827,6 +2945,144 @@ class ScraperApp(App):
         # parallel. Off Windows the scan is a no-op and reads nothing.
         self.set_interval(workshop_folders.DOWNLOADED_ITEM_SCAN_INTERVAL_SECONDS,
                           self._maybe_scan_downloaded_items)
+
+        # The login/proxy watcher. It is one small state-file read every five
+        # seconds and it is what removes the two manual clicks: a 407 opens the
+        # credential prompt, and a dead login opens the sign-in page in the
+        # default browser.
+        self._check_network_problems()
+        self._network_problem_timer = self.set_interval(
+            5.0, self._check_network_problems)
+
+    def _check_network_problems(self) -> None:
+        """Open the proxy prompt or the sign-in page when a record asks for it.
+
+        Both facts are written by another process, so they are polled. The
+        prompt is keyed to the recorded problem, not to this timer: a proxy that
+        keeps refusing must not reopen the dialog every five seconds, and a
+        session problem that has already opened one sign-in page must not open
+        another.
+        """
+        try:
+            proxy = network.read_auth_required(self.db_path)
+        except Exception:
+            logging.debug("Could not read the proxy problem record", exc_info=True)
+            proxy = None
+        if proxy:
+            key = proxy.get("detected_at") or proxy.get("url")
+            now = time.time()
+            if (not self._proxy_prompt_open
+                    and key != self._proxy_prompt_for
+                    and now >= self._proxy_prompt_snoozed_until):
+                self._proxy_prompt_for = key
+                self._proxy_prompt_open = True
+                self.push_screen(
+                    ProxyCredentialsScreen(
+                        self.config_path, self.db_path,
+                        url=(proxy.get("url")
+                             or network.proxy_url_for(
+                                 "https://steamcommunity.com", self.config)),
+                        detail=proxy.get("detail") or "",
+                        config=self.config),
+                    callback=self._proxy_prompt_closed)
+            return
+
+        try:
+            problem = session_health.read(self.db_path)
+        except Exception:
+            logging.debug("Could not read the session problem record", exc_info=True)
+            problem = None
+        if not problem:
+            return
+        key = problem.get("detected_at") or problem.get("detail")
+        if key == self._signin_opened_for:
+            return
+        self._signin_opened_for = key
+        self.notify("Steam session expired; opening the sign-in page.",
+                    severity="warning")
+        try:
+            webbrowser.open(session_health.LOGIN_URL)
+        except Exception:
+            logging.debug("Could not open the Steam sign-in page", exc_info=True)
+        self._start_session_recheck()
+
+    def _start_session_recheck(self) -> None:
+        """Recheck the login in the background after opening the sign-in page.
+
+        The web UI's poll does this for the web server; the TUI has its own
+        firefox-cookie cache and its own subscribe engine, so it needs the same
+        loop. Five seconds for five minutes, stopping as soon as the login is
+        verified or the route reports a proxy 407.
+        """
+        if self._session_recheck_timer is not None:
+            return
+        self._session_recheck_deadline = time.time() + 300.0
+        self._session_recheck_timer = self.set_interval(
+            5.0, self._auto_recheck_session)
+        self._auto_recheck_session()
+
+    def _stop_session_recheck(self) -> None:
+        if self._session_recheck_timer is not None:
+            self._session_recheck_timer.stop()
+            self._session_recheck_timer = None
+        self._session_recheck_running = False
+
+    def _auto_recheck_session(self) -> None:
+        if self._session_recheck_running:
+            return
+        if time.time() > self._session_recheck_deadline:
+            self._stop_session_recheck()
+            return
+        try:
+            problem = session_health.read(self.db_path)
+        except Exception:
+            problem = None
+        if not problem:
+            self._stop_session_recheck()
+            return
+        self._session_recheck_running = True
+        self.run_worker(self._auto_recheck_worker, name="session-recheck",
+                        thread=True, exit_on_error=False)
+
+    def _auto_recheck_worker(self) -> None:
+        try:
+            result = session_refresh.refresh_login(
+                self.config, self.config_path, self.db_path)
+        except Exception as exc:  # noqa: BLE001 - report it on the UI thread
+            result = {"ok": False, "detail": str(exc)}
+        try:
+            self.call_from_thread(self._after_auto_recheck, result)
+        except RuntimeError:
+            logging.debug("Session recheck finished after the app stopped")
+
+    def _after_auto_recheck(self, result: dict) -> None:
+        self._session_recheck_running = False
+        if result.get("ok"):
+            self._stop_session_recheck()
+            self.notify("Steam login verified.", severity="information")
+        elif result.get("proxy_auth_required"):
+            self._stop_session_recheck()
+            # The proxy blocked the verification; let the session problem prompt
+            # the sign-in/recheck flow again once the credential is saved.
+            self._signin_opened_for = None
+            self._check_network_problems()
+
+    def _proxy_prompt_closed(self, saved: bool | None) -> None:
+        self._proxy_prompt_open = False
+        if saved:
+            self.notify("Proxy credentials saved; the next retry will use them.",
+                        severity="information")
+            # A session problem may have been waiting behind the proxy: start its
+            # sign-in/recheck flow again now that requests can reach Steam.
+            self._signin_opened_for = None
+            self._check_network_problems()
+        else:
+            # "Later" is not "never": leave the operator alone for a while, then
+            # ask again while the proxy is still refusing. Clearing the key is
+            # what makes the retry reachable; the snooze deadline alone would
+            # still match the key it already recorded.
+            self._proxy_prompt_for = None
+            self._proxy_prompt_snoozed_until = time.time() + 600.0
 
     def _check_scroll_bottom(self, scroll_y: float) -> None:
         self.save_state()
@@ -3617,6 +3873,10 @@ class ScraperApp(App):
             resp = requests.post(
                 f"http://127.0.0.1:{web_port}/api/subscribe/{wid}",
                 timeout=15,
+                # The embedded server is on loopback; an environment proxy must
+                # not be asked to reach it (and a 407 there would look like a
+                # subscribe failure).
+                proxies={"http": None, "https": None},
             )
             data = resp.json()
             if data.get("success") == 1:

@@ -7,6 +7,7 @@ import requests.utils
 import logging
 from src.config import load_config, login_secure_value, warn_retired_key
 from src.firefox_cookies import steam_community_cookies, firefox_version
+from src import network
 
 # The selectors scrape_extended_details depends on. Named so a selector miss can
 # be captured against the exact selector that failed.
@@ -143,13 +144,20 @@ _session_built_from = None
 
 
 def _get_session() -> HTMLSession:
-    """The shared session, created on first use."""
+    """The shared session, created on first use.
+
+    ``trust_env`` is off because this module resolves the proxy itself through
+    :mod:`src.network` and passes it per request. Leaving it on would merge the
+    environment's proxy back in for any scheme the caller omitted, which is how
+    a deliberate bypass could silently stop being a bypass.
+    """
     global _session, _session_built_from
     factory = HTMLSession
     if _session is None or _session_built_from is not factory:
         with _session_lock:
             if _session is None or _session_built_from is not factory:
                 _session = factory()
+                _session.trust_env = False
                 _session_built_from = factory
     return _session
 
@@ -401,6 +409,21 @@ def _extract_total_pages(response) -> int:
     page_match = page_pattern.search(response.text)
     return int(page_match.group(1)) if page_match else 1
 
+def _current_config() -> dict | None:
+    """The config for a request, or ``None`` when it cannot be read.
+
+    The path is the one the process was started with, not the literal
+    ``config.yaml`` this module used to read. A daemon launched with an explicit
+    path from another directory was reading no config at all there, so a cookie
+    the Recheck button had just saved never reached the scrape.
+    """
+    try:
+        return load_config(network.config_path())
+    except Exception as exc:
+        logging.debug("Reading config for a Workshop request failed: %s", exc)
+        return None
+
+
 def _workshop_cookies_or_empty() -> dict:
     """Cookies for the current config, or none if it cannot be read.
 
@@ -410,11 +433,65 @@ def _workshop_cookies_or_empty() -> dict:
     restarted. An unreadable config yields an anonymous request rather than a
     failed scrape.
     """
+    config = _current_config()
+    if config is None:
+        return {}
     try:
-        return _build_workshop_cookies(load_config("config.yaml"))
+        return _build_workshop_cookies(config)
     except Exception as exc:
         logging.debug("Scraping without cookies: %s", exc)
         return {}
+
+
+LOGIN_CHECK_URL = "https://steamcommunity.com/my/"
+
+
+def verify_login(config: dict | None = None) -> dict:
+    """Ask Steam whether the current cookie is accepted, with one page read.
+
+    Recheck used to clear the warning from the cookie's own expiry alone, which
+    cannot see a revoked session, a cookie from another browser profile, or a
+    proxy that is refusing every request. The result here is the only authority:
+    the signed-in markers on the page the daemon itself would read.
+
+    Returns ``{"ok": True}`` when the page proves a session, or a dict carrying
+    ``ok: False`` and a sentence for the operator. A proxy that answers 407 is
+    reported separately so the front end can ask for credentials instead of
+    claiming the login is bad.
+    """
+    config = _current_config() if config is None else config
+    if config is None:
+        config = {}
+    cookies = _build_workshop_cookies(config)
+    proxies = network.proxies_for(LOGIN_CHECK_URL, config)
+    try:
+        response = _get_session().get(
+            LOGIN_CHECK_URL, cookies=cookies, headers=BROWSER_HEADERS,
+            proxies=proxies, timeout=15,
+        )
+        response.raise_for_status()
+    except requests.exceptions.ProxyError as exc:
+        proxy = network.proxy_error(exc)
+        if proxy:
+            logging.warning(
+                "Login check could not reach Steam: the HTTP proxy %s requires "
+                "authentication (407).", proxy["proxy_url"] or "<detected>")
+            return {"ok": False, "proxy_auth_required": True, **proxy}
+        return {"ok": False, "detail": f"Could not reach Steam: {exc}"}
+    except requests.exceptions.RequestException as exc:
+        return {"ok": False, "detail": f"Could not reach Steam: {exc}"}
+
+    body = response.text or ""
+    final_url = str(getattr(response, "url", "") or "")
+    if "/login/" in final_url or looks_like_signed_out(body):
+        return {
+            "ok": False,
+            "detail": (
+                "Steam answered the login check with its sign-in page, so the "
+                "saved login cookie is not accepted"
+            ),
+        }
+    return {"ok": True}
 
 
 def scrape_extended_details(item_url: str, keep_body: bool = False) -> dict | None:
@@ -441,7 +518,9 @@ def scrape_extended_details(item_url: str, keep_body: bool = False) -> dict | No
     web delay (see ``src/web_worker.py``).
     """
     session = _get_session()
+    config = _current_config() or {}
     cookies = _workshop_cookies_or_empty()
+    proxies = network.proxies_for(item_url, config)
     request = {
         "method": "GET",
         "url": item_url,
@@ -451,7 +530,7 @@ def scrape_extended_details(item_url: str, keep_body: bool = False) -> dict | No
     }
     try:
         response = session.get(item_url, timeout=10, cookies=cookies,
-                               headers=BROWSER_HEADERS)
+                               headers=BROWSER_HEADERS, proxies=proxies)
         response.raise_for_status()
 
         description_element = response.html.find(DESCRIPTION_SELECTOR, first=True)
@@ -492,6 +571,31 @@ def scrape_extended_details(item_url: str, keep_body: bool = False) -> dict | No
             "final_url": str(getattr(error_response, "url", item_url)),
             "request": request,
         }
+    except requests.exceptions.ProxyError as exc:
+        # A proxy refusing the CONNECT with 407 is not a Steam failure and not a
+        # cookie failure. Return it as its own result so the worker records the
+        # proxy problem for the front end to ask about, instead of backing off
+        # for a reason that cannot improve with time.
+        proxy = network.proxy_error(exc)
+        if proxy:
+            logging.warning(
+                "Workshop request to %s was refused by the HTTP proxy %s "
+                "(407 Proxy Authentication Required).",
+                item_url, proxy["proxy_url"] or "<detected>")
+            return {
+                "description": None,
+                "tags": [],
+                "body": None,
+                "http_status": None,
+                "final_url": item_url,
+                "request": request,
+                "proxy_auth_required": True,
+                **proxy,
+            }
+        logging.warning(
+            "Workshop request to %s could not reach Steam through its proxy: %s",
+            item_url, exc)
+        return None
     except requests.exceptions.RequestException as exc:
         # A genuine transport failure has no response and no status, so None
         # keeps meaning exactly that. The log names the exception: the owner
@@ -507,9 +611,9 @@ def discover_items_by_date_html(appid: int, updated_after: int, updated_before: 
     Returns a tuple of (list_of_ids, total_pages).
     """
     try:
-        config = load_config("config.yaml")
+        config = load_config(network.config_path())
     except FileNotFoundError:
-        logging.error("Configuration file not found: config.yaml")
+        logging.error("Configuration file not found: %s", network.config_path())
         sys.exit(1)
 
     cookies = _build_workshop_cookies(config)
@@ -522,11 +626,22 @@ def discover_items_by_date_html(appid: int, updated_after: int, updated_before: 
     session = _get_session()
     try:
         response = session.get(url, cookies=cookies, timeout=15,
-                               headers=BROWSER_HEADERS)
+                               headers=BROWSER_HEADERS,
+                               proxies=network.proxies_for(url, config))
         response.raise_for_status()
         ids = _extract_item_ids_from_page(response)
         total_pages = _extract_total_pages(response)
         return ids, total_pages
+    except requests.exceptions.ProxyError as exc:
+        proxy = network.proxy_error(exc)
+        if proxy:
+            logging.warning(
+                "Page discovery for appid %s was refused by the HTTP proxy %s "
+                "(407 Proxy Authentication Required).",
+                appid, proxy["proxy_url"] or "<detected>")
+        else:
+            logging.warning("Page discovery for appid %s failed through its proxy", appid)
+        return [], -1
     except Exception:
         logging.warning("Page discovery for appid %s failed", appid)
         return [], -1

@@ -8,6 +8,7 @@ from src.config import ConfigError, load_config
 from src.database import initialize_database, SchemaVersionError
 from src import crash
 from src import log_rotation
+from src import network
 
 
 class _SafeStreamHandler(logging.StreamHandler):
@@ -175,6 +176,7 @@ def main():
     should_daemonize = "--daemon" in sys.argv
     if args:
         config_path = args[0]
+    network.set_config_path(config_path)
         
     try:
         config = load_config(config_path)

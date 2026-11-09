@@ -56,6 +56,17 @@ export STEAM_API_KEY="YOUR_API_KEY_HERE"
 ```
 *(Note: Public workshop items often do not require an API key, but having one is recommended for stability).*
 
+**HTTP proxy (Optional):** If the machine reaches Steam through a proxy that asks for a
+username and password, the first request refused with `407 Proxy Authentication Required`
+opens a credential prompt in the web UI (and in the TUI when it is running). The values are
+saved under `proxy:` in `config.yaml` and used by the daemon and the web server on their
+next request, so no restart is needed for Steam, API or image work. The translator builds
+its HTTP client when its thread starts, so a running translator needs a daemon restart to
+use newly entered credentials. If the proxy should be bypassed for some hosts, set
+`proxy.no_proxy`. A proxy that requires Windows integrated (NTLM) authentication cannot use
+a plain username/password form; exempt Steam with `no_proxy` or use a Basic-auth proxy
+instead.
+
 **Translation (Optional):** To enable automatic translation of non-English text, you must provide an OpenAI API key. It is highly recommended to provide this as an environment variable:
 ```bash
 export OPENAI_API_KEY="YOUR_OPENAI_API_KEY_HERE"

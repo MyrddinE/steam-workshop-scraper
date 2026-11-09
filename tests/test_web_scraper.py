@@ -317,3 +317,89 @@ def test_wilson_lower_edge_cases():
     assert 0.0 <= wilson_lower(100, 100) <= 1.0
 
 
+
+
+# ── the proxy is not Steam, and not the item ─────────────────────────────────
+
+def test_a_proxy_407_is_reported_as_its_own_result(monkeypatch):
+    """A 407 must not read as a timeout: it is fixable with a credential."""
+    from src import web_scraper
+
+    class _Session:
+        def get(self, *args, **kwargs):
+            raise requests.exceptions.ProxyError(
+                "Cannot connect to proxy. Tunnel connection failed: "
+                "407 Proxy Authentication Required")
+
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: _Session())
+    monkeypatch.setattr(web_scraper, "_workshop_cookies_or_empty", lambda: {})
+    monkeypatch.setattr(web_scraper, "_current_config", lambda: {})
+    monkeypatch.setattr(web_scraper.network, "proxy_url_for",
+                        lambda url, config=None: "http://proxy.example:8080")
+
+    result = web_scraper.scrape_extended_details(
+        "https://steamcommunity.com/sharedfiles/filedetails/?id=1")
+
+    assert result["proxy_auth_required"] is True
+    assert result["proxy_url"] == "http://proxy.example:8080"
+    assert result["description"] is None
+
+
+def _login_response(body, url="https://steamcommunity.com/my/"):
+    response = MagicMock()
+    response.text = body
+    response.url = url
+    response.status_code = 200
+    response.raise_for_status.return_value = None
+    return response
+
+
+def test_verify_login_accepts_a_page_with_the_account_marker(monkeypatch):
+    from src import web_scraper
+
+    class _Session:
+        def get(self, *args, **kwargs):
+            return _login_response('<div id="account_pulldown">signed in</div>')
+
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: _Session())
+    monkeypatch.setattr(web_scraper, "_current_config", lambda: {})
+
+    assert web_scraper.verify_login({}) == {"ok": True}
+
+
+def test_verify_login_refuses_a_sign_in_page(monkeypatch):
+    from src import web_scraper
+
+    class _Session:
+        def get(self, *args, **kwargs):
+            return _login_response(
+                '<html><body><a href="/login/home/">Sign in</a></body></html>',
+                url="https://steamcommunity.com/login/home/")
+
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: _Session())
+    monkeypatch.setattr(web_scraper, "_current_config", lambda: {})
+
+    result = web_scraper.verify_login({})
+
+    assert result["ok"] is False
+    assert "sign-in page" in result["detail"]
+
+
+def test_verify_login_reports_a_proxy_407(monkeypatch):
+    from src import web_scraper
+
+    class _Session:
+        def get(self, *args, **kwargs):
+            raise requests.exceptions.ProxyError(
+                "Tunnel connection failed: 407 Proxy Authentication Required")
+
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: _Session())
+    monkeypatch.setattr(web_scraper, "_current_config", lambda: {})
+    monkeypatch.setattr(web_scraper.network, "proxy_url_for",
+                        lambda url, config=None: "http://proxy.example:8080")
+
+    result = web_scraper.verify_login({})
+
+    assert result["ok"] is False
+    assert result["proxy_auth_required"] is True
+    assert result["proxy_url"] == "http://proxy.example:8080"

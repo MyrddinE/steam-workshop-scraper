@@ -9,6 +9,7 @@ import threading
 from datetime import datetime, timezone
 from src.database import get_next_web_scrape_item, insert_or_update_item, get_connection, queue_field_for_translation, translation_is_current, live_fetch_status_predicate
 from src import activity
+from src import network
 from src import pacing
 from src import session_health
 from src.daemon_state import StateStore, state_path_for
@@ -110,6 +111,10 @@ class ScrapeOutcome(enum.Enum):
     # neither the item's nor a recognised condition. The only served outcome
     # that grows ``web_delay``.
     UNKNOWN = "unknown"
+    # The HTTP proxy answered 407 instead of Steam. Not a Steam failure, not a
+    # cookie failure and not the item's fault: record the proxy problem so the
+    # front end can ask for credentials, and leave the row queued.
+    PROXY_AUTH_REQUIRED = "proxy_auth_required"
 
 
 def classify_scrape(scrape_result: dict | None) -> ScrapeOutcome:
@@ -135,6 +140,8 @@ def classify_scrape(scrape_result: dict | None) -> ScrapeOutcome:
     """
     if scrape_result is None:
         return ScrapeOutcome.UNKNOWN
+    if scrape_result.get("proxy_auth_required"):
+        return ScrapeOutcome.PROXY_AUTH_REQUIRED
     if scrape_result.get("description") is not None:
         return ScrapeOutcome.SUCCESS
 
@@ -400,6 +407,26 @@ class WebScraperThread(threading.Thread):
             "queued and the delay unchanged.",
             item["workshop_id"], scrape_result.get("http_status"))
 
+    def _handle_proxy_auth(self, item: dict, url: str, scrape_result: dict) -> None:
+        """Handle a request the HTTP proxy refused with 407.
+
+        The credential is not the problem and the item is not the problem: the
+        proxy requires authentication the process has not been given. Record the
+        condition for the front end so it can prompt, leave the row queued, and
+        wait long enough that a credential entered in the dialog is in place
+        before the retry. No failure capture: there was no Steam response to
+        keep, and a proxy problem is not evidence about the item.
+        """
+        proxy_url = scrape_result.get("proxy_url") or ""
+        detail = scrape_result.get("detail") or network.AUTH_REQUIRED_DETAIL
+        network.record_auth_required(self.db_path, proxy_url, detail)
+        logging.warning(
+            "[W:%s] Steam request was refused by the HTTP proxy %s "
+            "(407 Proxy Authentication Required); leaving the item queued and "
+            "waiting for credentials.",
+            item["workshop_id"], proxy_url or "<detected>")
+        pacing.wait(30.0, lambda: self.running)
+
     def _handle_unknown(self, item: dict, url: str, scrape_result: dict | None) -> None:
         """Handle an outcome we cannot attribute, and back off.
 
@@ -503,6 +530,9 @@ class WebScraperThread(threading.Thread):
 
                     title = item.get("title_en") or item.get("title") or str(workshop_id)
                     logging.info(f"[W:{workshop_id}] Scraped \"{title}\"")
+                    # A served item page proves the proxy path works, so a
+                    # credential entered since the last refusal has taken effect.
+                    network.clear_auth_required(self.db_path)
                     self.web_successes += 1
                     self.web_failures = 0
                     if self.web_successes >= 5:
@@ -538,6 +568,8 @@ class WebScraperThread(threading.Thread):
                     self._handle_item_page_without_description(item, url, scrape_result)
                 elif outcome is ScrapeOutcome.GATED:
                     self._handle_gate(item, url, scrape_result)
+                elif outcome is ScrapeOutcome.PROXY_AUTH_REQUIRED:
+                    self._handle_proxy_auth(item, url, scrape_result)
                 else:  # ScrapeOutcome.UNKNOWN
                     self._handle_unknown(item, url, scrape_result)
                 # Responsive, so a long backoff cannot make the worker deaf to a

@@ -3,7 +3,7 @@ import time
 import threading
 import logging
 
-from src import capture
+from src import capture, network
 
 # The shared request schedule. ``_next_slot`` is the earliest monotonic moment at
 # which the next caller may start a request, so every caller — the batched
@@ -25,6 +25,27 @@ _api_delay = 1.5
 #   https://partner.steamgames.com/doc/webapi/ISteamUser#GetPlayerSummaries
 #   https://partner.steamgames.com/doc/webapi/ISteamRemoteStorage#GetPublishedFileDetails
 STEAM_API_MAX_IDS_PER_REQUEST = 100
+
+
+def _record_proxy_failure(exc, where: str) -> None:
+    """Record a 407 so the front end can ask for proxy credentials.
+
+    The API functions carry no database path, so the one in the current config is
+    used. A proxy failure is not a Steam failure and must not be counted as one.
+    """
+    proxy = network.proxy_error(exc)
+    if proxy:
+        network.record_auth_required_from_config(proxy["proxy_url"], proxy["detail"])
+        logging.warning(
+            "%s was refused by the HTTP proxy %s (407 Proxy Authentication Required).",
+            where, proxy["proxy_url"] or "<detected>")
+        # The API loop is not a worker that pauses on its own: without this it
+        # would ask the proxy again on the next 1.5 s slot. Push the shared
+        # schedule out so a 407 costs one line per half minute, not forty a
+        # minute, and give the operator time to answer the prompt.
+        global _next_slot
+        with _lock:
+            _next_slot = max(_next_slot, time.monotonic() + 30.0)
 
 
 def set_api_delay(seconds: float):
@@ -107,7 +128,8 @@ def get_workshop_details_batch(item_ids: list[int], api_key: str) -> dict[int, d
 
     _rate_limit()
     try:
-        response = requests.post(url, data=data, timeout=10)
+        response = requests.post(url, data=data, timeout=10,
+                                 proxies=network.proxies_for(url))
         response.raise_for_status()
         try:
             json_data = response.json()
@@ -171,6 +193,9 @@ def get_workshop_details_batch(item_ids: list[int], api_key: str) -> dict[int, d
             by_id.setdefault(item_id, {"status": 500, "publishedfileid": item_id})
         return by_id
 
+    except requests.exceptions.ProxyError as exc:
+        _record_proxy_failure(exc, "Steam API batch request")
+        return None
     except requests.exceptions.RequestException:
         # Transport failure, timeout, or an HTTP error status (429/5xx included):
         # the request itself failed.
@@ -215,7 +240,8 @@ def get_player_summaries(steamids: list[int], api_key: str) -> dict[int, dict]:
     
     _rate_limit()
     try:
-        response = requests.get(url, params=params, timeout=10)
+        response = requests.get(url, params=params, timeout=10,
+                                proxies=network.proxies_for(url))
         response.raise_for_status()
         json_data = response.json()
         
@@ -226,6 +252,9 @@ def get_player_summaries(steamids: list[int], api_key: str) -> dict[int, dict]:
             result[sid] = player
         return result
         
+    except requests.exceptions.ProxyError as exc:
+        _record_proxy_failure(exc, "Steam player summaries request")
+        return {}
     except (requests.exceptions.RequestException, ValueError, KeyError):
         return {}
 
@@ -260,7 +289,8 @@ def query_workshop_newest_page(appid: int, cursor: str, api_key: str,
     if not _rate_limit(keep_running):
         return {"abandoned": True, "total": 0, "items": [], "next_cursor": ""}
     try:
-        response = requests.get(url, params=params, timeout=15)
+        response = requests.get(url, params=params, timeout=15,
+                                proxies=network.proxies_for(url))
         response.raise_for_status()
         data = response.json().get("response", {})
         
@@ -269,6 +299,10 @@ def query_workshop_newest_page(appid: int, cursor: str, api_key: str,
             "items": data.get("publishedfiledetails", []),
             "next_cursor": data.get("next_cursor", ""),
         }
+    except requests.exceptions.ProxyError as exc:
+        _record_proxy_failure(exc, "Steam Workshop discovery request")
+        return {"total": 0, "items": [], "next_cursor": "", "failed": True,
+                "proxy_auth_required": True}
     except requests.exceptions.HTTPError as e:
         if e.response is not None and e.response.status_code == 403:
             logging.error(f"Steam API returned 403 Forbidden for QueryFiles. "
@@ -305,7 +339,8 @@ def query_workshop_updated_page(appid: int, cursor: str, api_key: str, numperpag
     if not _rate_limit(keep_running):
         return {"abandoned": True, "total": 0, "items": [], "next_cursor": "", "failed": False}
     try:
-        response = requests.get(url, params=params, timeout=15)
+        response = requests.get(url, params=params, timeout=15,
+                                proxies=network.proxies_for(url))
         response.raise_for_status()
         data = response.json().get("response", {})
         items = data.get("publishedfiledetails", [])
@@ -315,6 +350,10 @@ def query_workshop_updated_page(appid: int, cursor: str, api_key: str, numperpag
             "next_cursor": data.get("next_cursor", ""),  # page mode may still return a cursor
             "failed": False,
         }
+    except requests.exceptions.ProxyError as exc:
+        _record_proxy_failure(exc, "Steam Workshop updated-page request")
+        return {"total": 0, "items": [], "next_cursor": "", "failed": True,
+                "proxy_auth_required": True}
     except requests.exceptions.HTTPError as e:
         if e.response is not None and e.response.status_code == 403:
             logging.error("Steam API returned 403 Forbidden for page-mode QueryFiles.")

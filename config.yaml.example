@@ -14,6 +14,17 @@ daemon:
   # outbox_dir: "outbox"
   # backup_interval_seconds: 3600
 
+# Optional. An HTTP proxy that requires authentication. The app asks for these
+# credentials the first time a request is refused with 407 and writes them here.
+# `url` is optional: when absent the proxy the OS or environment supplies is
+# used, and the app fills it in from the refusal. `no_proxy` is a comma-separated
+# list of hosts that must bypass the proxy.
+# proxy:
+#   url: "http://proxy.example:8080"
+#   username: "operator"
+#   password: "s3cret"
+#   no_proxy: "localhost,127.0.0.1"
+
 openai:
   api_key: "YOUR_OPENAI_API_KEY_HERE" # Can be overridden by OPENAI_API_KEY env var
   endpoint: "https://api.openai.com/v1"

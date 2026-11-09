@@ -232,6 +232,11 @@ _TIMERS_WITHOUT_THEIR_OWN_READ = {
         "redraws an estimate; no database access",
     ("ScraperApp", "_tick_spinners"):
         "redraws spinners; no database access",
+    ("ScraperApp", "_check_network_problems"):
+        "reads the proxy and session state files; no database access",
+    ("ScraperApp", "_auto_recheck_session"):
+        "reads the session state file and starts a network worker; no database "
+        "access",
 }
 
 

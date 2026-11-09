@@ -333,6 +333,20 @@ def cleanup_crash_hooks():
 
 
 @pytest.fixture(autouse=True)
+def reset_network_config_path():
+    """A test that starts a front end sets the process-wide config path.
+
+    The network helpers read that path when a caller does not pass a config (the
+    scrape path, the API helpers). Leaving one test's temporary path in place
+    would make the next test read a file that no longer exists, so the default is
+    restored after every test.
+    """
+    yield
+    from src import network
+    network.set_config_path("config.yaml")
+
+
+@pytest.fixture(autouse=True)
 def reset_config_warning_dedupe():
     """Config-key warnings fire once per process by design.
 

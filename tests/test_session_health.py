@@ -19,7 +19,7 @@ import re
 
 import pytest
 
-from src import session_cookie, session_health
+from src import network, session_cookie, session_health
 from src.daemon_state import state_path_for
 from src.database import initialize_database
 
@@ -171,6 +171,18 @@ def web_client(tmp_path):
     return app.test_client(), db_path, config
 
 
+@pytest.fixture
+def verify_ok(monkeypatch):
+    """Treat Steam's login check as proving the session.
+
+    Recheck now makes one authenticated page read instead of trusting the
+    token's local expiry; the route tests below exercise the decision around
+    that read, so they stub its answer rather than reaching Steam.
+    """
+    monkeypatch.setattr("src.web_scraper.verify_login",
+                        lambda config=None: {"ok": True})
+
+
 def test_the_session_route_reports_a_healthy_login(web_client):
     client, _, _ = web_client
 
@@ -195,12 +207,12 @@ def test_the_session_route_reports_the_recorded_problem(web_client):
 
 
 def test_recheck_clears_the_warning_when_the_browser_has_a_fresh_cookie(
-        web_client, monkeypatch):
+        web_client, monkeypatch, verify_ok):
     """The whole point of the button: sign in, click, and the warning goes."""
     client, db_path, config = web_client
     session_health.record_rejected(db_path, "the saved login cookie expired", now=1000)
-    monkeypatch.setattr("src.webserver.steam_login_secure", lambda refresh=False: _cookie(9_999_999_999))
-    monkeypatch.setattr("src.webserver.save_config", lambda path, cfg: None)
+    monkeypatch.setattr("src.session_refresh.steam_login_secure", lambda refresh=False: _cookie(9_999_999_999))
+    monkeypatch.setattr("src.session_refresh.save_config", lambda path, cfg: None)
 
     body = client.post('/api/session/recheck').get_json()
 
@@ -209,13 +221,13 @@ def test_recheck_clears_the_warning_when_the_browser_has_a_fresh_cookie(
     assert client.get('/api/session').get_json()["problem"] is False
 
 
-def test_recheck_saves_the_fresh_cookie_for_the_daemon(web_client, monkeypatch):
+def test_recheck_saves_the_fresh_cookie_for_the_daemon(web_client, monkeypatch, verify_ok):
     """The daemon is a separate process and re-reads config.yaml, so the value
     has to reach the file or the sign-in changes nothing."""
     client, _, config = web_client
     saved = {}
-    monkeypatch.setattr("src.webserver.steam_login_secure", lambda refresh=False: _cookie(9_999_999_999))
-    monkeypatch.setattr("src.webserver.save_config",
+    monkeypatch.setattr("src.session_refresh.steam_login_secure", lambda refresh=False: _cookie(9_999_999_999))
+    monkeypatch.setattr("src.session_refresh.save_config",
                         lambda path, cfg: saved.update({"path": path, "cfg": cfg}))
 
     client.post('/api/session/recheck')
@@ -224,15 +236,15 @@ def test_recheck_saves_the_fresh_cookie_for_the_daemon(web_client, monkeypatch):
     assert saved["cfg"]["session"]["login_secure"] == _cookie(9_999_999_999)
 
 
-def test_recheck_writes_nothing_when_the_cookie_has_not_moved(web_client, monkeypatch):
+def test_recheck_writes_nothing_when_the_cookie_has_not_moved(web_client, monkeypatch, verify_ok):
     """A rewrite per click would serialise YAML for no change, for a value that
     is polled and pushed on a timer elsewhere in this server."""
     client, db_path, config = web_client
     live = _cookie(9_999_999_999)
     config["session"]["login_secure"] = live
     called = {"n": 0}
-    monkeypatch.setattr("src.webserver.steam_login_secure", lambda refresh=False: live)
-    monkeypatch.setattr("src.webserver.save_config",
+    monkeypatch.setattr("src.session_refresh.steam_login_secure", lambda refresh=False: live)
+    monkeypatch.setattr("src.session_refresh.save_config",
                         lambda path, cfg: called.update(n=called["n"] + 1))
 
     body = client.post('/api/session/recheck').get_json()
@@ -244,7 +256,7 @@ def test_recheck_writes_nothing_when_the_cookie_has_not_moved(web_client, monkey
 def test_recheck_reports_a_browser_that_still_has_nothing_fresh(web_client, monkeypatch):
     client, db_path, config = web_client
     config["session"]["login_secure"] = _cookie(1000)
-    monkeypatch.setattr("src.webserver.steam_login_secure", lambda refresh=False: None)
+    monkeypatch.setattr("src.session_refresh.steam_login_secure", lambda refresh=False: None)
 
     body = client.post('/api/session/recheck').get_json()
 
@@ -256,7 +268,7 @@ def test_recheck_reports_a_browser_that_still_has_nothing_fresh(web_client, monk
 def test_recheck_says_so_when_there_is_no_cookie_at_all(web_client, monkeypatch):
     client, _, config = web_client
     config["session"]["login_secure"] = ""
-    monkeypatch.setattr("src.webserver.steam_login_secure", lambda refresh=False: None)
+    monkeypatch.setattr("src.session_refresh.steam_login_secure", lambda refresh=False: None)
 
     body = client.post('/api/session/recheck').get_json()
 
@@ -264,21 +276,110 @@ def test_recheck_says_so_when_there_is_no_cookie_at_all(web_client, monkeypatch)
                     "detail": "no login cookie is available"}
 
 
-def test_recheck_reports_a_cookie_it_could_not_save(web_client, monkeypatch):
+def test_recheck_reports_a_cookie_it_could_not_save(web_client, monkeypatch, verify_ok):
     """The warning must survive the failure, and say what failed."""
     client, db_path, _ = web_client
-    monkeypatch.setattr("src.webserver.steam_login_secure", lambda refresh=False: _cookie(9_999_999_999))
+    monkeypatch.setattr("src.session_refresh.steam_login_secure", lambda refresh=False: _cookie(9_999_999_999))
 
     def explode(path, cfg):
         raise OSError("read-only file system")
 
-    monkeypatch.setattr("src.webserver.save_config", explode)
+    monkeypatch.setattr("src.session_refresh.save_config", explode)
 
     resp = client.post('/api/session/recheck')
 
     assert resp.status_code == 500
     assert resp.get_json()["problem"] is True
     assert "could not be saved" in session_health.read(db_path)["detail"]
+
+
+def test_recheck_keeps_the_warning_when_steam_rejects_the_login(web_client, monkeypatch):
+    """A locally unexpired token is not evidence: Steam's answer is."""
+    client, db_path, config = web_client
+    config["session"]["login_secure"] = _cookie(9_999_999_999)
+    monkeypatch.setattr("src.session_refresh.steam_login_secure", lambda refresh=False: None)
+    monkeypatch.setattr("src.web_scraper.verify_login", lambda config=None: {
+        "ok": False,
+        "detail": "Steam answered the login check with its sign-in page",
+    })
+
+    body = client.post('/api/session/recheck').get_json()
+
+    assert body["ok"] is False
+    assert "sign-in page" in body["detail"]
+    assert session_health.read(db_path)["detail"] == body["detail"]
+
+
+def test_recheck_reports_a_proxy_407_instead_of_a_bad_login(web_client, monkeypatch):
+    client, db_path, config = web_client
+    config["session"]["login_secure"] = _cookie(9_999_999_999)
+    monkeypatch.setattr("src.session_refresh.steam_login_secure", lambda refresh=False: None)
+    monkeypatch.setattr("src.web_scraper.verify_login", lambda config=None: {
+        "ok": False,
+        "proxy_auth_required": True,
+        "proxy_url": "http://proxy.example:8080",
+        "detail": network.AUTH_REQUIRED_DETAIL,
+    })
+
+    body = client.post('/api/session/recheck').get_json()
+
+    assert body["ok"] is False and body["proxy_auth_required"] is True
+    assert body["proxy_url"] == "http://proxy.example:8080"
+    recorded = network.read_auth_required(db_path)
+    assert recorded["url"] == "http://proxy.example:8080"
+    assert session_health.read(db_path) is None, "a proxy 407 is not a bad login"
+
+
+def test_the_session_route_reports_a_recorded_proxy_problem(web_client):
+    client, db_path, _ = web_client
+    network.record_auth_required(db_path, "http://proxy.example:8080",
+                                 network.AUTH_REQUIRED_DETAIL, )
+
+    body = client.get('/api/session').get_json()
+
+    assert body["proxy"]["problem"] is True
+    assert body["proxy"]["url"] == "http://proxy.example:8080"
+    assert body["proxy"]["detail"] == network.AUTH_REQUIRED_DETAIL
+
+
+def test_proxy_credentials_are_saved_to_the_config_and_clear_the_problem(
+        web_client, tmp_path):
+    import yaml
+    client, db_path, _ = web_client
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("database:\n  path: test.db\n", encoding="utf-8")
+    network.record_auth_required(db_path, "http://proxy.example:8080",
+                                 network.AUTH_REQUIRED_DETAIL)
+
+    resp = client.post('/api/proxy_credentials', json={
+        "url": "http://proxy.example:8080",
+        "username": "operator",
+        "password": "s3cret",
+    })
+
+    assert resp.status_code == 200 and resp.get_json()["ok"] is True
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["proxy"] == {
+        "url": "http://proxy.example:8080",
+        "username": "operator",
+        "password": "s3cret",
+    }
+    assert saved["database"]["path"] == "test.db"
+    assert network.read_auth_required(db_path) is None
+
+
+def test_proxy_credentials_route_requires_both_halves(web_client, tmp_path):
+    client, db_path, _ = web_client
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("database:\n  path: test.db\n", encoding="utf-8")
+
+    resp = client.post('/api/proxy_credentials', json={
+        "url": "http://proxy.example:8080", "username": "operator",
+        "password": "",
+    })
+
+    assert resp.status_code == 400
+    assert "username and password" in resp.get_json()["detail"]
 
 
 # --- the banner in the page --------------------------------------------------

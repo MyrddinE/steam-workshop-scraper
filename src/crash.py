@@ -718,6 +718,19 @@ def _config_secrets(config):
         if isinstance(block, dict):
             for key in keys:
                 _add_secret_value(values, block.get(key))
+    # The proxy password is a credential in the same file as the Steam cookie.
+    # The URL may also carry it as userinfo, which the key-name rule cannot see
+    # because the key is `url`.
+    proxy = config.get("proxy")
+    if isinstance(proxy, dict):
+        _add_secret_value(values, proxy.get("password"))
+        raw_url = proxy.get("url")
+        if raw_url:
+            try:
+                from urllib.parse import unquote, urlsplit
+                _add_secret_value(values, unquote(urlsplit(str(raw_url)).password or ""))
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                logging.debug("Crash dump could not read proxy url userinfo: %s", exc)
     # The loader strips an env-derived key from the config before saving, so the
     # environment has to be read here as well or a crash would dump it verbatim.
     _add_secret_value(values, os.environ.get("STEAM_API_KEY"))

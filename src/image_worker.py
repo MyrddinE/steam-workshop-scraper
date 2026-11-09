@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import requests
 from datetime import datetime, timezone
-from src import capture, images, pacing
+from src import capture, images, network, pacing
 from src import activity
 from src.database import get_next_image_item, insert_or_update_item, get_image_path, live_fetch_status_predicate
 
@@ -114,7 +114,9 @@ class ImageDownloadThread(threading.Thread):
                 # a single step -- the opposite of backing off.
                 elapsed = self._clock.since()
                 try:
-                    resp = requests.get(url, allow_redirects=True, timeout=15, stream=True)
+                    resp = requests.get(url, allow_redirects=True, timeout=15,
+                                        stream=True,
+                                        proxies=network.proxies_for(url))
                     if resp.status_code != 200:
                         raise Exception(f"HTTP {resp.status_code}")
 
@@ -185,6 +187,7 @@ class ImageDownloadThread(threading.Thread):
 
                     title = item.get("title_en") or item.get("title") or str(wid)
                     logging.info(f"[I:{wid}] Downloaded preview ({ext}) for \"{title}\"")
+                    network.clear_auth_required(self.db_path)
                     self.image_successes += 1
                     self.image_failures = 0
                     if self.image_successes >= 5:
@@ -192,6 +195,19 @@ class ImageDownloadThread(threading.Thread):
                     self._decay_delay(elapsed)
 
                 except Exception as e:
+                    proxy = network.proxy_error(e)
+                    if proxy:
+                        # A 407 is not an image failure and not the item's fault:
+                        # keep its queue flag, record the proxy problem for the
+                        # front end, and wait rather than growing image_delay.
+                        network.record_auth_required(
+                            self.db_path, proxy["proxy_url"], proxy["detail"])
+                        logging.warning(
+                            "[I:%s] Image download was refused by the HTTP proxy %s "
+                            "(407 Proxy Authentication Required); waiting for "
+                            "credentials.", wid, proxy["proxy_url"] or "<detected>")
+                        pacing.wait(30.0, lambda: self.running)
+                        continue
                     logging.warning(f"[I:{wid}] Image download failed: {e}")
                     # Failures are always captured when the outbox is on: the status
                     # and headers of the response, or the exception text when there

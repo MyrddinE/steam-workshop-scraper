@@ -88,6 +88,28 @@ do.
 Removed from the list above rather than marked resolved. Each is now documented as current
 behaviour, or covered by a test:
 
+### A 407 proxy refusal was read as a dead Steam login
+
+The owner reported that cookies had stopped working and that Recheck "appeared to work".
+The log said otherwise: **4,515** `ProxyError('Cannot connect to proxy.', OSError('Tunnel
+connection failed: 407 Proxy Authentication Required'))` lines between 2026-11-05 16:02 and
+2026-11-08 22:15, while the same run logged `Read 9 Steam cookies from the Firefox profile
+(...), including steamLoginSecure` and every subscribe request carried `login=set`. The
+cookie was fine; an authenticating HTTP proxy was refusing every CONNECT before Steam saw
+it. Recheck could not see that: it read the local cookie, found the token unexpired, and
+cleared the warning while every task kept failing. The subscribe path then reported
+`No sessionid available`, which was a downstream symptom of the item-page read failing,
+not a missing credential.
+
+`src/network.py` now owns proxy resolution and the 407 record; both front ends prompt for
+the credentials and save only the `proxy` section of `config.yaml`, and the workers leave
+the affected item queued rather than treating a proxy as a Steam or pacing failure.
+`src/session_refresh.py` makes Steam's signed-in page the authority before it saves a
+cookie or clears the warning, and the web page opens the sign-in page once per recorded
+problem and rechecks automatically. The regression is pinned by `tests/test_network.py`,
+`tests/test_session_refresh.py`, the route cases in `tests/test_session_health.py`, the
+worker outcome in `tests/test_workers.py`, and the page driver in `tests/test_webserver.py`.
+
 ### A superseded pass could strand the pause lock (issue 88)
 
 Ownership of the overlay's module-scope state is taken once a pass commits to running, and handed back when

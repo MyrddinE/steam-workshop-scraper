@@ -318,10 +318,26 @@ def test_percentile_disc_cutoffs_match_the_ntile_window_with_a_filter(tmp_path):
 
 
 def test_cutoffs_use_percentile_disc_not_a_materialised_ntile_window(tmp_path, monkeypatch):
-    """The performance change itself: exact ranks, no ``NTILE`` window."""
+    """The performance change itself: exact ranks, no ``NTILE`` window.
+
+    ``percentile_disc`` is a SQLite 3.51+ builtin, and the production host runs an
+    older library, so this host may legitimately be on the fallback. The fallback
+    is covered by the tests below; asserting the fast path here would be assuming
+    the test environment's SQLite version, which is exactly what the probe exists
+    to avoid.
+    """
     db_path = str(tmp_path / "mechanism.db")
     initialize_database(db_path)
     _seed_scores(db_path, 120)
+
+    conn = get_connection(db_path)
+    try:
+        if not database._percentile_disc_is_available(conn):
+            pytest.skip(
+                f"SQLite {sqlite3.sqlite_version} has no percentile_disc; "
+                "the NTILE fallback is covered separately")
+    finally:
+        conn.close()
 
     statements = _record_statements(monkeypatch)
     compute_wilson_cutoffs(db_path)
