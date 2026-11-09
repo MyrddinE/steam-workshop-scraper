@@ -133,3 +133,32 @@ def test_a_save_failure_is_reported_with_its_own_flag(
 
     assert result["ok"] is False and result["save_failed"] is True
     assert "could not be saved" in result["detail"]
+
+
+def test_a_repeated_failure_keeps_the_first_timestamp(config_path, tmp_path, monkeypatch):
+    """The auto-recheck must not look like a new problem every five seconds.
+
+    The page and the TUI open the sign-in page once per `detected_at`; moving
+    that timestamp on every failed check would open a new tab each poll.
+    """
+    from src import session_health
+
+    db_path = str(tmp_path / "workshop.db")
+    config = {"session": {"login_secure": _cookie(9_999_999_999)}}
+    monkeypatch.setattr(session_refresh, "steam_login_secure",
+                        lambda refresh=False: None)
+    monkeypatch.setattr(session_refresh.web_scraper, "verify_login",
+                        lambda config=None: {
+                            "ok": False,
+                            "detail": "Steam answered the login check with its sign-in page",
+                        })
+    monkeypatch.setattr(session_health.time, "time", lambda: 1000)
+    session_refresh.refresh_login(config, config_path, db_path)
+    first = session_health.read(db_path)["detected_at"]
+
+    monkeypatch.setattr(session_health.time, "time", lambda: 2000)
+    session_refresh.refresh_login(config, config_path, db_path)
+    second = session_health.read(db_path)["detected_at"]
+
+    assert first == 1000
+    assert second == 1000, "the same failure keeps its original timestamp"

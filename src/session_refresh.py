@@ -43,6 +43,20 @@ def _candidate(config: dict) -> tuple[str, str]:
     return login_secure_value(config), "config"
 
 
+def _record_problem(db_path: str, detail: str) -> None:
+    """Record a failed check without making a repeated failure look new.
+
+    The page and the TUI key their "open the sign-in page once" logic to
+    ``detected_at``. A recheck that fails the same way every five seconds must
+    not move that timestamp, or each poll opens another sign-in tab.
+    """
+    existing = session_health.read(db_path)
+    now = None
+    if existing and existing.get("detail") == detail:
+        now = existing.get("detected_at")
+    session_health.record_rejected(db_path, detail, now=now)
+
+
 def refresh_login(config: dict, config_path: str, db_path: str) -> dict:
     """Read, verify, and persist the Steam login; return the UI-facing result.
 
@@ -58,12 +72,12 @@ def refresh_login(config: dict, config_path: str, db_path: str) -> dict:
     cookie, source = _candidate(config)
     if not cookie:
         detail = "no login cookie is available"
-        session_health.record_rejected(db_path, detail)
+        _record_problem(db_path, detail)
         return {"ok": False, "problem": True, "detail": detail}
 
     reason = session_health.evaluate_login(cookie)
     if reason:
-        session_health.record_rejected(db_path, reason)
+        _record_problem(db_path, reason)
         return {"ok": False, "problem": True, "detail": reason}
 
     # Verify with the cookie that was just read. In browser mode the refresh
@@ -92,7 +106,7 @@ def refresh_login(config: dict, config_path: str, db_path: str) -> dict:
             config.setdefault("session", {})["login_secure"] = configured_before
         else:
             config.get("session", {}).pop("login_secure", None)
-        session_health.record_rejected(db_path, detail)
+        _record_problem(db_path, detail)
         return {"ok": False, "problem": True, "detail": detail}
 
     if cookie != configured_before:
@@ -100,7 +114,7 @@ def refresh_login(config: dict, config_path: str, db_path: str) -> dict:
             save_config(config_path, {"session": {"login_secure": cookie}})
         except Exception as exc:
             detail = f"a fresh login cookie was found but could not be saved ({exc})"
-            session_health.record_rejected(db_path, detail)
+            _record_problem(db_path, detail)
             logging.warning("[Session] %s", detail)
             return {"ok": False, "problem": True, "detail": detail,
                     "save_failed": True}
