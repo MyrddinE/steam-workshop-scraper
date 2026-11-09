@@ -5852,6 +5852,12 @@ global.sessionStorage = {
   setItem(k, v) { _store[k] = String(v); },
   removeItem(k) { delete _store[k]; },
 };
+const _local = {};
+global.localStorage = {
+  getItem(k) { return Object.prototype.hasOwnProperty.call(_local, k) ? _local[k] : null; },
+  setItem(k, v) { _local[k] = String(v); },
+  removeItem(k) { delete _local[k]; },
+};
 global.window = {open(url) { opened.push(url); return {}; }};
 global.setInterval = () => 1;
 global.clearInterval = () => {};
@@ -5863,6 +5869,7 @@ let _proxyPromptSnoozedUntil = 0;
 let _proxyProblemKey = null;
 const SESSION_AUTO_RECHECK_MS = 5000;
 const SESSION_AUTO_RECHECK_WINDOW_MS = 300000;
+const SIGN_IN_OPEN_COOLDOWN_MS = 600000;
 globalThis._refreshSessionWarning = async () => { calls.push('refresh'); };
 
 const _showSessionWarning = (__SHOW__);
@@ -5902,6 +5909,75 @@ const _saveProxyCredentials = (__SAVE__);
 """
 
 
+SIGN_IN_COOLDOWN_DRIVER = """
+const opened = [];
+const elements = {};
+function _el(id) {
+  if (!elements[id]) elements[id] = {style: {}, value: '', textContent: '',
+    focus() {}, addEventListener() {}};
+  return elements[id];
+}
+global.document = {getElementById: _el};
+const _session = {};
+global.sessionStorage = {
+  getItem(k) { return Object.prototype.hasOwnProperty.call(_session, k) ? _session[k] : null; },
+  setItem(k, v) { _session[k] = String(v); },
+  removeItem(k) { delete _session[k]; },
+};
+const _local = {};
+global.localStorage = {
+  getItem(k) { return Object.prototype.hasOwnProperty.call(_local, k) ? _local[k] : null; },
+  setItem(k, v) { _local[k] = String(v); },
+  removeItem(k) { delete _local[k]; },
+};
+global.window = {open(url) { opened.push(url); return {}; }};
+global.setInterval = () => 1;
+global.clearInterval = () => {};
+let _sessionAutoRecheckIv = null;
+let _sessionAutoRecheckDeadline = 0;
+const SESSION_AUTO_RECHECK_MS = 5000;
+const SESSION_AUTO_RECHECK_WINDOW_MS = 300000;
+const SIGN_IN_OPEN_COOLDOWN_MS = 600000;
+let now = 1000000;
+Date.now = () => now;
+
+const _sessionProblemKey = (__KEY__);
+const _stopAutoRecheck = (__STOP__);
+const _startAutoRecheck = (__START__);
+const _signInCooldownActive = (__COOLDOWN__);
+const _recordSignInOpened = (__RECORD__);
+const _autoOpenSignIn = (__OPEN__);
+
+_autoOpenSignIn({detected_at: 1, login_url: 'https://steamcommunity.com/my/'});
+_autoOpenSignIn({detected_at: 2, login_url: 'https://steamcommunity.com/my/'});
+const within = opened.length;
+now += 10 * 60 * 1000 + 1;
+_autoOpenSignIn({detected_at: 3, login_url: 'https://steamcommunity.com/my/'});
+console.log(JSON.stringify({within: within, after: opened.length}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
+def test_the_sign_in_window_is_opened_at_most_once_per_ten_minutes(web_client, tmp_path):
+    """A problem re-recorded every few seconds must not steal focus each time."""
+    client, _ = web_client
+    script = _served_inline_script(client)
+    driver = SIGN_IN_COOLDOWN_DRIVER
+    for placeholder, name in (
+            ("__KEY__", "_sessionProblemKey"),
+            ("__STOP__", "_stopAutoRecheck"),
+            ("__START__", "_startAutoRecheck"),
+            ("__COOLDOWN__", "_signInCooldownActive"),
+            ("__RECORD__", "_recordSignInOpened"),
+            ("__OPEN__", "_autoOpenSignIn")):
+        driver = driver.replace(placeholder, _extract_function(script, name))
+
+    out = _run_node(driver, tmp_path)
+
+    assert out["within"] == 1, "a second problem inside the cooldown opened a window"
+    assert out["after"] == 2, "a problem after ten minutes should open a window"
+
+
 @pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
 def test_the_page_opens_the_sign_in_once_and_asks_for_proxy_credentials(web_client, tmp_path):
     """A dead login opens one sign-in tab; a 407 opens the credential prompt.
@@ -5914,6 +5990,7 @@ def test_the_page_opens_the_sign_in_once_and_asks_for_proxy_credentials(web_clie
     helpers = "\n".join(
         f"const {name} = ({_extract_function(script, name)});"
         for name in ("_sessionProblemKey", "_stopAutoRecheck", "_startAutoRecheck",
+                     "_signInCooldownActive", "_recordSignInOpened",
                      "_autoOpenSignIn", "_showProxyDialog", "_hideProxyDialog"))
     driver = AUTO_SESSION_DRIVER.replace(
         "const _showSessionWarning = (__SHOW__);",

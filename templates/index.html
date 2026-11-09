@@ -3195,6 +3195,9 @@ let _sessionWarningIv = null;
 const SESSION_WARNING_POLL_MS = 30000;
 const SESSION_AUTO_RECHECK_MS = 5000;
 const SESSION_AUTO_RECHECK_WINDOW_MS = 5 * 60 * 1000;
+// Opening a sign-in tab steals focus, so it is rate-limited across reloads and
+// tabs even when the recorded problem changes every few seconds.
+const SIGN_IN_OPEN_COOLDOWN_MS = 10 * 60 * 1000;
 let _sessionAutoRecheckIv = null;
 let _sessionAutoRecheckDeadline = 0;
 let _sessionRecheckInFlight = false;
@@ -3222,14 +3225,36 @@ function _startAutoRecheck() {
   }, SESSION_AUTO_RECHECK_MS);
 }
 
+function _signInCooldownActive() {
+  try {
+    const last = Number(localStorage.getItem('dsh.signInLastOpenedAt') || 0);
+    return Date.now() - last < SIGN_IN_OPEN_COOLDOWN_MS;
+  } catch(e) {
+    return false;
+  }
+}
+
+function _recordSignInOpened() {
+  try {
+    localStorage.setItem('dsh.signInLastOpenedAt', String(Date.now()));
+  } catch(e) {
+    // Storage disabled; the per-problem session key still limits this tab.
+  }
+}
+
 function _autoOpenSignIn(s) {
   const key = _sessionProblemKey(s);
   if (!key) return;
+  if (_signInCooldownActive()) {
+    _startAutoRecheck();
+    return;
+  }
   if (sessionStorage.getItem('dsh.signInOpenedFor') === key) {
     _startAutoRecheck();
     return;
   }
   sessionStorage.setItem('dsh.signInOpenedFor', key);
+  _recordSignInOpened();
   let win = null;
   // A named target reuses the sign-in tab a previous problem opened instead of
   // stacking a new one. `noopener` is deliberately not passed to window.open:
@@ -3390,7 +3415,7 @@ async function _saveProxyCredentials(event) {
 
 document.getElementById('session-warning-recheck').onclick = () => _recheckSession(false);
 document.getElementById('session-warning-login').addEventListener(
-  'click', () => _startAutoRecheck());
+  'click', () => { _recordSignInOpened(); _startAutoRecheck(); });
 document.getElementById('proxy-form').addEventListener('submit', _saveProxyCredentials);
 document.getElementById('proxy-cancel').addEventListener('click', () => {
   _proxyPromptSnoozedUntil = Date.now() + 10 * 60 * 1000;

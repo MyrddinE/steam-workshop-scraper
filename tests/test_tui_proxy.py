@@ -94,6 +94,7 @@ def test_the_watcher_opens_the_sign_in_page_once_per_problem(monkeypatch, tmp_pa
         _proxy_prompt_for = None
         _proxy_prompt_snoozed_until = 0.0
         _signin_opened_for = None
+        _signin_last_opened_at = 0.0
 
         def __init__(self):
             self.notices = []
@@ -207,3 +208,46 @@ def test_later_still_lets_the_proxy_prompt_return(monkeypatch):
     assert app._proxy_prompt_open is False
     assert app._proxy_prompt_for is None, "the key must not block the retry"
     assert app._proxy_prompt_snoozed_until > 0
+
+
+def test_the_tui_sign_in_window_is_throttled_to_once_per_ten_minutes(
+        monkeypatch, tmp_path):
+    """A problem re-recorded every few seconds must not steal focus each time."""
+    import src.tui as tui
+
+    opened = []
+    now = {"value": 1000.0}
+    problem = {"detected_at": 7, "detail": "expired"}
+    monkeypatch.setattr(tui.webbrowser, "open", lambda url: opened.append(url))
+    monkeypatch.setattr(tui.network, "read_auth_required", lambda db_path: None)
+    monkeypatch.setattr(tui.session_health, "read", lambda db_path: dict(problem))
+    monkeypatch.setattr(tui.time, "time", lambda: now["value"])
+
+    class _Fake:
+        db_path = str(tmp_path / "workshop.db")
+        config_path = str(tmp_path / "config.yaml")
+        config = {}
+        _proxy_prompt_open = False
+        _proxy_prompt_for = None
+        _proxy_prompt_snoozed_until = 0.0
+        _signin_opened_for = None
+        _signin_last_opened_at = 0.0
+
+        def notify(self, message, severity=None):
+            pass
+
+        def _start_session_recheck(self):
+            pass
+
+    app = _Fake()
+    tui.ScraperApp._check_network_problems(app)
+    problem["detected_at"] = 8
+    tui.ScraperApp._check_network_problems(app)
+
+    assert len(opened) == 1, "a second problem inside the cooldown opened a window"
+
+    now["value"] += 601
+    problem["detected_at"] = 9
+    tui.ScraperApp._check_network_problems(app)
+
+    assert len(opened) == 2, "a problem after ten minutes should open a window"
