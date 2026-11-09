@@ -9,6 +9,8 @@ config.yaml
 .tui_state.yaml
 .daemon_state.yaml
 .daemon_state.yaml.tmp
+.daemon.pid
+tui_state.yaml
 
 # Python
 __pycache__/
@@ -51,3 +53,4 @@ Thumbs.db
 
 # Documentation/Reference
 reference/
+
