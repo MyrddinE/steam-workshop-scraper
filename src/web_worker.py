@@ -308,7 +308,12 @@ class WebScraperThread(threading.Thread):
         """
         self.web_failures += 1
         self.web_successes = 0
-        if self.web_failures >= 2 and self.web_had_success_streak:
+        # Every failure after the first two doubles the delay. The old
+        # `web_had_success_streak` gate stopped the growth after one step, which
+        # pinned a sustained shadow signout at ~13 s and hammered it 153 times.
+        # The pacing module's rule is the right one here: a refusal means asking
+        # twice as seldom, and the spacing follows the length of the outage.
+        if self.web_failures >= 2:
             old = self.web_delay
             self.web_delay = pacing.backoff(self.web_delay)
             logging.info(f"Multiple consecutive web scrape failures! Increasing web delay from {old} to {self.web_delay}s.")

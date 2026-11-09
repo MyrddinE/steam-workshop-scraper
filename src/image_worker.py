@@ -269,7 +269,7 @@ class ImageDownloadThread(threading.Thread):
                         conn.close()
                         self.image_failures += 1
                         self.image_successes = 0
-                        if self.image_failures >= 2 and self.image_had_success_streak:
+                        if self.image_failures >= 2:
                             old = self.image_delay
                             self.image_delay = pacing.backoff(self.image_delay)
                             logging.info(f"Multiple consecutive image failures! Increasing delay from {old} to {self.image_delay}s.")

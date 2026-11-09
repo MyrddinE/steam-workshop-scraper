@@ -770,6 +770,24 @@ def test_a_transport_failure_still_grows_the_delay(db_path):
     assert worker.web_delay > WEB_DELAY_DEFAULT, "a transport failure still slows the scraper"
 
 
+def test_a_sustained_web_failure_keeps_doubling_the_delay(db_path):
+    """A shadow signout must spread requests out, not pin the delay at one step.
+
+    The old success-streak gate backed off once and then stopped, which left a
+    sustained 500 loop hammering Steam every ~13 s for over an hour.
+    """
+    from src.web_worker import WebScraperThread
+
+    worker = WebScraperThread(db_path, ".pauselock")
+    worker.web_delay = 12.0
+    worker.web_failures = 2
+    worker.web_had_success_streak = False
+
+    worker._record_web_failure()
+
+    assert worker.web_delay == 24.0
+
+
 def test_a_rate_limit_halves_the_request_rate(db_path):
     """A throttle is an unambiguous refusal, so it slows the scraper at once.
 
