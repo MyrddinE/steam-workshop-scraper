@@ -382,6 +382,17 @@ class Daemon:
         self.config_path = config_path
         from src import network
         network.set_config_path(config_path)
+        # One startup line names the config file and whether proxy credentials
+        # are available in it. A 407 later then has an answer to "is the daemon
+        # reading the file the prompt wrote?" without exposing the password.
+        try:
+            logging.info(
+                "Proxy settings from %s: %s; credentials %s",
+                network.config_path(),
+                network.proxy_url_for("https://steamcommunity.com") or "none",
+                "present" if network.has_credentials() else "missing")
+        except Exception:
+            logging.debug("Could not describe the proxy settings", exc_info=True)
         self.running = True
         
         # Implement default fallbacks
