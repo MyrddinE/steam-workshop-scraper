@@ -92,17 +92,17 @@ def test_the_same_problem_keeps_its_first_timestamp(tmp_path, monkeypatch):
     """
     db_path = str(tmp_path / "s.db")
     initialize_database(db_path)
-    monkeypatch.setattr(session_health.time, "time", lambda: 1000)
-    session_health.record_rejected(db_path, "the same sentence")
+    session_health.record_rejected(db_path, "the same sentence", now=1000)
     first = session_health.read(db_path)["detected_at"]
 
-    monkeypatch.setattr(session_health.time, "time", lambda: 2000)
-    session_health.record_rejected(db_path, "the same sentence")
+    # The subscriptions walk passes its own `seen_at`; it must not move the
+    # stamp either.
+    session_health.record_rejected(db_path, "the same sentence", now=2000)
     assert session_health.read(db_path)["detected_at"] == first
 
-    session_health.record_rejected(db_path, "a different sentence")
+    session_health.record_rejected(db_path, "a different sentence", now=3000)
     assert session_health.read(db_path) == {
-        "detail": "a different sentence", "detected_at": 2000}
+        "detail": "a different sentence", "detected_at": 3000}
 
 
 def test_a_section_without_a_sentence_reads_as_no_problem(tmp_path):

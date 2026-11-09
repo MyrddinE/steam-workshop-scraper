@@ -57,19 +57,19 @@ def record_rejected(db_path: str, detail: str, now: int | None = None) -> bool:
 
     A repeated write of the same sentence keeps the first ``detected_at``. Both
     front ends key their "open the sign-in page once" behaviour to that stamp,
-    and a worker that sees the same sign-in page on every scrape, or an
-    automatic recheck that fails every five seconds, must not make the problem
-    look new. A genuinely different sentence gets a new stamp. An explicit
-    ``now`` is honoured as given, which is what the deterministic tests use.
+    and a worker that sees the same sign-in page on every scrape, the
+    subscriptions walk, or an automatic recheck every five seconds must not make
+    the problem look new. A genuinely different sentence gets a new stamp. An
+    explicit ``now`` sets the time of a new or changed problem; it does not
+    overwrite the first stamp of an unchanged one.
     """
     detail = str(detail)
     store = StateStore(state_path_for(db_path))
-    if now is None:
-        existing = store.load().get(SECTION)
-        if isinstance(existing, dict) and existing.get("detail") == detail:
-            previous = existing.get("detected_at")
-            if isinstance(previous, (int, float)) and not isinstance(previous, bool):
-                now = int(previous)
+    existing = store.load().get(SECTION)
+    if isinstance(existing, dict) and existing.get("detail") == detail:
+        previous = existing.get("detected_at")
+        if isinstance(previous, (int, float)) and not isinstance(previous, bool):
+            now = int(previous)
     return store.save({SECTION: {
         "detail": detail,
         "detected_at": int(time.time()) if now is None else int(now),
