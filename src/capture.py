@@ -233,6 +233,9 @@ _AUTH_MARKER_CANDIDATES = (
     "sign in",
     "store.steampowered.com/login",  # the signed-out sign-in link target
     "g_steamID",
+    "Sign out of account",     # 2026 Workshop header when signed in
+    "Account details",
+    "View my profile",
 )
 
 _CLASS_RE = re.compile(rb"""class\s*=\s*["']([^"']*)["']""", re.IGNORECASE)

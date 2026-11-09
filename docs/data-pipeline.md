@@ -274,6 +274,14 @@ account dropdown and a real `g_steamID`, and 27 throttled pages carrying neither
 the signed-in markers is therefore caused by the throttling, not by a bad cookie, and a throttle
 page must not be read as evidence that the session has lapsed.
 
+**A 5xx is not evidence about the login.** The 2026 Workshop shell served a fully signed-in page
+with HTTP 500: it carried the account menu ("Sign out of account", "Account details", "View my
+profile") but none of the older `account_pulldown`/`g_steamID` markers. Reading that absence as
+anonymous recorded a session problem on every failed scrape, which the automatic recheck then
+cleared, only for the next 500 to record it again. `looks_like_signed_out` now recognises the
+2026 account phrases, and the worker records a session problem only for a served **2xx** page:
+a server fault is a statement about the request, not the cookie.
+
 **Gated pages**: A miss whose body carries no item markup but does look like an error page, an age
 check or a sign-in wall is classified `GATED`. `_refresh_login_cookie_if_gated_or_signed_out` has already re-read the
 login cookie when the page looked gated or signed out, so the next request carries the freshest

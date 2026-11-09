@@ -415,6 +415,37 @@ def test_a_signed_in_page_leaves_a_healthy_session_alone():
     assert session_health.read("test.db") is None
 
 
+def test_a_500_signed_in_page_is_not_evidence_of_a_dead_login():
+    """The live 500 shell was signed in but had none of the old markers.
+
+    A server fault is not an answer about the cookie; recording it made every
+    recheck clear a problem the next 500 immediately recreated.
+    """
+    from src import session_health
+    from src.web_worker import WebScraperThread
+    session_health.record_accepted("test.db")
+    body = ("<div>Account details</div><a>Sign out of account</a>"
+            "<a>View my profile</a>")
+
+    WebScraperThread("test.db", "nope.lock", None,
+                     lambda: True)._record_session_health_from(body, 500)
+
+    assert session_health.read("test.db") is None
+
+
+def test_a_200_2026_signed_in_page_is_healthy():
+    from src import session_health
+    from src.web_worker import WebScraperThread
+    session_health.record_rejected("test.db", "the login cookie expired", now=1000)
+    body = ("<div>Account details</div><a>Sign out of account</a>"
+            "<a>View my profile</a>")
+
+    WebScraperThread("test.db", "nope.lock", None,
+                     lambda: True)._record_session_health_from(body, 200)
+
+    assert session_health.read("test.db") is None
+
+
 def test_a_throttled_page_makes_no_claim_about_the_cookie():
     """A throttle is not evidence about the login, so it must neither raise the
     warning nor clear one that is already up."""

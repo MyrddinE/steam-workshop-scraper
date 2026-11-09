@@ -192,18 +192,32 @@ def looks_like_rate_limited(body: str) -> bool:
     return any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
 
 
+# The header's signed-in markers. The old `account_pulldown`/`g_steamID` pair
+# is not present in the 2026 Workshop shell: a signed-in 500 page from the live
+# captures contains "Sign out of account", "Account details" and "View my
+# profile" but neither of the old markers. Treat any of these account-specific
+# phrases as proof of a session; an error page must not be mistaken for a
+# sign-in wall just because the old dropdown moved.
+_SIGNED_IN_MARKERS = (
+    "account_pulldown",
+    "Sign out of account",
+    "Account details",
+    "View my profile",
+)
+
+
 def looks_like_signed_out(body: str) -> bool:
     """Whether the page was served to an anonymous visitor.
 
-    The header carries an account dropdown once Steam recognises a session, so
-    its absence is the most direct sign that the request was anonymous — which is
+    The header carries an account menu once Steam recognises a session, so its
+    absence is the most direct sign that the request was anonymous — which is
     what a stale login cookie produces, and what the captured pages showed:
     present in every signed-in capture, absent in all of the anonymous ones.
     `g_steamID` is the cross-check, since it is `false` when signed out.
     """
     if not body:
         return False
-    if "account_pulldown" in body:
+    if any(marker in body for marker in _SIGNED_IN_MARKERS):
         return False
     match = re.search(r"g_steamID\s*=\s*\"?([^\";\s]+)", body, re.IGNORECASE)
     return match is None or match.group(1).lower() == "false"

@@ -235,9 +235,11 @@ class WebScraperThread(threading.Thread):
         # direction. Every other miss does: this records the problem, or clears
         # one the fresh page disproves.
         if not looks_like_rate_limited(body):
-            self._record_session_health_from(body)
+            self._record_session_health_from(
+                body, scrape_result.get("http_status") if scrape_result else None)
 
-    def _record_session_health_from(self, body: str) -> None:
+    def _record_session_health_from(self, body: str,
+                                    http_status: int | None = None) -> None:
         """Record or clear the login problem a failed scrape is evidence of.
 
         The predicate is :func:`looks_like_signed_out`, the specific one, rather than
@@ -248,11 +250,19 @@ class WebScraperThread(threading.Thread):
         age check) reads the same way -- which is affordable because the warning
         names the remedy and the recheck button clears it from the token alone.
 
-        An empty body claims nothing in either direction. This runs on the
-        scraped page rather than on the cookie alone because Steam's answer is
-        what settles the question -- a token can look valid and still be refused.
+        An empty body claims nothing in either direction. A non-2xx response is
+        a server answer about the request, not about the login: the 2026 Steam
+        shell returned a fully signed-in page with HTTP 500 and no old markers,
+        and treating that as anonymous re-recorded the session problem after
+        every recheck cleared it. Only a served 2xx page is evidence.
+
+        This runs on the scraped page rather than on the cookie alone because
+        Steam's answer is what settles the question -- a token can look valid
+        and still be refused.
         """
         if not body:
+            return
+        if isinstance(http_status, int) and not (200 <= http_status < 300):
             return
         if looks_like_signed_out(body):
             session_health.record_rejected(self.db_path, session_health.NOT_ACCEPTED_DETAIL)
@@ -461,10 +471,35 @@ class WebScraperThread(threading.Thread):
             conn.close()
         else:
             self._capture_scrape_failure(item, url, scrape_result, failure_kind="web_unknown")
-            logging.warning(
-                "[W:%s] Page was not the item's and matched no known condition "
-                "(HTTP %s); leaving web_scrape_priority unchanged and backing off.",
-                workshop_id, scrape_result.get("http_status"))
+            status = scrape_result.get("http_status")
+            if isinstance(status, int) and status >= 500:
+                # A server fault is not the item's page, and leaving the
+                # priority untouched let one permanently broken page (the live
+                # 500 shell was retried 153 times) monopolise the worker: it
+                # was always the highest-priority row, so no other item was
+                # reached. Yield one place; the API re-raises the item if its
+                # description is still missing, which is the normal way back in.
+                conn = get_connection(self.db_path)
+                conn.execute(
+                    "UPDATE workshop_items SET web_scrape_priority = "
+                    "CASE WHEN web_scrape_priority > 0 "
+                    "THEN web_scrape_priority - 1 ELSE 0 END "
+                    "WHERE workshop_id = ?",
+                    (workshop_id,))
+                conn.commit()
+                conn.close()
+                logging.warning(
+                    "[W:%s] Page was not the item's and matched no known "
+                    "condition (HTTP %s); lowering web_scrape_priority by one "
+                    "and backing off.", workshop_id, status)
+            else:
+                # A served 200 page that is not the item is left in place: a
+                # layout change is not a server fault, and the existing policy
+                # keeps the item's queue position for it.
+                logging.warning(
+                    "[W:%s] Page was not the item's and matched no known "
+                    "condition (HTTP %s); leaving web_scrape_priority unchanged "
+                    "and backing off.", workshop_id, status)
         self._record_web_failure()
 
     def run(self):

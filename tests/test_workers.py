@@ -681,6 +681,22 @@ def test_classify_scrape_names_every_outcome():
     ) is ScrapeOutcome.UNKNOWN
 
 
+def test_a_served_unknown_page_yields_one_queue_place(db_path):
+    """A permanently broken page must not monopolise the web worker."""
+    from src.database import insert_or_update_item
+    from src.web_worker import WebScraperThread
+
+    insert_or_update_item(db_path, {"workshop_id": 1, "web_scrape_priority": 5})
+    worker = WebScraperThread(db_path, ".pauselock")
+
+    worker = _run_web_worker(
+        db_path, {"workshop_id": 1, "steam_updated_at": 1},
+        dict(MISS, http_status=500, body="<html>signed-in shell</html>"),
+        worker=worker)
+
+    assert _web_scrape_priority(db_path) == 4, "the item yields to the rest of the queue"
+
+
 def test_a_proxy_407_leaves_the_item_queued_and_records_the_problem(db_path):
     """The proxy is not the item's fault and not a pacing signal."""
     from src import network

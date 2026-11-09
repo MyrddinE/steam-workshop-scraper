@@ -293,6 +293,9 @@ def test_the_current_session_token_key_wins_and_the_retired_key_still_warns(capl
     ('<html>nothing here</html>', True),                        # anonymous
     ('<script>var g_steamID = false;</script>', True),          # explicitly signed out
     ('<script>var g_steamID = "76561198000000000";</script>', False),  # a real id is signed in
+    # The 2026 Workshop header has neither old marker; these account phrases are
+    # the signed-in evidence in the live 500 capture.
+    ('<div>Account details</div><a>Sign out of account</a><a>View my profile</a>', False),
     ("", False),
 ])
 def test_looks_like_signed_out(body, expected):
