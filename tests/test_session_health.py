@@ -427,3 +427,48 @@ def test_the_banner_is_hidden_until_a_problem_is_reported():
     assert '/api/session' in html
     assert '/api/session/recheck' in html
     assert '_refreshSessionWarning' in html
+
+
+def test_the_sign_in_claim_is_shared_and_throttled(web_client):
+    """One POST claims; a second is refused, and a manual open records it."""
+    client, _, _ = web_client
+
+    first = client.post('/api/session/sign_in_opened',
+                        json={"claim": True}).get_json()
+    second = client.post('/api/session/sign_in_opened',
+                         json={"claim": True}).get_json()
+
+    assert first["allowed"] is True
+    assert second["allowed"] is False
+    assert second["cooldown_remaining"] > 0
+
+    manual = client.post('/api/session/sign_in_opened',
+                         json={"claim": False}).get_json()
+    assert manual["allowed"] is True
+    assert client.post('/api/session/sign_in_opened',
+                       json={"claim": True}).get_json()["allowed"] is False
+
+
+def test_the_session_route_reports_the_shared_sign_in_cooldown(web_client):
+    client, _, _ = web_client
+    client.post('/api/session/sign_in_opened', json={"claim": True})
+
+    body = client.get('/api/session').get_json()
+
+    assert body["sign_in"]["opened_at"] is not None
+    assert body["sign_in"]["cooldown_remaining"] > 0
+
+
+def test_a_tui_claim_blocks_the_web_claim_and_vice_versa(web_client):
+    """The two front ends use the same file/function, not two local timers."""
+    from src import signin
+
+    client, db_path, _ = web_client
+
+    assert signin.claim_open(db_path) is True
+    assert client.post('/api/session/sign_in_opened',
+                       json={"claim": True}).get_json()["allowed"] is False
+
+    # A successful web claim after the cooldown would block the TUI; simulate
+    # the clock instead of waiting ten minutes.
+    assert signin.claim_open(db_path, now=signin.opened_at(db_path) + 1) is False

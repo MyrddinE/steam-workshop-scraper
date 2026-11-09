@@ -5852,12 +5852,6 @@ global.sessionStorage = {
   setItem(k, v) { _store[k] = String(v); },
   removeItem(k) { delete _store[k]; },
 };
-const _local = {};
-global.localStorage = {
-  getItem(k) { return Object.prototype.hasOwnProperty.call(_local, k) ? _local[k] : null; },
-  setItem(k, v) { _local[k] = String(v); },
-  removeItem(k) { delete _local[k]; },
-};
 global.window = {open(url) { opened.push(url); return {}; }};
 global.setInterval = () => 1;
 global.clearInterval = () => {};
@@ -5869,23 +5863,22 @@ let _proxyPromptSnoozedUntil = 0;
 let _proxyProblemKey = null;
 const SESSION_AUTO_RECHECK_MS = 5000;
 const SESSION_AUTO_RECHECK_WINDOW_MS = 300000;
-const SIGN_IN_OPEN_COOLDOWN_MS = 600000;
 globalThis._refreshSessionWarning = async () => { calls.push('refresh'); };
 
 const _showSessionWarning = (__SHOW__);
 const _saveProxyCredentials = (__SAVE__);
 
 (async () => {
-  _showSessionWarning({problem: true, detected_at: 7, detail: 'expired',
-                       login_url: 'https://steamcommunity.com/my/'});
-  _showSessionWarning({problem: true, detected_at: 7, detail: 'expired',
-                       login_url: 'https://steamcommunity.com/my/'});
+  await _showSessionWarning({problem: true, detected_at: 7, detail: 'expired',
+                             login_url: 'https://steamcommunity.com/my/'});
+  await _showSessionWarning({problem: true, detected_at: 7, detail: 'expired',
+                             login_url: 'https://steamcommunity.com/my/'});
   const firstOpened = opened.length;
 
-  _showSessionWarning({problem: false, detected_at: 7,
-                       login_url: 'https://steamcommunity.com/my/',
-                       proxy: {problem: true, url: 'http://proxy.example:8080',
-                               detail: 'proxy auth required'}});
+  await _showSessionWarning({problem: false, detected_at: 7,
+                             login_url: 'https://steamcommunity.com/my/',
+                             proxy: {problem: true, url: 'http://proxy.example:8080',
+                                     detail: 'proxy auth required'}});
   const proxyDisplay = _el('proxy-modal').style.display;
 
   _el('proxy-url').value = 'http://proxy.example:8080';
@@ -5909,8 +5902,9 @@ const _saveProxyCredentials = (__SAVE__);
 """
 
 
-SIGN_IN_COOLDOWN_DRIVER = """
+SIGN_IN_CLAIM_DRIVER = """
 const opened = [];
+const calls = [];
 const elements = {};
 function _el(id) {
   if (!elements[id]) elements[id] = {style: {}, value: '', textContent: '',
@@ -5924,12 +5918,6 @@ global.sessionStorage = {
   setItem(k, v) { _session[k] = String(v); },
   removeItem(k) { delete _session[k]; },
 };
-const _local = {};
-global.localStorage = {
-  getItem(k) { return Object.prototype.hasOwnProperty.call(_local, k) ? _local[k] : null; },
-  setItem(k, v) { _local[k] = String(v); },
-  removeItem(k) { delete _local[k]; },
-};
 global.window = {open(url) { opened.push(url); return {}; }};
 global.setInterval = () => 1;
 global.clearInterval = () => {};
@@ -5937,64 +5925,82 @@ let _sessionAutoRecheckIv = null;
 let _sessionAutoRecheckDeadline = 0;
 const SESSION_AUTO_RECHECK_MS = 5000;
 const SESSION_AUTO_RECHECK_WINDOW_MS = 300000;
-const SIGN_IN_OPEN_COOLDOWN_MS = 600000;
-let now = 1000000;
-Date.now = () => now;
+let claimAllowed = true;
+global.fetch = async (path) => {
+  calls.push(path);
+  return {ok: true, json: async () => ({
+    allowed: claimAllowed,
+    cooldown_remaining: claimAllowed ? 0 : 600,
+  })};
+};
 
 const _sessionProblemKey = (__KEY__);
 const _stopAutoRecheck = (__STOP__);
 const _startAutoRecheck = (__START__);
-const _signInCooldownActive = (__COOLDOWN__);
-const _recordSignInOpened = (__RECORD__);
+const _claimSignInOpen = (__CLAIM__);
 const _autoOpenSignIn = (__OPEN__);
 
-_autoOpenSignIn({detected_at: 1, login_url: 'https://steamcommunity.com/my/'});
-_autoOpenSignIn({detected_at: 2, login_url: 'https://steamcommunity.com/my/'});
-const within = opened.length;
-now += 10 * 60 * 1000 + 1;
-_autoOpenSignIn({detected_at: 3, login_url: 'https://steamcommunity.com/my/'});
-console.log(JSON.stringify({within: within, after: opened.length}));
+(async () => {
+  await _autoOpenSignIn({detected_at: 1, login_url: 'https://steamcommunity.com/my/'});
+  claimAllowed = false;
+  await _autoOpenSignIn({detected_at: 2, login_url: 'https://steamcommunity.com/my/'});
+  const within = opened.length;
+  const refusedHint = _el('session-warning-hint').textContent;
+  claimAllowed = true;
+  await _autoOpenSignIn({detected_at: 3, login_url: 'https://steamcommunity.com/my/'});
+  console.log(JSON.stringify({within: within, after: opened.length,
+                              calls: calls, refusedHint: refusedHint}));
+})();
 """
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
-def test_the_sign_in_window_is_opened_at_most_once_per_ten_minutes(web_client, tmp_path):
-    """A problem re-recorded every few seconds must not steal focus each time."""
+def test_the_sign_in_window_honours_the_shared_cooldown(web_client, tmp_path):
+    """The page only opens when the server's one authority says it may."""
     client, _ = web_client
     script = _served_inline_script(client)
-    driver = SIGN_IN_COOLDOWN_DRIVER
+    driver = SIGN_IN_CLAIM_DRIVER
     for placeholder, name in (
             ("__KEY__", "_sessionProblemKey"),
             ("__STOP__", "_stopAutoRecheck"),
             ("__START__", "_startAutoRecheck"),
-            ("__COOLDOWN__", "_signInCooldownActive"),
-            ("__RECORD__", "_recordSignInOpened"),
+            ("__CLAIM__", "_claimSignInOpen"),
             ("__OPEN__", "_autoOpenSignIn")):
         driver = driver.replace(placeholder, _extract_function(script, name))
 
     out = _run_node(driver, tmp_path)
 
-    assert out["within"] == 1, "a second problem inside the cooldown opened a window"
-    assert out["after"] == 2, "a problem after ten minutes should open a window"
+    assert out["within"] == 1, "a refused claim must not open a window"
+    assert out["after"] == 2, "an allowed claim after the cooldown opens a window"
+    assert out["calls"].count("/api/session/sign_in_opened") == 3
+    assert "recently opened" in out["refusedHint"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed; cannot exercise the served JavaScript")
 def test_the_page_opens_the_sign_in_once_and_asks_for_proxy_credentials(web_client, tmp_path):
-    """A dead login opens one sign-in tab; a 407 opens the credential prompt.
+    """A dead login claims one sign-in tab; a 407 opens the credential prompt.
 
-    The sign-in tab is opened once per recorded problem, not once per poll, and
-    the proxy prompt posts the three fields the server saves.
+    The sign-in claim goes through the server, so the TUI and the page share the
+    cooldown. The proxy prompt still posts the three fields the server saves.
     """
     client, _ = web_client
     script = _served_inline_script(client)
     helpers = "\n".join(
         f"const {name} = ({_extract_function(script, name)});"
         for name in ("_sessionProblemKey", "_stopAutoRecheck", "_startAutoRecheck",
-                     "_signInCooldownActive", "_recordSignInOpened",
-                     "_autoOpenSignIn", "_showProxyDialog", "_hideProxyDialog"))
+                     "_claimSignInOpen", "_autoOpenSignIn", "_showProxyDialog",
+                     "_hideProxyDialog"))
     driver = AUTO_SESSION_DRIVER.replace(
         "const _showSessionWarning = (__SHOW__);",
-        helpers + "\nconst _showSessionWarning = (__SHOW__);")
+        helpers + "\nlet _claimAllowed = true;\n"
+        "global.fetch = async (path, opts) => {\n"
+        "  fetchCalls.push({path: path, body: opts && opts.body});\n"
+        "  if (path === '/api/session/sign_in_opened') {\n"
+        "    return {ok: true, json: async () => ({allowed: _claimAllowed,\n"
+        "                                          cooldown_remaining: 0})};\n"
+        "  }\n"
+        "  return {ok: true, json: async () => ({ok: true})};\n"
+        "};\nconst _showSessionWarning = (__SHOW__);")
     driver = driver.replace(
         "__SHOW__", _extract_function(script, "_showSessionWarning"))
     driver = driver.replace(
@@ -6002,11 +6008,13 @@ def test_the_page_opens_the_sign_in_once_and_asks_for_proxy_credentials(web_clie
 
     out = _run_node(driver, tmp_path)
 
-    assert out["firstOpened"] == 1, "the same problem must not open a tab per poll"
+    assert out["firstOpened"] == 1, "the same problem must not claim a tab per poll"
     assert out["opened"] == ["https://steamcommunity.com/my/"]
     assert out["proxyDisplay"] == "block"
-    assert out["fetchCalls"][0]["path"] == "/api/proxy_credentials"
-    body = json.loads(out["fetchCalls"][0]["body"])
+    proxy_calls = [call for call in out["fetchCalls"]
+                   if call["path"] == "/api/proxy_credentials"]
+    assert len(proxy_calls) == 1
+    body = json.loads(proxy_calls[0]["body"])
     assert body == {"url": "http://proxy.example:8080",
                     "username": "operator", "password": "s3cret"}
     assert out["modalAfter"] == "none"

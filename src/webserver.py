@@ -18,6 +18,7 @@ from src import network
 from src import pending
 from src import session_health
 from src import session_refresh
+from src import signin
 from src import sort_diagnostic
 from src import subscribe_engine
 from src import subscription
@@ -436,6 +437,10 @@ def api_session():
             "detail": proxy.get("detail"),
             "detected_at": proxy.get("detected_at"),
         },
+        "sign_in": {
+            "opened_at": signin.opened_at(_db_path),
+            "cooldown_remaining": signin.cooldown_remaining(_db_path),
+        },
     })
 
 
@@ -458,6 +463,31 @@ def api_session_recheck():
                         "detail": f"the login check failed unexpectedly: {exc}"}), 500
     status = 500 if result.get("save_failed") else 200
     return jsonify(result), status
+
+
+@app.route('/api/session/sign_in_opened', methods=['POST'])
+def api_sign_in_opened():
+    """The one authority for opening an automatic sign-in window.
+
+    The TUI and the web UI run in different processes; this endpoint and
+    :mod:`src.signin` are the single rule they share. A JSON body with
+    ``claim: true`` (the default) asks permission and records the window only
+    when allowed; ``claim: false`` records a user-initiated open so the other
+    front end does not follow it. The answer always carries the remaining
+    cooldown so the page can show why it did not open.
+    """
+    data = request.get_json(silent=True) or {}
+    claim = bool(data.get("claim", True))
+    if claim:
+        allowed = signin.claim_open(_db_path)
+    else:
+        signin.record_open(_db_path)
+        allowed = True
+    return jsonify({
+        "allowed": allowed,
+        "opened_at": signin.opened_at(_db_path),
+        "cooldown_remaining": signin.cooldown_remaining(_db_path),
+    })
 
 
 @app.route('/api/proxy_credentials', methods=['POST'])

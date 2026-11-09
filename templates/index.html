@@ -3195,9 +3195,6 @@ let _sessionWarningIv = null;
 const SESSION_WARNING_POLL_MS = 30000;
 const SESSION_AUTO_RECHECK_MS = 5000;
 const SESSION_AUTO_RECHECK_WINDOW_MS = 5 * 60 * 1000;
-// Opening a sign-in tab steals focus, so it is rate-limited across reloads and
-// tabs even when the recorded problem changes every few seconds.
-const SIGN_IN_OPEN_COOLDOWN_MS = 10 * 60 * 1000;
 let _sessionAutoRecheckIv = null;
 let _sessionAutoRecheckDeadline = 0;
 let _sessionRecheckInFlight = false;
@@ -3225,36 +3222,52 @@ function _startAutoRecheck() {
   }, SESSION_AUTO_RECHECK_MS);
 }
 
-function _signInCooldownActive() {
+// The cooldown is owned by the server (src/signin.py), because the TUI and the
+// web UI are different processes. The page claims before opening; the TUI calls
+// the same function directly. The rate limit is therefore shared.
+async function _claimSignInOpen() {
   try {
-    const last = Number(localStorage.getItem('dsh.signInLastOpenedAt') || 0);
-    return Date.now() - last < SIGN_IN_OPEN_COOLDOWN_MS;
+    const resp = await fetch('/api/session/sign_in_opened', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({claim: true}),
+    });
+    return await resp.json();
   } catch(e) {
-    return false;
+    console.debug('Sign-in cooldown claim failed', e);
+    return {allowed: false, cooldown_remaining: 0};
   }
 }
 
-function _recordSignInOpened() {
+async function _recordSignInOpened() {
   try {
-    localStorage.setItem('dsh.signInLastOpenedAt', String(Date.now()));
+    await fetch('/api/session/sign_in_opened', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({claim: false}),
+    });
   } catch(e) {
-    // Storage disabled; the per-problem session key still limits this tab.
+    console.debug('Could not record the manual sign-in open', e);
   }
 }
 
-function _autoOpenSignIn(s) {
+async function _autoOpenSignIn(s) {
   const key = _sessionProblemKey(s);
   if (!key) return;
-  if (_signInCooldownActive()) {
-    _startAutoRecheck();
-    return;
-  }
   if (sessionStorage.getItem('dsh.signInOpenedFor') === key) {
     _startAutoRecheck();
     return;
   }
+  const claim = await _claimSignInOpen();
+  if (!claim || !claim.allowed) {
+    const hint = document.getElementById('session-warning-hint');
+    if (hint && claim && claim.cooldown_remaining > 0) {
+      hint.textContent = '(Sign-in window recently opened; use the link.)';
+    }
+    _startAutoRecheck();
+    return;
+  }
   sessionStorage.setItem('dsh.signInOpenedFor', key);
-  _recordSignInOpened();
   let win = null;
   // A named target reuses the sign-in tab a previous problem opened instead of
   // stacking a new one. `noopener` is deliberately not passed to window.open:
@@ -3276,7 +3289,7 @@ function _autoOpenSignIn(s) {
   _startAutoRecheck();
 }
 
-function _showSessionWarning(s) {
+async function _showSessionWarning(s) {
   const el = document.getElementById('session-warning');
   if (!el) return;
   const proxy = s.proxy || {};
@@ -3300,14 +3313,14 @@ function _showSessionWarning(s) {
   const link = document.getElementById('session-warning-login');
   if (link && s.login_url) link.href = s.login_url;
   el.style.display = 'flex';
-  _autoOpenSignIn(s);
+  await _autoOpenSignIn(s);
 }
 
 async function _refreshSessionWarning() {
   try {
     const resp = await fetch('/api/session');
     const s = await resp.json();
-    _showSessionWarning(s);
+    await _showSessionWarning(s);
   } catch(e) { console.debug('Session warning poll error', e); /* keep polling */ }
 }
 

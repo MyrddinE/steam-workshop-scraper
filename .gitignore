@@ -10,6 +10,10 @@ config.yaml
 .daemon_state.yaml
 .daemon_state.yaml.tmp
 .daemon.pid
+# The shared automatic-sign-in cooldown stamp and its transient lock.
+.signin_opened_at
+.signin_opened_at.lock
+.signin_opened_at.*.tmp
 tui_state.yaml
 
 # Python

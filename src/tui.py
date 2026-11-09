@@ -26,6 +26,7 @@ from src import item_updates
 from src import pending
 from src import session_health
 from src import session_refresh
+from src import signin
 from src import subscription
 from src import subscribe_engine
 from src import crash
@@ -2338,11 +2339,6 @@ def app_bindings(platform: str | None = None) -> list[tuple[str, str, str]]:
     return bindings
 
 
-# A sign-in window steals focus. Even if the recorded problem changes every few
-# seconds, open at most one every ten minutes; the recheck keeps running.
-SIGN_IN_OPEN_COOLDOWN_SECONDS = 10 * 60.0
-
-
 class ProxyCredentialsScreen(ModalScreen):
     """Ask for the credentials an authenticating HTTP proxy demands.
 
@@ -2740,7 +2736,6 @@ class ScraperApp(App):
         self._proxy_prompt_for = None
         self._proxy_prompt_snoozed_until = 0.0
         self._signin_opened_for = None
-        self._signin_last_opened_at = 0.0
         self._session_recheck_timer = None
         self._session_recheck_deadline = 0.0
         self._session_recheck_running = False
@@ -3003,15 +2998,13 @@ class ScraperApp(App):
         key = problem.get("detected_at") or problem.get("detail")
         if key == self._signin_opened_for:
             return
-        now = time.time()
-        if now - self._signin_last_opened_at < SIGN_IN_OPEN_COOLDOWN_SECONDS:
-            # The problem may be re-recorded with a new timestamp every few
-            # seconds; do not steal focus for each one. Keep checking in the
-            # background, and let the user use the web UI's link if they want.
+        # The one shared rule. The web UI claims through
+        # `/api/session/sign_in_opened`, which calls this same function, so the
+        # two front ends cannot both open a window inside the cooldown.
+        if not signin.claim_open(self.db_path):
             self._start_session_recheck()
             return
         self._signin_opened_for = key
-        self._signin_last_opened_at = now
         self.notify("Steam session expired; opening the sign-in page.",
                     severity="warning")
         try:

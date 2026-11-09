@@ -94,9 +94,12 @@ and waits rather than decaying it or growing a pacing delay. The web UI shows
 the same two conditions through `#session-warning` and `#proxy-modal`.
 
 The automatic sign-in window is throttled to **at most once per ten minutes**
-(`SIGN_IN_OPEN_COOLDOWN_SECONDS`). A problem re-recorded every few seconds keeps
-the background recheck running but does not keep stealing focus; the operator
-can still open the page by hand.
+by `signin.claim_open(db_path)`, the same `src/signin.py` function the web UI's
+`/api/session/sign_in_opened` route calls. The stamp is a file beside the
+database, so the two front ends share one cooldown even though they are separate
+processes. A problem re-recorded every few seconds keeps the background recheck
+running but does not keep stealing focus; the operator can still open the page
+by hand.
 
 ---
 
