@@ -84,6 +84,27 @@ def test_a_later_problem_replaces_the_earlier_one(tmp_path):
     assert session_health.read(db_path) == {"detail": "revoked", "detected_at": 2000}
 
 
+def test_the_same_problem_keeps_its_first_timestamp(tmp_path, monkeypatch):
+    """Both front ends key their one sign-in tab to `detected_at`.
+
+    A worker that sees the same sign-in page on every scrape, or an automatic
+    recheck that fails every five seconds, must not make the problem look new.
+    """
+    db_path = str(tmp_path / "s.db")
+    initialize_database(db_path)
+    monkeypatch.setattr(session_health.time, "time", lambda: 1000)
+    session_health.record_rejected(db_path, "the same sentence")
+    first = session_health.read(db_path)["detected_at"]
+
+    monkeypatch.setattr(session_health.time, "time", lambda: 2000)
+    session_health.record_rejected(db_path, "the same sentence")
+    assert session_health.read(db_path)["detected_at"] == first
+
+    session_health.record_rejected(db_path, "a different sentence")
+    assert session_health.read(db_path) == {
+        "detail": "a different sentence", "detected_at": 2000}
+
+
 def test_a_section_without_a_sentence_reads_as_no_problem(tmp_path):
     """An unexplained warning is worse than none, so it is not reported."""
     db_path = str(tmp_path / "s.db")
