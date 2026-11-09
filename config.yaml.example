@@ -24,6 +24,9 @@ daemon:
 #   username: "operator"
 #   password: "s3cret"
 #   no_proxy: "localhost,127.0.0.1"
+#   # If the proxy inspects TLS (e2guardian/Squid SSL bump), point this at the
+#   # proxy's CA certificate in PEM form; Python does not use the Windows store.
+#   ca_bundle: "C:\path\to\proxy-ca.pem"
 
 openai:
   api_key: "YOUR_OPENAI_API_KEY_HERE" # Can be overridden by OPENAI_API_KEY env var

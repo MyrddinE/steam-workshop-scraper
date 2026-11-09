@@ -168,8 +168,10 @@ def _create_openai_client(openai_config: dict) -> OpenAI:
     if proxy_url:
         try:
             import httpx2
+            verify = network.verify_setting()
             client_kwargs["http_client"] = httpx2.Client(
-                proxy=proxy_url, trust_env=False)
+                proxy=proxy_url, trust_env=False,
+                **({"verify": verify} if verify is not True else {}))
         except Exception as exc:  # noqa: BLE001 - a missing optional client is not fatal
             logging.debug("Could not configure the proxy for the OpenAI client: %s", exc)
     return OpenAI(**client_kwargs)

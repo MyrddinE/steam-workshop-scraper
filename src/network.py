@@ -248,6 +248,53 @@ def proxy_url_with_credentials(url: str, config: dict | None = None) -> str:
     return settings.get("https") or settings.get("http") or ""
 
 
+# CA bundle paths already warned about; verify_setting runs per request.
+_WARNED_CA_PATHS: set[str] = set()
+
+
+def ca_bundle(config: dict | None = None) -> str:
+    """The PEM bundle that should verify the proxy's TLS certificates, or ``""``.
+
+    Config wins, then the standard requests/OpenSSL variables. The e2guardian
+    interception CA is not in certifi, so without one of these a MITM'd Steam
+    request fails with ``CERTIFICATE_VERIFY_FAILED`` even though the browser
+    trusts the proxy.
+    """
+    section = _section(config if config is not None else load_current_config())
+    configured = str(section.get("ca_bundle") or "").strip()
+    if configured:
+        return configured
+    for name in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE"):
+        value = os.environ.get(name)
+        if value:
+            return value
+    return ""
+
+
+def verify_setting(config: dict | None = None):
+    """The ``verify`` value for ``requests``/``httpx``: a CA path or ``True``."""
+    path = ca_bundle(config)
+    if not path:
+        return True
+    if path not in _WARNED_CA_PATHS and not os.path.exists(path):
+        _WARNED_CA_PATHS.add(path)
+        logging.warning(
+            "Configured CA bundle does not exist: %s. TLS verification will fail "
+            "until it does.", path)
+    return path
+
+
+def has_credentials(config: dict | None = None) -> bool:
+    """Whether a saved proxy username and password are available.
+
+    Diagnostic only: a 407 beside this being true means the proxy rejected the
+    credentials or their authentication scheme, not that they were absent.
+    """
+    username, password = _configured_credentials(
+        config if config is not None else load_current_config())
+    return bool(username and password)
+
+
 def proxy_error(exc: BaseException) -> dict | None:
     """What a 407 exception says, or ``None`` when it is not one.
 

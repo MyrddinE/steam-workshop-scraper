@@ -468,6 +468,7 @@ def verify_login(config: dict | None = None) -> dict:
         response = _get_session().get(
             LOGIN_CHECK_URL, cookies=cookies, headers=BROWSER_HEADERS,
             proxies=proxies, timeout=15,
+            verify=network.verify_setting(config),
         )
         response.raise_for_status()
     except requests.exceptions.ProxyError as exc:
@@ -477,6 +478,16 @@ def verify_login(config: dict | None = None) -> dict:
                 "Login check could not reach Steam: the HTTP proxy %s requires "
                 "authentication (407).", proxy["proxy_url"] or "<detected>")
             return {"ok": False, "proxy_auth_required": True, **proxy}
+        return {"ok": False, "detail": f"Could not reach Steam: {exc}"}
+    except requests.exceptions.SSLError as exc:
+        if "CERTIFICATE_VERIFY_FAILED" in str(exc) or "local issuer" in str(exc):
+            detail = (
+                "TLS certificate verification failed. Python does not trust the "
+                "proxy's interception CA; set proxy.ca_bundle to its PEM file "
+                "(or REQUESTS_CA_BUNDLE) and restart."
+            )
+            logging.warning("Login check: %s %s", detail, exc)
+            return {"ok": False, "detail": detail, "tls_trust_required": True}
         return {"ok": False, "detail": f"Could not reach Steam: {exc}"}
     except requests.exceptions.RequestException as exc:
         return {"ok": False, "detail": f"Could not reach Steam: {exc}"}
@@ -530,7 +541,8 @@ def scrape_extended_details(item_url: str, keep_body: bool = False) -> dict | No
     }
     try:
         response = session.get(item_url, timeout=10, cookies=cookies,
-                               headers=BROWSER_HEADERS, proxies=proxies)
+                               headers=BROWSER_HEADERS, proxies=proxies,
+                               verify=network.verify_setting(config))
         response.raise_for_status()
 
         description_element = response.html.find(DESCRIPTION_SELECTOR, first=True)
@@ -580,8 +592,9 @@ def scrape_extended_details(item_url: str, keep_body: bool = False) -> dict | No
         if proxy:
             logging.warning(
                 "Workshop request to %s was refused by the HTTP proxy %s "
-                "(407 Proxy Authentication Required).",
-                item_url, proxy["proxy_url"] or "<detected>")
+                "(407 Proxy Authentication Required; saved credentials %s).",
+                item_url, proxy["proxy_url"] or "<detected>",
+                "present" if network.has_credentials(config) else "missing")
             return {
                 "description": None,
                 "tags": [],
@@ -595,6 +608,24 @@ def scrape_extended_details(item_url: str, keep_body: bool = False) -> dict | No
         logging.warning(
             "Workshop request to %s could not reach Steam through its proxy: %s",
             item_url, exc)
+        return None
+    except requests.exceptions.SSLError as exc:
+        if "CERTIFICATE_VERIFY_FAILED" in str(exc) or "local issuer" in str(exc):
+            logging.warning(
+                "TLS verification to %s failed: Python does not trust the "
+                "proxy's interception CA. Set proxy.ca_bundle to the e2guardian "
+                "CA PEM (or REQUESTS_CA_BUNDLE) and restart. %s",
+                item_url, exc)
+            return {
+                "description": None, "tags": [], "body": None,
+                "http_status": None, "final_url": item_url,
+                "request": request, "tls_trust_required": True,
+                "detail": (
+                    "TLS certificate verification failed; set proxy.ca_bundle "
+                    "to the proxy's CA PEM"),
+            }
+        logging.warning("Workshop request to %s failed with an SSL error: %s",
+                        item_url, exc)
         return None
     except requests.exceptions.RequestException as exc:
         # A genuine transport failure has no response and no status, so None
@@ -627,7 +658,8 @@ def discover_items_by_date_html(appid: int, updated_after: int, updated_before: 
     try:
         response = session.get(url, cookies=cookies, timeout=15,
                                headers=BROWSER_HEADERS,
-                               proxies=network.proxies_for(url, config))
+                               proxies=network.proxies_for(url, config),
+                               verify=network.verify_setting(config))
         response.raise_for_status()
         ids = _extract_item_ids_from_page(response)
         total_pages = _extract_total_pages(response)

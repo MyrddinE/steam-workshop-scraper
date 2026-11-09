@@ -422,9 +422,10 @@ class WebScraperThread(threading.Thread):
         network.record_auth_required(self.db_path, proxy_url, detail)
         logging.warning(
             "[W:%s] Steam request was refused by the HTTP proxy %s "
-            "(407 Proxy Authentication Required); leaving the item queued and "
-            "waiting for credentials.",
-            item["workshop_id"], proxy_url or "<detected>")
+            "(407 Proxy Authentication Required; saved credentials %s); "
+            "leaving the item queued and waiting for credentials.",
+            item["workshop_id"], proxy_url or "<detected>",
+            "present" if network.has_credentials() else "missing")
         pacing.wait(30.0, lambda: self.running)
 
     def _handle_unknown(self, item: dict, url: str, scrape_result: dict | None) -> None:

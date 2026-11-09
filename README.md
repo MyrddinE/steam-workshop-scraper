@@ -63,9 +63,12 @@ saved under `proxy:` in `config.yaml` and used by the daemon and the web server 
 next request, so no restart is needed for Steam, API or image work. The translator builds
 its HTTP client when its thread starts, so a running translator needs a daemon restart to
 use newly entered credentials. If the proxy should be bypassed for some hosts, set
-`proxy.no_proxy`. A proxy that requires Windows integrated (NTLM) authentication cannot use
-a plain username/password form; exempt Steam with `no_proxy` or use a Basic-auth proxy
-instead.
+`proxy.no_proxy`. If the proxy inspects TLS (e2guardian/Squid SSL bump), set
+`proxy.ca_bundle` to the proxy's PEM CA certificate: Python trusts certifi, not the Windows
+certificate store, so a CA that Firefox trusts is still unknown to the scraper. A proxy that
+requires Windows integrated (NTLM/Negotiate) authentication cannot use a plain
+username/password form; exempt Steam with `no_proxy`, use a Basic-auth proxy, or put a local
+NTLM helper (such as `cntlm`) in front of it.
 
 **Translation (Optional):** To enable automatic translation of non-English text, you must provide an OpenAI API key. It is highly recommended to provide this as an environment variable:
 ```bash

@@ -403,3 +403,31 @@ def test_verify_login_reports_a_proxy_407(monkeypatch):
     assert result["ok"] is False
     assert result["proxy_auth_required"] is True
     assert result["proxy_url"] == "http://proxy.example:8080"
+
+
+def test_the_scrape_passes_the_configured_ca_bundle(monkeypatch):
+    """The shared session has trust_env off, so the CA cannot come from env alone."""
+    from src import web_scraper
+
+    sent = {}
+
+    class _Session:
+        def get(self, url, **kwargs):
+            sent.update(kwargs)
+            response = MagicMock()
+            response.status_code = 200
+            response.text = "<html></html>"
+            response.url = url
+            response.html.find.return_value = None
+            return response
+
+    monkeypatch.setattr(web_scraper, "_get_session", lambda: _Session())
+    monkeypatch.setattr(web_scraper, "_workshop_cookies_or_empty", lambda: {})
+    monkeypatch.setattr(web_scraper, "_current_config", lambda: {})
+    monkeypatch.setattr(web_scraper.network, "verify_setting",
+                        lambda config=None: "/proxy/ca.pem")
+
+    web_scraper.scrape_extended_details(
+        "https://steamcommunity.com/sharedfiles/filedetails/?id=1")
+
+    assert sent["verify"] == "/proxy/ca.pem"

@@ -171,3 +171,36 @@ def test_the_configured_url_is_used_for_the_detected_readout():
 
     assert network.proxy_url_for("https://steamcommunity.com/", config) == \
         "http://proxy.example:8080"
+
+
+def test_the_configured_ca_bundle_wins_over_the_environment(monkeypatch):
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/env/ca.pem")
+
+    assert network.ca_bundle({"proxy": {"ca_bundle": "/config/ca.pem"}}) == \
+        "/config/ca.pem"
+    assert network.verify_setting({"proxy": {"ca_bundle": "/config/ca.pem"}}) == \
+        "/config/ca.pem"
+
+
+def test_the_standard_ca_environment_variables_are_honoured(monkeypatch):
+    for name in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CURL_CA_BUNDLE", "/proxy/ca.pem")
+
+    assert network.ca_bundle({}) == "/proxy/ca.pem"
+    assert network.verify_setting({}) == "/proxy/ca.pem"
+
+
+def test_verification_is_on_when_no_bundle_is_configured(monkeypatch):
+    for name in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE"):
+        monkeypatch.delenv(name, raising=False)
+
+    assert network.verify_setting({}) is True
+
+
+def test_has_credentials_reports_whether_both_halves_are_saved():
+    assert network.has_credentials(
+        {"proxy": {"username": "operator", "password": "s3cret"}}) is True
+    assert network.has_credentials(
+        {"proxy": {"username": "operator"}}) is False
+    assert network.has_credentials({}) is False

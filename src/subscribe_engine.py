@@ -581,7 +581,8 @@ def _post_captured(url: str, form: dict, cookies: dict, workshop_id: int,
     session = session if session is not None else web_scraper._get_session()
     headers = subscribe_headers(workshop_id)
     resp = session.post(url, data=form, cookies=cookies, headers=headers,
-                        timeout=15, proxies=network.proxies_for(url))
+                        timeout=15, proxies=network.proxies_for(url),
+                        verify=network.verify_setting())
     if capture.web_download_capture_active():
         capture.record_web_download(
             capture.SUBSCRIBE_KIND, workshop_id, url,

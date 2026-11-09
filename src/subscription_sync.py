@@ -173,6 +173,7 @@ def _fetch_page(appid: int, page: int, config: dict, keep_running=None) -> str:
         headers=headers,
         timeout=15,
         proxies=network.proxies_for(url, config),
+        verify=network.verify_setting(config),
     )
     if capture.web_download_capture_active():
         capture.record_web_download(

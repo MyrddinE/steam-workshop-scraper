@@ -116,7 +116,8 @@ class ImageDownloadThread(threading.Thread):
                 try:
                     resp = requests.get(url, allow_redirects=True, timeout=15,
                                         stream=True,
-                                        proxies=network.proxies_for(url))
+                                        proxies=network.proxies_for(url),
+                                        verify=network.verify_setting())
                     if resp.status_code != 200:
                         raise Exception(f"HTTP {resp.status_code}")
 
@@ -204,8 +205,10 @@ class ImageDownloadThread(threading.Thread):
                             self.db_path, proxy["proxy_url"], proxy["detail"])
                         logging.warning(
                             "[I:%s] Image download was refused by the HTTP proxy %s "
-                            "(407 Proxy Authentication Required); waiting for "
-                            "credentials.", wid, proxy["proxy_url"] or "<detected>")
+                            "(407 Proxy Authentication Required; saved credentials "
+                            "%s); waiting for credentials.",
+                            wid, proxy["proxy_url"] or "<detected>",
+                            "present" if network.has_credentials() else "missing")
                         pacing.wait(30.0, lambda: self.running)
                         continue
                     logging.warning(f"[I:{wid}] Image download failed: {e}")

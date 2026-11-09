@@ -161,6 +161,7 @@ The rename is done before the button's request answers, so the live path is new 
 | `proxy.username` | string | None | Proxy username, sent as URL userinfo. Saved by the prompt. |
 | `proxy.password` | string | None | Proxy password. Saved by the prompt, registered with the crash writer as a secret, and never printed: every log/UI path uses `network.display_proxy`, which strips userinfo. `network.save_credentials` writes **only** the `proxy` section, so the save cannot clobber the rest of `config.yaml` (the failure issue 91 records). |
 | `proxy.no_proxy` | string | None | Comma-separated hosts that bypass the proxy, combined with the environment's `NO_PROXY`. |
+| `proxy.ca_bundle` | string | None | PEM bundle that verifies the proxy's TLS certificates. Needed when the proxy performs SSL inspection (e2guardian/Squid bump): Python uses its own CA bundle (certifi), not the Windows certificate store, so a CA the browser trusts is still unknown here. `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` and `SSL_CERT_FILE` are honoured when this is unset. Verification is never disabled. |
 
 A proxy that answers `407 Proxy Authentication Required` is not a Steam failure and not a cookie failure: `src/network.py` recognises it, records it in `.daemon_state.yaml`, and both front ends ask for credentials. Recheck is not offered for it — signing in cannot fix a proxy — and the workers leave the item queued and wait rather than growing a pacing delay for a condition only a credential can fix.
 

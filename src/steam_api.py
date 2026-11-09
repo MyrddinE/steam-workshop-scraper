@@ -37,8 +37,10 @@ def _record_proxy_failure(exc, where: str) -> None:
     if proxy:
         network.record_auth_required_from_config(proxy["proxy_url"], proxy["detail"])
         logging.warning(
-            "%s was refused by the HTTP proxy %s (407 Proxy Authentication Required).",
-            where, proxy["proxy_url"] or "<detected>")
+            "%s was refused by the HTTP proxy %s (407 Proxy Authentication "
+            "Required; saved credentials %s).",
+            where, proxy["proxy_url"] or "<detected>",
+            "present" if network.has_credentials() else "missing")
         # The API loop is not a worker that pauses on its own: without this it
         # would ask the proxy again on the next 1.5 s slot. Push the shared
         # schedule out so a 407 costs one line per half minute, not forty a
@@ -129,7 +131,8 @@ def get_workshop_details_batch(item_ids: list[int], api_key: str) -> dict[int, d
     _rate_limit()
     try:
         response = requests.post(url, data=data, timeout=10,
-                                 proxies=network.proxies_for(url))
+                                 proxies=network.proxies_for(url),
+                                 verify=network.verify_setting())
         response.raise_for_status()
         try:
             json_data = response.json()
@@ -241,7 +244,8 @@ def get_player_summaries(steamids: list[int], api_key: str) -> dict[int, dict]:
     _rate_limit()
     try:
         response = requests.get(url, params=params, timeout=10,
-                                proxies=network.proxies_for(url))
+                                proxies=network.proxies_for(url),
+                                verify=network.verify_setting())
         response.raise_for_status()
         json_data = response.json()
         
@@ -290,7 +294,8 @@ def query_workshop_newest_page(appid: int, cursor: str, api_key: str,
         return {"abandoned": True, "total": 0, "items": [], "next_cursor": ""}
     try:
         response = requests.get(url, params=params, timeout=15,
-                                proxies=network.proxies_for(url))
+                                proxies=network.proxies_for(url),
+                                verify=network.verify_setting())
         response.raise_for_status()
         data = response.json().get("response", {})
         
@@ -340,7 +345,8 @@ def query_workshop_updated_page(appid: int, cursor: str, api_key: str, numperpag
         return {"abandoned": True, "total": 0, "items": [], "next_cursor": "", "failed": False}
     try:
         response = requests.get(url, params=params, timeout=15,
-                                proxies=network.proxies_for(url))
+                                proxies=network.proxies_for(url),
+                                verify=network.verify_setting())
         response.raise_for_status()
         data = response.json().get("response", {})
         items = data.get("publishedfiledetails", [])
